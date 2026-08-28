@@ -285,32 +285,48 @@ A direct catalog check should use the same host, port, username, and password as
 
 ### Staff email uniqueness
 
-Deploy the application code first, then run:
+Staff email identity is trimmed and case-insensitive. The database should enforce that rule with a unique index on `staff.email_normalized`.
 
-```bash
-source venv/bin/activate
-python ensure_staff_email_uniqueness.py
-```
-
-When the table is clean, the script backfills `email_normalized` and ensures this invariant:
+Before applying the migration, inspect the current table for addresses that collide after trimming and case normalization:
 
 ```sql
-UNIQUE KEY uq_staff_email_normalized (email_normalized)
+SELECT LOWER(TRIM(email)) AS normalized_email,
+       COUNT(*) AS account_count
+FROM staff
+GROUP BY LOWER(TRIM(email))
+HAVING COUNT(*) > 1;
 ```
 
-If duplicate rows already exist, the script stops without changing the table and prints their IDs. Resolve those records in `/support`, then run the script again. It intentionally does not hard-delete staff rows because historical records may reference their IDs.
+Resolve any conflicts before creating the unique index. Keep the account that should remain active, update any duplicate account to a unique archival email, then deactivate it through `/support` so historical ticket and audit references remain intact.
 
-A reference migration is included at:
+Apply the repository migration through your normal database migration process:
 
 ```text
 migrations/20260826_staff_email_uniqueness.sql
 ```
 
-The Python migration helper is preferred because it applies the same normalization rules as the application and checks for the exact single-column unique index.
+Example using the MariaDB command-line client:
+
+```bash
+mysql -h <db-host> -P <db-port> -u <db-user> -p <app-database> \
+  < migrations/20260826_staff_email_uniqueness.sql
+```
+
+After applying it, confirm that the exact single-column unique index exists:
+
+```sql
+SHOW INDEX FROM staff;
+```
+
+The expected invariant is:
+
+```sql
+UNIQUE KEY uq_staff_email_normalized (email_normalized)
+```
 
 ## Validation
 
-From the repository root:
+Run the repository's normal compilation and automated test suite from the project root:
 
 ```bash
 source venv/bin/activate
@@ -318,31 +334,29 @@ python -m compileall -q app
 pytest -q
 ```
 
-Verify the live MariaDB catalog without making an OpenAI request:
+Confirm that the application database account can read the live shipping catalog using the same host, port, username, and password configured for the service:
 
 ```bash
-python verify_canonical_shipping_pipeline.py
+mysql -h <db-host> -P <db-port> -u <db-user> -p \
+  -e "SELECT origin, destination, shipping_method, goods_type, price, transit_time
+      FROM shipping_db.shipping_rates
+      LIMIT 5;"
 ```
 
-Expected output:
-
-```text
-OK: canonical English shipping fields, live catalogue lookup, Decimal pricing, context replacement, and style-safe rendering are ready.
-```
-
-An optional semantic-normalizer smoke test makes one OpenAI request:
+Also confirm access to the destination table:
 
 ```bash
-python verify_canonical_shipping_pipeline.py --semantic-smoke
+mysql -h <db-host> -P <db-port> -u <db-user> -p \
+  -e "SELECT * FROM shipping_db.destinations LIMIT 5;"
 ```
 
-Run the staff email migration/check as part of deployment validation when the schema invariant has not already been installed:
+For the staff schema, confirm that `uq_staff_email_normalized` is present after the migration:
 
-```bash
-python ensure_staff_email_uniqueness.py
+```sql
+SHOW INDEX FROM staff;
 ```
 
-Local compilation and tests do not replace a live WhatsApp and MariaDB acceptance test in the target environment.
+Compilation and unit tests do not replace the live MariaDB, Redis, OpenAI, Meta webhook, and WhatsApp acceptance tests described below.
 
 ## Deployment
 
@@ -359,14 +373,16 @@ cp -a app "app.backup.$(date +%Y%m%d-%H%M%S)"
 source venv/bin/activate
 python -m compileall -q app
 pytest -q
-python ensure_staff_email_uniqueness.py
-python verify_canonical_shipping_pipeline.py
+
+# Apply pending SQL migrations through your normal database migration process.
+# In particular, apply migrations/20260826_staff_email_uniqueness.sql once
+# if the normalized staff-email index is not already installed.
 
 sudo systemctl restart shipment-bot
 sudo journalctl -u shipment-bot -n 200 --no-pager
 ```
 
-Do not set `REDIS_URL=''` in production. Redis is required for cross-worker and cross-restart locking, state, and idempotency behavior.
+After restarting, run the relevant live acceptance tests against a dedicated test customer and test staff account. Do not set `REDIS_URL=''` in production; Redis is required for cross-worker and cross-restart locking, state, and idempotency behavior.
 
 ## Acceptance tests
 
@@ -518,7 +534,7 @@ Delete only the affected test conversation’s Redis key and repeat the full seq
 
 **Staff creation reports a duplicate email**
 
-Edit the existing account rather than creating another role-specific duplicate. Run `python ensure_staff_email_uniqueness.py` after resolving legacy conflicts.
+Edit the existing account rather than creating another role-specific duplicate. For legacy conflicts, inspect the normalized email values, resolve the duplicate records, apply `migrations/20260826_staff_email_uniqueness.sql`, and confirm that `uq_staff_email_normalized` exists.
 
 **Semantic normalization is unavailable**
 
@@ -548,9 +564,7 @@ This can be expected while the sender lock is active. Meta may retry the webhook
 | `app/support_api.py` | Support and staff-management API routes. |
 | `app/support_ui.py` | `/support` dashboard behavior. |
 | `tests/test_canonical_shipping_pipeline.py` | Canonical shipping-pipeline coverage. |
-| `migrations/20260826_staff_email_uniqueness.sql` | Reference unique-email migration. |
-| `ensure_staff_email_uniqueness.py` | Preferred staff email backfill and invariant installer. |
-| `verify_canonical_shipping_pipeline.py` | Live catalog verifier and optional semantic smoke test. |
+| `migrations/20260826_staff_email_uniqueness.sql` | Staff email normalization and unique-index migration. |
 
 ## Security notes
 
