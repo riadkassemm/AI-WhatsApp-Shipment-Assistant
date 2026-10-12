@@ -571,6 +571,10 @@ select { cursor: pointer; }
 .ticket-heading-line { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
 .ticket-heading h2 { max-width: 100%; margin: 0; color: var(--text-strong); font-size: 16px; line-height: 1.25; letter-spacing: -0.015em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ticket-subtitle { margin-top: 4px; color: var(--text-muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ticket-history-shortcut { max-width: 100%; min-height: 27px; display: inline-flex; align-items: center; gap: 5px; margin-top: 6px; padding: 3px 8px; border: 1px solid color-mix(in srgb, var(--primary) 24%, var(--border)); border-radius: 999px; background: var(--primary-soft); color: var(--primary); font-size: 11px; font-weight: 750; white-space: nowrap; cursor: pointer; }
+.ticket-history-shortcut:hover, .ticket-history-shortcut:focus-visible { border-color: var(--primary); }
+.ticket-history-shortcut .icon { width: 13px; height: 13px; }
+.ticket-history-shortcut-compact { display: none; }
 .ticket-header-meta { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 6px; }
 .actions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 7px; }
 .context-toggle { display: inline-grid; }
@@ -935,6 +939,8 @@ body.column-resizing * { cursor: col-resize !important; }
   .ticket-heading-avatar { display: grid; }
   .ticket-heading h2 { font-size: 14px; }
   .ticket-subtitle { max-width: 58vw; }
+  .ticket-history-shortcut-full { display: none; }
+  .ticket-history-shortcut-compact { display: inline; }
   .ticket-header-meta { display: none; }
   .actions { gap: 4px; }
   .actions .btn { min-width: 38px; padding: 8px 9px; }
@@ -1218,6 +1224,7 @@ body.column-resizing * { cursor: col-resize !important; }
       <div class="ticket-heading">
         <div class="ticket-heading-line"><h2 id="ticketTitle">Select a ticket</h2><span id="ticketHeadingStatus"></span></div>
         <div class="ticket-subtitle" id="ticketSubtitle">Choose a conversation from the queue to begin.</div>
+        <button class="ticket-history-shortcut hidden" id="viewSharedHistoryBtn" type="button" aria-controls="conversation" aria-label="View shared customer history"><svg class="icon icon-sm" aria-hidden="true"><use href="#icon-history"></use></svg><span class="ticket-history-shortcut-full">View shared history</span><span class="ticket-history-shortcut-compact">History</span><span id="sharedHistoryCount"></span></button>
         <div class="ticket-header-meta" id="ticketHeaderMeta"></div>
       </div>
       <div class="actions" id="actions"></div>
@@ -1247,7 +1254,7 @@ body.column-resizing * { cursor: col-resize !important; }
         <div class="conversation" id="conversation" role="log" aria-label="Conversation timeline" tabindex="0">
           <div class="conversation-empty"><div class="empty-state-inner"><div class="empty-icon"><svg class="icon icon-lg" aria-hidden="true"><use href="#icon-message"></use></svg></div><h3>Open a customer conversation</h3><p>Ticket conversation will appear here.</p></div></div>
         </div>
-        <button class="btn small scroll-latest hidden" id="scrollToLatestBtn" type="button"><svg class="icon icon-sm" aria-hidden="true"><use href="#icon-arrow-down"></use></svg>Latest</button>
+        <button class="btn small scroll-latest hidden" id="scrollToLatestBtn" type="button"><svg class="icon icon-sm" aria-hidden="true"><use href="#icon-arrow-down"></use></svg><span id="scrollToLatestLabel">Latest</span></button>
       </section>
       <aside class="context-panel" id="contextPanel" aria-label="Customer and ticket details">
         <div class="layout-resizer context-resizer" id="contextResizer" role="separator" aria-orientation="vertical" aria-label="Resize customer details" aria-valuemin="260" aria-valuemax="520" tabindex="0"></div>
@@ -1613,6 +1620,8 @@ const state = {
   previousHistoryExpanded: false,
   previousHistoryLoaded: false,
   previousHistoryPending: false,
+  historyJumpActive: false,
+  historyJumpReachedTop: false,
   cachedCurrentMessages: [],
   currentMessagesHasMore: false,
   currentMessagesExpanded: false,
@@ -2452,6 +2461,10 @@ function clearTicketWorkspace() {
   state.previousHistoryExpanded = false;
   state.previousHistoryLoaded = false;
   state.previousHistoryPending = false;
+  state.historyJumpActive = false;
+  state.historyJumpReachedTop = false;
+  updateSharedHistoryShortcut();
+  $('scrollToLatestBtn').classList.add('hidden');
   state.cachedCurrentMessages = [];
   state.currentMessagesHasMore = false;
   state.currentMessagesExpanded = false;
@@ -4233,6 +4246,7 @@ async function loadEarlierConversations(button = null) {
     state.previousTicketHistory = [...older, ...state.previousTicketHistory];
     state.previousTicketHistoryHasMore = older.length > 0 && Boolean(result.previous_ticket_history_has_more);
     state.previousHistoryExpanded = true;
+    updateSharedHistoryShortcut();
     const data = state.currentTicketData;
     data.previous_ticket_history = state.previousTicketHistory;
     data.previous_ticket_history_has_more = state.previousTicketHistoryHasMore;
@@ -4298,10 +4312,52 @@ async function loadOlderConversationMessages(ticketId, previous = false, button 
   }
 }
 
+function updateSharedHistoryShortcut() {
+  const button = $('viewSharedHistoryBtn');
+  const count = state.previousTicketHistory.length;
+  const hasHistory = count > 0 || state.previousTicketHistoryHasMore;
+  button.classList.toggle('hidden', !hasHistory);
+  text($('sharedHistoryCount'), hasHistory ? '(' + count + (state.previousTicketHistoryHasMore ? '+' : '') + ')' : '');
+  button.setAttribute('aria-label', hasHistory
+    ? 'View shared customer history, ' + count + (state.previousTicketHistoryHasMore ? ' or more' : '') + ' conversations'
+    : 'View shared customer history');
+  if (!hasHistory) {
+    state.historyJumpActive = false;
+    state.historyJumpReachedTop = false;
+  }
+}
+
+function jumpToSharedHistory() {
+  if (!state.currentTicketData || $('viewSharedHistoryBtn').classList.contains('hidden')) return;
+  state.historyJumpActive = true;
+  state.historyJumpReachedTop = false;
+  $('conversation').scrollTo({top: 0, behavior: 'smooth'});
+  updateScrollLatestButton();
+}
+
+function jumpToCurrentConversation() {
+  state.historyJumpActive = false;
+  state.historyJumpReachedTop = false;
+  const conversation = $('conversation');
+  conversation.scrollTo({top: conversation.scrollHeight, behavior: 'smooth'});
+  updateScrollLatestButton();
+}
+
 function updateScrollLatestButton() {
   const conversation = $('conversation');
   const away = conversation.scrollHeight - conversation.scrollTop - conversation.clientHeight > 220;
-  $('scrollToLatestBtn').classList.toggle('hidden', !away);
+  if (state.historyJumpActive) {
+    if (conversation.scrollTop <= 20) state.historyJumpReachedTop = true;
+    else if (state.historyJumpReachedTop && !away) {
+      state.historyJumpActive = false;
+      state.historyJumpReachedTop = false;
+    }
+  }
+  const button = $('scrollToLatestBtn');
+  button.classList.toggle('hidden', !away && !state.historyJumpActive);
+  const label = state.historyJumpActive ? 'Back to current' : 'Latest';
+  text($('scrollToLatestLabel'), label);
+  button.setAttribute('aria-label', state.historyJumpActive ? 'Back to current conversation' : 'Scroll to latest message');
 }
 
 function contextValue(value) {
@@ -4659,6 +4715,10 @@ async function openTicket(id, {silent = false, refreshQueue = false, refreshHist
     state.previousHistoryExpanded = false;
     state.previousHistoryLoaded = false;
     state.previousHistoryPending = false;
+    state.historyJumpActive = false;
+    state.historyJumpReachedTop = false;
+    updateSharedHistoryShortcut();
+    $('scrollToLatestBtn').classList.add('hidden');
     state.cachedCurrentMessages = [];
     state.currentMessagesHasMore = false;
     state.currentMessagesExpanded = false;
@@ -4700,6 +4760,7 @@ async function openTicket(id, {silent = false, refreshQueue = false, refreshHist
     }
     data.previous_ticket_history = state.previousTicketHistory;
     data.previous_ticket_history_has_more = state.previousTicketHistoryHasMore;
+    updateSharedHistoryShortcut();
     if (!aroundMessageId) {
       if (isNewSelection || !state.cachedCurrentMessages.length) {
         state.cachedCurrentMessages = Array.isArray(data.messages) ? data.messages.slice() : [];
@@ -4759,6 +4820,12 @@ async function openTicket(id, {silent = false, refreshQueue = false, refreshHist
     if(e.status===403) {
       state.currentTicketData = null;
       state.ticketId = null;
+      state.previousTicketHistory = [];
+      state.previousTicketHistoryHasMore = false;
+      state.historyJumpActive = false;
+      state.historyJumpReachedTop = false;
+      updateSharedHistoryShortcut();
+      $('scrollToLatestBtn').classList.add('hidden');
       state.timelineSignature = '';
       state.currentConversationOrigin = null;
       saveSupportSelection();
@@ -6767,9 +6834,8 @@ $('conversationSearchInput').addEventListener('keydown', event => {
 $('closeContextBtn').addEventListener('click', () => closeContextPanel());
 $('contextBackdrop').addEventListener('click', () => closeContextPanel());
 $('dismissErrorBtn').addEventListener('click', () => showError(''));
-$('scrollToLatestBtn').addEventListener('click', () => {
-  $('conversation').scrollTo({top: $('conversation').scrollHeight, behavior: 'smooth'});
-});
+$('viewSharedHistoryBtn').addEventListener('click', jumpToSharedHistory);
+$('scrollToLatestBtn').addEventListener('click', jumpToCurrentConversation);
 $('conversation').addEventListener('scroll', updateScrollLatestButton, {passive: true});
 
 $('imageBtn').addEventListener('click', chooseImage);

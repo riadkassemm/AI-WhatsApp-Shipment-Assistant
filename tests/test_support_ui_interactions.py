@@ -760,6 +760,7 @@ const closeContextPanel = () => {};
 const updateComposerCount = () => {};
 const updateQueueSummary = () => {};
 const renderQueue = () => {};
+const updateSharedHistoryShortcut = () => {};
 const errors = [];
 const showError = message => {if (message) errors.push(message)};
 const mergeLiveMessages = () => {};
@@ -860,7 +861,7 @@ const api = async path => {
 @pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is unavailable")
 def test_history_paging_loads_every_page_and_keeps_thread_cursors() -> None:
     merge_history = _HTML[_HTML.index("function mergeTimelineMessages("): _HTML.index("function changeCachedMessage(")]
-    paging = _HTML[_HTML.index("function beginHistoryLoad("): _HTML.index("function updateScrollLatestButton(")]
+    paging = _HTML[_HTML.index("function beginHistoryLoad("): _HTML.index("function updateSharedHistoryShortcut(")]
     script = r"""
 const assert = require('node:assert/strict');
 const firstThread = {ticket: {id: 30, conversation_origin: 'CUSTOMER'},
@@ -877,6 +878,7 @@ const state = {authenticated: true, ticketId: 42, currentConversationOrigin: 'CU
 const button = () => ({textContent: 'Load', disabled: false, isConnected: false});
 const renderOptions = [];
 const renderConversation = (_data, options) => {renderOptions.push(options)};
+const updateSharedHistoryShortcut = () => {};
 const timelineSignature = data => JSON.stringify(data.previous_ticket_history.map(thread => thread.ticket.id));
 const mergeLiveMessages = () => {};
 const errors = [];
@@ -970,6 +972,8 @@ const api = path => {
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is unavailable")
 def test_initial_history_load_survives_background_poll_and_retries_after_error() -> None:
+    paging = _HTML[_HTML.index("function beginHistoryLoad("): _HTML.index("function updateSharedHistoryShortcut(")]
+    shortcuts = _HTML[_HTML.index("function updateSharedHistoryShortcut("): _HTML.index("function contextValue(")]
     open_ticket = _HTML[_HTML.index("async function openTicket("): _HTML.index("async function doAction(")]
     script = r"""
 const assert = require('node:assert/strict');
@@ -978,12 +982,21 @@ const state = {agent: {id: '7'}, authenticated: true, view: 'unassigned',
   previousTicketHistory: [], previousTicketHistoryHasMore: false,
   previousHistoryExpanded: false, previousHistoryLoaded: false,
   previousHistoryPending: false, timelineSignature: '', ticketRequest: 0,
+  historySelectionEpoch: 0, historyLoadRequest: 0, historyLoadBusy: false,
   lastInboundByTicket: {}, replyTarget: null, mediaRecorder: null, pageLeaving: false};
 const elements = new Map();
 const $ = id => {
-  if (!elements.has(id)) elements.set(id, {value: '', classList: {add(){}, remove(){}}, replaceChildren(){}});
+  if (!elements.has(id)) {
+    const classes = new Set();
+    elements.set(id, {value: '', classList: {
+      add(name) {classes.add(name)}, remove(name) {classes.delete(name)},
+      toggle(name, present) {if (present) classes.add(name); else classes.delete(name)},
+      contains(name) {return classes.has(name)}
+    }, setAttribute(name, value) {this[name] = value}, replaceChildren(){}});
+  }
   return elements.get(id);
 };
+const text = (element, value) => {element.textContent = value};
 const window = {innerWidth: 1200};
 const setComposerEnabled = () => {};
 const cancelMessageEdit = () => {};
@@ -1017,14 +1030,19 @@ const detail = path => ({ticket: {id: Number(path.match(/\/tickets\/(\d+)/)[1]),
   events: [], messages: [], messages_has_more: false,
   previous_ticket_history: path.includes('include_previous_history=true')
     ? [{ticket: {id: 7}, messages: [{id: 70}]}] : [],
-  previous_ticket_history_has_more: false});
+  previous_ticket_history_has_more: path.includes('/tickets/42?include_previous_history=true')});
 const api = path => {
   paths.push(path);
+  if (path === '/api/support/tickets/42/history?before_ticket_id=7&limit=5') {
+    return Promise.resolve({previous_ticket_history: [
+      {ticket: {id: 5}, messages: []}, {ticket: {id: 6}, messages: []}
+    ], previous_ticket_history_has_more: false});
+  }
   if (paths.length === 1) return new Promise(resolve => {releaseInitial = () => resolve(detail(path))});
   if (failNext) {failNext = false; throw new Error('Temporary network error')}
   return Promise.resolve(detail(path));
 };
-""" + open_ticket + r"""
+""" + paging + shortcuts + open_ticket + r"""
 (async () => {
   const initial = openTicket(42, {silent: true});
   assert.equal(state.previousHistoryPending, true);
@@ -1035,10 +1053,18 @@ const api = path => {
   assert.equal(state.previousHistoryLoaded, true);
   assert.equal(state.previousHistoryPending, false);
   assert.deepEqual(state.previousTicketHistory.map(item => item.ticket.id), [7]);
+  assert.equal($('viewSharedHistoryBtn').classList.contains('hidden'), false,
+    'successful detail response reveals the history shortcut');
+  assert.equal($('sharedHistoryCount').textContent, '(1+)');
+
+  await loadEarlierConversations();
+  assert.deepEqual(state.previousTicketHistory.map(item => item.ticket.id), [5, 6, 7]);
+  assert.equal($('sharedHistoryCount').textContent, '(3)',
+    'successful pagination updates the shortcut count');
 
   await openTicket(42, {silent: true});
   assert.equal(paths.at(-1), '/api/support/tickets/42', 'ordinary polling reuses loaded history');
-  assert.deepEqual(state.currentTicketData.previous_ticket_history.map(item => item.ticket.id), [7]);
+  assert.deepEqual(state.currentTicketData.previous_ticket_history.map(item => item.ticket.id), [5, 6, 7]);
 
   failNext = true;
   await openTicket(43, {silent: true});
@@ -1051,6 +1077,80 @@ const api = path => {
 })().catch(error => {console.error(error); process.exitCode = 1});
 """
     result = subprocess.run(["node", "-e", script], text=True, capture_output=True, timeout=15)
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is unavailable")
+def test_shared_history_shortcut_jumps_without_rerender_and_tracks_pagination() -> None:
+    assert 'id="viewSharedHistoryBtn"' in _HTML
+    assert '.ticket-history-shortcut-compact { display: inline; }' in _HTML
+    shortcuts = _HTML[
+        _HTML.index("function updateSharedHistoryShortcut("):
+        _HTML.index("function contextValue(")
+    ]
+    script = r"""
+const assert = require('node:assert/strict');
+function element() {
+  const classes = new Set();
+  return {classList: {
+    toggle(name, present) {if (present) classes.add(name); else classes.delete(name)},
+    contains(name) {return classes.has(name)}
+  }, setAttribute(name, value) {this[name] = value}, textContent: ''};
+}
+const historyButton = element();
+const historyCount = element();
+const latestButton = element();
+const latestLabel = element();
+const conversation = {...element(), scrollHeight: 1000, scrollTop: 900, clientHeight: 100,
+  scrollTo(options) {this.scrollTop = options.top; this.lastScroll = options}};
+const elements = {viewSharedHistoryBtn: historyButton, sharedHistoryCount: historyCount,
+  scrollToLatestBtn: latestButton, scrollToLatestLabel: latestLabel, conversation};
+const $ = id => elements[id];
+const text = (node, value) => {node.textContent = value};
+const state = {currentTicketData: {ticket: {id: 42}}, previousTicketHistory: [],
+  previousTicketHistoryHasMore: false, historyJumpActive: false};
+const playingAudio = {paused: false};
+let rerenders = 0;
+const renderConversation = () => {rerenders++};
+""" + shortcuts + r"""
+updateSharedHistoryShortcut();
+assert.equal(historyButton.classList.contains('hidden'), true);
+state.previousTicketHistory = Array.from({length: 5}, (_, id) => ({ticket: {id}}));
+state.previousTicketHistoryHasMore = true;
+updateSharedHistoryShortcut();
+assert.equal(historyButton.classList.contains('hidden'), false);
+assert.equal(historyCount.textContent, '(5+)');
+assert.match(historyButton['aria-label'], /5 or more conversations/);
+
+jumpToSharedHistory();
+assert.deepEqual(conversation.lastScroll, {top: 0, behavior: 'smooth'});
+assert.equal(state.historyJumpActive, true);
+assert.equal(latestButton.classList.contains('hidden'), false);
+assert.equal(latestLabel.textContent, 'Back to current');
+assert.equal(rerenders, 0);
+assert.equal(playingAudio.paused, false);
+
+state.previousTicketHistory.push(...Array.from({length: 5}, (_, id) => ({ticket: {id: id + 5}})));
+state.previousTicketHistoryHasMore = false;
+updateSharedHistoryShortcut();
+assert.equal(historyCount.textContent, '(10)', 'pagination updates the visible count');
+conversation.scrollTop = 850;
+updateScrollLatestButton();
+assert.equal(state.historyJumpActive, false, 'manual scrolling near the latest messages clears history navigation');
+assert.equal(latestLabel.textContent, 'Latest');
+jumpToSharedHistory();
+jumpToCurrentConversation();
+assert.deepEqual(conversation.lastScroll, {top: 1000, behavior: 'smooth'});
+assert.equal(latestLabel.textContent, 'Latest');
+assert.equal(latestButton.classList.contains('hidden'), true);
+assert.equal(rerenders, 0);
+assert.equal(playingAudio.paused, false);
+
+state.previousTicketHistory = [];
+updateSharedHistoryShortcut();
+assert.equal(historyButton.classList.contains('hidden'), true);
+"""
+    result = subprocess.run(["node", "-e", script], text=True, capture_output=True, timeout=10)
     assert result.returncode == 0, result.stderr
 
 

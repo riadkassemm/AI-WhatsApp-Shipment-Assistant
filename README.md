@@ -924,7 +924,7 @@ Edited images are sent as new WhatsApp media messages; their source image is unc
 
 ## Shared customer conversation history
 
-Tickets and staff chats keep separate timelines and lifecycles. Opening either conversation shows up to five other resolved/closed tickets or chats for the same customer WhatsApp phone number above the current timeline, under **Shared customer history**. All authenticated staff can read this history, including cases handled by other staff and cases received on another business line or an earlier connection ID for the same number. **Load earlier conversations** and **Load older messages** page through the rest; historical AI context and protected attachments remain available. Active conversations belonging to another staff member are not exposed through this history.
+Tickets and staff chats keep separate timelines and lifecycles. Opening either conversation loads up to five other resolved/closed tickets or chats for the same customer WhatsApp phone number under **Shared customer history**. The header's **View shared history** button opens those earlier conversations, and **Back to current** returns to the latest messages. All authenticated staff can read this history, including cases handled by other staff and cases received on another business line or an earlier connection ID for the same number. **Load earlier conversations** and **Load older messages** page through the rest; historical AI context and protected attachments remain available. Active conversations belonging to another staff member are not exposed through this history.
 
 ## Shared Contacts + Google Contacts sync (2026-09-23)
 
