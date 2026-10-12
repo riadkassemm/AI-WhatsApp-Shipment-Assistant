@@ -1,0 +1,31 @@
+[Unit]
+Description=WhatsApp Support Development API
+Wants=network-online.target shipment-db-tunnel.service redis-server.service
+After=network-online.target shipment-db-tunnel.service redis-server.service
+PartOf=whatsapp-dev.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=exec
+User=whatsapp-support
+Group=whatsapp-support
+WorkingDirectory=/opt/whatsapp-support/current
+EnvironmentFile=/etc/whatsapp-support/app.env
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStartPre=/opt/whatsapp-support/current/venv/bin/python scripts/check_runtime.py --wait 60 --schema
+ExecStart=/opt/whatsapp-support/current/venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1 --proxy-headers --forwarded-allow-ips 127.0.0.1 --timeout-graceful-shutdown 10
+Restart=always
+RestartSec=5
+TimeoutStartSec=100
+TimeoutStopSec=35
+UMask=0077
+StateDirectory=whatsapp-support
+StateDirectoryMode=0700
+ReadWritePaths=/var/lib/whatsapp-support
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+CapabilityBoundingSet=
+RestrictSUIDSGID=true

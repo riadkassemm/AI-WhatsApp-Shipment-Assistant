@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 import time
 import types
@@ -35,6 +36,34 @@ sys.modules.setdefault("openai", fake_openai)
 from app import main
 from app.conversation_store import Conversation
 from app.whatsapp_client import IncomingWhatsAppMessage
+
+
+def test_reaction_bypasses_ai_and_ticket_message_creation(monkeypatch) -> None:
+    async def run() -> None:
+        calls: list[dict] = []
+
+        async def fake_reaction(**kwargs):
+            calls.append(kwargs)
+            return {"id": 3, "emoji": "😂"}
+
+        monkeypatch.setattr(main.support_service, "route_whatsapp_reaction", fake_reaction)
+        response = await main._process_incoming_message(
+            IncomingWhatsAppMessage(
+                from_number="96170123456",
+                message_id="wamid.reaction",
+                message_type="reaction",
+                text=None,
+                timestamp="1720000000",
+                business_phone_number_id="12345",
+                reaction_message_id="wamid.original",
+                reaction_emoji="😂",
+            )
+        )
+        assert response.status_code == 200
+        assert json.loads(response.body)["status"] == "reaction_updated"
+        assert calls[0]["target_whatsapp_message_id"] == "wamid.original"
+
+    asyncio.run(run())
 
 
 def test_stale_detection_keeps_unique_late_messages() -> None:
@@ -95,7 +124,15 @@ def test_message_burst_combines_adjacent_text_messages_in_provider_order() -> No
     assert combined.timestamp == "200"
 
 
-def test_sender_queue_processes_adjacent_messages_as_one_turn() -> None:
+def test_sender_queue_processes_adjacent_messages_as_one_turn(monkeypatch) -> None:
+    async def ai_on():
+        return types.SimpleNamespace(effective_ai_enabled=True)
+
+    monkeypatch.setattr(
+        main.ai_availability_service,
+        "get_effective_ai_availability",
+        ai_on,
+    )
     from app.conversation_store import InMemoryConversationStore
 
     async def run() -> None:
@@ -119,7 +156,7 @@ def test_sender_queue_processes_adjacent_messages_as_one_turn() -> None:
 
         seen: list[str | None] = []
 
-        async def fake_process(incoming: IncomingWhatsAppMessage):
+        async def fake_process(incoming: IncomingWhatsAppMessage, **_kwargs):
             seen.append(incoming.text)
             return main._json_response(200, {"status": "handled"})
 

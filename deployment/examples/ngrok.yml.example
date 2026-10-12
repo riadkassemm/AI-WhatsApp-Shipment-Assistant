@@ -1,0 +1,16 @@
+# Keep the actual token and existing HTTPS endpoint in a private server file.
+# Do not commit the populated file or print it in diagnostics.
+version: 3
+agent:
+  authtoken: REPLACE_WITH_EXISTING_PRIVATE_NGROK_TOKEN
+  console_ui: false
+  log: stdout
+  log_format: json
+  log_level: info
+  web_addr: 127.0.0.1:4040
+  inspect_db_size: -1
+endpoints:
+  - name: support-dev
+    url: https://REPLACE_WITH_EXISTING_STABLE_NGROK_DOMAIN
+    upstream:
+      url: http://127.0.0.1:8000

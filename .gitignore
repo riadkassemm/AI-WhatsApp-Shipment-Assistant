@@ -220,3 +220,6 @@ __marimo__/
 .streamlit/secrets.toml
 # Support media is customer content and must stay out of source control.
 data/support_media/
+# Linked-device bridge dependencies and sensitive session/customer data.
+node_modules/
+whatsapp_bridge/data/

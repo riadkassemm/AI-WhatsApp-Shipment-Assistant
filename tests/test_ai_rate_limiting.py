@@ -98,7 +98,15 @@ def test_ai_limit_notice_is_throttled_separately_from_quota() -> None:
     asyncio.run(run())
 
 
-def test_quota_block_returns_200_and_never_calls_ai() -> None:
+def test_quota_block_returns_200_and_never_calls_ai(monkeypatch) -> None:
+    async def ai_on():
+        return types.SimpleNamespace(effective_ai_enabled=True)
+
+    monkeypatch.setattr(
+        main.ai_availability_service,
+        "get_effective_ai_availability",
+        ai_on,
+    )
     class Blocker:
         async def consume(self, _key: str) -> AIQuotaDecision:
             return AIQuotaDecision(False, "customer_minute")
@@ -185,7 +193,15 @@ def test_quota_block_returns_200_and_never_calls_ai() -> None:
     asyncio.run(run())
 
 
-def test_deterministic_shipping_answer_does_not_consume_ai_quota() -> None:
+def test_deterministic_shipping_answer_does_not_consume_ai_quota(monkeypatch) -> None:
+    async def ai_on():
+        return types.SimpleNamespace(effective_ai_enabled=True)
+
+    monkeypatch.setattr(
+        main.ai_availability_service,
+        "get_effective_ai_availability",
+        ai_on,
+    )
     class MustNotConsume:
         async def consume(self, _key: str) -> AIQuotaDecision:
             raise AssertionError("deterministic shipping should bypass AI quota")

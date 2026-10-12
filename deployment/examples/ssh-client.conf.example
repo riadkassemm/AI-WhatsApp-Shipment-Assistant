@@ -1,0 +1,20 @@
+Host whatsapp-support-database
+    HostName REPLACE_DATABASE_HOST
+    User whatsapp-forward
+    Port 22
+    IdentityFile /etc/whatsapp-support/ssh/id_ed25519
+    UserKnownHostsFile /etc/whatsapp-support/ssh/known_hosts
+    IdentitiesOnly yes
+    StrictHostKeyChecking yes
+    BatchMode yes
+    PasswordAuthentication no
+    KbdInteractiveAuthentication no
+    ForwardAgent no
+    ControlMaster no
+    LocalForward 127.0.0.1:3307 127.0.0.1:3306
+    GatewayPorts no
+    ExitOnForwardFailure yes
+    ConnectTimeout 10
+    ConnectionAttempts 1
+    ServerAliveInterval 30
+    ServerAliveCountMax 3

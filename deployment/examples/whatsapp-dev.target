@@ -1,0 +1,7 @@
+[Unit]
+Description=WhatsApp Support Development Stack
+Wants=network-online.target whatsapp-db-tunnel.service whatsapp-api.service whatsapp-bridge.service whatsapp-ngrok.service
+After=network-online.target
+
+[Install]
+WantedBy=multi-user.target

@@ -138,6 +138,41 @@ def test_whatsapp_client_can_route_outbound_message_through_ticket_number() -> N
     asyncio.run(run())
 
 
+def test_whatsapp_client_sends_reply_context_for_text_and_pdf() -> None:
+    async def run() -> None:
+        client = WhatsAppClient()
+        seen: list[dict] = []
+
+        async def fake_send(payload: dict, *, label: str, phone_number_id: str | None = None) -> dict:
+            seen.append({"payload": payload, "label": label, "phone_number_id": phone_number_id})
+            return {"messages": [{"id": "wamid.out"}]}
+
+        client._send_payload = fake_send  # type: ignore[method-assign]
+        await client.send_text(
+            "96170123456",
+            "Reply",
+            phone_number_id="business-2",
+            context_message_id="wamid.inbound",
+        )
+        await client.send_media(
+            to="96170123456",
+            media_type="document",
+            media_id="meta-pdf",
+            caption="Invoice",
+            filename="invoice.pdf",
+            phone_number_id="business-2",
+            context_message_id="wamid.inbound",
+        )
+
+        assert seen[0]["payload"]["context"] == {"message_id": "wamid.inbound"}
+        assert seen[1]["payload"]["context"] == {"message_id": "wamid.inbound"}
+        assert seen[1]["payload"]["type"] == "document"
+        assert seen[1]["payload"]["document"]["filename"] == "invoice.pdf"
+        assert seen[1]["payload"]["document"]["caption"] == "Invoice"
+
+    asyncio.run(run())
+
+
 def test_assigned_agent_can_transfer_ticket(monkeypatch: pytest.MonkeyPatch) -> None:
     async def run() -> None:
         service = SupportService()
@@ -335,5 +370,80 @@ def test_status_change_carries_assignment_snapshot_to_repository(monkeypatch: py
         )
         assert updated["status"] == "WAITING_CUSTOMER"
         assert seen["expected_assignee_id"] == "7"
+
+    asyncio.run(run())
+
+
+def test_agent_text_reply_uses_whatsapp_context_and_persists_reference(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def run() -> None:
+        service = SupportService()
+        agent = SupportAgent(id="7", name="Agent A", role="agent")
+        ticket = {
+            "id": 42,
+            "status": "IN_PROGRESS",
+            "active_key": "business-a:96170123456",
+            "current_assignee_id": "7",
+            "whatsapp_phone": "96170123456",
+            "business_phone_number_id": "business-a",
+        }
+        seen: dict = {}
+
+        async def get_ticket(_ticket_id: int) -> dict:
+            return dict(ticket)
+
+        async def no_existing(_client_id: str):
+            return None
+
+        async def get_message(message_id: int):
+            if message_id == 9:
+                return {
+                    "id": 9,
+                    "ticket_id": 42,
+                    "whatsapp_message_id": "wamid.customer.9",
+                }
+            return {
+                "id": message_id,
+                "ticket_id": 42,
+                "send_status": "SENT",
+                "message_type": "text",
+                "reply_to_whatsapp_message_id": "wamid.customer.9",
+            }
+
+        async def add_message(**kwargs):
+            seen["stored"] = kwargs
+            return {"id": 10, "ticket_id": 42, **kwargs}, True
+
+        async def send_text(to: str, body: str, **kwargs):
+            seen["send"] = {"to": to, "body": body, **kwargs}
+            return {"messages": [{"id": "wamid.agent.10"}]}
+
+        async def update_state(message_id: int, **kwargs):
+            seen["send_state"] = {"message_id": message_id, **kwargs}
+
+        async def publish(event_type: str, **payload):
+            seen.setdefault("events", []).append((event_type, payload))
+
+        monkeypatch.setattr(support_service_module.support_repository, "get_ticket", get_ticket)
+        monkeypatch.setattr(support_service_module.support_repository, "get_message_by_client_id", no_existing)
+        monkeypatch.setattr(support_service_module.support_repository, "get_message", get_message)
+        monkeypatch.setattr(support_service_module.support_repository, "add_ticket_message", add_message)
+        monkeypatch.setattr(support_service_module.support_repository, "update_message_send_state", update_state)
+        monkeypatch.setattr(support_service_module.whatsapp_client, "send_text", send_text)
+        monkeypatch.setattr(support_service_module, "publish_support_event", publish)
+
+        result = await service.send_agent_message(
+            42,
+            agent=agent,
+            body="Got it",
+            client_message_id="client-reply-1",
+            reply_to_message_id=9,
+        )
+
+        assert result["send_status"] == "SENT"
+        assert seen["stored"]["reply_to_whatsapp_message_id"] == "wamid.customer.9"
+        assert seen["send"]["context_message_id"] == "wamid.customer.9"
+        assert [event for event, _payload in seen["events"]] == ["outbound_message", "outbound_message"]
+        assert seen["events"][0][1]["message"]["send_status"] == "PENDING"
+        assert seen["events"][1][1]["message"]["send_status"] == "SENT"
 
     asyncio.run(run())

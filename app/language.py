@@ -237,11 +237,11 @@ def auth_prompt(style: str | None) -> str:
     if style == "ar":
         return "يرجى تزويدي بمعرّف المستخدم (User ID) الخاص فيك."
     if style == "leb_ar":
-        return "بعثلي user ID تبعك."
+        return "بليز، ابعتلي الـUser ID تبعك"
     if style == "leb_arabizi":
-        return "B3atle l user ID taba3ak."
+        return "Please b3atle el user ID."
     if style == "mixed":
-        return "B3atle your user ID."
+        return "Please b3atle your user ID."
     return "Please provide your User ID."
 
 

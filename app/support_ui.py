@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from fastapi import APIRouter
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, Response
 
 from app.config import settings
 
@@ -16,7 +18,22 @@ async def support_dashboard() -> HTMLResponse:
     html = _HTML.replace(
         "__POLL_MS__", str(max(1, settings.support_queue_poll_seconds) * 1000)
     ).replace("__CSRF_COOKIE__", settings.support_csrf_cookie_name)
-    return HTMLResponse(html)
+    return HTMLResponse(
+        html,
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+        },
+    )
+
+
+@router.get("/support/image-editor.js")
+async def support_image_editor_script() -> Response:
+    if not settings.support_ui_enabled:
+        return Response(status_code=404)
+    script = Path(__file__).with_name("support_image_editor.js").read_text(encoding="utf-8")
+    script = script.replace("__IMAGE_MAX_BYTES__", str(max(1, settings.support_image_max_bytes)))
+    return Response(script, media_type="text/javascript", headers={"Cache-Control": "no-store"})
 
 
 _HTML = r'''<!doctype html>
@@ -27,6 +44,7 @@ _HTML = r'''<!doctype html>
 <meta name="color-scheme" content="light dark" />
 <meta name="theme-color" content="#f4f7fb" />
 <title>Shipment Support</title>
+<script src="/support/image-editor.js"></script>
 <script>
 (function () {
   try {
@@ -81,8 +99,8 @@ _HTML = r'''<!doctype html>
   --radius-lg: 16px;
   --radius-xl: 20px;
   --sidebar-width: 236px;
-  --queue-width: 370px;
-  --context-width: 330px;
+  --queue-width: 340px;
+  --context-width: 300px;
   --header-height: 76px;
   --transition: 150ms ease;
 }
@@ -272,6 +290,10 @@ select { cursor: pointer; }
     radial-gradient(circle at 18% 12%, color-mix(in srgb, var(--primary) 10%, transparent), transparent 30%),
     var(--bg-app);
 }
+.session-loading-content { display: grid; justify-items: center; gap: 13px; text-align: center; }
+.session-loading-content strong { color: var(--text-strong); font-size: 16px; }
+.session-loading-content p { margin: 0; color: var(--text-muted); }
+.session-loading-content .btn { margin-top: 4px; }
 .login-shell { width: min(440px, 100%); }
 .login-theme-row { display: flex; justify-content: flex-end; margin-bottom: 12px; }
 .login-card {
@@ -375,7 +397,12 @@ select { cursor: pointer; }
 .queue-nav-btn.active .queue-nav-count { background: color-mix(in srgb, var(--primary) 14%, var(--surface)); color: var(--primary); }
 .queue-nav-count:empty { display: none; }
 .nav-spacer { flex: 1; min-height: 14px; }
-.agent-card { margin: 10px; padding: 10px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-subtle); }
+.account-zone { flex: 0 0 auto; }
+.message-preferences-slot { margin: 0 10px 5px; }
+.message-preferences-slot .btn { width: 100%; }
+.whatsapp-manage-slot { margin: 0 10px; }
+.whatsapp-manage-slot .btn { width: 100%; }
+.agent-card { margin: 6px 10px 10px; padding: 10px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-subtle); }
 .agent-main { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .avatar {
   width: 36px;
@@ -401,19 +428,27 @@ select { cursor: pointer; }
 .staff-actions .btn { flex: 1; }
 
 .inbox-panel {
+  position: relative;
   min-width: 0;
   min-height: 0;
   display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  grid-template-rows: auto auto auto minmax(0, 1fr) auto;
   background: var(--surface);
   border-right: 1px solid var(--border);
 }
-.inbox-header { min-height: var(--header-height); display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 13px 16px; border-bottom: 1px solid var(--border); }
+.inbox-header { grid-row: 1; min-height: var(--header-height); display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 13px 16px; border-bottom: 1px solid var(--border); }
+.inbox-header-actions { display: flex; align-items: center; gap: 7px; }
+.ai-header-control { min-height: 34px; display: inline-flex; align-items: center; gap: 7px; padding: 6px 10px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface); color: var(--text-muted); box-shadow: var(--shadow-xs); font-size: 11px; font-weight: 750; }
+.ai-header-control:hover { border-color: var(--border-strong); background: var(--surface-hover); }
+.ai-header-control .ai-header-state { color: var(--text-strong); font-weight: 850; }
+.ai-status-dot { width: 8px; height: 8px; flex: 0 0 auto; border-radius: 50%; background: var(--text-subtle); box-shadow: 0 0 0 3px color-mix(in srgb, var(--text-subtle) 12%, transparent); }
+.ai-status-dot.on { background: var(--success); box-shadow: 0 0 0 3px color-mix(in srgb, var(--success) 15%, transparent); }
+.ai-status-dot.off { background: var(--danger); box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger) 13%, transparent); }
 .eyebrow { color: var(--text-subtle); font-size: 10px; font-weight: 800; letter-spacing: 0.09em; text-transform: uppercase; }
 .inbox-title-row { display: flex; align-items: baseline; gap: 8px; }
 .inbox-title-row h1 { margin: 1px 0 0; color: var(--text-strong); font-size: 18px; line-height: 1.2; letter-spacing: -0.02em; }
 .queue-total { color: var(--text-muted); font-size: 12px; white-space: nowrap; }
-.search-wrap { padding: 12px 14px; border-bottom: 1px solid var(--border); }
+.search-wrap { grid-row: 2; padding: 12px 14px; border-bottom: 1px solid var(--border); }
 .search-field { position: relative; }
 .search-field > .icon { position: absolute; z-index: 1; left: 11px; top: 50%; transform: translateY(-50%); color: var(--text-subtle); pointer-events: none; }
 .search-field input { width: 100%; min-height: 40px; padding: 8px 42px 8px 36px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg-subtle); color: var(--text-strong); }
@@ -421,6 +456,7 @@ select { cursor: pointer; }
 .search-clear { position: absolute; right: 4px; top: 50%; transform: translateY(-50%); width: 32px; height: 32px; }
 .search-scope { margin-top: 7px; color: var(--text-subtle); font-size: 11px; }
 .queue {
+  grid-row: 4;
   min-height: 0;
   overflow: auto;
   overscroll-behavior: contain;
@@ -468,7 +504,29 @@ select { cursor: pointer; }
 .status-waiting-customer, .status-waiting-internal { background: var(--warning-soft); color: var(--warning); }
 .status-resolved, .status-closed { background: var(--success-soft); color: var(--success); }
 .status-default { background: var(--surface-muted); color: var(--text-muted); }
-.queue-footer { min-height: 58px; display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 10px 14px; border-top: 1px solid var(--border); background: var(--surface); }
+.contact-row { width: 100%; display: grid; grid-template-columns: 38px minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 12px 14px; border: 0; border-bottom: 1px solid var(--border); background: transparent; color: var(--text); text-align: left; cursor: pointer; }
+.contact-row:hover { background: var(--surface-hover); }
+.contact-row-copy { min-width: 0; }
+.contact-row-name { color: var(--text-strong); font-weight: 750; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.contact-row-phone { margin-top: 2px; color: var(--text-muted); font-size: 11px; font-family: var(--font-mono); }
+.contact-row-meta { margin-top: 4px; display: flex; gap: 5px; flex-wrap: wrap; color: var(--text-subtle); font-size: 10px; }
+.contact-source { display: inline-flex; align-items: center; padding: 2px 6px; border-radius: 999px; background: var(--surface-muted); color: var(--text-muted); font-size: 9px; font-weight: 750; text-transform: uppercase; }
+.contact-source.google { background: var(--primary-soft); color: var(--primary); }
+.contact-source.vcf { background: var(--success-soft); color: var(--success); }
+.contacts-toolbar { grid-row: 3; display: flex; align-items: center; gap: 8px; padding: 9px 14px; border-bottom: 1px solid var(--border); background: var(--bg-subtle); }
+.contacts-google-copy { min-width: 0; flex: 1; }
+.contacts-google-copy strong { display: block; color: var(--text-strong); font-size: 11px; }
+.contacts-google-copy span { display: block; margin-top: 1px; color: var(--text-muted); font-size: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.contacts-toolbar-actions { display: flex; gap: 5px; flex-wrap: wrap; justify-content: flex-end; }
+.contact-picker-list { max-height: 320px; overflow: auto; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); }
+.contact-picker-row { width: 100%; display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 8px; align-items: center; padding: 9px 10px; border: 0; border-bottom: 1px solid var(--border); background: transparent; color: var(--text); text-align: left; cursor: pointer; }
+.contact-picker-row:last-child { border-bottom: 0; }
+.contact-picker-row:hover, .contact-picker-row.selected { background: var(--surface-selected); }
+.contact-picker-row strong { display: block; color: var(--text-strong); font-size: 12px; }
+.contact-picker-row span { display: block; margin-top: 2px; color: var(--text-muted); font-size: 10px; }
+.contact-picker-section { margin-top: 12px; }
+.contact-picker-section-title { margin: 0 0 6px; color: var(--text-subtle); font-size: 10px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; }
+.queue-footer { grid-row: 5; min-height: 58px; display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 10px 14px; border-top: 1px solid var(--border); background: var(--surface); }
 .page-summary { color: var(--text-muted); font-size: 11px; font-variant-numeric: tabular-nums; }
 .pagination-actions { display: flex; gap: 5px; }
 
@@ -515,7 +573,7 @@ select { cursor: pointer; }
 .ticket-subtitle { margin-top: 4px; color: var(--text-muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ticket-header-meta { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 6px; }
 .actions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 7px; }
-.context-toggle { display: none; }
+.context-toggle { display: inline-grid; }
 .action-menu { position: relative; }
 .action-menu[open] { z-index: 15; }
 .menu-summary { list-style: none; min-height: 38px; display: inline-flex; align-items: center; gap: 7px; padding: 8px 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); font-weight: 650; font-size: 13px; box-shadow: var(--shadow-xs); }
@@ -529,8 +587,15 @@ select { cursor: pointer; }
 .error-banner.visible { display: flex; }
 .error-banner-copy { flex: 1; }
 .error-banner .icon-btn { width: 28px; height: 28px; margin: -4px -5px -4px 0; color: var(--danger); }
-.workspace-content { grid-row: 2; grid-column: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) var(--context-width); }
+.workspace-content { grid-row: 2; grid-column: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) var(--context-width); transition: grid-template-columns 150ms ease; }
 .conversation-shell { min-width: 0; min-height: 0; position: relative; background: var(--bg-app); }
+.layout-resizer { position: absolute; z-index: 18; top: 0; bottom: 0; width: 9px; touch-action: none; cursor: col-resize; outline: none; }
+.layout-resizer::after { content: ""; position: absolute; top: 0; bottom: 0; left: 4px; width: 1px; background: transparent; transition: background-color var(--transition), width var(--transition), left var(--transition); }
+.layout-resizer:hover::after, .layout-resizer:focus-visible::after, body.column-resizing .layout-resizer.active::after { left: 3px; width: 3px; background: var(--primary); }
+.queue-resizer { right: -5px; }
+.context-resizer { left: -5px; }
+body.column-resizing { cursor: col-resize !important; user-select: none !important; }
+body.column-resizing * { cursor: col-resize !important; }
 .conversation {
   height: 100%;
   overflow: auto;
@@ -538,12 +603,19 @@ select { cursor: pointer; }
   padding: 22px clamp(16px, 3vw, 36px) 28px;
   scroll-padding-bottom: 90px;
 }
-.conversation-inner { width: min(820px, 100%); margin: 0 auto; }
+.conversation-inner { width: min(960px, 100%); margin: 0 auto; }
 .conversation-empty { height: 100%; min-height: 260px; display: grid; place-items: center; }
 .scroll-latest { position: absolute; z-index: 3; right: 18px; bottom: 16px; border-radius: 999px; box-shadow: var(--shadow-sm); }
 .date-divider { display: flex; align-items: center; gap: 12px; margin: 22px 0 16px; color: var(--text-subtle); font-size: 10px; font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase; }
 .date-divider::before, .date-divider::after { content: ""; height: 1px; flex: 1; background: var(--border); }
 .context-divider { display: flex; align-items: center; gap: 8px; margin: 0 auto 18px; width: max-content; max-width: 100%; padding: 6px 10px; border: 1px dashed var(--border-strong); border-radius: 999px; color: var(--text-muted); background: var(--surface); font-size: 11px; }
+.previous-ticket-divider { margin: 24px 0 12px; padding: 9px 11px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-muted); color: var(--text-muted); font-size: 11px; }
+.previous-ticket-divider strong { color: var(--text-strong); }
+.previous-ticket-divider span { margin-left: 6px; }
+.history-load-row { display: flex; justify-content: center; margin: 12px 0 18px; }
+.history-load-row .btn { white-space: normal; text-align: center; }
+.message-row.previous-ticket-msg { opacity: 0.9; }
+.message-row.previous-ticket-msg .message-bubble { box-shadow: none; }
 .message-row { display: grid; grid-template-columns: 34px minmax(0, 1fr); align-items: end; gap: 9px; margin: 11px 0; }
 .message-row.outbound { grid-template-columns: minmax(0, 1fr) 34px; }
 .message-row.outbound .message-avatar { grid-column: 2; }
@@ -557,24 +629,75 @@ select { cursor: pointer; }
 .message-row.context-msg .message-bubble { border-style: dashed; box-shadow: none; }
 .message-sender { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-bottom: 5px; color: var(--text-strong); font-size: 11px; font-weight: 800; }
 .role-badge { min-height: 18px; padding: 2px 6px; background: var(--surface-muted); color: var(--text-muted); font-size: 9px; letter-spacing: 0.035em; text-transform: uppercase; }
+.message-quote { width: min(100%, 520px); margin-bottom: 8px; padding: 7px 9px; border-left: 3px solid var(--primary); border-radius: 7px; background: color-mix(in srgb, var(--primary-soft) 55%, var(--surface)); color: var(--text-muted); font-size: 10px; }
+.message-quote strong { display: block; margin-bottom: 2px; color: var(--text-strong); font-size: 10px; }
+.message-quote span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .message-body { color: var(--text-strong); white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }
+.message-body a { color: var(--primary); text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 2px; overflow-wrap: anywhere; }
+.message-body a:hover { color: var(--primary-hover); }
+.message-search-highlight { background: color-mix(in srgb, var(--warning) 42%, transparent); color: inherit; border-radius: 3px; padding: 0 1px; }
+.message-row.search-target .message-bubble { outline: 3px solid color-mix(in srgb, var(--primary) 35%, transparent); outline-offset: 2px; }
+.conversation-search-toolbar { position: absolute; z-index: 12; top: 10px; right: 14px; width: min(440px, calc(100% - 28px)); display: flex; align-items: center; gap: 6px; padding: 7px 8px; border: 1px solid var(--border-strong); border-radius: var(--radius-md); background: var(--surface-raised); box-shadow: var(--shadow-sm); }
+.conversation-search-toolbar.hidden { display: none; }
+.conversation-search-input { min-width: 0; flex: 1; height: 34px; border: 0; outline: 0; background: transparent; color: var(--text-strong); }
+.conversation-search-count { min-width: 48px; color: var(--text-muted); font-size: 11px; text-align: center; font-variant-numeric: tabular-nums; }
+.search-result-row { width: 100%; display: block; padding: 13px 15px; border: 0; border-bottom: 1px solid var(--border); background: transparent; color: var(--text); text-align: left; cursor: pointer; }
+.search-result-row:hover { background: var(--surface-hover); }
+.search-result-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.search-result-customer { min-width: 0; color: var(--text-strong); font-weight: 750; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.search-result-time { flex: 0 0 auto; color: var(--text-subtle); font-size: 10px; }
+.search-result-ref { margin-top: 2px; color: var(--text-subtle); font-size: 10px; font-family: var(--font-mono); }
+.search-result-preview { margin-top: 7px; color: var(--text-muted); font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; }
 .message-body code { font-family: var(--font-mono); font-size: 0.92em; }
 .message-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; margin-top: 6px; padding: 0 3px; color: var(--text-subtle); font-size: 10px; }
 .message-row.outbound .message-meta { justify-content: flex-end; }
+.message-action-btn { min-height: 24px; padding: 2px 6px; border: 0; background: transparent; color: var(--text-muted); font-size: 10px; box-shadow: none; opacity: 0; transition: opacity 120ms ease, background 120ms ease; }
+.message-row:hover .message-action-btn, .message-action-btn:focus-visible { opacity: 1; }
+@media (hover: none) { .message-action-btn { opacity: 1; min-height: 36px; } }
+@media (pointer: coarse) { .media-viewer-tools .btn.small, .image-editor-toolbar .btn.small { min-height: 40px; } }
+.message-reactions { display: flex; flex-wrap: wrap; gap: 4px; margin: -4px 4px 2px; position: relative; z-index: 1; }
+.message-row.outbound .message-reactions { justify-content: flex-end; }
+.reaction-chip { min-height: 24px; display: inline-flex; align-items: center; gap: 3px; padding: 2px 7px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface-raised); color: var(--text); font-size: 13px; box-shadow: var(--shadow-sm); }
+.reaction-chip span { color: var(--text-muted); font-size: 10px; font-weight: 750; }
+.message-reaction-menu { position: relative; }
+.message-reaction-menu > summary { list-style: none; }
+.message-reaction-menu > summary::-webkit-details-marker { display: none; }
+.message-reaction-menu.disabled > summary { pointer-events: none; opacity: 0.35; }
+.message-reaction-picker { position: absolute; z-index: 8; bottom: calc(100% + 5px); left: 0; display: flex; gap: 3px; padding: 5px; border: 1px solid var(--border-strong); border-radius: 999px; background: var(--surface-raised); box-shadow: var(--shadow-md); }
+.message-row.outbound .message-reaction-picker { right: 0; left: auto; }
+.reaction-option { width: 30px; height: 30px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 50%; background: transparent; font-size: 17px; cursor: pointer; }
+.reaction-option:hover, .reaction-option:focus-visible, .reaction-option.active { background: var(--primary-soft); outline: 0; }
+.forwarded-label { display: inline-flex; align-items: center; gap: 4px; margin-bottom: 5px; color: var(--text-subtle); font-size: 10px; font-style: italic; font-weight: 650; }
+.forwarded-label .icon { width: 13px; height: 13px; }
 .send-state { display: inline-flex; align-items: center; gap: 3px; font-weight: 700; }
 .send-state.failed { color: var(--danger); }
 .send-state.pending { color: var(--warning); }
 .msg-media { margin: 0 0 8px; }
 .media-open { max-width: 100%; display: block; padding: 0; border: 0; border-radius: 10px; background: transparent; cursor: zoom-in; }
 .msg-media img { display: block; width: auto; max-width: min(440px, 100%); max-height: 420px; border-radius: 10px; object-fit: contain; background: var(--surface-muted); }
+.msg-media.sticker img { max-width: min(220px, 55vw); max-height: 220px; background: transparent; }
 .msg-media audio { display: block; width: min(360px, 62vw); max-width: 100%; }
-.media-unavailable { padding: 12px; border: 1px dashed var(--border-strong); border-radius: 9px; background: var(--surface-muted); color: var(--text-muted); font-size: 12px; }
+.voice-note-player { display: flex; align-items: center; gap: 7px; max-width: 100%; }
+.voice-note-player audio { min-width: 0; flex: 1 1 auto; }
+.voice-speed-btn { flex: 0 0 auto; min-width: 42px; min-height: 34px; padding: 4px 6px; border: 1px solid var(--border-strong); border-radius: 8px; background: var(--surface-raised); color: var(--text-strong); font-size: 11px; font-weight: 800; cursor: pointer; }
+.voice-speed-btn:hover, .voice-speed-btn:focus-visible { background: var(--primary-soft); }
+.linked-device-section { padding: 12px; margin-bottom: 18px; border: 1px solid var(--border); border-radius: 10px; }
+.linked-device-qr { display: block; width: 220px; max-width: 100%; height: auto; margin: 12px auto; border-radius: 8px; background: white; }
+.linked-device-line { padding: 12px 0; border-bottom: 1px solid var(--border); }
+.linked-device-line:last-child { border-bottom: 0; }
+.document-card, .location-card { width: min(420px, 100%); display: flex; align-items: center; gap: 10px; padding: 10px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg-subtle); }
+.document-card-copy, .location-card-copy { min-width: 0; flex: 1; }
+.document-card-copy strong, .location-card-copy strong { display: block; color: var(--text-strong); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.document-card-copy span, .location-card-copy span { display: block; margin-top: 2px; color: var(--text-muted); font-size: 10px; overflow-wrap: anywhere; }
+.document-card .icon, .location-card .icon { flex: 0 0 auto; color: var(--primary); }
+.media-unavailable { padding: 12px; border: 1px dashed var(--border-strong); border-radius: 9px; background: var(--surface-muted); color: var(--text-muted); font-size: 12px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.media-unavailable > span { flex: 1 1 220px; }
 .event { width: fit-content; max-width: min(90%, 620px); margin: 15px auto; padding: 6px 10px; border: 1px solid var(--border); border-radius: 999px; background: color-mix(in srgb, var(--surface) 82%, transparent); color: var(--text-muted); text-align: center; font-size: 10px; overflow-wrap: anywhere; }
 
-.context-panel { min-width: 0; overflow: auto; border-left: 1px solid var(--border); background: var(--surface); }
+.context-panel { position: relative; min-width: 0; overflow: auto; border-left: 1px solid var(--border); background: var(--surface); }
 .context-panel-head { position: sticky; top: 0; z-index: 2; min-height: 54px; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 15px; border-bottom: 1px solid var(--border); background: color-mix(in srgb, var(--surface) 94%, transparent); backdrop-filter: blur(10px); }
 .context-panel-head strong { color: var(--text-strong); font-size: 13px; }
-.context-close { display: none; }
+.context-close { display: inline-grid; }
 .context { padding: 15px; }
 .context-hero { display: flex; align-items: center; gap: 11px; padding-bottom: 15px; border-bottom: 1px solid var(--border); }
 .context-hero-copy { min-width: 0; }
@@ -593,8 +716,12 @@ select { cursor: pointer; }
 .context-backdrop { display: none; }
 
 .composer-shell { grid-row: 3; grid-column: 1; position: relative; z-index: 3; border-top: 1px solid var(--border); background: var(--surface); }
-.read-only-banner, .recording-bar, .media-draft { margin: 10px 14px 0; }
+.read-only-banner, .recording-bar, .media-draft, .reply-draft { margin: 10px 14px 0; }
 .read-only-banner { display: flex; align-items: flex-start; gap: 9px; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--warning) 32%, var(--border)); border-radius: var(--radius-sm); background: var(--warning-soft); color: var(--warning); font-size: 12px; }
+.reply-draft { display: flex; align-items: center; gap: 9px; padding: 8px 10px; border-left: 3px solid var(--primary); border-radius: var(--radius-sm); background: var(--primary-soft); }
+.reply-draft-copy { min-width: 0; flex: 1; }
+.reply-draft-copy strong { display: block; color: var(--text-strong); font-size: 11px; }
+.reply-draft-copy span { display: block; margin-top: 1px; color: var(--text-muted); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .recording-bar { display: flex; align-items: center; gap: 9px; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--danger) 25%, var(--border)); border-radius: var(--radius-sm); background: var(--danger-soft); color: var(--danger); font-size: 12px; font-weight: 700; }
 .recording-dot { width: 9px; height: 9px; flex: 0 0 auto; border-radius: 50%; background: var(--danger); animation: pulse 1s infinite; }
 .recording-bar .btn { margin-left: auto; }
@@ -603,6 +730,8 @@ select { cursor: pointer; }
 .media-draft-preview img { width: 100%; height: 100%; object-fit: cover; }
 .media-draft-preview audio { width: min(300px, 52vw); }
 .media-draft.audio .media-draft-preview { width: auto; min-width: min(300px, 52vw); height: auto; background: transparent; }
+.media-draft.document .media-draft-preview { color: var(--primary); }
+.media-draft.document .media-draft-preview .icon { width: 30px; height: 30px; }
 .media-draft-info { min-width: 0; flex: 1; }
 .media-draft-name { color: var(--text-strong); font-size: 12px; font-weight: 750; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .media-draft-size { margin-top: 2px; color: var(--text-muted); font-size: 11px; }
@@ -612,7 +741,7 @@ select { cursor: pointer; }
 .reply-mode { display: inline-flex; align-items: center; gap: 6px; color: var(--success); font-size: 11px; font-weight: 750; }
 .reply-mode-dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
 .composer-shortcut { color: var(--text-subtle); font-size: 10px; }
-.composer-row { display: grid; grid-template-columns: auto auto minmax(0, 1fr) auto; align-items: end; gap: 7px; }
+.composer-row { display: grid; grid-template-columns: auto auto auto minmax(0, 1fr) auto; align-items: end; gap: 7px; }
 .composer-input-wrap { min-width: 0; }
 .composer-textarea { min-height: 42px; max-height: 154px; resize: none; line-height: 1.45; padding: 10px 11px; overflow-y: auto; }
 .composer-meta { min-height: 18px; display: flex; justify-content: space-between; gap: 10px; margin: 4px 2px 0; color: var(--text-subtle); font-size: 10px; }
@@ -622,6 +751,57 @@ select { cursor: pointer; }
 .modal-backdrop { position: fixed; inset: 0; z-index: 50; display: grid; place-items: center; padding: 22px; background: var(--overlay); }
 .modal-card { width: min(820px, 100%); max-height: min(90vh, 900px); max-height: min(90dvh, 900px); display: flex; flex-direction: column; overflow: hidden; border: 1px solid var(--border-strong); border-radius: var(--radius-lg); background: var(--surface-raised); box-shadow: var(--shadow-lg); }
 .modal-card.transfer-card { width: min(520px, 100%); }
+.modal-card.message-preferences-card { width: min(620px, 100%); }
+.message-preference-textarea { min-height: 112px !important; resize: vertical; line-height: 1.45; }
+.message-preference-hint { display: flex; justify-content: space-between; gap: 10px; }
+.message-preference-hint span:last-child { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.modal-card.ai-settings-card { width: min(660px, 100%); }
+.modal-card.whatsapp-card { width: min(760px, 100%); }
+.modal-card.location-card-modal { width: min(560px, 100%); }
+.location-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 12px; }
+.location-grid .wide { grid-column: 1 / -1; }
+.whatsapp-account-list, .whatsapp-number-list { display: grid; gap: 8px; margin-top: 12px; }
+.whatsapp-account-row, .whatsapp-number-row { display: grid; gap: 10px; align-items: center; padding: 11px 12px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--surface); }
+.whatsapp-account-row { grid-template-columns: minmax(0, 1fr) auto; }
+.whatsapp-number-row { grid-template-columns: minmax(0, 1fr) auto; }
+.whatsapp-row-title { color: var(--text-strong); font-size: 12px; font-weight: 800; }
+.whatsapp-row-subtitle { margin-top: 2px; color: var(--text-muted); font-size: 10px; overflow-wrap: anywhere; }
+.whatsapp-row-meta { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 6px; }
+.whatsapp-sync-form { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: end; margin-top: 15px; }
+.whatsapp-sync-form .field { margin: 0; }
+.modal-card.media-viewer-card { width: min(1200px, 96vw); height: min(92vh, 960px); }
+.media-viewer-body { flex: 1 1 0; min-width: 0; min-height: 0; position: relative; display: flex; align-items: center; justify-content: center; overflow: hidden; padding: 14px; background: var(--bg-app); }
+.media-viewer-body.image-mode { touch-action: none; }
+.media-viewer-body img { display: block; position: absolute; max-width: none; max-height: none; border-radius: 8px; transform-origin: center center; user-select: none; -webkit-user-drag: none; }
+.media-viewer-body.can-pan { cursor: grab; }
+.media-viewer-body.panning { cursor: grabbing; }
+.media-viewer-body.editing { padding: 10px; }
+.media-viewer-body canvas { display: block; position: absolute; max-width: none; max-height: none; transform-origin: center center; touch-action: none; box-shadow: var(--shadow-md); }
+.media-viewer-tools { display: flex; align-items: center; gap: 6px; margin-left: auto; flex-wrap: wrap; }
+.image-editor-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px 14px; border-top: 1px solid var(--border); }
+.image-editor-toolbar label { display: flex; align-items: center; gap: 4px; font-size: 12px; }
+.image-editor-toolbar input[type="text"] { flex: 1 1 150px; min-width: 110px; }
+.image-editor-toolbar input[type="range"] { width: 90px; }
+.image-editor-toolbar button[aria-pressed="true"] { background: var(--primary-soft); border-color: var(--primary); }
+.media-viewer-zoom { min-width: 52px; text-align: center; color: var(--text-muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.context-contact-action { margin-left: auto; flex: 0 0 auto; }
+.media-viewer-body iframe { width: 100%; height: 100%; min-height: 62vh; border: 0; border-radius: 8px; background: white; }
+.ai-status-card { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 18px; padding: 14px 15px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-subtle); }
+.ai-status-copy strong { display: block; color: var(--text-strong); font-size: 13px; }
+.ai-status-copy span { display: block; margin-top: 3px; color: var(--text-muted); font-size: 11px; }
+.ai-status-pill { display: inline-flex; align-items: center; gap: 7px; flex: 0 0 auto; padding: 6px 10px; border-radius: 999px; background: var(--success-soft); color: var(--success); font-size: 12px; font-weight: 800; }
+.ai-status-pill::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+.ai-status-pill.off { background: var(--surface-muted); color: var(--text-muted); }
+.ai-mode-options { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; margin: 0 0 18px; padding: 0; border: 0; }
+.ai-mode-options legend { grid-column: 1 / -1; margin-bottom: 1px; color: var(--text-strong); font-size: 13px; font-weight: 700; }
+.ai-mode-option { display: flex; align-items: flex-start; gap: 9px; padding: 11px 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); cursor: pointer; }
+.ai-mode-option:has(input:checked) { border-color: color-mix(in srgb, var(--primary) 45%, var(--border)); background: var(--primary-soft); }
+.ai-mode-option input { margin-top: 2px; accent-color: var(--primary); }
+.ai-mode-option strong { display: block; color: var(--text-strong); font-size: 12px; }
+.ai-mode-option span { display: block; margin-top: 2px; color: var(--text-muted); font-size: 10px; line-height: 1.4; }
+.ai-schedule-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 14px; }
+.ai-schedule-grid .wide { grid-column: 1 / -1; }
+.ai-next-change { margin-top: -3px; margin-bottom: 16px; color: var(--text-muted); font-size: 11px; }
 .modal-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; padding: 18px 20px 14px; border-bottom: 1px solid var(--border); }
 .modal-head h2 { margin: 0; color: var(--text-strong); font-size: 18px; letter-spacing: -0.015em; }
 .modal-subtitle { margin-top: 3px; color: var(--text-muted); font-size: 12px; }
@@ -670,10 +850,16 @@ select { cursor: pointer; }
 @keyframes indeterminate { 0% { transform: translateX(-120%); } 55% { transform: translateX(190%); } 100% { transform: translateX(190%); } }
 @keyframes toast-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
 
+@media (min-width: 1101px) {
+  .workspace-content.context-collapsed { grid-template-columns: minmax(0, 1fr) 0; }
+  .workspace-content.context-collapsed .context-panel { width: 0; min-width: 0; visibility: hidden; pointer-events: none; overflow: hidden; border-left: 0; }
+  .workspace-content.context-collapsed .context-resizer { display: none; }
+}
+
 @media (max-width: 1280px) {
   :root { --sidebar-width: 82px; --queue-width: 350px; }
   .brand-bar { position: relative; justify-content: center; padding-inline: 10px; }
-  .brand-copy, .sidebar-label, .agent-copy, .staff-actions .btn span, .queue-nav-label { display: none; }
+  .brand-copy, .sidebar-label, .agent-copy, .staff-actions .btn span, .message-preferences-slot .btn span, .whatsapp-manage-slot .btn span, .queue-nav-label { display: none; }
   .brand-bar .brand-logo { width: 34px; height: 34px; position: absolute; top: 5px; }
   .brand-bar .icon-btn { width: 28px; height: 28px; display: inline-grid; position: absolute; bottom: 5px; }
   .queue-nav { padding: 8px; }
@@ -695,11 +881,13 @@ select { cursor: pointer; }
   .context-backdrop { position: fixed; z-index: 41; inset: 0; display: block; background: var(--overlay); opacity: 0; visibility: hidden; transition: opacity 190ms ease, visibility 190ms ease; }
   .context-backdrop.visible { opacity: 1; visibility: visible; }
   .context-toggle { display: inline-grid; }
+  .context-resizer { display: none; }
 }
 
 @media (max-width: 900px) {
   :root { --queue-width: 306px; }
   .actions .btn .optional-label { display: none; }
+  .ai-header-control { padding-inline: 8px; }
   .message-stack { width: min(82%, 640px); }
 }
 
@@ -724,13 +912,21 @@ select { cursor: pointer; }
   .queue-nav-label { display: inline; }
   .queue-nav-count { position: static; min-width: 19px; height: 18px; }
   .nav-spacer, .sidebar-label { display: none; }
-  .agent-card { grid-area: agent; align-self: center; display: flex; align-items: center; margin: 0 9px 0 0; padding: 0; border: 0; background: transparent; }
+  .account-zone { grid-area: agent; align-self: center; display: flex; align-items: center; gap: 2px; margin: 0 9px 0 0; }
+  .message-preferences-slot, .whatsapp-manage-slot { margin: 0; }
+  .message-preferences-slot .btn, .whatsapp-manage-slot .btn { width: 36px; height: 36px; min-height: 36px; padding: 0; border-color: transparent; background: transparent; box-shadow: none; }
+  .message-preferences-slot .btn:hover, .whatsapp-manage-slot .btn:hover { background: var(--surface-muted); }
+  .agent-card { align-self: center; display: flex; align-items: center; margin: 0; padding: 0; border: 0; background: transparent; }
   .agent-main { display: none; }
   .staff-actions { display: flex; margin: 0; }
   .staff-actions .btn { width: 36px; height: 36px; min-height: 36px; flex: 0 0 auto; padding: 0; border-color: transparent; background: transparent; box-shadow: none; }
   .staff-actions .btn:hover { background: var(--surface-muted); }
   .inbox-panel { min-height: 0; flex: 1; border-right: 0; }
+  .queue-resizer { display: none; }
   .inbox-header { min-height: 62px; padding: 10px 14px; }
+  #startChatBtn { width: 36px; min-width: 36px; padding: 0; }
+  #startChatBtn .optional-label { display: none; }
+  .ai-header-control .ai-header-copy { display: none; }
   .main { display: none; min-height: 0; flex: 1; }
   body.mobile-ticket-open .global-sidebar, body.mobile-ticket-open .inbox-panel { display: none; }
   body.mobile-ticket-open .main { display: grid; }
@@ -753,11 +949,11 @@ select { cursor: pointer; }
   .composer { padding: 9px 10px 10px; }
   .composer-mode { margin-inline: 1px; }
   .composer-shortcut { display: none; }
-  .composer-row { grid-template-columns: auto auto minmax(0, 1fr) auto; gap: 5px; }
+  .composer-row { grid-template-columns: auto auto auto minmax(0, 1fr) auto; gap: 5px; }
   .composer-row .icon-btn { width: 40px; height: 40px; }
   .send-btn { min-width: 44px; width: 44px; padding: 0; }
   .send-btn .send-label { display: none; }
-  .read-only-banner, .recording-bar, .media-draft { margin-inline: 10px; }
+  .read-only-banner, .recording-bar, .media-draft, .reply-draft { margin-inline: 10px; }
   .media-draft { align-items: flex-start; flex-wrap: wrap; }
   .media-draft-info { min-width: 120px; }
   .modal-backdrop { align-items: end; padding: 0; }
@@ -788,7 +984,7 @@ select { cursor: pointer; }
   .message-stack { width: min(92%, 620px); }
   .message-sender { margin-bottom: 4px; }
   .message-bubble { padding: 9px 10px; }
-  .composer-row { grid-template-columns: auto auto minmax(0, 1fr) auto; }
+  .composer-row { grid-template-columns: auto auto auto minmax(0, 1fr) auto; }
   .composer-row .icon-btn { width: 38px; height: 38px; }
   .composer-textarea { min-height: 40px; padding: 9px; }
   .send-btn { width: 40px; min-width: 40px; min-height: 40px; }
@@ -835,6 +1031,10 @@ select { cursor: pointer; }
   <symbol id="icon-alert" viewBox="0 0 24 24"><path d="M12 3 2.8 20h18.4z"/><path d="M12 9v4M12 16.5h.01"/></symbol>
   <symbol id="icon-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 10.5V17M12 7h.01"/></symbol>
   <symbol id="icon-image" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="8.5" cy="9" r="1.5"/><path d="m5 18 5-5 3 3 2-2 4 4"/></symbol>
+  <symbol id="icon-file" viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6z"/><path d="M14 3v5h5M8.5 13h7M8.5 16h7"/></symbol>
+  <symbol id="icon-paperclip" viewBox="0 0 24 24"><path d="m8.5 12.5 6.2-6.2a3 3 0 1 1 4.2 4.2l-8.1 8.1a5 5 0 0 1-7.1-7.1l8-8"/></symbol>
+  <symbol id="icon-reply" viewBox="0 0 24 24"><path d="m10 7-6 5 6 5v-3h3.5c3.3 0 5.6 1.2 7 3.5-.3-5.3-2.8-8-7.5-8H10z"/></symbol>
+  <symbol id="icon-map-pin" viewBox="0 0 24 24"><path d="M12 21s6-5.3 6-11a6 6 0 1 0-12 0c0 5.7 6 11 6 11Z"/><circle cx="12" cy="10" r="2"/></symbol>
   <symbol id="icon-mic" viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11.5a6.5 6.5 0 0 0 13 0M12 18v3M8.5 21h7"/></symbol>
   <symbol id="icon-square" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="1"/></symbol>
   <symbol id="icon-send" viewBox="0 0 24 24"><path d="m3.5 4 17 8-17 8 3-8zM6.5 12h14"/></symbol>
@@ -847,7 +1047,16 @@ select { cursor: pointer; }
   <symbol id="icon-arrow-down" viewBox="0 0 24 24"><path d="M12 4v14M6 12l6 6 6-6"/></symbol>
 </svg>
 
-<main class="login-page" id="loginPage">
+<main class="login-page" id="sessionLoading">
+  <div class="session-loading-content">
+    <span class="brand-logo" aria-hidden="true"><svg class="icon icon-lg"><use href="#icon-logo"></use></svg></span>
+    <strong>Shipment Support</strong>
+    <p id="sessionLoadingStatus" role="status" aria-live="polite">Checking your session…</p>
+    <button class="btn primary hidden" id="sessionRetryBtn" type="button">Try again</button>
+  </div>
+</main>
+
+<main class="login-page hidden" id="loginPage">
   <div class="login-shell">
     <div class="login-theme-row">
       <button class="icon-btn" id="loginThemeBtn" type="button" aria-label="Switch to dark theme" data-tooltip="Change theme">
@@ -900,6 +1109,12 @@ select { cursor: pointer; }
       <button class="queue-nav-btn" data-view="mine" type="button" aria-label="My tickets" title="My tickets">
         <svg class="icon" aria-hidden="true"><use href="#icon-user-check"></use></svg><span class="queue-nav-label">My tickets</span><span class="queue-nav-count" data-count-for="mine"></span>
       </button>
+      <button class="queue-nav-btn" data-view="chats" type="button" aria-label="Staff initiated chats" title="Chats">
+        <svg class="icon" aria-hidden="true"><use href="#icon-message"></use></svg><span class="queue-nav-label">Chats</span><span class="queue-nav-count" data-count-for="chats"></span>
+      </button>
+      <button class="queue-nav-btn" data-view="contacts" type="button" aria-label="Contacts" title="Contacts">
+        <svg class="icon" aria-hidden="true"><use href="#icon-users"></use></svg><span class="queue-nav-label">Contacts</span><span class="queue-nav-count" data-count-for="contacts"></span>
+      </button>
       <button class="queue-nav-btn" data-view="watching" type="button" aria-label="Watching" title="Watching">
         <svg class="icon" aria-hidden="true"><use href="#icon-eye"></use></svg><span class="queue-nav-label">Watching</span><span class="queue-nav-count" data-count-for="watching"></span>
       </button>
@@ -914,18 +1129,30 @@ select { cursor: pointer; }
       </button>
     </nav>
     <div class="nav-spacer"></div>
-    <div class="agent-card">
-      <div class="agent-main">
-        <div class="avatar" id="agentAvatar" aria-hidden="true">—</div>
-        <div class="agent-copy"><strong id="agentName">Support agent</strong><span id="agentLabel"></span></div>
+    <div class="account-zone">
+      <div class="message-preferences-slot">
+        <button class="btn ghost" id="messagePreferencesBtn" type="button" aria-label="My automatic messages" title="My automatic messages">
+          <svg class="icon" aria-hidden="true"><use href="#icon-message"></use></svg><span>Messages</span>
+        </button>
       </div>
-      <div class="staff-actions">
-        <button class="btn ghost hidden" id="manageStaffBtn" type="button" aria-label="Staff accounts" title="Staff accounts">
-          <svg class="icon" aria-hidden="true"><use href="#icon-users"></use></svg><span>Staff</span>
+      <div class="whatsapp-manage-slot">
+        <button class="btn ghost hidden" id="manageWhatsAppBtn" type="button" aria-label="WhatsApp numbers" title="WhatsApp numbers">
+          <svg class="icon" aria-hidden="true"><use href="#icon-phone"></use></svg><span>WhatsApp</span>
         </button>
-        <button class="btn ghost" id="logoutBtn" type="button" aria-label="Sign out" title="Sign out">
-          <svg class="icon" aria-hidden="true"><use href="#icon-log-out"></use></svg><span>Sign out</span>
-        </button>
+      </div>
+      <div class="agent-card">
+        <div class="agent-main">
+          <div class="avatar" id="agentAvatar" aria-hidden="true">—</div>
+          <div class="agent-copy"><strong id="agentName">Support agent</strong><span id="agentLabel"></span></div>
+        </div>
+        <div class="staff-actions">
+          <button class="btn ghost hidden" id="manageStaffBtn" type="button" aria-label="Staff accounts" title="Staff accounts">
+            <svg class="icon" aria-hidden="true"><use href="#icon-users"></use></svg><span>Staff</span>
+          </button>
+          <button class="btn ghost" id="logoutBtn" type="button" aria-label="Sign out" title="Sign out">
+            <svg class="icon" aria-hidden="true"><use href="#icon-log-out"></use></svg><span>Sign out</span>
+          </button>
+        </div>
       </div>
     </div>
   </aside>
@@ -936,20 +1163,38 @@ select { cursor: pointer; }
         <div class="eyebrow">Support queue</div>
         <div class="inbox-title-row"><h1 id="queueTitle">Unassigned</h1><span class="queue-total" id="queueTotal">—</span></div>
       </div>
-      <button class="icon-btn" id="refreshQueueBtn" type="button" aria-label="Refresh queue" data-tooltip="Refresh queue">
-        <svg class="icon" aria-hidden="true"><use href="#icon-refresh"></use></svg>
-      </button>
+      <div class="inbox-header-actions">
+        <button class="btn small primary" id="startChatBtn" type="button" aria-label="Start WhatsApp chat" title="Start WhatsApp chat">
+          <svg class="icon icon-sm" aria-hidden="true"><use href="#icon-plus"></use></svg><span class="optional-label">New chat</span>
+        </button>
+        <button class="ai-header-control" id="aiHeaderBtn" type="button" aria-label="AI assistant status" title="AI assistant status">
+          <i class="ai-status-dot" id="aiHeaderDot" aria-hidden="true"></i><span class="ai-header-copy">AI</span><span class="ai-header-state" id="aiHeaderStatus">—</span>
+        </button>
+        <button class="icon-btn" id="refreshQueueBtn" type="button" aria-label="Refresh queue" data-tooltip="Refresh queue">
+          <svg class="icon" aria-hidden="true"><use href="#icon-refresh"></use></svg>
+        </button>
+      </div>
     </header>
     <div class="search-wrap">
-      <label class="sr-only" for="queueSearch">Search tickets on this page</label>
+      <label class="sr-only" for="queueSearch">Search conversations and messages</label>
       <div class="search-field">
         <svg class="icon" aria-hidden="true"><use href="#icon-search"></use></svg>
-        <input id="queueSearch" type="search" autocomplete="off" placeholder="Search this page" aria-describedby="searchScope" />
+        <input id="queueSearch" type="search" autocomplete="off" placeholder="Search conversations and messages" aria-describedby="searchScope" />
         <button class="icon-btn search-clear hidden" id="clearQueueSearchBtn" type="button" aria-label="Clear ticket search">
           <svg class="icon icon-sm" aria-hidden="true"><use href="#icon-x"></use></svg>
         </button>
       </div>
-      <div class="search-scope" id="searchScope">Searches the loaded page by customer, ticket, shipment, status, or support line.</div>
+      <div class="search-scope" id="searchScope">Searches message history you are allowed to access. Customer/ticket filtering remains available for short searches.</div>
+    </div>
+    <div class="contacts-toolbar hidden" id="contactsToolbar">
+      <div class="contacts-google-copy"><strong id="googleContactsTitle">Google Contacts</strong><span id="googleContactsStatus">Not connected</span></div>
+      <div class="contacts-toolbar-actions">
+        <button class="btn small" id="googleContactsConnectBtn" type="button">Sign in with Google</button>
+        <input class="hidden" id="vcfContactsInput" type="file" accept=".vcf,text/vcard,text/x-vcard,text/directory" />
+        <button class="btn small" id="importVcfContactsBtn" type="button"><svg class="icon icon-sm"><use href="#icon-plus"></use></svg>Import VCF</button>
+        <button class="btn small hidden" id="googleContactsSyncBtn" type="button"><svg class="icon icon-sm"><use href="#icon-refresh"></use></svg>Sync</button>
+        <button class="btn small danger hidden" id="googleContactsDisconnectBtn" type="button">Disconnect</button>
+      </div>
     </div>
     <div class="queue" id="queue" role="listbox" aria-label="Support tickets" aria-busy="false">
       <div class="empty-state"><div class="empty-state-inner"><div class="empty-icon"><svg class="icon icon-lg" aria-hidden="true"><use href="#icon-inbox"></use></svg></div><h3>No tickets loaded</h3><p>Your selected queue will appear here after sign-in.</p></div></div>
@@ -961,6 +1206,7 @@ select { cursor: pointer; }
         <button class="icon-btn" id="nextPageBtn" type="button" aria-label="Next ticket page" data-tooltip="Next page" disabled><svg class="icon" aria-hidden="true"><use href="#icon-chevron-right"></use></svg></button>
       </div>
     </footer>
+    <div class="layout-resizer queue-resizer" id="queueResizer" role="separator" aria-orientation="vertical" aria-label="Resize ticket list" aria-valuemin="260" aria-valuemax="520" tabindex="0"></div>
   </section>
 
   <main class="main" aria-labelledby="ticketTitle">
@@ -975,6 +1221,9 @@ select { cursor: pointer; }
         <div class="ticket-header-meta" id="ticketHeaderMeta"></div>
       </div>
       <div class="actions" id="actions"></div>
+      <button class="icon-btn" id="conversationSearchBtn" type="button" aria-label="Search this conversation" data-tooltip="Search conversation">
+        <svg class="icon" aria-hidden="true"><use href="#icon-search"></use></svg>
+      </button>
       <button class="icon-btn context-toggle" id="contextToggleBtn" type="button" aria-label="Open customer details" aria-controls="contextPanel" aria-expanded="false" data-tooltip="Customer details">
         <svg class="icon" aria-hidden="true"><use href="#icon-panel-right"></use></svg>
       </button>
@@ -985,14 +1234,23 @@ select { cursor: pointer; }
       <div class="error-banner-copy" id="errorText"></div>
       <button class="icon-btn" id="dismissErrorBtn" type="button" aria-label="Dismiss error"><svg class="icon icon-sm" aria-hidden="true"><use href="#icon-x"></use></svg></button>
     </div>
-    <div class="workspace-content">
+    <div class="workspace-content" id="workspaceContent">
       <section class="conversation-shell" aria-label="Ticket conversation">
+        <div class="conversation-search-toolbar hidden" id="conversationSearchToolbar">
+          <svg class="icon icon-sm" aria-hidden="true"><use href="#icon-search"></use></svg>
+          <input class="conversation-search-input" id="conversationSearchInput" type="search" autocomplete="off" placeholder="Search this conversation" aria-label="Search this conversation" />
+          <span class="conversation-search-count" id="conversationSearchCount">—</span>
+          <button class="icon-btn" id="conversationSearchPrev" type="button" aria-label="Previous match" data-tooltip="Previous match"><svg class="icon icon-sm"><use href="#icon-chevron-left"></use></svg></button>
+          <button class="icon-btn" id="conversationSearchNext" type="button" aria-label="Next match" data-tooltip="Next match"><svg class="icon icon-sm"><use href="#icon-chevron-right"></use></svg></button>
+          <button class="icon-btn" id="conversationSearchClose" type="button" aria-label="Close conversation search"><svg class="icon icon-sm"><use href="#icon-x"></use></svg></button>
+        </div>
         <div class="conversation" id="conversation" role="log" aria-label="Conversation timeline" tabindex="0">
           <div class="conversation-empty"><div class="empty-state-inner"><div class="empty-icon"><svg class="icon icon-lg" aria-hidden="true"><use href="#icon-message"></use></svg></div><h3>Open a customer conversation</h3><p>Ticket conversation will appear here.</p></div></div>
         </div>
         <button class="btn small scroll-latest hidden" id="scrollToLatestBtn" type="button"><svg class="icon icon-sm" aria-hidden="true"><use href="#icon-arrow-down"></use></svg>Latest</button>
       </section>
       <aside class="context-panel" id="contextPanel" aria-label="Customer and ticket details">
+        <div class="layout-resizer context-resizer" id="contextResizer" role="separator" aria-orientation="vertical" aria-label="Resize customer details" aria-valuemin="260" aria-valuemax="520" tabindex="0"></div>
         <div class="context-panel-head"><strong>Customer details</strong><button class="icon-btn context-close" id="closeContextBtn" type="button" aria-label="Close customer details"><svg class="icon" aria-hidden="true"><use href="#icon-x"></use></svg></button></div>
         <div class="context" id="context"><div class="empty-state"><div class="empty-state-inner"><div class="empty-icon"><svg class="icon icon-lg" aria-hidden="true"><use href="#icon-user"></use></svg></div><h3>No ticket selected</h3><p>Customer and shipment context will appear here.</p></div></div></div>
       </aside>
@@ -1000,22 +1258,31 @@ select { cursor: pointer; }
     </div>
     <div class="composer-shell">
       <div class="read-only-banner hidden" id="readOnlyBanner" role="status"></div>
+      <div class="reply-draft hidden" id="replyDraft" role="status">
+        <svg class="icon icon-sm" aria-hidden="true"><use href="#icon-reply"></use></svg>
+        <div class="reply-draft-copy"><strong id="replyDraftTitle">Replying to message</strong><span id="replyDraftBody"></span></div>
+        <button class="icon-btn" id="cancelReplyBtn" type="button" aria-label="Cancel reply"><svg class="icon icon-sm" aria-hidden="true"><use href="#icon-x"></use></svg></button>
+      </div>
+      <div class="reply-draft hidden" id="editDraft" role="status"><div class="reply-draft-copy"><strong>Editing WhatsApp message</strong><span>Your changes will update the message for the customer.</span></div><button class="btn small" id="cancelEditBtn" type="button">Cancel</button></div>
       <div class="recording-bar hidden" id="recordingBar" role="status" aria-live="polite"><span class="recording-dot" aria-hidden="true"></span><span id="recordingTime">Recording 0:00</span><button class="btn small" id="cancelRecordingBtn" type="button">Cancel recording</button></div>
       <div class="media-draft hidden" id="mediaDraft"></div>
       <div class="composer">
         <div class="composer-mode"><span class="reply-mode"><span class="reply-mode-dot" aria-hidden="true"></span>Public reply · WhatsApp</span><span class="composer-shortcut">Enter to send · Shift+Enter for a new line</span></div>
         <div class="composer-row">
-          <input id="imageInput" type="file" accept="image/jpeg,image/png" class="hidden" />
-          <button class="icon-btn" id="imageBtn" type="button" disabled aria-label="Attach an image" data-tooltip="Attach image">
-            <svg class="icon" aria-hidden="true"><use href="#icon-image"></use></svg>
+          <input id="imageInput" type="file" accept="image/jpeg,image/png,image/webp,application/pdf" class="hidden" />
+          <button class="icon-btn" id="imageBtn" type="button" disabled aria-label="Attach an image, sticker, or PDF" data-tooltip="Attach image, sticker, or PDF">
+            <svg class="icon" aria-hidden="true"><use href="#icon-paperclip"></use></svg>
           </button>
           <button class="icon-btn" id="voiceBtn" type="button" disabled aria-label="Record a voice note" aria-pressed="false" data-tooltip="Record voice note">
             <svg class="icon" aria-hidden="true"><use href="#icon-mic"></use></svg>
           </button>
+          <button class="icon-btn" id="locationBtn" type="button" disabled aria-label="Share a location" data-tooltip="Share location">
+            <svg class="icon" aria-hidden="true"><use href="#icon-map-pin"></use></svg>
+          </button>
           <div class="composer-input-wrap">
             <label class="sr-only" for="message">Public reply to customer on WhatsApp</label>
             <textarea class="composer-textarea" id="message" dir="auto" rows="1" maxlength="4096" placeholder="Reply to customer on WhatsApp" disabled aria-describedby="composerHelp composerCount"></textarea>
-            <div class="composer-meta"><span id="composerHelp">Messages are sent from the WhatsApp number that received this ticket.</span><span class="composer-count" id="composerCount">0 / 4096</span></div>
+            <div class="composer-meta"><span id="composerHelp">Messages are sent from the WhatsApp number for this conversation.</span><span class="composer-count" id="composerCount">0 / 4096</span></div>
           </div>
           <button class="btn primary send-btn" id="sendBtn" type="button" disabled>
             <svg class="icon" aria-hidden="true"><use href="#icon-send"></use></svg><span class="send-label">Send</span>
@@ -1025,6 +1292,157 @@ select { cursor: pointer; }
     </div>
   </main>
 </div>
+
+<section class="modal-backdrop hidden" id="aiSettingsModal" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="aiSettingsModalTitle" aria-describedby="aiSettingsModalSubtitle">
+  <div class="modal-card ai-settings-card" role="document" tabindex="-1">
+    <div class="modal-head">
+      <div><h2 id="aiSettingsModalTitle">AI Assistant</h2><div class="modal-subtitle" id="aiSettingsModalSubtitle">Control global AI availability for new inbound WhatsApp messages.</div></div>
+      <button class="icon-btn modal-close" id="closeAiSettingsBtn" type="button" aria-label="Close AI settings" data-tooltip="Close"><svg class="icon" aria-hidden="true"><use href="#icon-x"></use></svg></button>
+    </div>
+    <div class="modal-body">
+      <div class="staff-feedback error-box" id="aiSettingsError" role="alert" aria-live="assertive"></div>
+      <div class="ai-status-card">
+        <div class="ai-status-copy"><strong>Current effective status</strong><span id="aiEffectiveReason">Loading current settings…</span></div>
+        <span class="ai-status-pill off" id="aiEffectiveStatus">—</span>
+      </div>
+      <form id="aiSettingsForm" novalidate>
+        <fieldset class="ai-mode-options">
+          <legend>Control mode</legend>
+          <label class="ai-mode-option"><input id="aiModeManual" type="radio" name="aiControlMode" value="MANUAL" /><span><strong>Manual</strong><span>Use the saved ON/OFF switch until a manager changes it.</span></span></label>
+          <label class="ai-mode-option"><input id="aiModeScheduled" type="radio" name="aiControlMode" value="SCHEDULED" /><span><strong>Automatic schedule</strong><span>Calculate availability from a daily time window and IANA timezone.</span></span></label>
+        </fieldset>
+        <div id="aiManualFields">
+          <div class="field"><label for="aiManualEnabled">AI mode</label><select id="aiManualEnabled"><option value="true">ON</option><option value="false">OFF</option></select></div>
+        </div>
+        <div class="hidden" id="aiScheduledFields">
+          <div class="ai-schedule-grid">
+            <div class="field"><label for="aiScheduleStart">AI active from</label><input id="aiScheduleStart" type="time" step="60" required /></div>
+            <div class="field"><label for="aiScheduleEnd">AI active until</label><input id="aiScheduleEnd" type="time" step="60" required /></div>
+            <div class="field wide"><label for="aiScheduleTimezone">Timezone</label><input id="aiScheduleTimezone" type="text" maxlength="128" placeholder="Asia/Beirut" autocomplete="off" required /><div class="field-hint">Use an IANA timezone such as Asia/Beirut, Europe/London, or UTC.</div></div>
+          </div>
+        </div>
+        <div class="ai-next-change" id="aiNextChange">Next automatic change: —</div>
+        <div class="form-note" id="aiUpdatedMeta">Saved configuration is authoritative across backend instances.</div>
+        <div class="modal-actions"><button class="btn" id="cancelAiSettingsBtn" type="button">Cancel</button><button class="btn primary" id="saveAiSettingsBtn" type="submit"><svg class="icon" aria-hidden="true"><use href="#icon-check"></use></svg>Save changes</button></div>
+      </form>
+    </div>
+  </div>
+</section>
+
+<section class="modal-backdrop hidden" id="whatsappModal" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="whatsappModalTitle" aria-describedby="whatsappModalSubtitle">
+  <div class="modal-card whatsapp-card" role="document" tabindex="-1">
+    <div class="modal-head">
+      <div><h2 id="whatsappModalTitle">WhatsApp numbers</h2><div class="modal-subtitle" id="whatsappModalSubtitle">Link WhatsApp numbers or sync them from Meta, then choose which numbers are active in the app.</div></div>
+      <button class="icon-btn modal-close" id="closeWhatsAppBtn" type="button" aria-label="Close WhatsApp numbers"><svg class="icon" aria-hidden="true"><use href="#icon-x"></use></svg></button>
+    </div>
+    <div class="modal-body">
+      <div class="staff-feedback error-box" id="whatsappError" role="alert" aria-live="assertive"></div>
+      <div class="staff-feedback success-box" id="whatsappSuccess" role="status" aria-live="polite"></div>
+      <section class="linked-device-section hidden" id="linkedDeviceSection" aria-labelledby="linkedDeviceTitle">
+        <div class="section-title"><div><strong id="linkedDeviceTitle">WhatsApp linked devices</strong><div class="muted">Link each number using its phone's WhatsApp → Settings → Linked devices. Add it to the app after pairing.</div></div><button class="btn primary" id="addLinkedDeviceBtn" type="button">Link another number</button></div>
+        <div id="linkedDeviceLines"></div>
+        <div class="form-note" id="linkedDeviceStatus" role="status"></div>
+      </section>
+      <div class="section-title">
+        <div><strong>Meta accounts</strong><div class="muted">The access token remains server-side. Add a WABA ID once, then Sync whenever numbers change in Meta.</div></div>
+        <button class="btn" id="refreshWhatsAppBtn" type="button"><svg class="icon" aria-hidden="true"><use href="#icon-refresh"></use></svg>Refresh</button>
+      </div>
+      <form class="whatsapp-sync-form" id="wabaSyncForm" novalidate>
+        <div class="field"><label for="wabaIdInput">WhatsApp Business Account (WABA) ID</label><input id="wabaIdInput" type="text" inputmode="numeric" pattern="[0-9]+" maxlength="64" placeholder="Enter WABA ID" required /><div class="field-hint">Found in Meta Business Manager / WhatsApp Manager. This is not a secret.</div></div>
+        <button class="btn primary" id="syncWabaBtn" type="submit"><svg class="icon" aria-hidden="true"><use href="#icon-refresh"></use></svg>Connect & sync</button>
+      </form>
+      <div class="form-note">Newly discovered numbers are disabled by default. Select <strong>Add to app</strong> to allow customer messages on that line. Removing a line preserves its historical tickets.</div>
+      <div class="whatsapp-account-list" id="whatsappAccounts"></div>
+      <div class="section-title" style="margin-top:20px"><div><strong>Phone numbers</strong><div class="muted">Only enabled numbers are accepted for new inbound conversations.</div></div></div>
+      <div class="whatsapp-number-list" id="whatsappNumbers"></div>
+    </div>
+  </div>
+</section>
+
+<section class="modal-backdrop hidden" id="locationModal" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="locationModalTitle">
+  <div class="modal-card location-card-modal" role="document" tabindex="-1">
+    <div class="modal-head">
+      <div><h2 id="locationModalTitle">Share location</h2><div class="modal-subtitle">Send a WhatsApp location to the customer.</div></div>
+      <button class="icon-btn modal-close" id="closeLocationBtn" type="button" aria-label="Close location"><svg class="icon" aria-hidden="true"><use href="#icon-x"></use></svg></button>
+    </div>
+    <div class="modal-body">
+      <div class="staff-feedback error-box" id="locationError" role="alert"></div>
+      <form id="locationForm" novalidate>
+        <div class="location-grid">
+          <div class="field"><label for="locationLatitude">Latitude</label><input id="locationLatitude" type="number" step="any" min="-90" max="90" required /></div>
+          <div class="field"><label for="locationLongitude">Longitude</label><input id="locationLongitude" type="number" step="any" min="-180" max="180" required /></div>
+          <div class="field wide"><label for="locationName">Location name <span class="muted">(optional)</span></label><input id="locationName" type="text" maxlength="255" placeholder="Office, warehouse, branch…" /></div>
+          <div class="field wide"><label for="locationAddress">Address <span class="muted">(optional)</span></label><input id="locationAddress" type="text" maxlength="1000" placeholder="Street, city, country" /></div>
+        </div>
+        <div class="modal-actions"><button class="btn" id="useCurrentLocationBtn" type="button"><svg class="icon" aria-hidden="true"><use href="#icon-map-pin"></use></svg>Use my current location</button><button class="btn" id="cancelLocationBtn" type="button">Cancel</button><button class="btn primary" id="sendLocationBtn" type="submit"><svg class="icon" aria-hidden="true"><use href="#icon-send"></use></svg>Send location</button></div>
+      </form>
+    </div>
+  </div>
+</section>
+
+<section class="modal-backdrop hidden" id="messagePreferencesModal" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="messagePreferencesTitle" aria-describedby="messagePreferencesSubtitle">
+  <div class="modal-card message-preferences-card" role="document" tabindex="-1">
+    <div class="modal-head">
+      <div><h2 id="messagePreferencesTitle">My automatic messages</h2><div class="modal-subtitle" id="messagePreferencesSubtitle">Customize the messages sent when you claim and resolve a customer ticket.</div></div>
+      <button class="icon-btn modal-close" id="closeMessagePreferencesBtn" type="button" aria-label="Close automatic messages"><svg class="icon" aria-hidden="true"><use href="#icon-x"></use></svg></button>
+    </div>
+    <div class="modal-body">
+      <div class="staff-feedback error-box" id="messagePreferencesError" role="alert" aria-live="assertive"></div>
+      <form id="messagePreferencesForm" novalidate>
+        <div class="field">
+          <label for="customGreetingMessage">Greeting when I claim a ticket</label>
+          <textarea id="customGreetingMessage" class="message-preference-textarea" rows="4" maxlength="2000" placeholder="Leave empty to use the default greeting"></textarea>
+          <div class="field-hint message-preference-hint"><span>Sent automatically when you claim a ticket. Empty = existing language-aware default.</span><span id="customGreetingCount">0 / 2000</span></div>
+        </div>
+        <div class="field">
+          <label for="customResolutionMessage">Resolution message</label>
+          <textarea id="customResolutionMessage" class="message-preference-textarea" rows="4" maxlength="2000" placeholder="Leave empty to use the default resolution message"></textarea>
+          <div class="field-hint message-preference-hint"><span>Sent automatically when you resolve a ticket and return it to AI. Empty = existing language-aware default.</span><span id="customResolutionCount">0 / 2000</span></div>
+        </div>
+        <div class="form-note">These settings belong only to your staff account. Other agents keep their own messages or the defaults.</div>
+        <div class="modal-actions"><button class="btn" id="cancelMessagePreferencesBtn" type="button">Cancel</button><button class="btn primary" id="saveMessagePreferencesBtn" type="submit"><svg class="icon" aria-hidden="true"><use href="#icon-check"></use></svg>Save messages</button></div>
+      </form>
+    </div>
+  </div>
+</section>
+
+<section class="modal-backdrop hidden" id="mediaViewerModal" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="mediaViewerTitle">
+  <div class="modal-card media-viewer-card" role="document" tabindex="-1">
+    <div class="modal-head">
+      <div><h2 id="mediaViewerTitle">Attachment</h2><div class="modal-subtitle" id="mediaViewerSubtitle">Customer attachment</div></div>
+      <div class="media-viewer-tools hidden" id="mediaViewerTools">
+        <button class="btn small" id="editMediaBtn" type="button">Edit</button>
+        <a class="btn small" id="downloadMediaBtn" href="#" download>Download</a>
+        <button class="btn small" id="zoomOutBtn" type="button" aria-label="Zoom out">−</button>
+        <span class="media-viewer-zoom" id="mediaViewerZoom">100%</span>
+        <button class="btn small" id="zoomInBtn" type="button" aria-label="Zoom in">+</button>
+        <button class="btn small" id="zoomResetBtn" type="button">Reset</button>
+      </div>
+      <button class="icon-btn modal-close" id="closeMediaViewerBtn" type="button" aria-label="Close attachment viewer"><svg class="icon" aria-hidden="true"><use href="#icon-x"></use></svg></button>
+    </div>
+    <div class="media-viewer-body" id="mediaViewerBody"></div>
+    <div class="image-editor-toolbar hidden" id="imageEditorToolbar">
+      <button class="btn small" id="editorSelectBtn" type="button" aria-pressed="false">Select</button>
+      <button class="btn small" id="editorDrawBtn" type="button" aria-pressed="true">Draw</button>
+      <button class="btn small" id="editorTextBtn" type="button" aria-pressed="false">Text</button>
+      <label>Color <input id="editorColor" type="color" value="#ff3b30" /></label>
+      <label>Size <input id="editorSize" type="range" min="2" max="40" value="8" /></label>
+      <button class="btn small" id="editorUndoBtn" type="button">Undo</button>
+      <button class="btn small" id="editorRedoBtn" type="button">Redo</button>
+      <button class="btn small" id="editorEditTextBtn" type="button">Edit selected text</button>
+      <button class="btn small" id="editorDeleteBtn" type="button">Remove selected</button>
+      <input id="editorCaption" type="text" maxlength="1024" placeholder="Caption (optional)" aria-label="Image caption" />
+      <button class="btn primary small" id="editorSendBtn" type="button">Send image</button>
+    </div>
+  </div>
+</section>
+
+<section class="modal-backdrop hidden" id="messageDeleteModal" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="messageDeleteTitle">
+  <div class="modal-card transfer-card" role="document" tabindex="-1">
+    <div class="modal-head"><div><h2 id="messageDeleteTitle">Delete message</h2><div class="modal-subtitle" id="messageDeleteSubtitle">Delete for me removes the message from your support view.</div></div><button class="icon-btn modal-close" id="cancelMessageDeleteBtn" type="button" aria-label="Cancel deletion"><svg class="icon" aria-hidden="true"><use href="#icon-x"></use></svg></button></div>
+    <div class="modal-body"><div class="modal-actions"><button class="btn danger" id="deleteMeBtn" type="button">Delete for me</button><button class="btn danger hidden" id="deleteEveryoneBtn" type="button">Delete for everyone</button><button class="btn" id="cancelMessageDeleteActionBtn" type="button">Cancel</button></div></div>
+  </div>
+</section>
 
 <section class="modal-backdrop hidden" id="staffModal" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="staffModalTitle" aria-describedby="staffModalSubtitle">
   <div class="modal-card" role="document" tabindex="-1">
@@ -1083,6 +1501,43 @@ select { cursor: pointer; }
   </div>
 </section>
 
+<section class="modal-backdrop hidden" id="startChatModal" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="startChatTitle">
+  <div class="modal-card transfer-card" role="document" tabindex="-1">
+    <div class="modal-head">
+      <div><h2 id="startChatTitle">Start WhatsApp chat</h2><div class="modal-subtitle">Start a staff-owned conversation with a customer.</div></div>
+      <button class="icon-btn modal-close" id="closeStartChatBtn" type="button" aria-label="Close"><svg class="icon"><use href="#icon-x"></use></svg></button>
+    </div>
+    <div class="modal-body">
+      <div class="staff-feedback error-box" id="startChatError" role="alert"></div>
+      <form id="startChatForm" novalidate>
+        <div class="field"><label for="startChatLine">Send from</label><select id="startChatLine" required></select></div>
+        <div class="field"><label for="startChatPhone">Customer WhatsApp number</label><input id="startChatPhone" type="tel" inputmode="tel" placeholder="96170123456" maxlength="32" required /><div class="field-hint">Use the international number, with or without +.</div></div>
+        <div class="field"><label for="startChatName">Customer name <span class="muted">(optional)</span></label><input id="startChatName" type="text" maxlength="191" /></div>
+        <div class="field"><label for="startChatBody">First message</label><textarea id="startChatBody" rows="5" maxlength="4096" required placeholder="Write the first WhatsApp message"></textarea></div>
+        <div class="form-note">If WhatsApp's customer-service window is closed, Meta may require an approved template instead of a free-form first message.</div>
+        <div class="modal-actions"><button class="btn" id="cancelStartChatBtn" type="button">Cancel</button><button class="btn primary" id="confirmStartChatBtn" type="submit"><svg class="icon"><use href="#icon-send"></use></svg>Start chat</button></div>
+      </form>
+    </div>
+  </div>
+</section>
+
+<section class="modal-backdrop hidden" id="forwardModal" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="forwardTitle">
+  <div class="modal-card transfer-card" role="document" tabindex="-1">
+    <div class="modal-head">
+      <div><h2 id="forwardTitle">Forward message</h2><div class="modal-subtitle" id="forwardSubtitle">Forward a message from any conversation you can view.</div></div>
+      <button class="icon-btn modal-close" id="closeForwardBtn" type="button" aria-label="Close"><svg class="icon"><use href="#icon-x"></use></svg></button>
+    </div>
+    <div class="modal-body">
+      <div class="staff-feedback error-box" id="forwardError" role="alert"></div>
+      <div class="field"><label for="forwardSearch">Search contact or conversation</label><input id="forwardSearch" type="search" autocomplete="off" placeholder="Search name or phone number" /></div>
+      <div class="contact-picker-section"><div class="contact-picker-section-title">Contacts</div><div class="contact-picker-list" id="forwardContactsList"></div></div>
+      <div class="contact-picker-section"><div class="contact-picker-section-title">Active conversations</div><div class="contact-picker-list" id="forwardConversationsList"></div></div>
+      <div class="form-note">Selecting a contact forwards through the source WhatsApp line and opens/reopens a staff chat when needed. Media is re-uploaded securely.</div>
+      <div class="modal-actions"><button class="btn" id="cancelForwardBtn" type="button">Cancel</button><button class="btn primary" id="confirmForwardBtn" type="button"><svg class="icon"><use href="#icon-reply"></use></svg>Forward</button></div>
+    </div>
+  </div>
+</section>
+
 <section class="modal-backdrop hidden" id="transferModal" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="transferModalTitle" aria-describedby="transferModalSubtitle">
   <div class="modal-card transfer-card" role="document" tabindex="-1">
     <div class="modal-head">
@@ -1105,6 +1560,8 @@ select { cursor: pointer; }
 const QUEUE_CONFIG = {
   unassigned: {label: 'Unassigned', emptyTitle: 'No unassigned tickets', emptyBody: 'New customer escalations will appear here when they need an owner.', icon: 'inbox'},
   mine: {label: 'My tickets', emptyTitle: 'No tickets assigned to you', emptyBody: 'Claim an unassigned ticket or wait for a transfer from another agent.', icon: 'user-check'},
+  chats: {label: 'Chats', emptyTitle: 'No staff chats yet', emptyBody: 'Use New chat to start a WhatsApp conversation with a customer.', icon: 'message'},
+  contacts: {label: 'Contacts', emptyTitle: 'No contacts yet', emptyBody: 'Save a customer contact, sync Google Contacts, or import a VCF address book.', icon: 'users'},
   watching: {label: 'Watching', emptyTitle: 'No watched conversations', emptyBody: 'Tickets you previously transferred remain here while they are active.', icon: 'eye'},
   active: {label: 'Active', emptyTitle: 'No active tickets', emptyBody: 'There are no active conversations available in this view.', icon: 'activity'},
   waiting: {label: 'Waiting', emptyTitle: 'Nothing is waiting', emptyBody: 'Tickets waiting on a customer or internal follow-up will appear here.', icon: 'clock'},
@@ -1125,6 +1582,7 @@ const MESSAGE_ROLE_LABELS = {
   AI: 'AI assistant',
   SYSTEM: 'System'
 };
+const REACTION_EMOJIS = ['👍', '❤️', '😂', '😮', '😢', '🙏'];
 const state = {
   view: 'unassigned',
   page: 1,
@@ -1132,16 +1590,62 @@ const state = {
   total: 0,
   queueItems: [],
   queueTotals: {},
+  queueCountsBusy: false,
+  queueCountsPending: false,
   query: '',
+  globalSearchResults: [],
+  globalSearchBusy: false,
+  globalSearchTimer: null,
+  globalSearchRequest: 0,
+  conversationSearchOpen: false,
+  conversationSearchQuery: '',
+  conversationSearchResults: [],
+  conversationSearchIndex: -1,
+  conversationSearchTimer: null,
+  searchTargetMessageId: null,
   queueRequest: 0,
   ticketRequest: 0,
   ticketId: null,
   currentTicketData: null,
+  currentConversationOrigin: null,
+  previousTicketHistory: [],
+  previousTicketHistoryHasMore: false,
+  previousHistoryExpanded: false,
+  previousHistoryLoaded: false,
+  previousHistoryPending: false,
+  cachedCurrentMessages: [],
+  currentMessagesHasMore: false,
+  currentMessagesExpanded: false,
+  historyLoadBusy: false,
+  historyLoadRequest: 0,
+  historySelectionEpoch: 0,
   timelineSignature: '',
   agent: null,
   busy: false,
   authenticated: false,
+  pageLeaving: false,
   staffBusy: false,
+  messagePreferencesBusy: false,
+  aiSettingsBusy: false,
+  aiSettings: null,
+  whatsappBusy: false,
+  whatsappRegistry: null,
+  linkedDeviceStatus: null,
+  linkedDeviceBusy: false,
+  linkedDeviceRequest: 0,
+  linkedDeviceAdditionId: null,
+  chatBusy: false,
+  chatLines: [],
+  forwardTarget: null,
+  forwardBusy: false,
+  forwardSelection: null,
+  forwardContacts: [],
+  forwardConversations: [],
+  forwardSearchTimer: null,
+  forwardChoiceRequest: 0,
+  googleContactsStatus: null,
+  googleContactsBusy: false,
+  vcfImportBusy: false,
   staffItems: [],
   staffView: 'list',
   editingStaffId: null,
@@ -1149,6 +1653,7 @@ const state = {
   conflictStaff: null,
   composerEnabled: false,
   pendingMedia: null,
+  replyTarget: null,
   mediaRecorder: null,
   mediaStream: null,
   recordingChunks: [],
@@ -1159,8 +1664,80 @@ const state = {
   transferTargets: [],
   activeModal: null,
   lastFocused: null,
-  contextOpen: false
+  contextOpen: false,
+  notificationAudioContext: null,
+  notificationUnlocked: false,
+  notificationPermissionRequested: false,
+  supportEventSource: null,
+  mediaZoom: 1,
+  mediaTranslateX: 0,
+  mediaTranslateY: 0,
+  mediaSource: null,
+  editTarget: null,
+  deleteTarget: null,
+  imageEditor: null,
+  unassignedSnapshot: null,
+  lastInboundByTicket: {},
+  localMessages: new Map(),
+  realtimeMessages: new Map(),
+  textSendChain: Promise.resolve()
 };
+
+const SUPPORT_SELECTION_STORAGE_PREFIX = 'shipment-support-workspace-v1:';
+
+function supportSelectionStorageKey() {
+  const staffId = String(state.agent?.id || '').trim();
+  return staffId ? SUPPORT_SELECTION_STORAGE_PREFIX + encodeURIComponent(staffId) : null;
+}
+
+function saveSupportSelection() {
+  if (!state.authenticated) return;
+  const key = supportSelectionStorageKey();
+  if (!key) return;
+  const ticketId = Number(state.ticketId);
+  const origin = String(state.currentConversationOrigin || '').toUpperCase();
+  const selected = Number.isSafeInteger(ticketId) && ticketId > 0 && ['STAFF', 'CUSTOMER'].includes(origin);
+  try {
+    sessionStorage.setItem(key, JSON.stringify({
+      view: Object.prototype.hasOwnProperty.call(QUEUE_CONFIG, state.view) ? state.view : 'unassigned',
+      page: Number.isSafeInteger(state.page) && state.page > 0 ? state.page : 1,
+      ticketId: selected ? ticketId : null,
+      conversationOrigin: selected ? origin : null
+    }));
+  } catch (_) {}
+}
+
+function readSupportSelection() {
+  if (!state.authenticated) return null;
+  const key = supportSelectionStorageKey();
+  if (!key) return null;
+  try {
+    const raw = sessionStorage.getItem(key);
+    if (!raw) return null;
+    const saved = JSON.parse(raw);
+    if (!saved || !Object.prototype.hasOwnProperty.call(QUEUE_CONFIG, saved.view)) throw new Error('Invalid view');
+    const ticketId = Number.isSafeInteger(saved.ticketId) && saved.ticketId > 0 ? saved.ticketId : null;
+    const origin = ['STAFF', 'CUSTOMER'].includes(saved.conversationOrigin) ? saved.conversationOrigin : null;
+    return {
+      view: saved.view,
+      page: Number.isSafeInteger(saved.page) && saved.page > 0 && saved.page <= 10000 ? saved.page : 1,
+      ticketId: ticketId && origin ? ticketId : null,
+      conversationOrigin: ticketId && origin ? origin : null
+    };
+  } catch (_) {
+    try { sessionStorage.removeItem(key); } catch (_) {}
+    return null;
+  }
+}
+
+function clearSupportSelections() {
+  try {
+    for (let index = sessionStorage.length - 1; index >= 0; index -= 1) {
+      const key = sessionStorage.key(index);
+      if (key?.startsWith(SUPPORT_SELECTION_STORAGE_PREFIX)) sessionStorage.removeItem(key);
+    }
+  } catch (_) {}
+}
 
 const $ = id => document.getElementById(id);
 
@@ -1198,11 +1775,42 @@ function initials(value) {
   return (words[0][0] + words[words.length - 1][0]).toUpperCase();
 }
 
+function messageOccurredAt(message) {
+  const numeric = Number(message?.whatsapp_timestamp);
+  if (Number.isFinite(numeric) && numeric > 0) {
+    const milliseconds = numeric < 100_000_000_000 ? numeric * 1000 : numeric;
+    const occurred = new Date(milliseconds);
+    if (!Number.isNaN(occurred.getTime()) && milliseconds <= Date.now() + 300_000) {
+      return occurred.toISOString();
+    }
+  }
+  return message?.created_at || null;
+}
+
 function fmt(value) {
   if (!value) return '—';
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return String(value);
   return new Intl.DateTimeFormat(undefined, {dateStyle: 'medium', timeStyle: 'short'}).format(date);
+}
+
+function fmtInTimezone(value, timezone) {
+  if (!value) return '—';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  try {
+    return new Intl.DateTimeFormat(undefined, {
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      timeZone: timezone || 'UTC',
+      timeZoneName: 'short'
+    }).format(date);
+  } catch (_) {
+    return fmt(value);
+  }
 }
 
 function relativeTime(value) {
@@ -1254,13 +1862,21 @@ function showLoginError(message) {
 }
 
 function showError(message) {
+  if (state.pageLeaving) return;
   const banner = $('error');
   text($('errorText'), message || '');
   banner.classList.toggle('visible', Boolean(message));
 }
 
+function markPageLeaving() {
+  if (state.pageLeaving) return;
+  state.pageLeaving = true;
+  state.queueRequest += 1;
+  state.ticketRequest += 1;
+}
+
 function notify(message, type = 'success') {
-  if (!message) return;
+  if (!message || state.pageLeaving) return;
   const toast = document.createElement('div');
   toast.className = 'toast ' + type;
   toast.setAttribute('role', type === 'error' ? 'alert' : 'status');
@@ -1277,6 +1893,170 @@ function notify(message, type = 'success') {
   toast.append(copy, close);
   $('toastRegion').append(toast);
   window.setTimeout(() => toast.remove(), 5200);
+}
+
+function unlockNotificationAudio() {
+  try {
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    if (AudioContextClass && !state.notificationAudioContext) state.notificationAudioContext = new AudioContextClass();
+    if (state.notificationAudioContext && state.notificationAudioContext.state === 'suspended') state.notificationAudioContext.resume().catch(() => {});
+    state.notificationUnlocked = Boolean(state.notificationAudioContext);
+  } catch (_) {}
+  if (state.authenticated && !state.notificationPermissionRequested && 'Notification' in window && Notification.permission === 'default') {
+    state.notificationPermissionRequested = true;
+    try { Notification.requestPermission().catch(() => {}); } catch (_) {}
+  }
+}
+
+function playNewConversationSound() {
+  const context = state.notificationAudioContext;
+  if (!state.notificationUnlocked || !context || context.state === 'closed') return;
+  const play = () => {
+    try {
+      const start = context.currentTime + 0.01;
+      for (const [offset, frequency] of [[0, 740], [0.16, 980], [0.32, 820]]) {
+        const oscillator = context.createOscillator();
+        const gain = context.createGain();
+        oscillator.type = 'sine';
+        oscillator.frequency.value = frequency;
+        gain.gain.setValueAtTime(0.0001, start + offset);
+        gain.gain.exponentialRampToValueAtTime(0.22, start + offset + 0.02);
+        gain.gain.exponentialRampToValueAtTime(0.0001, start + offset + 0.14);
+        oscillator.connect(gain);
+        gain.connect(context.destination);
+        oscillator.start(start + offset);
+        oscillator.stop(start + offset + 0.15);
+      }
+    } catch (_) {}
+  };
+  if (context.state === 'suspended') context.resume().then(play).catch(() => {});
+  else play();
+}
+
+function notifyNewCustomerActivity(message) {
+  const body = message || 'New customer conversation requires attention.';
+  playNewConversationSound();
+  notify(body);
+  document.title = '● Shipment Support';
+  if ('setAppBadge' in navigator) navigator.setAppBadge(1).catch(() => {});
+  if ('Notification' in window && Notification.permission === 'granted') {
+    try { new Notification('Shipment Support', {body, tag: 'shipment-support', renotify: true}); } catch (_) {}
+  }
+}
+
+function clearAttentionIndicator() {
+  document.title = 'Shipment Support';
+  if ('clearAppBadge' in navigator) navigator.clearAppBadge().catch(() => {});
+}
+
+function disconnectSupportEvents() {
+  if (state.supportEventSource) {
+    state.supportEventSource.close();
+    state.supportEventSource = null;
+  }
+}
+
+function connectSupportEvents() {
+  disconnectSupportEvents();
+  if (!state.authenticated || typeof EventSource === 'undefined') return;
+  const source = new EventSource('/api/support/events', {withCredentials: true});
+  state.supportEventSource = source;
+  source.onmessage = event => {
+    let payload = {};
+    try { payload = JSON.parse(event.data || '{}'); } catch (_) { return; }
+    const type = String(payload.type || '');
+    if (type === 'outbound_message' || type === 'customer_message' || type === 'message_media_ready') {
+      if (payload.authorized !== true) return;
+      if (payload.message && state.ticketId && String(state.ticketId) === String(payload.ticket_id || '')) {
+        upsertTimelineMessage(payload.message, payload.ticket_id);
+      } else if (state.ticketId && String(state.ticketId) === String(payload.ticket_id || '')) {
+        openTicket(state.ticketId, {silent: true}).catch(() => {});
+      } else if (type === 'message_media_ready' && state.previousTicketHistory.some(thread => String(thread.ticket?.id) === String(payload.ticket_id))) {
+        if (payload.message) {
+          changeCachedMessage(payload.ticket_id, payload.message.id, payload.message);
+          if (state.currentTicketData) {
+            state.timelineSignature = timelineSignature(state.currentTicketData);
+            renderConversation(state.currentTicketData);
+          }
+        } else if (state.ticketId) openTicket(state.ticketId, {silent: true, refreshHistory: true}).catch(() => {});
+      }
+      if (type === 'outbound_message') {
+        // Messages sent from the linked WhatsApp app can change a ticket's
+        // preview and place in the queue even when another ticket is open.
+        // Refreshing only the queue leaves any playing voice note untouched.
+        refreshAllQueueCounts().catch(() => {});
+        if (state.view !== 'contacts') loadQueue({silent: true}).catch(() => {});
+        return;
+      }
+      if (type !== 'customer_message') return;
+    }
+    refreshAllQueueCounts().catch(() => {});
+    if (type === 'ticket_updated') {
+      if (payload.authorized !== true) return;
+      if (state.ticketId && String(state.ticketId) === String(payload.ticket_id || '')) {
+        openTicket(state.ticketId, {silent: true}).catch(() => {});
+      }
+      loadQueue({silent: true}).catch(() => {});
+      return;
+    }
+    if (type === 'contacts_synced' || type === 'contact_saved') {
+      if (!payload.staff_id || String(payload.staff_id) === String(state.agent?.id || '')) {
+        if (state.view === 'contacts') loadQueue({silent: true}).catch(() => {});
+        loadGoogleContactsStatus().catch(() => {});
+      }
+      return;
+    }
+    if (['message_updated', 'message_deleted_for_everyone', 'message_deleted_for_me'].includes(type)) {
+      if (payload.authorized === true) {
+        const changedId = Number(payload.message_id);
+        state.realtimeMessages.delete(String(payload.ticket_id) + ':' + changedId);
+        if (type === 'message_deleted_for_everyone' && state.editTarget?.id === changedId && String(state.editTarget.ticketId) === String(payload.ticket_id)) {
+          cancelMessageEdit();
+          notify('The message you were editing was deleted on WhatsApp.', 'error');
+        }
+        if (type === 'message_deleted_for_me') {
+          state.realtimeMessages.delete(String(payload.ticket_id) + ':' + changedId);
+          changeCachedMessage(payload.ticket_id, changedId, null, true);
+        }
+        if (type !== 'message_updated' && state.mediaSource && state.mediaSource.includes('/messages/' + changedId + '/media')) {
+          if (state.imageEditor) notify('The original image was deleted. Your edits remain open, but it cannot be sent.', 'error');
+          else closeMediaViewer();
+        }
+        refreshMessageSearchAfterChange(changedId);
+        if (state.ticketId && String(state.ticketId) === String(payload.ticket_id || '')) {
+          if (payload.message && type !== 'message_deleted_for_me') {
+            upsertTimelineMessage(payload.message, payload.ticket_id);
+            if (type === 'message_deleted_for_everyone' && state.replyTarget?.id === changedId) clearReplyTarget();
+          } else openTicket(state.ticketId, {silent: true}).catch(() => {});
+        } else if (state.previousTicketHistory.some(thread => String(thread.ticket?.id) === String(payload.ticket_id))) {
+          if (payload.message && type !== 'message_deleted_for_me') changeCachedMessage(payload.ticket_id, changedId, payload.message);
+          openTicket(state.ticketId, {silent: true, refreshHistory: true}).catch(() => {});
+        }
+      }
+      return;
+    }
+    if (!['ticket_created', 'customer_message', 'message_reaction'].includes(type)) return;
+    // Ticket/chat events are only actionable when the per-session backend SSE
+    // authorizer approved them. This prevents future event types from accidentally
+    // reintroducing client-side-only notification filtering.
+    if (payload.authorized !== true) return;
+    const customer = payload.customer_name || payload.customer_phone || 'customer';
+    const notificationText = type === 'ticket_created'
+      ? (payload.phone_initiated === true
+          ? 'New unassigned WhatsApp app conversation with ' + customer + '.'
+          : 'New unassigned conversation from ' + customer + '.')
+      : type === 'message_reaction'
+        ? 'New WhatsApp reaction from ' + customer + '.'
+        : 'New customer message from ' + customer + '.';
+    notifyNewCustomerActivity(notificationText);
+    state.unassignedSnapshot = null;
+    if (state.view === 'unassigned') loadQueue({silent: true}).catch(() => {});
+    else pollUnassignedActivity().catch(() => {});
+    if (type !== 'customer_message' && state.ticketId && String(state.ticketId) === String(payload.ticket_id || '')) openTicket(state.ticketId, {silent: true}).catch(() => {});
+  };
+  source.onerror = () => {
+    // EventSource retries automatically. Polling remains active as a fallback.
+  };
 }
 
 function setButtonBusy(button, busy, busyLabel = 'Working…') {
@@ -1354,20 +2134,142 @@ function closeDialog(id, restoreFocus = true) {
   }
 }
 
+const LAYOUT_STORAGE = {
+  queueWidth: 'shipment-support-queue-width',
+  contextWidth: 'shipment-support-context-width',
+  contextCollapsed: 'shipment-support-context-collapsed'
+};
+
+function clampLayoutValue(value, minimum, maximum) {
+  return Math.min(maximum, Math.max(minimum, Number(value) || minimum));
+}
+
+function readLayoutWidth(variableName, fallback) {
+  const raw = getComputedStyle(document.documentElement).getPropertyValue(variableName);
+  const parsed = Number.parseFloat(raw);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function setLayoutWidth(variableName, storageKey, value, minimum, maximum, handle = null, persist = true) {
+  const width = Math.round(clampLayoutValue(value, minimum, maximum));
+  document.documentElement.style.setProperty(variableName, width + 'px');
+  if (handle) handle.setAttribute('aria-valuenow', String(width));
+  if (persist) {
+    try { localStorage.setItem(storageKey, String(width)); } catch (_) {}
+  }
+  return width;
+}
+
+function restoreLayoutPreferences() {
+  try {
+    const queueWidth = Number(localStorage.getItem(LAYOUT_STORAGE.queueWidth));
+    if (Number.isFinite(queueWidth) && queueWidth > 0) setLayoutWidth('--queue-width', LAYOUT_STORAGE.queueWidth, queueWidth, 260, 520, $('queueResizer'), false);
+    const contextWidth = Number(localStorage.getItem(LAYOUT_STORAGE.contextWidth));
+    if (Number.isFinite(contextWidth) && contextWidth > 0) setLayoutWidth('--context-width', LAYOUT_STORAGE.contextWidth, contextWidth, 260, 520, $('contextResizer'), false);
+    const collapsed = localStorage.getItem(LAYOUT_STORAGE.contextCollapsed);
+    state.contextOpen = collapsed === null ? false : collapsed !== 'true';
+  } catch (_) {
+    state.contextOpen = false;
+  }
+  $('queueResizer').setAttribute('aria-valuenow', String(Math.round(readLayoutWidth('--queue-width', 340))));
+  $('contextResizer').setAttribute('aria-valuenow', String(Math.round(readLayoutWidth('--context-width', 300))));
+  syncContextLayout();
+}
+
+function syncContextLayout() {
+  const desktop = window.innerWidth > 1100;
+  const workspace = $('workspaceContent');
+  const panel = $('contextPanel');
+  const backdrop = $('contextBackdrop');
+  const toggle = $('contextToggleBtn');
+  if (desktop) {
+    workspace.classList.toggle('context-collapsed', !state.contextOpen);
+    panel.classList.remove('open');
+    backdrop.classList.remove('visible');
+  } else {
+    workspace.classList.remove('context-collapsed');
+    panel.classList.toggle('open', state.contextOpen);
+    backdrop.classList.toggle('visible', state.contextOpen);
+  }
+  toggle.setAttribute('aria-expanded', state.contextOpen ? 'true' : 'false');
+  toggle.setAttribute('aria-label', state.contextOpen ? 'Close customer details' : 'Open customer details');
+  toggle.setAttribute('data-tooltip', state.contextOpen ? 'Hide customer details' : 'Customer details');
+}
+
+function rememberContextPreference() {
+  try { localStorage.setItem(LAYOUT_STORAGE.contextCollapsed, state.contextOpen ? 'false' : 'true'); } catch (_) {}
+}
+
 function openContextPanel() {
   state.contextOpen = true;
-  $('contextPanel').classList.add('open');
-  $('contextBackdrop').classList.add('visible');
-  $('contextToggleBtn').setAttribute('aria-expanded', 'true');
-  window.setTimeout(() => $('closeContextBtn').focus(), 20);
+  rememberContextPreference();
+  syncContextLayout();
+  if (window.innerWidth <= 1100) window.setTimeout(() => $('closeContextBtn').focus(), 20);
 }
 
 function closeContextPanel(restoreFocus = true) {
   state.contextOpen = false;
-  $('contextPanel').classList.remove('open');
-  $('contextBackdrop').classList.remove('visible');
-  $('contextToggleBtn').setAttribute('aria-expanded', 'false');
-  if (restoreFocus && window.innerWidth <= 1100) $('contextToggleBtn').focus();
+  rememberContextPreference();
+  syncContextLayout();
+  if (restoreFocus) $('contextToggleBtn').focus();
+}
+
+function toggleContextPanel() {
+  if (state.contextOpen) closeContextPanel(false);
+  else openContextPanel();
+}
+
+function installColumnResizer({id, variableName, storageKey, minimum, maximum, direction = 1, enabled}) {
+  const handle = $(id);
+  if (!handle) return;
+  let startX = 0;
+  let startWidth = 0;
+  let activePointer = null;
+
+  const setWidth = (value, persist = true) => setLayoutWidth(variableName, storageKey, value, minimum, maximum, handle, persist);
+  const stop = () => {
+    if (activePointer === null) return;
+    activePointer = null;
+    handle.classList.remove('active');
+    document.body.classList.remove('column-resizing');
+  };
+
+  handle.addEventListener('pointerdown', event => {
+    if (enabled && !enabled()) return;
+    if (event.button !== 0) return;
+    activePointer = event.pointerId;
+    startX = event.clientX;
+    startWidth = readLayoutWidth(variableName, minimum);
+    handle.classList.add('active');
+    document.body.classList.add('column-resizing');
+    handle.setPointerCapture?.(event.pointerId);
+    event.preventDefault();
+  });
+  handle.addEventListener('pointermove', event => {
+    if (activePointer !== event.pointerId) return;
+    setWidth(startWidth + ((event.clientX - startX) * direction), false);
+  });
+  handle.addEventListener('pointerup', event => {
+    if (activePointer !== event.pointerId) return;
+    setWidth(readLayoutWidth(variableName, minimum), true);
+    stop();
+  });
+  handle.addEventListener('pointercancel', stop);
+  handle.addEventListener('keydown', event => {
+    if (enabled && !enabled()) return;
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+    event.preventDefault();
+    if (event.key === 'Home') return void setWidth(minimum);
+    if (event.key === 'End') return void setWidth(maximum);
+    const step = event.shiftKey ? 32 : 16;
+    const current = readLayoutWidth(variableName, minimum);
+    const delta = event.key === 'ArrowRight' ? step : -step;
+    setWidth(current + (delta * direction));
+  });
+  handle.addEventListener('dblclick', () => {
+    const defaultWidth = variableName === '--queue-width' ? 340 : 300;
+    setWidth(defaultWidth);
+  });
 }
 
 function handleGlobalKeydown(event) {
@@ -1382,9 +2284,49 @@ function handleGlobalKeydown(event) {
       closeContextPanel();
       return;
     }
+    if (state.activeModal === 'startChatModal') {
+      event.preventDefault();
+      closeStartChatModal();
+      return;
+    }
+    if (state.activeModal === 'forwardModal') {
+      event.preventDefault();
+      closeForwardModal();
+      return;
+    }
     if (state.activeModal === 'transferModal') {
       event.preventDefault();
       closeTransferModal();
+      return;
+    }
+    if (state.activeModal === 'messagePreferencesModal') {
+      event.preventDefault();
+      closeMessagePreferencesModal();
+      return;
+    }
+    if (state.activeModal === 'aiSettingsModal') {
+      event.preventDefault();
+      closeAiSettingsModal();
+      return;
+    }
+    if (state.activeModal === 'whatsappModal') {
+      event.preventDefault();
+      closeWhatsAppModal();
+      return;
+    }
+    if (state.activeModal === 'locationModal') {
+      event.preventDefault();
+      closeLocationModal();
+      return;
+    }
+    if (state.activeModal === 'mediaViewerModal') {
+      event.preventDefault();
+      closeMediaViewer();
+      return;
+    }
+    if (state.activeModal === 'messageDeleteModal') {
+      event.preventDefault();
+      closeMessageDelete();
       return;
     }
     if (state.activeModal === 'staffModal') {
@@ -1417,8 +2359,10 @@ async function api(path, options = {}) {
   let data = {};
   try { data = await response.json(); } catch (_) {}
   if (response.status === 401 && path !== '/api/support/login') {
-    showLogin();
-    throw new Error('Your staff session expired. Please sign in again.');
+    if (!state.pageLeaving) showLogin();
+    const error = new Error('Your staff session expired. Please sign in again.');
+    error.status = 401;
+    throw error;
   }
   if (!response.ok) {
     const detail = data.detail;
@@ -1442,8 +2386,27 @@ function canManageStaff() {
   return Boolean(state.agent && (state.agent.can_manage_staff || ['supervisor', 'admin'].includes(state.agent.role)));
 }
 
+function canManageAiSettings() {
+  return Boolean(
+    state.agent &&
+    (state.agent.can_manage_ai || state.agent.can_manage_staff || ['supervisor', 'admin'].includes(state.agent.role))
+  );
+}
+
+function canManageGoogleContacts() {
+  return Boolean(state.agent && ['supervisor', 'admin'].includes(state.agent.role));
+}
+
+function canManageWhatsApp() {
+  return Boolean(
+    state.agent &&
+    (state.agent.can_manage_whatsapp || state.agent.can_manage_staff || ['supervisor', 'admin'].includes(state.agent.role))
+  );
+}
+
 function configureStaffAccess() {
   $('manageStaffBtn').classList.toggle('hidden', !canManageStaff());
+  $('manageWhatsAppBtn').classList.toggle('hidden', !canManageWhatsApp());
 }
 
 function emptyMarkup(title, body, iconName = 'inbox') {
@@ -1480,10 +2443,24 @@ function renderQueueSkeleton() {
 }
 
 function clearTicketWorkspace() {
+  cancelMessageEdit(false);
   state.ticketId = null;
   state.currentTicketData = null;
+  state.currentConversationOrigin = null;
+  state.previousTicketHistory = [];
+  state.previousTicketHistoryHasMore = false;
+  state.previousHistoryExpanded = false;
+  state.previousHistoryLoaded = false;
+  state.previousHistoryPending = false;
+  state.cachedCurrentMessages = [];
+  state.currentMessagesHasMore = false;
+  state.currentMessagesExpanded = false;
+  state.historyLoadBusy = false;
+  state.historyLoadRequest += 1;
+  state.historySelectionEpoch += 1;
   state.timelineSignature = '';
   state.composerEnabled = false;
+  closeConversationSearch(false);
   state.queueItems = [];
   state.total = 0;
   $('queue').replaceChildren(emptyMarkup('No tickets loaded', 'Your selected queue will appear here after sign-in.', 'inbox').outer);
@@ -1497,16 +2474,27 @@ function clearTicketWorkspace() {
   $('readOnlyBanner').textContent = '';
   $('readOnlyBanner').classList.add('hidden');
   $('message').value = '';
+  clearReplyTarget();
   text($('ticketAvatar'), '—');
   showError('');
   updateQueueSummary();
   setComposerEnabled(false);
   closeContextPanel(false);
   setMobileTicketOpen(false);
+  saveSupportSelection();
 }
 
 function showLogin() {
+  $('sessionLoading').classList.add('hidden');
+  if (state.imageEditor) { state.imageEditor.dispose(); state.imageEditor = null; }
+  $('mediaViewerModal').classList.add('hidden');
+  $('imageEditorToolbar').classList.add('hidden');
+  $('messageDeleteModal').classList.add('hidden');
+  state.deleteTarget = null;
+  clearSupportSelections();
   state.authenticated = false;
+  disconnectSupportEvents();
+  saveLinkedDeviceAddition(null);
   state.agent = null;
   state.staffItems = [];
   state.editingStaffId = null;
@@ -1516,10 +2504,34 @@ function showLogin() {
   if (state.mediaRecorder) cancelVoiceRecording();
   clearMediaDraft();
   clearTicketWorkspace();$('dashboard').classList.add('hidden');
+  state.page = 1;
+  state.query = '';
+  state.globalSearchResults = [];
+  state.globalSearchRequest += 1;
+  $('queueSearch').value = '';
+  setQueueView('unassigned', {load: false, persist: false});
   $('loginPage').classList.remove('hidden');
+  closeDialog('messagePreferencesModal', false);
+  closeDialog('aiSettingsModal', false);
+  closeDialog('whatsappModal', false);
   closeDialog('staffModal', false);
   closeDialog('transferModal', false);
+  closeDialog('startChatModal', false);
+  closeDialog('forwardModal', false);
+  text($('aiHeaderStatus'), '—');
+  $('aiHeaderDot').className = 'ai-status-dot';
+  $('aiHeaderBtn').setAttribute('title', 'AI assistant status');
   $('manageStaffBtn').classList.add('hidden');
+  $('manageWhatsAppBtn').classList.add('hidden');
+  state.aiSettings = null;
+  state.whatsappRegistry = null;
+  state.linkedDeviceRequest++;
+  state.linkedDeviceStatus = null;
+  state.linkedDeviceAdditionId = null;
+  $('linkedDeviceLines').replaceChildren();
+  $('linkedDeviceSection').classList.add('hidden');
+  state.unassignedSnapshot = null;
+  state.lastInboundByTicket = {};
   $('password').value = '';
   showLoginError('');
   window.setTimeout(() => $('email').focus(), 20);
@@ -1527,13 +2539,30 @@ function showLogin() {
 
 function showDashboard() {
   state.authenticated = true;
+  $('sessionLoading').classList.add('hidden');
   $('loginPage').classList.add('hidden');
   $('dashboard').classList.remove('hidden');
   configureStaffAccess();
+  connectSupportEvents();
+}
+
+async function restoreSupportWorkspace() {
+  const saved = readSupportSelection();
+  if (saved) {
+    setQueueView(saved.view, {load: false, persist: false});
+    state.page = saved.page;
+  }
+  await loadQueue();
+  if (saved?.ticketId) {
+    await openTicket(saved.ticketId, {
+      silent: true, conversationOrigin: saved.conversationOrigin, restoring: true
+    });
+  } else saveSupportSelection();
 }
 
 async function login(event) {
   event.preventDefault();
+  unlockNotificationAudio();
   const form = $('loginForm');
   if (state.busy || !form.reportValidity()) return;
   state.busy = true;
@@ -1543,7 +2572,9 @@ async function login(event) {
     state.agent = await api('/api/support/login', {method:'POST', body: JSON.stringify({email: $('email').value.trim(), password: $('password').value})});
     setAgentIdentity(state.agent);
     showDashboard();
-    await loadQueue();
+    try { await loadAiSettings(); } catch (error) { renderAiSettingsUnavailable(error.message); }
+    await restoreSupportWorkspace();
+    await refreshAllQueueCounts();
     setAppStatus('Signed in to Shipment Support.');
   } catch (error) {
     showLoginError(error.message);
@@ -1556,13 +2587,24 @@ async function login(event) {
 
 async function bootstrap() {
   syncThemeControls();
+  text($('sessionLoadingStatus'), 'Checking your session…');
+  $('sessionRetryBtn').classList.add('hidden');
   try {
     state.agent = await api('/api/support/me');
-    setAgentIdentity(state.agent);
-    showDashboard();
-    await loadQueue();
-  } catch (_) {
-    showLogin();
+  } catch (error) {
+    if (state.pageLeaving || error.status === 401) return;
+    text($('sessionLoadingStatus'), 'Unable to check your session. Check your connection and try again.');
+    $('sessionRetryBtn').classList.remove('hidden');
+    return;
+  }
+  setAgentIdentity(state.agent);
+  showDashboard();
+  try {
+    try { await loadAiSettings(); } catch (error) { renderAiSettingsUnavailable(error.message); }
+    await restoreSupportWorkspace();
+    await refreshAllQueueCounts();
+  } catch (error) {
+    if (state.authenticated && !state.pageLeaving) showError(error.message);
   }
 }
 
@@ -1584,7 +2626,25 @@ async function logout() {
 function updateQueueCount(view, total) {
   state.queueTotals[view] = Number(total || 0);
   const badge = document.querySelector('[data-count-for="' + view + '"]');
-  if (badge) badge.textContent = state.queueTotals[view] > 0 ? String(state.queueTotals[view]) : '';
+  if (badge) badge.textContent = String(state.queueTotals[view]);
+}
+
+async function refreshAllQueueCounts() {
+  if (!state.authenticated) return;
+  if (state.queueCountsBusy) { state.queueCountsPending = true; return; }
+  state.queueCountsBusy = true;
+  try {
+    const data = await api('/api/support/queue-counts');
+    for (const [view, total] of Object.entries(data.counts || {})) updateQueueCount(view, total);
+  } catch (_) {
+    // Individual queue loading remains authoritative; count refresh is best-effort.
+  } finally {
+    state.queueCountsBusy = false;
+    if (state.queueCountsPending) {
+      state.queueCountsPending = false;
+      window.setTimeout(() => refreshAllQueueCounts(), 100);
+    }
+  }
 }
 
 function updateQueueSummary(visibleCount = null) {
@@ -1597,7 +2657,8 @@ function updateQueueSummary(visibleCount = null) {
   if (state.query) {
     text($('queueTotal'), searchCount + ' match' + (searchCount === 1 ? '' : 'es'));
   } else {
-    text($('queueTotal'), total + ' ticket' + (total === 1 ? '' : 's'));
+    const noun = state.view === 'chats' ? 'chat' : state.view === 'contacts' ? 'contact' : 'ticket';
+    text($('queueTotal'), total + ' ' + noun + (total === 1 ? '' : 's'));
   }
   const pages = Math.max(1, Math.ceil(total / state.pageSize));
   text($('pageSummary'), total ? ('Showing ' + first + '–' + last + ' of ' + total + ' · Page ' + state.page + ' of ' + pages) : 'Page 1');
@@ -1628,6 +2689,19 @@ function supportNumberLabel(ticket) {
   return 'Default WhatsApp number';
 }
 
+function isStaffChat(ticket) {
+  return String(ticket?.conversation_origin || '').toUpperCase() === 'STAFF';
+}
+
+function conversationStatusBadge(ticket) {
+  if (!isStaffChat(ticket)) return statusBadge(ticket?.status);
+  const badge = document.createElement('span');
+  const open = Boolean(ticket?.active_key);
+  badge.className = 'status-badge ' + (open ? 'status-assigned' : 'status-resolved');
+  badge.textContent = open ? 'Open' : 'Closed';
+  return badge;
+}
+
 function createMetaChip(label, iconName, className = 'meta-chip') {
   const chip = document.createElement('span');
   chip.className = className;
@@ -1637,6 +2711,40 @@ function createMetaChip(label, iconName, className = 'meta-chip') {
   chip.append(copy);
   chip.title = label;
   return chip;
+}
+
+function createContactRow(contact) {
+  const row = document.createElement('button');
+  row.type = 'button';
+  row.className = 'contact-row';
+  row.setAttribute('role', 'option');
+  const avatar = document.createElement('div');
+  avatar.className = 'avatar customer';
+  avatar.setAttribute('aria-hidden', 'true');
+  avatar.textContent = initials(contact.display_name || contact.normalized_phone || 'Contact');
+  const copy = document.createElement('div');
+  copy.className = 'contact-row-copy';
+  const name = document.createElement('div');
+  name.className = 'contact-row-name';
+  name.dir = 'auto';
+  name.textContent = contact.display_name || contact.normalized_phone || 'Unnamed contact';
+  const phone = document.createElement('div');
+  phone.className = 'contact-row-phone';
+  phone.textContent = '+' + String(contact.normalized_phone || '').replace(/^\+/, '');
+  const meta = document.createElement('div');
+  meta.className = 'contact-row-meta';
+  const source = document.createElement('span');
+  source.className = 'contact-source' + (contact.source === 'google' ? ' google' : contact.source === 'vcf' ? ' vcf' : '');
+  source.textContent = contact.source === 'google' ? 'Google' : contact.source === 'vcf' ? 'VCF' : 'Saved';
+  meta.append(source);
+  if (contact.email) meta.append(document.createTextNode(contact.email));
+  copy.append(name, phone, meta);
+  const chat = document.createElement('span');
+  chat.className = 'btn small';
+  chat.append(createIcon('message', 'icon icon-sm'), document.createTextNode('Chat'));
+  row.append(avatar, copy, chat);
+  row.onclick = () => openStartChatModal(contact);
+  return row;
 }
 
 function createTicketRow(ticket) {
@@ -1664,7 +2772,7 @@ function createTicketRow(ticket) {
   name.textContent = customer;
   const reference = document.createElement('div');
   reference.className = 'ticket-reference';
-  reference.textContent = ticket.ticket_reference || ('Ticket #' + ticket.id);
+  reference.textContent = isStaffChat(ticket) ? ('Chat · ' + (ticket.whatsapp_phone || ticket.id)) : (ticket.ticket_reference || ('Ticket #' + ticket.id));
   copy.append(name, reference);
 
   const time = document.createElement('time');
@@ -1677,31 +2785,145 @@ function createTicketRow(ticket) {
   const summary = document.createElement('div');
   summary.className = 'ticket-summary';
   summary.dir = 'auto';
-  summary.textContent = ticket.ai_summary || ticket.reason || ticket.requested_action || 'No summary available.';
+  summary.textContent = isStaffChat(ticket) ? ('WhatsApp conversation' + (ticket.current_assignee_name ? ' · ' + ticket.current_assignee_name : '')) : (ticket.ai_summary || ticket.reason || ticket.requested_action || 'No summary available.');
 
   const meta = document.createElement('div');
   meta.className = 'ticket-row-meta';
-  meta.append(statusBadge(ticket.status));
+  meta.append(conversationStatusBadge(ticket));
   meta.append(createMetaChip(supportNumberLabel(ticket), 'message', 'channel-pill'));
   if (ticket.current_assignee_name) meta.append(createMetaChip(ticket.current_assignee_name, 'user'));
   if (ticket.tracking_reference) meta.append(createMetaChip(ticket.tracking_reference, 'truck'));
 
   row.append(head, summary, meta);
-  row.onclick = () => openTicket(ticket.id);
+  row.onclick = () => openTicket(ticket.id, {conversationOrigin: ticket.conversation_origin});
   return row;
+}
+
+function createSearchResultRow(item) {
+  const row = document.createElement('button');
+  row.type = 'button';
+  row.className = 'search-result-row';
+  const head = document.createElement('div');
+  head.className = 'search-result-head';
+  const customer = document.createElement('div');
+  customer.className = 'search-result-customer';
+  customer.dir = 'auto';
+  customer.textContent = item.customer_name || item.customer_userid || item.whatsapp_phone || 'Unknown customer';
+  const time = document.createElement('time');
+  time.className = 'search-result-time';
+  time.dateTime = item.created_at || '';
+  time.textContent = item.created_at ? relativeTime(item.created_at) : '';
+  head.append(customer, time);
+  const ref = document.createElement('div');
+  ref.className = 'search-result-ref';
+  ref.textContent = (item.conversation_origin === 'STAFF' ? 'Chat · ' : 'Ticket · ') + (item.ticket_reference || ('#' + item.ticket_id));
+  const preview = document.createElement('div');
+  preview.className = 'search-result-preview';
+  preview.dir = 'auto';
+  preview.textContent = item.preview || item.message_type || 'Message';
+  highlightSearchTerm(preview, state.query);
+  row.append(head, ref, preview);
+  row.onclick = () => openSearchResult(item, state.query);
+  return row;
+}
+
+async function runGlobalMessageSearch() {
+  const query = state.query.trim();
+  const requestId = ++state.globalSearchRequest;
+  if (query.length < 2) {
+    state.globalSearchResults = [];
+    state.globalSearchBusy = false;
+    renderQueue();
+    return;
+  }
+  state.globalSearchBusy = true;
+  $('queue').setAttribute('aria-busy', 'true');
+  text($('searchScope'), 'Searching accessible ticket and chat message history…');
+  try {
+    const data = await api('/api/support/search/messages?q=' + encodeURIComponent(query) + '&limit=80');
+    if (requestId !== state.globalSearchRequest || query !== state.query.trim()) return;
+    state.globalSearchResults = Array.isArray(data.items) ? data.items : [];
+    renderQueue();
+  } catch (error) {
+    if (requestId !== state.globalSearchRequest) return;
+    state.globalSearchResults = [];
+    renderQueueError(error.message);
+  } finally {
+    if (requestId === state.globalSearchRequest) {
+      state.globalSearchBusy = false;
+      $('queue').setAttribute('aria-busy', 'false');
+      text($('searchScope'), query.length >= 2 ? 'Searches message history you are allowed to access.' : 'Searches the loaded page by customer, conversation, shipment, status, or support line.');
+    }
+  }
+}
+
+function refreshMessageSearchAfterChange(messageId) {
+  state.globalSearchResults = state.globalSearchResults.filter(item => Number(item.message_id) !== Number(messageId));
+  state.conversationSearchResults = state.conversationSearchResults.filter(item => Number(item.message_id) !== Number(messageId));
+  if (state.query.trim().length >= 2) runGlobalMessageSearch().catch(() => {});
+  if (state.conversationSearchOpen && state.conversationSearchQuery.length >= 2) searchCurrentConversation({preserveQuery: true}).catch(() => {});
+}
+
+function scheduleGlobalMessageSearch() {
+  if (state.globalSearchTimer) clearTimeout(state.globalSearchTimer);
+  state.globalSearchTimer = setTimeout(runGlobalMessageSearch, 250);
+}
+
+async function openSearchResult(item, query) {
+  if (!item || !item.ticket_id || !item.message_id) return;
+  state.conversationSearchOpen = true;
+  state.conversationSearchQuery = query || '';
+  $('conversationSearchInput').value = state.conversationSearchQuery;
+  $('conversationSearchToolbar').classList.remove('hidden');
+  await openTicket(Number(item.ticket_id), {silent: false, aroundMessageId: Number(item.message_id), preserveSearch: true, conversationOrigin: item.conversation_origin});
+  await searchCurrentConversation({focusMessageId: Number(item.message_id), preserveQuery: true});
 }
 
 function renderQueue() {
   const queue = $('queue');
-  const query = state.query.trim().toLocaleLowerCase();
-  const items = query ? state.queueItems.filter(ticket => queueSearchText(ticket).includes(query)) : state.queueItems;
+  const rawQuery = state.query.trim();
+  const query = rawQuery.toLocaleLowerCase();
+  const globalSearch = state.view !== 'contacts' && rawQuery.length >= 2;
+  const items = state.view === 'contacts' ? state.queueItems : (query && !globalSearch ? state.queueItems.filter(ticket => queueSearchText(ticket).includes(query)) : state.queueItems);
   queue.replaceChildren();
+
+  if (state.view === 'contacts') {
+    if (!state.queueItems.length) {
+      const config = QUEUE_CONFIG.contacts;
+      queue.append(emptyMarkup(config.emptyTitle, rawQuery ? 'No contact matches this search.' : config.emptyBody, config.icon).outer);
+    } else {
+      const fragment = document.createDocumentFragment();
+      for (const contact of state.queueItems) fragment.append(createContactRow(contact));
+      queue.append(fragment);
+    }
+    updateQueueSummary(state.queueItems.length);
+    $('clearQueueSearchBtn').classList.toggle('hidden', !state.query);
+    return;
+  }
+
+  if (globalSearch) {
+    if (state.globalSearchBusy) {
+      renderQueueSkeleton();
+    } else if (!state.globalSearchResults.length) {
+      queue.append(emptyMarkup('No message matches', 'No accessible ticket or chat contains this search text.', 'search').outer);
+    } else {
+      const fragment = document.createDocumentFragment();
+      for (const item of state.globalSearchResults) fragment.append(createSearchResultRow(item));
+      queue.append(fragment);
+    }
+    text($('queueTotal'), state.globalSearchResults.length + ' message match' + (state.globalSearchResults.length === 1 ? '' : 'es'));
+    text($('pageSummary'), 'Message history search');
+    $('previousPageBtn').disabled = true;
+    $('nextPageBtn').disabled = true;
+    $('clearQueueSearchBtn').classList.toggle('hidden', !state.query);
+    return;
+  }
 
   if (!state.queueItems.length) {
     const config = QUEUE_CONFIG[state.view] || QUEUE_CONFIG.unassigned;
     queue.append(emptyMarkup(config.emptyTitle, config.emptyBody, config.icon).outer);
   } else if (!items.length) {
-    const empty = emptyMarkup('No tickets match this search', 'Try a customer name, ticket reference, shipment number, status, or support line.', 'search');
+    const empty = emptyMarkup(state.view === 'chats' ? 'No chats match this search' : 'No tickets match this search', state.view === 'chats' ? 'Try a customer name, phone number, owner, or support line.' : 'Try a customer name, ticket reference, shipment number, status, or support line.', 'search');
     const clear = document.createElement('button');
     clear.type = 'button';
     clear.className = 'btn';
@@ -1739,7 +2961,11 @@ async function loadQueue({silent = false} = {}) {
   $('refreshQueueBtn').disabled = true;
   if (!silent) renderQueueSkeleton();
   try {
-    const path = '/api/support/tickets?view=' + encodeURIComponent(state.view) + '&page=' + state.page + '&page_size=' + state.pageSize;
+    const path = state.view === 'contacts'
+      ? '/api/support/contacts?page=' + state.page + '&page_size=' + state.pageSize + '&q=' + encodeURIComponent(state.query.trim())
+      : state.view === 'chats'
+        ? '/api/support/chats?page=' + state.page + '&page_size=' + state.pageSize
+        : '/api/support/tickets?view=' + encodeURIComponent(state.view) + '&page=' + state.page + '&page_size=' + state.pageSize;
     const data = await api(path);
     if (requestId !== state.queueRequest) return;
     const total = Number(data.total || 0);
@@ -1752,10 +2978,16 @@ async function loadQueue({silent = false} = {}) {
     state.queueItems = Array.isArray(data.items) ? data.items : [];
     state.total = total;
     updateQueueCount(state.view, total);
+    if (state.view === 'unassigned' && !(state.unassignedSnapshot instanceof Map)) {
+      state.unassignedSnapshot = new Map(
+        state.queueItems.map(item => [String(item.id), String(item.last_activity_at || '')])
+      );
+    }
     renderQueue();
     if (silent) queue.scrollTop = previousScrollTop;
   } catch (error) {
     if (requestId !== state.queueRequest) return;
+    if (state.pageLeaving) return;
     renderQueueError(error.message);
     text($('queueTotal'), 'Unavailable');
   } finally {
@@ -1766,25 +2998,70 @@ async function loadQueue({silent = false} = {}) {
   }
 }
 
-function setQueueView(view) {
-  if (!QUEUE_CONFIG[view] || state.view === view) return;
+async function pollUnassignedActivity() {
+  if (!state.authenticated) return;
+  try {
+    const data = await api('/api/support/tickets?view=unassigned&page=1&page_size=30');
+    const items = Array.isArray(data.items) ? data.items : [];
+    updateQueueCount('unassigned', Number(data.total || 0));
+    const snapshot = new Map(items.map(item => [String(item.id), String(item.last_activity_at || '')]));
+    if (state.unassignedSnapshot instanceof Map) {
+      let newCount = 0;
+      let updatedCount = 0;
+      for (const [id, activity] of snapshot.entries()) {
+        if (!state.unassignedSnapshot.has(id)) newCount += 1;
+        else if (state.unassignedSnapshot.get(id) !== activity) updatedCount += 1;
+      }
+      if (newCount || updatedCount) {
+        const message = newCount
+          ? (newCount === 1 ? 'New unassigned customer conversation.' : newCount + ' new unassigned customer conversations.')
+          : 'New customer message in the Unassigned queue.';
+        notifyNewCustomerActivity(message);
+        if (state.view === 'unassigned' && state.page === 1) {
+          state.queueItems = items;
+          state.total = Number(data.total || 0);
+          renderQueue();
+        }
+      }
+    }
+    state.unassignedSnapshot = snapshot;
+  } catch (_) {
+    // The normal queue error handling remains authoritative; notification polling is best-effort.
+  }
+}
+
+function setQueueView(view, {load = true, persist = true} = {}) {
+  if (!Object.prototype.hasOwnProperty.call(QUEUE_CONFIG, view) || state.view === view) return;
   state.view = view;
   state.page = 1;
   state.query = '';
+  state.globalSearchResults = [];
+  state.globalSearchRequest += 1;
   $('queueSearch').value = '';
   for (const button of $('tabs').querySelectorAll('button[data-view]')) {
     const active = button.dataset.view === view;
     button.classList.toggle('active', active);
     button.setAttribute('aria-current', active ? 'page' : 'false');
   }
+  const contacts = view === 'contacts';
+  $('contactsToolbar').classList.toggle('hidden', !contacts);
+  $('queueSearch').placeholder = contacts ? 'Search contacts' : 'Search conversations and messages';
+  text($('searchScope'), contacts ? 'Search saved, Google-synced, and VCF-imported contacts by name, phone, or email.' : 'Searches message history you are allowed to access. Customer/ticket filtering remains available for short searches.');
+  if (contacts) loadGoogleContactsStatus().catch(() => {});
   updateQueueSummary();
-  loadQueue();
+  if (persist) saveSupportSelection();
+  if (load) loadQueue();
 }
 
 function clearQueueSearch() {
   state.query = '';
+  state.globalSearchResults = [];
+  state.globalSearchRequest += 1;
+  if (state.globalSearchTimer) { clearTimeout(state.globalSearchTimer); state.globalSearchTimer = null; }
   $('queueSearch').value = '';
-  renderQueue();
+  text($('searchScope'), state.view === 'contacts' ? 'Search saved, Google-synced, and VCF-imported contacts by name, phone, or email.' : 'Searches message history you are allowed to access. Customer/ticket filtering remains available for short searches.');
+  if (state.view === 'contacts') loadQueue({silent: true});
+  else renderQueue();
   $('queueSearch').focus();
 }
 
@@ -1795,6 +3072,7 @@ function changePage(direction) {
   state.page = nextPage;
   state.query = '';
   $('queueSearch').value = '';
+  saveSupportSelection();
   loadQueue().then(() => $('queue').focus({preventScroll: true}));
 }
 
@@ -1848,10 +3126,458 @@ function messageClass(message) {
   return 'system';
 }
 
+function messagePreview(message) {
+  if (message.deleted_for_everyone_at) return 'Original message deleted';
+  const kind = String(message.media_kind || message.message_type || '').toLowerCase();
+  if (kind === 'image') return 'Image';
+  if (kind === 'sticker') return 'Sticker';
+  if (kind === 'audio') return 'Voice note';
+  if (kind === 'document') return message.media_filename || 'PDF document';
+  if (kind === 'location') return message.location_name || message.location_address || 'Location';
+  const body = String(message.body || message.content || '').trim();
+  return body || 'Message';
+}
+
+function renderReplyDraft() {
+  const container = $('replyDraft');
+  const target = state.replyTarget;
+  if (!target) {
+    container.classList.add('hidden');
+    text($('replyDraftTitle'), 'Replying to message');
+    text($('replyDraftBody'), '');
+    return;
+  }
+  text($('replyDraftTitle'), 'Replying to ' + target.actor);
+  text($('replyDraftBody'), target.preview);
+  container.classList.remove('hidden');
+}
+
+function clearReplyTarget() {
+  state.replyTarget = null;
+  renderReplyDraft();
+}
+
+function startReplyToMessage(message) {
+  if (!state.composerEnabled || !message || !message.id || !message.whatsapp_message_id) return;
+  state.replyTarget = {
+    id: Number(message.id),
+    actor: messageActor(message),
+    preview: messagePreview(message)
+  };
+  renderReplyDraft();
+  $('message').focus();
+  setAppStatus('Replying to ' + state.replyTarget.actor + '.');
+}
+
+function canChangeWhatsAppMessage(message, action) {
+  if (!message || message.deleted_for_everyone_at || !message.id) return false;
+  if (String(message.sender_type || '').toUpperCase() !== 'AGENT' || String(message.sender_id) !== String(state.agent?.id)) return false;
+  return action === 'edit' ? message.can_edit === true : message.can_delete_for_everyone === true;
+}
+
+function messageTicketId(message) {
+  return Number(message?.ticket_id || state.ticketId);
+}
+
+function startMessageEdit(message) {
+  if (!canChangeWhatsAppMessage(message, 'edit')) return;
+  if (state.busy || state.pendingMedia || state.mediaRecorder || state.editTarget) return;
+  state.editTarget = {
+    id: Number(message.id), ticketId: messageTicketId(message), version: Number(message.version || 1),
+    draft: $('message').value, reply: state.replyTarget
+  };
+  clearReplyTarget();
+  $('message').value = message.body || '';
+  $('editDraft').classList.remove('hidden');
+  updateComposerCount(); resizeComposer(); updateComposerControls(); focusMessageComposer();
+}
+
+function cancelMessageEdit(restore = true) {
+  const target = state.editTarget;
+  if (!target) return;
+  state.editTarget = null;
+  $('editDraft').classList.add('hidden');
+  $('message').value = restore ? target.draft : '';
+  state.replyTarget = restore ? target.reply : null;
+  renderReplyDraft(); updateComposerCount(); resizeComposer(); updateComposerControls();
+}
+
+function openMessageDelete(message) {
+  const canDeleteEveryone = canChangeWhatsAppMessage(message, 'everyone');
+  state.deleteTarget = {id: Number(message.id), ticketId: messageTicketId(message), canDeleteEveryone};
+  $('deleteEveryoneBtn').classList.toggle('hidden', !canDeleteEveryone);
+  text($('messageDeleteSubtitle'), canDeleteEveryone
+    ? 'Delete for everyone removes the message content from your support view and the customer’s WhatsApp chat. WhatsApp will show a deleted-message placeholder.'
+    : 'Delete for everyone is unavailable for this message on WhatsApp. Delete for me removes it from your support view; the customer’s copy remains unchanged.');
+  openDialog('messageDeleteModal', 'deleteMeBtn');
+}
+
+function closeMessageDelete() {
+  state.deleteTarget = null;
+  closeDialog('messageDeleteModal');
+}
+
+async function deleteMessage(scope) {
+  const target = state.deleteTarget;
+  if (!target || state.busy || !state.ticketId) return;
+  if (scope === 'everyone' && !target.canDeleteEveryone) return;
+  const visibleTicketId = state.ticketId;
+  state.busy = true;
+  $('deleteMeBtn').disabled = true; $('deleteEveryoneBtn').disabled = true;
+  try {
+    const result = await api('/api/support/tickets/' + target.ticketId + '/messages/' + target.id + '/delete', {
+      method: 'POST', body: JSON.stringify({scope})
+    });
+    changeCachedMessage(target.ticketId, target.id, result.message, scope === 'me');
+    state.realtimeMessages.delete(String(target.ticketId) + ':' + target.id);
+    if (state.editTarget?.id === target.id) cancelMessageEdit();
+    refreshMessageSearchAfterChange(target.id);
+    closeMessageDelete();
+    if (String(state.ticketId) === String(visibleTicketId)) {
+      await openTicket(visibleTicketId, {silent: true, refreshHistory: target.ticketId !== Number(visibleTicketId)});
+    }
+    notify(scope === 'me' ? 'Message removed from your support history.' : 'Message deleted for everyone on WhatsApp.');
+  } catch (error) {
+    notify(error.message, 'error');
+  } finally {
+    state.busy = false;
+    $('deleteMeBtn').disabled = false; $('deleteEveryoneBtn').disabled = false;
+  }
+}
+
+async function sendMessageReaction(message, selectedEmoji, menu = null) {
+  if (!state.composerEnabled || state.busy || !state.ticketId || !message?.id || !message.whatsapp_message_id) return;
+  const ownReaction = (Array.isArray(message.reactions) ? message.reactions : []).find(item => String(item.reactor_type || '').toUpperCase() === 'AGENT');
+  const emoji = ownReaction && ownReaction.emoji === selectedEmoji ? '' : selectedEmoji;
+  if (menu) menu.open = false;
+  state.busy = true;
+  setWorkspaceBusy(true);
+  showError('');
+  let succeeded = false;
+  try {
+    await api('/api/support/tickets/' + state.ticketId + '/messages/' + message.id + '/reaction', {
+      method: 'POST',
+      body: JSON.stringify({emoji, client_reaction_id: crypto.randomUUID()})
+    });
+    notify(emoji ? 'Reaction sent.' : 'Reaction removed.');
+    succeeded = true;
+    await openTicket(state.ticketId, {silent: true, refreshQueue: true});
+  } catch (error) {
+    showError(error.message);
+    notify(error.message, 'error');
+  } finally {
+    state.busy = false;
+    setWorkspaceBusy(false);
+  }
+  if (succeeded) focusMessageComposer();
+}
+
+function messageReactionBar(message) {
+  const reactions = Array.isArray(message.reactions) ? message.reactions.filter(item => item && item.emoji) : [];
+  if (!reactions.length) return null;
+  const grouped = new Map();
+  for (const reaction of reactions) {
+    const emoji = String(reaction.emoji || '');
+    if (!grouped.has(emoji)) grouped.set(emoji, []);
+    grouped.get(emoji).push(reaction);
+  }
+  const bar = document.createElement('div');
+  bar.className = 'message-reactions';
+  bar.setAttribute('aria-label', 'Message reactions');
+  for (const [emoji, items] of grouped.entries()) {
+    const chip = document.createElement('div');
+    chip.className = 'reaction-chip';
+    const names = items.map(item => item.reactor_name || (String(item.reactor_type || '').toUpperCase() === 'CUSTOMER' ? 'Customer' : 'Support agent'));
+    chip.title = names.join(', ');
+    chip.append(document.createTextNode(emoji));
+    if (items.length > 1) {
+      const count = document.createElement('span');
+      count.textContent = String(items.length);
+      chip.append(count);
+    }
+    bar.append(chip);
+  }
+  return bar;
+}
+
+function renderReplyQuote(parent, reply) {
+  if (!reply) return;
+  const quote = document.createElement('div');
+  quote.className = 'message-quote';
+  const actor = document.createElement('strong');
+  actor.textContent = reply.sender_name || MESSAGE_ROLE_LABELS[String(reply.sender_type || '').toUpperCase()] || 'Message';
+  const preview = document.createElement('span');
+  preview.dir = 'auto';
+  preview.textContent = messagePreview(reply);
+  quote.append(actor, preview);
+  parent.append(quote);
+}
+
+function applyMediaZoom() {
+  const surface = state.imageEditor?.canvas || $('mediaViewerBody').querySelector('img');
+  if (!surface) return;
+  const body = $('mediaViewerBody');
+  const width = surface.naturalWidth || surface.width;
+  const height = surface.naturalHeight || surface.height;
+  const fit = Math.min((body.clientWidth - 28) / width, (body.clientHeight - 28) / height, 1);
+  if (!Number.isFinite(fit) || fit <= 0) return;
+  surface.style.width = Math.round(width * fit) + 'px';
+  surface.style.height = Math.round(height * fit) + 'px';
+  surface.style.left = '50%'; surface.style.top = '50%';
+  surface.style.transform = 'translate(-50%, -50%) translate(' + state.mediaTranslateX + 'px, ' + state.mediaTranslateY + 'px) scale(' + state.mediaZoom + ')';
+  body.classList.toggle('can-pan', state.mediaZoom > 1);
+  text($('mediaViewerZoom'), Math.round(state.mediaZoom * 100) + '%');
+}
+
+function zoomMediaAt(next, clientX, clientY) {
+  const body = $('mediaViewerBody');
+  const rect = body.getBoundingClientRect();
+  const x = clientX - rect.left - rect.width / 2;
+  const y = clientY - rect.top - rect.height / 2;
+  const old = state.mediaZoom;
+  const zoom = Math.max(1, Math.min(8, next));
+  state.mediaTranslateX = x - (x - state.mediaTranslateX) * zoom / old;
+  state.mediaTranslateY = y - (y - state.mediaTranslateY) * zoom / old;
+  state.mediaZoom = zoom;
+  if (zoom === 1) { state.mediaTranslateX = 0; state.mediaTranslateY = 0; }
+  applyMediaZoom();
+}
+
+function changeMediaZoom(delta) {
+  const rect = $('mediaViewerBody').getBoundingClientRect();
+  zoomMediaAt(state.mediaZoom + delta, rect.left + rect.width / 2, rect.top + rect.height / 2);
+}
+
+function resetMediaZoom() {
+  state.mediaZoom = 1; state.mediaTranslateX = 0; state.mediaTranslateY = 0;
+  applyMediaZoom();
+}
+
+function openMediaViewer({kind, src, title, subtitle}) {
+  if (!src) return;
+  text($('mediaViewerTitle'), title || (kind === 'document' ? 'PDF document' : 'Image'));
+  text($('mediaViewerSubtitle'), subtitle || 'WhatsApp attachment');
+  const body = $('mediaViewerBody');
+  body.replaceChildren();
+  body.classList.toggle('image-mode', kind === 'image');
+  state.mediaSource = kind === 'image' ? src : null;
+  resetMediaZoom();
+  $('mediaViewerTools').classList.toggle('hidden', kind !== 'image');
+  $('editMediaBtn').classList.toggle('hidden', kind !== 'image' || !state.composerEnabled);
+  $('downloadMediaBtn').classList.toggle('hidden', kind !== 'image');
+  if (kind === 'image') $('downloadMediaBtn').href = src;
+  if (kind === 'document') {
+    const frame = document.createElement('iframe');
+    frame.src = src;
+    frame.title = title || 'PDF document';
+    body.append(frame);
+  } else {
+    const img = document.createElement('img');
+    img.src = src;
+    img.alt = title || 'Image attachment';
+    img.onload = applyMediaZoom;
+    img.onerror = () => notify('Image could not be loaded.', 'error');
+    body.append(img);
+  }
+  text($('mediaViewerZoom'), '100%');
+  openDialog('mediaViewerModal', 'closeMediaViewerBtn');
+}
+
+function closeMediaViewer() {
+  if (state.imageEditor?.sending) return;
+  if (state.imageEditor?.dirty && !confirm('Discard your changes?')) return;
+  if (state.imageEditor) { state.imageEditor.dispose(); state.imageEditor = null; }
+  $('imageEditorToolbar').classList.add('hidden');
+  $('mediaViewerBody').classList.remove('editing', 'image-mode', 'can-pan', 'panning');
+  mediaPointers.clear();
+  state.mediaSource = null;
+  resetMediaZoom();
+  $('mediaViewerTools').classList.add('hidden');
+  $('mediaViewerBody').replaceChildren();
+  closeDialog('mediaViewerModal');
+}
+
+async function enterImageEditor() {
+  if (!state.mediaSource || !state.composerEnabled || state.imageEditor) return;
+  if (!window.ChatImageEditor) { notify('Image editor is unavailable. Reload and try again.', 'error'); return; }
+  const source = new URL(state.mediaSource, location.href);
+  if (source.origin !== location.origin || !source.pathname.startsWith('/api/support/tickets/')) return;
+  $('editMediaBtn').disabled = true;
+  let bitmap = null;
+  try {
+    const response = await fetch(source.href, {credentials: 'same-origin', cache: 'no-store'});
+    if (!response.ok) throw new Error('Image could not be loaded for editing.');
+    const blob = await response.blob();
+    if (!['image/jpeg', 'image/png', 'image/webp'].includes(blob.type)) throw new Error('This image format cannot be edited.');
+    bitmap = await createImageBitmap(blob, {imageOrientation: 'from-image'});
+    const editor = new window.ChatImageEditor(bitmap, blob.type);
+    const body = $('mediaViewerBody');
+    body.replaceChildren(); body.classList.remove('can-pan', 'panning'); body.classList.add('editing');
+    state.mediaZoom = 1; state.mediaTranslateX = 0; state.mediaTranslateY = 0;
+    $('editMediaBtn').classList.add('hidden');
+    $('downloadMediaBtn').classList.add('hidden');
+    $('imageEditorToolbar').classList.remove('hidden');
+    $('editorCaption').value = '';
+    $('editorSelectBtn').setAttribute('aria-pressed', 'false');
+    $('editorDrawBtn').setAttribute('aria-pressed', 'true');
+    $('editorTextBtn').setAttribute('aria-pressed', 'false');
+    state.imageEditor = editor;
+    body.append(editor.canvas);
+    editor.resize();
+    applyMediaZoom();
+    editor.canvas.focus();
+  } catch (error) {
+    if (bitmap && !state.imageEditor) bitmap.close?.();
+    notify(error.message || 'Image could not be edited.', 'error');
+  }
+  finally { $('editMediaBtn').disabled = false; }
+}
+
+async function sendEditedImage() {
+  const editor = state.imageEditor;
+  if (!editor || editor.sending || !state.ticketId) return;
+  editor.sending = true;
+  setButtonBusy($('editorSendBtn'), true, 'Sending…');
+  try {
+    const sourceCheck = await fetch(state.mediaSource, {credentials: 'same-origin', cache: 'no-store'});
+    await sourceCheck.body?.cancel();
+    if (!sourceCheck.ok) throw new Error('The original image is no longer available. Your edits are still here.');
+    const blob = await editor.blob();
+    const mime = blob.type;
+    const form = new FormData();
+    form.append('media_type', 'image');
+    form.append('client_message_id', editor.sendId);
+    form.append('caption', $('editorCaption').value.trim());
+    form.append('file', new File([blob], mime === 'image/png' ? 'edited-image.png' : 'edited-image.jpg', {type: mime}));
+    await api('/api/support/tickets/' + state.ticketId + '/media', {method: 'POST', body: form});
+    editor.dispose(); state.imageEditor = null;
+    $('imageEditorToolbar').classList.add('hidden');
+    $('mediaViewerBody').classList.remove('editing');
+    closeMediaViewer();
+    await openTicket(state.ticketId, {silent: true, refreshQueue: true});
+    notify('Edited image sent. The original remains unchanged.');
+  } catch (error) {
+    if (error.status === 502) editor.sendId = crypto.randomUUID();
+    notify(error.message || 'Image upload failed. Your edits are still here.', 'error');
+  }
+  finally { editor.sending = false; setButtonBusy($('editorSendBtn'), false); }
+}
+
+function appendMessageTextWithLinks(container, value) {
+  const source = String(value ?? '');
+  const pattern = /(?:https?:\/\/|www\.)[^\s<>"']+/gi;
+  let cursor = 0;
+
+  for (const match of source.matchAll(pattern)) {
+    const start = match.index ?? 0;
+    const raw = match[0];
+    if (start > cursor) container.append(document.createTextNode(source.slice(cursor, start)));
+
+    let linkText = raw;
+    let trailing = '';
+    while (/[.,!?;:]$/.test(linkText)) {
+      trailing = linkText.slice(-1) + trailing;
+      linkText = linkText.slice(0, -1);
+    }
+    for (const [closing, opening] of [[')', '('], [']', '['], ['}', '{']]) {
+      while (linkText.endsWith(closing)) {
+        const closes = linkText.split(closing).length - 1;
+        const opens = linkText.split(opening).length - 1;
+        if (closes <= opens) break;
+        trailing = closing + trailing;
+        linkText = linkText.slice(0, -1);
+      }
+    }
+
+    const href = /^www\./i.test(linkText) ? 'https://' + linkText : linkText;
+    let safeHref = '';
+    try {
+      const parsed = new URL(href);
+      if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('Unsupported URL protocol');
+      safeHref = parsed.href;
+    } catch (_) {
+      container.append(document.createTextNode(raw));
+      cursor = start + raw.length;
+      continue;
+    }
+
+    const link = document.createElement('a');
+    link.href = safeHref;
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+    link.textContent = linkText;
+    link.title = 'Open link in a new tab';
+    container.append(link);
+    if (trailing) container.append(document.createTextNode(trailing));
+    cursor = start + raw.length;
+  }
+
+  if (cursor < source.length) container.append(document.createTextNode(source.slice(cursor)));
+}
+
+function highlightSearchTerm(root, term) {
+  const query = String(term || '').trim();
+  if (!root || !query) return;
+  const lower = query.toLocaleLowerCase();
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  const nodes = [];
+  while (walker.nextNode()) nodes.push(walker.currentNode);
+  for (const node of nodes) {
+    const value = node.nodeValue || '';
+    const valueLower = value.toLocaleLowerCase();
+    let start = 0;
+    let index = valueLower.indexOf(lower, start);
+    if (index < 0) continue;
+    const fragment = document.createDocumentFragment();
+    while (index >= 0) {
+      if (index > start) fragment.append(document.createTextNode(value.slice(start, index)));
+      const mark = document.createElement('mark');
+      mark.className = 'message-search-highlight';
+      mark.textContent = value.slice(index, index + query.length);
+      fragment.append(mark);
+      start = index + query.length;
+      index = valueLower.indexOf(lower, start);
+    }
+    if (start < value.length) fragment.append(document.createTextNode(value.slice(start)));
+    node.replaceWith(fragment);
+  }
+}
+
+function createVoiceNotePlayer(src, label) {
+  const player = document.createElement('div');
+  player.className = 'voice-note-player';
+  const audio = document.createElement('audio');
+  audio.controls = true;
+  audio.preload = 'metadata';
+  audio.src = src;
+  audio.dataset.mediaUrl = src;
+  audio.setAttribute('aria-label', label);
+  const speed = document.createElement('button');
+  speed.type = 'button';
+  speed.className = 'voice-speed-btn';
+  const rates = [1, 1.5, 2];
+  let rateIndex = 0;
+  const updateSpeed = () => {
+    speed.textContent = rates[rateIndex] + 'x';
+    speed.setAttribute('aria-label', 'Playback speed ' + rates[rateIndex] + 'x. Click to change speed.');
+    speed.title = 'Playback speed ' + rates[rateIndex] + 'x';
+  };
+  speed.onclick = () => {
+    rateIndex = (rateIndex + 1) % rates.length;
+    audio.playbackRate = rates[rateIndex];
+    updateSpeed();
+  };
+  updateSpeed();
+  player.append(audio, speed);
+  return {player, audio};
+}
+
 function addMessage(container, m, extraClass = '') {
   const outbound = m.direction === 'OUTBOUND';
+  const deleted = Boolean(m.deleted_for_everyone_at);
   const row = document.createElement('article');
   row.className = 'message-row ' + (outbound ? 'outbound ' : 'inbound ') + messageClass(m) + (extraClass ? ' ' + extraClass : '');
+  if (m.id) row.dataset.messageId = String(m.id);
 
   const avatar = document.createElement('div');
   avatar.className = 'avatar message-avatar ' + (messageClass(m) === 'customer' ? 'customer' : messageClass(m) === 'ai' ? 'ai' : '');
@@ -1863,68 +3589,146 @@ function addMessage(container, m, extraClass = '') {
   const bubble = document.createElement('div');
   bubble.className = 'message-bubble';
 
+  if (m.is_forwarded && !deleted) {
+    const forwarded = document.createElement('div');
+    forwarded.className = 'forwarded-label';
+    forwarded.append(createIcon('transfer', 'icon icon-sm'), document.createTextNode('Forwarded'));
+    bubble.append(forwarded);
+  }
+
   const sender = document.createElement('div');
   sender.className = 'message-sender';
   sender.append(document.createTextNode(messageActor(m)));
-  const role = document.createElement('span');
-  role.className = 'role-badge';
-  role.textContent = messageRole(m);
-  sender.append(role);
   bubble.append(sender);
+  if (!deleted) renderReplyQuote(bubble, m.reply_to);
 
-  const kind = m.media_kind || m.message_type || '';
-  if (['image', 'audio'].includes(kind)) {
+  const kind = String(m.media_kind || m.message_type || '').toLowerCase();
+  if (deleted) {
+    const tombstone = document.createElement('div');
+    tombstone.className = 'message-body';
+    tombstone.textContent = 'This message was deleted';
+    bubble.append(tombstone);
+  } else if (['image', 'audio', 'document', 'sticker'].includes(kind)) {
     const media = document.createElement('div');
-    media.className = 'msg-media';
+    media.className = 'msg-media' + (kind === 'sticker' ? ' sticker' : '');
     if (m.media_url) {
-      if (kind === 'image') {
+      if (kind === 'image' || kind === 'sticker') {
         const open = document.createElement('button');
         open.type = 'button';
         open.className = 'media-open';
-        open.setAttribute('aria-label', 'Open image from ' + messageActor(m) + ' in a new tab');
+        const mediaLabel = kind === 'sticker' ? 'sticker' : 'image';
+        open.setAttribute('aria-label', 'View ' + mediaLabel + ' from ' + messageActor(m));
         const img = document.createElement('img');
         img.src = m.media_url;
-        img.alt = 'Image from ' + messageActor(m);
+        img.alt = (kind === 'sticker' ? 'Sticker' : 'Image') + ' from ' + messageActor(m);
         img.loading = 'lazy';
-        img.onerror = () => {
-          const unavailable = document.createElement('div');
-          unavailable.className = 'media-unavailable';
-          unavailable.textContent = 'This image could not be loaded.';
-          open.replaceWith(unavailable);
+        const recovery = document.createElement('div');
+        recovery.className = 'media-unavailable hidden';
+        const recoveryText = document.createElement('span');
+        recoveryText.textContent = (kind === 'sticker' ? 'Sticker' : 'Image') + ' loading failed. The server can retry the WhatsApp media download.';
+        const retry = document.createElement('button');
+        retry.type = 'button';
+        retry.className = 'btn small';
+        retry.textContent = kind === 'sticker' ? 'Retry sticker' : 'Retry image';
+        retry.onclick = event => {
+          event.stopPropagation();
+          recovery.classList.add('hidden');
+          img.src = m.media_url + (m.media_url.includes('?') ? '&' : '?') + 'retry=' + Date.now();
         };
-        open.onclick = () => window.open(m.media_url, '_blank', 'noopener,noreferrer');
+        recovery.append(recoveryText, retry);
+        img.onerror = () => recovery.classList.remove('hidden');
+        img.onload = () => recovery.classList.add('hidden');
+        open.onclick = () => openMediaViewer({kind: 'image', src: m.media_url, title: (kind === 'sticker' ? 'Sticker' : 'Image') + ' from ' + messageActor(m), subtitle: fmt(messageOccurredAt(m))});
         open.append(img);
-        media.append(open);
+        media.append(open, recovery);
+      } else if (kind === 'document') {
+        const card = document.createElement('div');
+        card.className = 'document-card';
+        card.append(createIcon('file'));
+        const copy = document.createElement('div');
+        copy.className = 'document-card-copy';
+        const name = document.createElement('strong');
+        name.textContent = m.media_filename || 'PDF document';
+        const description = document.createElement('span');
+        description.textContent = 'PDF attachment';
+        copy.append(name, description);
+        const view = document.createElement('button');
+        view.type = 'button';
+        view.className = 'btn small';
+        view.textContent = 'View PDF';
+        view.onclick = () => openMediaViewer({kind: 'document', src: m.media_url, title: m.media_filename || 'PDF document', subtitle: 'WhatsApp document'});
+        card.append(copy, view);
+        media.append(card);
       } else {
-        const audio = document.createElement('audio');
-        audio.controls = true;
-        audio.preload = 'metadata';
-        audio.src = m.media_url;
-        audio.setAttribute('aria-label', 'Voice note from ' + messageActor(m));
-        audio.onerror = () => {
-          const unavailable = document.createElement('div');
-          unavailable.className = 'media-unavailable';
-          unavailable.textContent = 'This voice note could not be loaded.';
-          audio.replaceWith(unavailable);
+        const {player, audio} = createVoiceNotePlayer(m.media_url, 'Voice note from ' + messageActor(m));
+        const recovery = document.createElement('div');
+        recovery.className = 'media-unavailable hidden';
+        const recoveryText = document.createElement('span');
+        recoveryText.textContent = 'Playback failed. Retry the WhatsApp media download.';
+        const retry = document.createElement('button');
+        retry.type = 'button';
+        retry.className = 'btn small';
+        retry.textContent = 'Retry voice note';
+        retry.onclick = () => {
+          recovery.classList.add('hidden');
+          audio.src = m.media_url + (m.media_url.includes('?') ? '&' : '?') + 'retry=' + Date.now();
+          audio.load();
         };
-        media.append(audio);
+        recovery.append(recoveryText, retry);
+        audio.onerror = () => recovery.classList.remove('hidden');
+        audio.oncanplay = () => recovery.classList.add('hidden');
+        media.append(player, recovery);
       }
     } else {
       const unavailable = document.createElement('div');
       unavailable.className = 'media-unavailable';
-      unavailable.textContent = kind === 'image' ? 'Image unavailable' : 'Voice note unavailable';
+      unavailable.textContent = kind === 'image'
+        ? 'Image is not available in support storage.'
+        : kind === 'sticker'
+          ? 'Sticker is not available in support storage.'
+        : kind === 'document'
+          ? 'PDF is not available in support storage.'
+          : 'Voice note is not available in support storage.';
       media.append(unavailable);
     }
     bubble.append(media);
+  } else if (kind === 'location') {
+    const card = document.createElement('div');
+    card.className = 'location-card';
+    card.append(createIcon('map-pin'));
+    const copy = document.createElement('div');
+    copy.className = 'location-card-copy';
+    const name = document.createElement('strong');
+    name.dir = 'auto';
+    name.textContent = m.location_name || 'Shared location';
+    const detail = document.createElement('span');
+    detail.dir = 'auto';
+    const coordinates = [m.location_latitude, m.location_longitude].every(value => value !== null && value !== undefined)
+      ? Number(m.location_latitude).toFixed(6) + ', ' + Number(m.location_longitude).toFixed(6)
+      : '';
+    detail.textContent = m.location_address || coordinates || 'Location shared on WhatsApp';
+    copy.append(name, detail);
+    card.append(copy);
+    if (coordinates) {
+      const map = document.createElement('a');
+      map.className = 'btn small';
+      map.href = 'https://www.google.com/maps?q=' + encodeURIComponent(String(m.location_latitude) + ',' + String(m.location_longitude));
+      map.target = '_blank';
+      map.rel = 'noopener noreferrer';
+      map.textContent = 'Open map';
+      card.append(map);
+    }
+    bubble.append(card);
   }
 
   const bodyText = m.body || m.content || '';
-  const defaultMediaLabel = ['Image', 'Voice note', 'Audio message'].includes(bodyText);
-  if (bodyText && !(m.media_url && defaultMediaLabel)) {
+  const defaultMediaLabel = ['Image', 'Sticker', 'Voice note', 'Audio message', 'PDF document', 'Location'].includes(bodyText);
+  if (!deleted && bodyText && !((m.media_url || kind === 'location') && defaultMediaLabel)) {
     const body = document.createElement('div');
     body.className = 'message-body';
     body.dir = 'auto';
-    body.textContent = bodyText;
+    appendMessageTextWithLinks(body, bodyText);
+    if (state.conversationSearchOpen && state.conversationSearchQuery) highlightSearchTerm(body, state.conversationSearchQuery);
     bubble.append(body);
   }
 
@@ -1932,14 +3736,91 @@ function addMessage(container, m, extraClass = '') {
   meta.className = 'message-meta';
   const time = document.createElement('time');
   time.dateTime = m.created_at || '';
-  time.title = fmt(m.created_at);
-  time.textContent = m.created_at ? fmt(m.created_at) : (extraClass ? 'Earlier conversation context' : 'Time unavailable');
+  const occurredAt = messageOccurredAt(m);
+  time.title = fmt(occurredAt);
+  time.textContent = occurredAt ? fmt(occurredAt) : (extraClass ? 'Earlier context' : 'Time unavailable');
   meta.append(time);
+  if (m.edited_at && !deleted) {
+    const edited = document.createElement('span');
+    edited.textContent = 'edited';
+    edited.title = 'Edited ' + fmt(m.edited_at);
+    meta.append(edited);
+  }
+  if (canChangeWhatsAppMessage(m, 'edit')) {
+    const edit = document.createElement('button');
+    edit.type = 'button'; edit.className = 'btn message-action-btn'; edit.textContent = 'Edit';
+    edit.onclick = () => startMessageEdit(m);
+    meta.append(edit);
+  }
+  if (m.id && (!extraClass || canChangeWhatsAppMessage(m, 'everyone'))) {
+    const remove = document.createElement('button');
+    remove.type = 'button'; remove.className = 'btn message-action-btn'; remove.textContent = 'Delete';
+    remove.onclick = () => openMessageDelete(m);
+    meta.append(remove);
+  }
+  if (!extraClass && !m.id && m.client_message_id && ['FAILED', 'UNKNOWN'].includes(m.send_status)) {
+    const dismiss = document.createElement('button');
+    dismiss.type = 'button'; dismiss.className = 'btn message-action-btn'; dismiss.textContent = 'Dismiss';
+    dismiss.onclick = () => {
+      state.localMessages.delete(String(m.client_message_id));
+      state.currentTicketData.messages = (state.currentTicketData.messages || []).filter(item => item !== m);
+      state.timelineSignature = timelineSignature(state.currentTicketData);
+      renderConversation(state.currentTicketData);
+    };
+    meta.append(dismiss);
+  }
+  if (!extraClass && m.id && m.whatsapp_message_id && !deleted) {
+    const reply = document.createElement('button');
+    reply.type = 'button';
+    reply.className = 'btn message-action-btn message-reply-btn';
+    reply.append(createIcon('reply', 'icon icon-sm'), document.createTextNode('Reply'));
+    reply.onclick = () => startReplyToMessage(m);
+    meta.append(reply);
+  }
+  if (!extraClass && m.id && m.whatsapp_message_id && !deleted) {
+    const reactionMenu = document.createElement('details');
+    reactionMenu.className = 'message-reaction-menu';
+    const summary = document.createElement('summary');
+    summary.className = 'btn message-action-btn message-reaction-btn';
+    summary.append(document.createTextNode('React'));
+    const picker = document.createElement('div');
+    picker.className = 'message-reaction-picker';
+    const ownReaction = (Array.isArray(m.reactions) ? m.reactions : []).find(item => String(item.reactor_type || '').toUpperCase() === 'AGENT');
+    for (const emoji of REACTION_EMOJIS) {
+      const option = document.createElement('button');
+      option.type = 'button';
+      option.className = 'reaction-option' + (ownReaction?.emoji === emoji ? ' active' : '');
+      option.textContent = emoji;
+      option.title = ownReaction?.emoji === emoji ? 'Remove ' + emoji + ' reaction' : 'React with ' + emoji;
+      option.setAttribute('aria-label', option.title);
+      option.onclick = event => {
+        event.preventDefault();
+        event.stopPropagation();
+        sendMessageReaction(m, emoji, reactionMenu);
+      };
+      picker.append(option);
+    }
+    reactionMenu.append(summary, picker);
+    meta.append(reactionMenu);
+  }
+  if (!extraClass && m.id && !deleted && state.currentTicketData?.permissions?.can_forward !== false) {
+    const forward = document.createElement('button');
+    forward.type = 'button';
+    forward.className = 'btn message-action-btn message-forward-btn';
+    forward.append(createIcon('transfer', 'icon icon-sm'), document.createTextNode('Forward'));
+    forward.onclick = () => openForwardModal(m);
+    meta.append(forward);
+  }
   if (m.send_status === 'FAILED') {
     const failed = document.createElement('span');
     failed.className = 'send-state failed';
     failed.append(createIcon('alert', 'icon icon-sm'), document.createTextNode('Send failed' + (m.error_message ? ': ' + m.error_message : '')));
     meta.append(failed);
+  } else if (m.send_status === 'UNKNOWN') {
+    const unknown = document.createElement('span');
+    unknown.className = 'send-state pending';
+    unknown.append(createIcon('alert', 'icon icon-sm'), document.createTextNode('Send status unknown. Check WhatsApp before sending again.'));
+    meta.append(unknown);
   } else if (m.send_status === 'PENDING') {
     const pending = document.createElement('span');
     pending.className = 'send-state pending';
@@ -1952,12 +3833,13 @@ function addMessage(container, m, extraClass = '') {
     meta.append(sent);
   }
 
-  stack.append(bubble, meta);
+  const reactionBar = messageReactionBar(m);
+  if (reactionBar) stack.append(bubble, reactionBar, meta);
+  else stack.append(bubble, meta);
   if (outbound) row.append(stack, avatar);
   else row.append(avatar, stack);
   container.append(row);
 }
-
 function addEvent(container, event) {
   const element = document.createElement('div');
   element.className = 'event';
@@ -2000,18 +3882,255 @@ function addDateDivider(container, value) {
 }
 
 function timelineSignature(data) {
-  const messages = (data.messages || []).map(message => [message.id, message.updated_at, message.send_status, message.error_message, message.media_available, message.body]);
+  const messageSignature = message => [
+    message.id, message.updated_at, message.send_status, message.error_message,
+    message.media_available, message.body, message.version, message.edited_at,
+    message.deleted_for_everyone_at, message.can_edit, message.can_delete_for_everyone,
+    (message.reactions || []).map(reaction => [reaction.id, reaction.emoji, reaction.reactor_type, reaction.reactor_name, reaction.updated_at])
+  ];
+  const messages = (data.messages || []).map(messageSignature);
   const events = (data.events || []).map(event => [event.id, event.event_type, event.created_at, event.details_json]);
   const recent = ((data.context || {}).recent_messages || []).map(message => [message.role, message.content]);
-  return JSON.stringify([data.ticket?.id, messages, events, recent]);
+  const previous = (data.previous_ticket_history || []).map(thread => [
+    thread.ticket?.id,
+    thread.ticket?.updated_at,
+    thread.messages_has_more,
+    ((thread.context || {}).recent_messages || []).map(message => [message.role, message.content]),
+    (thread.messages || []).map(messageSignature)
+  ]);
+  return JSON.stringify([data.ticket?.id, data.ticket?.updated_at, data.messages_has_more,
+    data.previous_ticket_history_has_more, messages, events, recent, previous]);
 }
 
-function renderConversation(data, {forceScroll = false} = {}) {
+function mergeTimelineMessages(loaded, incoming) {
+  const byId = new Map();
+  for (const message of [...(loaded || []), ...(incoming || [])]) {
+    if (message?.id) byId.set(String(message.id), message);
+  }
+  return [...byId.values()].sort((left, right) => Number(left.id) - Number(right.id));
+}
+
+function mergePreviousHistoryThreads(loaded, fresh) {
+  const existing = new Map((loaded || []).map(thread => [String(thread.ticket?.id), thread]));
+  const freshIds = new Set((fresh || []).map(thread => String(thread.ticket?.id)));
+  return [
+    ...(loaded || []).filter(thread => !freshIds.has(String(thread.ticket?.id))),
+    ...(fresh || []).map(thread => {
+      const old = existing.get(String(thread.ticket?.id));
+      if (!old) return thread;
+      return {
+        ...thread,
+        messages: mergeTimelineMessages(old.messages, thread.messages),
+        messages_has_more: old._messagesExpanded ? old.messages_has_more : thread.messages_has_more,
+        _messagesExpanded: Boolean(old._messagesExpanded)
+      };
+    })
+  ];
+}
+
+function changeCachedMessage(ticketId, messageId, updated = null, hidden = false) {
+  const change = messages => (messages || []).filter(message => !hidden || Number(message.id) !== Number(messageId))
+    .map(message => updated && Number(message.id) === Number(messageId) ? updated : message);
+  if (String(ticketId) === String(state.ticketId)) {
+    state.cachedCurrentMessages = change(state.cachedCurrentMessages);
+    if (state.currentTicketData) state.currentTicketData.messages = change(state.currentTicketData.messages);
+  } else {
+    const thread = state.previousTicketHistory.find(item => String(item.ticket?.id) === String(ticketId));
+    if (thread) thread.messages = change(thread.messages);
+  }
+}
+
+function upsertTimelineMessage(message, ticketId) {
+  if (!message || !state.currentTicketData || String(state.ticketId) !== String(ticketId)) return;
+  if (state.currentTicketData.ticket?.id && String(state.currentTicketData.ticket.id) !== String(ticketId)) return;
+  const messages = state.currentTicketData.messages || (state.currentTicketData.messages = []);
+  const clientId = String(message.client_message_id || '');
+  const index = messages.findIndex(item =>
+    (message.id && String(item.id) === String(message.id)) ||
+    (clientId && String(item.client_message_id || '') === clientId));
+  if (index >= 0) messages[index] = message;
+  else messages.push(message);
+  if (message.id) {
+    const cacheIndex = state.cachedCurrentMessages.findIndex(item => String(item.id) === String(message.id));
+    if (cacheIndex >= 0) state.cachedCurrentMessages[cacheIndex] = message;
+    else state.cachedCurrentMessages.push(message);
+  }
+  if (clientId && message.id) state.localMessages.delete(clientId);
+  if (message.id) state.realtimeMessages.set(String(ticketId) + ':' + message.id, message);
+  state.timelineSignature = timelineSignature(state.currentTicketData);
+  renderConversation(state.currentTicketData);
+  if (message.direction === 'INBOUND' && message.id) {
+    const key = String(ticketId);
+    state.lastInboundByTicket[key] = Math.max(Number(state.lastInboundByTicket[key] || 0), Number(message.id));
+  }
+}
+
+function mergeLiveMessages(data, ticketId) {
+  if (!Array.isArray(data.messages)) data.messages = [];
+  const seen = new Set((data.messages || []).map(message => String(message.id)));
+  for (const [key, message] of state.realtimeMessages) {
+    if (!key.startsWith(String(ticketId) + ':')) continue;
+    if (seen.has(String(message.id))) { state.realtimeMessages.delete(key); continue; }
+    data.messages.push(message);
+    seen.add(String(message.id));
+  }
+  const confirmed = new Set(data.messages.map(message => String(message.client_message_id || '')));
+  for (const [clientId, item] of state.localMessages) {
+    if (String(item.ticketId) !== String(ticketId)) continue;
+    if (confirmed.has(clientId)) { state.localMessages.delete(clientId); continue; }
+    data.messages.push(item.message);
+  }
+}
+
+function updateAudioMessageRow(existing, rendered) {
+  const existingStack = existing.querySelector('.message-stack');
+  const renderedStack = rendered.querySelector('.message-stack');
+  const existingBubble = existingStack.querySelector('.message-bubble');
+  const renderedBubble = renderedStack.querySelector('.message-bubble');
+  const existingMedia = existingBubble.querySelector('.msg-media');
+  const renderedMedia = renderedBubble.querySelector('.msg-media');
+
+  // Keep the media element and all of its ancestors connected while updating
+  // the sender, caption, reactions, and delivery status around it.
+  function updateAround(parent, fresh, kept, freshKept) {
+    const children = [...fresh.children];
+    const split = children.indexOf(freshKept);
+    for (const child of children.slice(0, split)) parent.insertBefore(child, kept);
+    for (const child of children.slice(split + 1)) parent.append(child);
+    for (const child of [...parent.children]) {
+      if (child !== kept && !children.includes(child)) child.remove();
+    }
+  }
+
+  updateAround(existingBubble, renderedBubble, existingMedia, renderedMedia);
+  updateAround(existingStack, renderedStack, existingBubble, renderedBubble);
+  existing.querySelector('.message-avatar').replaceWith(rendered.querySelector('.message-avatar'));
+  existing.className = rendered.className;
+}
+
+function updateConversationKeepingAudio(conversation, rendered) {
+  const existing = conversation.firstElementChild;
+  if (!existing?.classList.contains('conversation-inner')) return false;
+  const audioRows = new Map();
+  for (const row of existing.querySelectorAll('.message-row[data-message-id]')) {
+    const audio = row.querySelector('.voice-note-player audio[data-media-url]');
+    if (audio) audioRows.set(row.dataset.messageId, row);
+  }
+  if (!audioRows.size) return false;
+
+  let reused = 0;
+  const desired = [...rendered.children].map(row => {
+    const previous = row.dataset.messageId && audioRows.get(row.dataset.messageId);
+    if (!previous) return row;
+    const oldAudio = previous.querySelector('.voice-note-player audio[data-media-url]');
+    const newAudio = row.querySelector('.voice-note-player audio[data-media-url]');
+    if (!newAudio || oldAudio.dataset.mediaUrl !== newAudio.dataset.mediaUrl) return row;
+    audioRows.delete(row.dataset.messageId);
+    updateAudioMessageRow(previous, row);
+    reused++;
+    return previous;
+  });
+  if (!reused) return false;
+
+  const wanted = new Set(desired);
+  let cursor = existing.firstElementChild;
+  for (const row of desired) {
+    if (row === cursor) {
+      cursor = cursor.nextElementSibling;
+      continue;
+    }
+    while (cursor && cursor !== row && !wanted.has(cursor)) {
+      const next = cursor.nextElementSibling;
+      cursor.remove();
+      cursor = next;
+    }
+    if (row === cursor) cursor = cursor.nextElementSibling;
+    else existing.insertBefore(row, cursor);
+  }
+  while (cursor) {
+    const next = cursor.nextElementSibling;
+    cursor.remove();
+    cursor = next;
+  }
+  return true;
+}
+
+function historyLoadButton(label, handler, ariaLabel = label) {
+  const row = document.createElement('div');
+  row.className = 'history-load-row';
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'btn small';
+  button.textContent = label;
+  button.setAttribute('aria-label', ariaLabel);
+  button.disabled = state.historyLoadBusy;
+  button.onclick = () => handler(button);
+  row.append(button);
+  return row;
+}
+
+function renderConversation(data, {forceScroll = false, preserveAudio = true, preserveScrollAnchor = null} = {}) {
   const conversation = $('conversation');
   const nearBottom = conversation.scrollHeight - conversation.scrollTop - conversation.clientHeight < 140;
   const previousScrollTop = conversation.scrollTop;
+  const previousHeight = conversation.scrollHeight;
+  const anchorTop = preserveScrollAnchor ? (conversation.querySelector(preserveScrollAnchor)?.getBoundingClientRect().top ?? null) : null;
   const inner = document.createElement('div');
   inner.className = 'conversation-inner';
+
+  const previousThreads = Array.isArray(data.previous_ticket_history) ? data.previous_ticket_history : [];
+  if (previousThreads.length || data.previous_ticket_history_has_more) {
+    const historyHeading = document.createElement('div');
+    historyHeading.className = 'context-divider';
+    historyHeading.append(createIcon('history', 'icon icon-sm'), document.createTextNode('Shared customer history'));
+    inner.append(historyHeading);
+  }
+  if (data.previous_ticket_history_has_more && !state.conversationSearchOpen) {
+    inner.append(historyLoadButton('Load earlier conversations', loadEarlierConversations));
+  }
+  for (const thread of previousThreads) {
+    const historicalTicket = thread.ticket || {};
+    const divider = document.createElement('div');
+    divider.className = 'previous-ticket-divider';
+    divider.dataset.historyTicketId = String(historicalTicket.id || '');
+    const title = document.createElement('strong');
+    title.textContent = (isStaffChat(historicalTicket) ? 'Chat · ' : 'Ticket · ') +
+      (historicalTicket.ticket_reference || ('#' + historicalTicket.id));
+    const details = document.createElement('span');
+    const closedAt = historicalTicket.closed_at || historicalTicket.resolved_at || historicalTicket.last_activity_at;
+    const historyLine = supportNumberLabel(historicalTicket);
+    details.textContent = (closedAt ? fmt(closedAt) + ' · ' : '') + formatStatus(historicalTicket.status || 'Resolved') + ' · ' + historyLine;
+    divider.append(title, details);
+    inner.append(divider);
+    const historicalMessages = Array.isArray(thread.messages) ? thread.messages : [];
+    const historicalContext = ((thread.context || {}).recent_messages || []).filter(message => ['user', 'assistant'].includes(message.role) && message.content);
+    const firstHistoricalInbound = historicalMessages.find(message => message.sender_type === 'CUSTOMER' && message.direction === 'INBOUND');
+    if (firstHistoricalInbound && historicalContext.length && historicalContext[historicalContext.length - 1].role === 'user' && historicalContext[historicalContext.length - 1].content === firstHistoricalInbound.body) historicalContext.pop();
+    if (historicalContext.length) {
+      const contextLabel = document.createElement('div');
+      contextLabel.className = 'context-divider';
+      contextLabel.append(createIcon('history', 'icon icon-sm'), document.createTextNode('AI context before this handoff'));
+      inner.append(contextLabel);
+      for (const message of historicalContext) {
+        addMessage(inner, {body: message.content, sender_type: message.role === 'user' ? 'CUSTOMER' : 'AI', direction: message.role === 'user' ? 'INBOUND' : 'OUTBOUND'}, 'context-msg previous-ticket-msg');
+      }
+    }
+    if (thread.messages_has_more && !state.conversationSearchOpen) {
+      inner.append(historyLoadButton('Load older messages', button => loadOlderConversationMessages(historicalTicket.id, true, button),
+        'Load older messages in ' + (historicalTicket.ticket_reference || ('conversation #' + historicalTicket.id))));
+    }
+    for (const message of [...historicalMessages].sort((left, right) => String(messageOccurredAt(left) || '').localeCompare(String(messageOccurredAt(right) || '')))) {
+      addMessage(inner, message, 'previous-ticket-msg');
+    }
+  }
+  if (previousThreads.length) {
+    const currentDivider = document.createElement('div');
+    currentDivider.className = 'context-divider';
+    currentDivider.append(createIcon('message', 'icon icon-sm'), document.createTextNode(
+      (isStaffChat(data.ticket) ? 'Current chat · ' : 'Current ticket · ') +
+      (data.ticket?.ticket_reference || ('#' + data.ticket?.id))));
+    inner.append(currentDivider);
+  }
 
   const recent = ((data.context || {}).recent_messages || []).filter(message => ['user', 'assistant'].includes(message.role) && message.content);
   const firstInbound = (data.messages || []).find(message => message.sender_type === 'CUSTOMER' && message.direction === 'INBOUND');
@@ -2025,9 +4144,13 @@ function renderConversation(data, {forceScroll = false} = {}) {
       addMessage(inner, {body: message.content, sender_type: message.role === 'user' ? 'CUSTOMER' : 'AI', direction: message.role === 'user' ? 'INBOUND' : 'OUTBOUND'}, 'context-msg');
     }
   }
+  if (data.messages_has_more && !state.conversationSearchOpen) {
+    inner.append(historyLoadButton('Load older messages', button => loadOlderConversationMessages(data.ticket?.id, false, button),
+      'Load older messages in this conversation'));
+  }
 
   const timeline = [
-    ...(data.messages || []).map(item => ({kind: 'message', at: item.created_at, data: item})),
+    ...(data.messages || []).map(item => ({kind: 'message', at: messageOccurredAt(item), data: item})),
     ...(data.events || []).map(item => ({kind: 'event', at: item.created_at, data: item}))
   ].sort((left, right) => String(left.at || '').localeCompare(String(right.at || '')));
 
@@ -2042,17 +4165,137 @@ function renderConversation(data, {forceScroll = false} = {}) {
     else addEvent(inner, item.data);
   }
 
-  if (!recent.length && !timeline.length) {
+  if (!previousThreads.length && !recent.length && !timeline.length) {
     const empty = emptyMarkup('No messages yet', 'The customer conversation has no message history to display.', 'message');
     empty.outer.classList.add('conversation-empty');
     conversation.replaceChildren(empty.outer);
   } else {
-    conversation.replaceChildren(inner);
+    if (!preserveAudio || !updateConversationKeepingAudio(conversation, inner)) conversation.replaceChildren(inner);
   }
 
-  if (forceScroll || nearBottom) conversation.scrollTop = conversation.scrollHeight;
+  if (preserveScrollAnchor) {
+    const newAnchor = conversation.querySelector(preserveScrollAnchor);
+    conversation.scrollTop = previousScrollTop + (anchorTop !== null && newAnchor
+      ? newAnchor.getBoundingClientRect().top - anchorTop
+      : conversation.scrollHeight - previousHeight);
+  } else if (forceScroll || nearBottom) conversation.scrollTop = conversation.scrollHeight;
   else conversation.scrollTop = previousScrollTop;
   updateScrollLatestButton();
+}
+
+function beginHistoryLoad(button) {
+  if (state.historyLoadBusy || !state.authenticated || !state.ticketId || !state.currentTicketData) return null;
+  state.historyLoadBusy = true;
+  const request = {
+    ticketId: state.ticketId,
+    selectionEpoch: state.historySelectionEpoch,
+    requestId: ++state.historyLoadRequest,
+    button,
+    label: button?.textContent || ''
+  };
+  if (button) { button.disabled = true; button.textContent = 'Loading…'; }
+  return request;
+}
+
+function historyLoadIsCurrent(request) {
+  return request.requestId === state.historyLoadRequest &&
+    request.selectionEpoch === state.historySelectionEpoch &&
+    String(request.ticketId) === String(state.ticketId) && state.authenticated;
+}
+
+function finishHistoryLoad(request) {
+  if (request.requestId !== state.historyLoadRequest) return;
+  state.historyLoadBusy = false;
+  if (request.button?.isConnected) {
+    request.button.disabled = false;
+    request.button.textContent = request.label;
+  }
+}
+
+function historyDetailBase() {
+  const origin = state.currentTicketData?.ticket?.conversation_origin || state.currentConversationOrigin;
+  return '/api/support/' + (String(origin).toUpperCase() === 'STAFF' ? 'chats/' : 'tickets/') + state.ticketId;
+}
+
+async function loadEarlierConversations(button = null) {
+  const oldest = state.previousTicketHistory[0];
+  const beforeTicketId = Number(oldest?.ticket?.id);
+  if (!state.previousTicketHistoryHasMore || !beforeTicketId) return;
+  const request = beginHistoryLoad(button);
+  if (!request) return;
+  const anchor = '[data-history-ticket-id="' + beforeTicketId + '"]';
+  try {
+    const result = await api(historyDetailBase() + '/history?before_ticket_id=' + beforeTicketId + '&limit=5');
+    if (!historyLoadIsCurrent(request)) return;
+    if (!Array.isArray(result.previous_ticket_history)) throw new Error('Earlier conversation history could not be loaded.');
+    const existing = new Set(state.previousTicketHistory.map(thread => String(thread.ticket?.id)));
+    const older = result.previous_ticket_history.filter(thread => thread.ticket?.id && !existing.has(String(thread.ticket.id)));
+    state.previousTicketHistory = [...older, ...state.previousTicketHistory];
+    state.previousTicketHistoryHasMore = older.length > 0 && Boolean(result.previous_ticket_history_has_more);
+    state.previousHistoryExpanded = true;
+    const data = state.currentTicketData;
+    data.previous_ticket_history = state.previousTicketHistory;
+    data.previous_ticket_history_has_more = state.previousTicketHistoryHasMore;
+    state.historyLoadBusy = false;
+    renderConversation(data, {preserveScrollAnchor: anchor});
+    state.timelineSignature = timelineSignature(data);
+  } catch (error) {
+    if (historyLoadIsCurrent(request) && !state.pageLeaving) {
+      state.historyLoadBusy = false;
+      renderConversation(state.currentTicketData, {preserveScrollAnchor: anchor});
+      showError(error.message);
+    }
+  } finally {
+    finishHistoryLoad(request);
+  }
+}
+
+async function loadOlderConversationMessages(ticketId, previous = false, button = null) {
+  const targetId = Number(ticketId);
+  const thread = previous ? state.previousTicketHistory.find(item => Number(item.ticket?.id) === targetId) : null;
+  const messages = previous ? thread?.messages : state.cachedCurrentMessages;
+  const hasMore = previous ? thread?.messages_has_more : state.currentMessagesHasMore;
+  const oldestMessageId = Number((messages || []).find(message => message?.id)?.id);
+  if (!targetId || !hasMore || !oldestMessageId || (previous && !thread)) return;
+  const request = beginHistoryLoad(button);
+  if (!request) return;
+  const anchor = '[data-message-id="' + oldestMessageId + '"]';
+  const path = historyDetailBase() + (previous ? '/history/' + targetId : '') +
+    '/messages?before_message_id=' + oldestMessageId + '&limit=' + (previous ? '100' : '150');
+  try {
+    const result = await api(path);
+    if (!historyLoadIsCurrent(request)) return;
+    if (!Array.isArray(result.messages)) throw new Error('Older messages could not be loaded.');
+    const data = state.currentTicketData;
+    if (previous) {
+      const currentThread = state.previousTicketHistory.find(item => Number(item.ticket?.id) === targetId);
+      if (!currentThread) return;
+      const oldCount = (currentThread.messages || []).length;
+      currentThread.messages = mergeTimelineMessages(result.messages, currentThread.messages);
+      currentThread.messages_has_more = currentThread.messages.length > oldCount && Boolean(result.messages_has_more);
+      currentThread._messagesExpanded = true;
+      data.previous_ticket_history = state.previousTicketHistory;
+    } else {
+      const oldCount = state.cachedCurrentMessages.length;
+      state.cachedCurrentMessages = mergeTimelineMessages(result.messages, state.cachedCurrentMessages);
+      state.currentMessagesHasMore = state.cachedCurrentMessages.length > oldCount && Boolean(result.messages_has_more);
+      state.currentMessagesExpanded = true;
+      data.messages = state.cachedCurrentMessages.slice();
+      data.messages_has_more = state.currentMessagesHasMore;
+      mergeLiveMessages(data, state.ticketId);
+    }
+    state.historyLoadBusy = false;
+    renderConversation(data, {preserveScrollAnchor: anchor});
+    state.timelineSignature = timelineSignature(data);
+  } catch (error) {
+    if (historyLoadIsCurrent(request) && !state.pageLeaving) {
+      state.historyLoadBusy = false;
+      renderConversation(state.currentTicketData, {preserveScrollAnchor: anchor});
+      showError(error.message);
+    }
+  } finally {
+    finishHistoryLoad(request);
+  }
 }
 
 function updateScrollLatestButton() {
@@ -2106,7 +4349,29 @@ function appendContextCard(container, title, entries, {summary = false} = {}) {
   container.append(card);
 }
 
-function renderContext(ticket, context, shipment) {
+async function saveCurrentContact(ticket, identity) {
+  if (!ticket || !state.ticketId || state.busy) return;
+  const current = identity && identity.saved_contact ? (identity.name || ticket.customer_name || '') : '';
+  const name = window.prompt(identity && identity.saved_contact ? 'Edit contact name' : 'Save this guest as a contact', current);
+  if (name === null) return;
+  const trimmed = name.trim();
+  if (!trimmed) { notify('Contact name is required.', 'error'); return; }
+  state.busy = true;
+  setWorkspaceBusy(true);
+  try {
+    await api('/api/support/tickets/' + state.ticketId + '/contact', {method:'PUT', body: JSON.stringify({name: trimmed})});
+    notify('Contact saved.');
+    await openTicket(state.ticketId, {silent: true, refreshQueue: true});
+  } catch (error) {
+    showError(error.message);
+    notify(error.message, 'error');
+  } finally {
+    state.busy = false;
+    setWorkspaceBusy(false);
+  }
+}
+
+function renderContext(ticket, context, shipment, identity = null, permissions = null) {
   const container = $('context');
   const previousScrollTop = $('contextPanel').scrollTop;
   container.replaceChildren();
@@ -2127,56 +4392,72 @@ function renderContext(ticket, context, shipment) {
   detail.textContent = ticket.whatsapp_phone || ticket.customer_userid || 'Customer identity unavailable';
   copy.append(name, detail);
   hero.append(avatar, copy);
+  if (identity && !identity.registered_user && permissions && permissions.can_operate) {
+    const save = document.createElement('button');
+    save.type = 'button';
+    save.className = 'btn small context-contact-action';
+    save.append(createIcon('user', 'icon icon-sm'), document.createTextNode(identity.saved_contact ? 'Edit contact' : 'Save contact'));
+    save.onclick = () => saveCurrentContact(ticket, identity);
+    hero.append(save);
+  }
   container.append(hero);
 
   appendContextCard(container, 'Customer', [
     ['Name', ticket.customer_name],
     ['User ID', ticket.customer_userid, 'code'],
-    ['Customer ID', ticket.customer_id, 'code'],
     ['WhatsApp', ticket.whatsapp_phone],
     ['Authenticated', context.authenticated],
-    ['Language', ticket.current_language || context.current_language],
-    ['Communication style', ticket.communication_style || context.communication_style]
+    ['Identity', identity?.registered_user ? 'Registered customer' : identity?.saved_contact ? 'Saved contact' : 'Guest']
   ]);
 
-  appendContextCard(container, 'Escalation', [
-    ['Reason', ticket.reason],
-    ['Requested action', ticket.requested_action],
-    ['Tracking reference', ticket.tracking_reference, 'code']
-  ]);
-  if (ticket.ai_summary) appendContextCard(container, 'AI summary', [['Summary', ticket.ai_summary]], {summary: true});
+  if (!isStaffChat(ticket)) {
+    appendContextCard(container, 'Escalation', [
+      ['Reason', ticket.reason],
+      ['Requested action', ticket.requested_action],
+      ['Tracking reference', ticket.tracking_reference, 'code']
+    ]);
+    if (ticket.ai_summary) appendContextCard(container, 'AI summary', [['Summary', ticket.ai_summary]], {summary: true});
+  }
 
-  appendContextCard(container, 'Shipment', [
-    ['Status', shipment && shipment.status],
-    ['Mode', shipment && shipment.mode],
-    ['Description', shipment && shipment.description],
-    ['Order ID', shipment && shipment.order_id, 'code'],
-    ['Shipment ID', shipment && shipment.shipment_id, 'code']
-  ]);
+  if (shipment) {
+    appendContextCard(container, 'Shipment', [
+      ['Status', shipment.status],
+      ['Mode', shipment.mode],
+      ['Description', shipment.description],
+      ['Order ID', shipment.order_id, 'code'],
+      ['Shipment ID', shipment.shipment_id, 'code']
+    ]);
+  }
 
-  appendContextCard(container, 'Ticket', [
-    ['Status', formatStatus(ticket.status)],
-    ['Assignee', ticket.current_assignee_name || 'Unassigned'],
-    ['Received on', supportNumberLabel(ticket)],
-    ['Meta phone number ID', ticket.business_phone_number_id, 'code'],
-    ['Created', fmt(ticket.created_at)],
-    ['Last activity', fmt(ticket.last_activity_at)]
-  ]);
+  if (isStaffChat(ticket)) {
+    appendContextCard(container, 'Chat', [
+      ['Status', ticket.active_key ? 'Open' : 'Closed'],
+      ['Owner', ticket.current_assignee_name || 'Unassigned'],
+      ['WhatsApp line', supportNumberLabel(ticket)],
+      ['Started', fmt(ticket.created_at)]
+    ]);
+  } else {
+    appendContextCard(container, 'Ticket', [
+      ['Status', formatStatus(ticket.status)],
+      ['Assignee', ticket.current_assignee_name || 'Unassigned'],
+      ['Received on', supportNumberLabel(ticket)],
+      ['Created', fmt(ticket.created_at)]
+    ]);
+  }
   $('contextPanel').scrollTop = previousScrollTop;
 }
 
 function renderTicketHeader(ticket) {
   const customer = ticket.customer_name || ticket.customer_userid || ticket.whatsapp_phone || 'Unknown customer';
-  text($('ticketTitle'), ticket.ticket_reference || ('Ticket #' + ticket.id));
-  text($('ticketSubtitle'), customer + ' · Received on ' + supportNumberLabel(ticket));
+  text($('ticketTitle'), isStaffChat(ticket) ? customer : (ticket.ticket_reference || ('Ticket #' + ticket.id)));
+  text($('ticketSubtitle'), isStaffChat(ticket) ? ('Chat · ' + ticket.whatsapp_phone + ' · ' + supportNumberLabel(ticket)) : (customer + ' · Received on ' + supportNumberLabel(ticket)));
   text($('ticketAvatar'), initials(customer));
-  $('ticketHeadingStatus').replaceChildren(statusBadge(ticket.status));
+  $('ticketHeadingStatus').replaceChildren(conversationStatusBadge(ticket));
   const meta = $('ticketHeaderMeta');
   meta.replaceChildren();
   if (ticket.current_assignee_name) meta.append(createMetaChip('Assigned to ' + ticket.current_assignee_name, 'user'));
   else meta.append(createMetaChip('Unassigned', 'user'));
   if (ticket.tracking_reference) meta.append(createMetaChip(ticket.tracking_reference, 'truck'));
-  meta.append(createMetaChip('Updated ' + relativeTime(ticket.last_activity_at), 'clock'));
 }
 
 function renderReadOnlyState(data) {
@@ -2185,7 +4466,7 @@ function renderReadOnlyState(data) {
   const permissions = data.permissions;
   banner.replaceChildren();
   if (permissions.is_read_only_observer && ticket.active_key) {
-    banner.append(createIcon('eye'), document.createTextNode('Watching only — this ticket is assigned to ' + (ticket.current_assignee_name || 'another agent') + '. You can follow the live conversation, but only the current assignee can send messages.'));
+    banner.append(createIcon('eye'), document.createTextNode('Watching only — this conversation is assigned to ' + (ticket.current_assignee_name || 'another staff member') + '. You can follow it live, but only the current assignee can send messages.'));
     banner.classList.remove('hidden');
   } else {
     banner.classList.add('hidden');
@@ -2214,6 +4495,15 @@ function renderActions(data) {
   container.replaceChildren();
   const ticket = data.ticket;
   const permissions = data.permissions;
+
+  if (isStaffChat(ticket)) {
+    if (permissions.can_transfer && ticket.active_key) container.append(actionButton('Transfer chat', openTransferModal, '', 'transfer'));
+    if (permissions.can_operate && ticket.active_key) {
+      container.append(actionButton('Close chat', closeStaffChat, 'danger', 'check-circle'));
+    }
+    return;
+  }
+
   if (permissions.can_claim) container.append(actionButton('Claim ticket', () => doAction('/claim', 'Ticket claimed.'), 'primary', 'user-check'));
   if (permissions.can_transfer && ticket.active_key) container.append(actionButton('Transfer', openTransferModal, '', 'transfer'));
   if (permissions.can_operate && ticket.active_key) {
@@ -2242,6 +4532,9 @@ function renderActions(data) {
     }
     container.append(actionButton('Resolve & return to AI', resolveTicket, 'danger', 'check-circle'));
   }
+  if (permissions.can_delete_history) {
+    container.append(actionButton('Delete ticket', deleteHistoryTicket, 'danger', 'trash'));
+  }
 }
 
 function setWorkspaceBusy(busy) {
@@ -2249,60 +4542,247 @@ function setWorkspaceBusy(busy) {
   updateComposerControls();
 }
 
-async function openTicket(id, {silent = false} = {}) {
+function latestInboundMessageId(data) {
+  const messages = Array.isArray(data && data.messages) ? data.messages : [];
+  let latest = 0;
+  for (const message of messages) {
+    if (String(message.direction || '').toUpperCase() !== 'INBOUND') continue;
+    const id = Number(message.id || 0);
+    if (id > latest) latest = id;
+  }
+  return latest;
+}
+
+function syncConversationSearchControls() {
+  const total = state.conversationSearchResults.length;
+  const index = state.conversationSearchIndex;
+  text($('conversationSearchCount'), total && index >= 0 ? (index + 1) + ' / ' + total : (state.conversationSearchQuery ? '0 / 0' : '—'));
+  $('conversationSearchPrev').disabled = !total || index <= 0;
+  $('conversationSearchNext').disabled = !total || index < 0 || index >= total - 1;
+}
+
+function openConversationSearch() {
+  if (!state.ticketId) return;
+  state.conversationSearchOpen = true;
+  $('conversationSearchToolbar').classList.remove('hidden');
+  $('conversationSearchInput').focus();
+  $('conversationSearchInput').select();
+  syncConversationSearchControls();
+}
+
+function closeConversationSearch(restoreFocus = true) {
+  state.conversationSearchOpen = false;
+  state.conversationSearchQuery = '';
+  state.conversationSearchResults = [];
+  state.conversationSearchIndex = -1;
+  state.searchTargetMessageId = null;
+  if (state.conversationSearchTimer) { clearTimeout(state.conversationSearchTimer); state.conversationSearchTimer = null; }
+  const toolbar = $('conversationSearchToolbar');
+  if (toolbar) toolbar.classList.add('hidden');
+  if ($('conversationSearchInput')) $('conversationSearchInput').value = '';
+  syncConversationSearchControls();
+  const activeTicketId = state.ticketId;
+  if (restoreFocus) {
+    $('conversationSearchBtn')?.focus();
+    if (activeTicketId) openTicket(activeTicketId, {silent: true});
+  }
+}
+
+async function searchCurrentConversation({focusMessageId = null, preserveQuery = false} = {}) {
+  if (!state.ticketId) return;
+  const query = preserveQuery ? state.conversationSearchQuery : $('conversationSearchInput').value.trim();
+  state.conversationSearchQuery = query;
+  if (query.length < 2) {
+    state.conversationSearchResults = [];
+    state.conversationSearchIndex = -1;
+    syncConversationSearchControls();
+    if (state.currentTicketData) renderConversation(state.currentTicketData, {forceScroll: false});
+    return;
+  }
+  try {
+    const data = await api('/api/support/search/messages?q=' + encodeURIComponent(query) + '&ticket_id=' + encodeURIComponent(state.ticketId) + '&limit=100');
+    const chronological = (Array.isArray(data.items) ? data.items : []).slice().reverse();
+    state.conversationSearchResults = chronological;
+    let index = chronological.length ? chronological.length - 1 : -1;
+    if (focusMessageId) {
+      const found = chronological.findIndex(item => Number(item.message_id) === Number(focusMessageId));
+      if (found >= 0) index = found;
+    }
+    state.conversationSearchIndex = index;
+    syncConversationSearchControls();
+    if (index >= 0) await jumpToConversationSearchResult(index);
+  } catch (error) {
+    showError(error.message);
+  }
+}
+
+function scheduleConversationSearch() {
+  if (state.conversationSearchTimer) clearTimeout(state.conversationSearchTimer);
+  state.conversationSearchTimer = setTimeout(() => searchCurrentConversation(), 220);
+}
+
+async function jumpToConversationSearchResult(index) {
+  const item = state.conversationSearchResults[index];
+  if (!item || !state.ticketId) return;
+  state.conversationSearchIndex = index;
+  state.searchTargetMessageId = Number(item.message_id);
+  syncConversationSearchControls();
+  await openTicket(state.ticketId, {silent: true, aroundMessageId: state.searchTargetMessageId, preserveSearch: true});
+  const target = $('conversation').querySelector('[data-message-id="' + state.searchTargetMessageId + '"]');
+  if (target) {
+    target.classList.add('search-target');
+    target.scrollIntoView({block: 'center', behavior: 'smooth'});
+  }
+}
+
+function moveConversationSearch(delta) {
+  const next = state.conversationSearchIndex + delta;
+  if (next < 0 || next >= state.conversationSearchResults.length) return;
+  jumpToConversationSearchResult(next);
+}
+
+async function openTicket(id, {silent = false, refreshQueue = false, refreshHistory = false, aroundMessageId = null, preserveSearch = false, conversationOrigin = null, restoring = false} = {}) {
   const isNewSelection = String(state.ticketId || '') !== String(id || '');
+  if (!isNewSelection && silent && !refreshHistory && state.previousHistoryPending) return;
   if (isNewSelection) {
+    state.currentTicketData = null;
+    setComposerEnabled(false);
+    cancelMessageEdit(false);
     if (state.mediaRecorder) cancelVoiceRecording();
     clearMediaDraft();
+    clearReplyTarget();
     $('message').value = '';
     updateComposerCount();
     state.timelineSignature = '';
+    state.previousTicketHistory = [];
+    state.previousTicketHistoryHasMore = false;
+    state.previousHistoryExpanded = false;
+    state.previousHistoryLoaded = false;
+    state.previousHistoryPending = false;
+    state.cachedCurrentMessages = [];
+    state.currentMessagesHasMore = false;
+    state.currentMessagesExpanded = false;
+    state.historyLoadBusy = false;
+    state.historyLoadRequest += 1;
+    state.historySelectionEpoch += 1;
+    if (!preserveSearch) closeConversationSearch(false);
   }
   state.ticketId = id;
+  if (conversationOrigin) state.currentConversationOrigin = conversationOrigin;
+  else if (isNewSelection) state.currentConversationOrigin = state.view === 'chats' ? 'STAFF' : 'CUSTOMER';
   setMobileTicketOpen(true);
-  closeContextPanel(false);
+  // Keep the desktop Customer Details panel in the state chosen by the agent.
+  // Background polling reuses openTicket(), so closing it unconditionally here
+  // caused the panel to collapse every few seconds. On compact/mobile layouts
+  // it remains an overlay, so close it only when switching to another ticket.
+  if (isNewSelection && window.innerWidth <= 1100) closeContextPanel(false);
   renderQueue();
   showError('');
   const requestId = ++state.ticketRequest;
+  const needPreviousHistory = isNewSelection || refreshHistory || !state.previousHistoryLoaded || state.previousHistoryPending;
+  if (needPreviousHistory) state.previousHistoryPending = true;
   if (isNewSelection || !silent) $('workspaceLoading').classList.remove('hidden');
   try {
-    const data = await api('/api/support/tickets/' + id);
+    const chatRequest = String(state.currentConversationOrigin || '').toUpperCase() === 'STAFF';
+    const detailBase = chatRequest ? '/api/support/chats/' : '/api/support/tickets/';
+    const detailParams = new URLSearchParams();
+    if (aroundMessageId) detailParams.set('around_message_id', String(aroundMessageId));
+    if (needPreviousHistory) detailParams.set('include_previous_history', 'true');
+    const detailPath = detailBase + id + (detailParams.toString() ? ('?' + detailParams.toString()) : '');
+    const data = await api(detailPath);
     if (requestId !== state.ticketRequest || String(state.ticketId) !== String(id)) return;
+    if (needPreviousHistory && Array.isArray(data.previous_ticket_history)) {
+      state.previousTicketHistory = state.previousHistoryExpanded
+        ? mergePreviousHistoryThreads(state.previousTicketHistory, data.previous_ticket_history)
+        : data.previous_ticket_history;
+      if (!state.previousHistoryExpanded) state.previousTicketHistoryHasMore = Boolean(data.previous_ticket_history_has_more);
+      state.previousHistoryLoaded = true;
+    }
+    data.previous_ticket_history = state.previousTicketHistory;
+    data.previous_ticket_history_has_more = state.previousTicketHistoryHasMore;
+    if (!aroundMessageId) {
+      if (isNewSelection || !state.cachedCurrentMessages.length) {
+        state.cachedCurrentMessages = Array.isArray(data.messages) ? data.messages.slice() : [];
+        state.currentMessagesHasMore = Boolean(data.messages_has_more);
+      } else {
+        state.cachedCurrentMessages = mergeTimelineMessages(state.cachedCurrentMessages, data.messages);
+        if (!state.currentMessagesExpanded) state.currentMessagesHasMore = Boolean(data.messages_has_more);
+      }
+      data.messages = state.cachedCurrentMessages.slice();
+      data.messages_has_more = state.currentMessagesHasMore;
+    }
+    mergeLiveMessages(data, id);
     state.currentTicketData = data;
+    if (state.replyTarget && (data.messages || []).some(item => Number(item.id) === state.replyTarget.id && item.deleted_for_everyone_at)) {
+      clearReplyTarget();
+      notify('The replied-to message was deleted.', 'error');
+    }
     const ticket = data.ticket;
+    state.currentConversationOrigin = ticket?.conversation_origin || state.currentConversationOrigin;
+    saveSupportSelection();
+    const inboundId = latestInboundMessageId(data);
+    const previousInboundId = Number(state.lastInboundByTicket[String(id)] || 0);
+    if (!isNewSelection && previousInboundId && inboundId > previousInboundId && ticket.current_assignee_id) {
+      notifyNewCustomerActivity('New customer message from ' + (ticket.customer_name || ticket.customer_userid || ticket.whatsapp_phone || 'customer') + '.');
+    }
+    if (inboundId) state.lastInboundByTicket[String(id)] = inboundId;
     renderTicketHeader(ticket);
-    renderContext(ticket, data.context || {}, data.shipment || null);
+    renderContext(ticket, data.context || {}, data.shipment || null, data.customer_identity || null, data.permissions || null);
     renderReadOnlyState(data);
     renderActions(data);
     const signature = timelineSignature(data);
-    if (signature !== state.timelineSignature || isNewSelection) {
-      renderConversation(data, {forceScroll: isNewSelection});
+    if (signature !== state.timelineSignature || isNewSelection || aroundMessageId) {
+      renderConversation(data, {forceScroll: isNewSelection && !aroundMessageId, preserveAudio: !isNewSelection});
       state.timelineSignature = signature;
     }
-    setComposerEnabled(Boolean(data.permissions.can_reply && ticket.active_key));
-    await loadQueue({silent: true});
-    if (isNewSelection) setAppStatus('Opened ' + (ticket.ticket_reference || 'ticket') + ' for ' + (ticket.customer_name || ticket.customer_userid || ticket.whatsapp_phone || 'customer') + '.');
+    if (aroundMessageId) {
+      const target = $('conversation').querySelector('[data-message-id="' + aroundMessageId + '"]');
+      if (target) {
+        target.classList.add('search-target');
+        target.scrollIntoView({block: 'center', behavior: 'smooth'});
+      }
+    }
+    setComposerEnabled(Boolean(data.permissions.can_reply));
+    if (data.permissions.can_reply && isStaffChat(ticket) && !ticket.active_key) {
+      text($('composerHelp'), 'Sending will reopen this chat and preserve its full history.');
+    }
+    if ((isNewSelection && !restoring) || !silent || refreshQueue) await loadQueue({silent: true});
+    if (isNewSelection) setAppStatus(isStaffChat(ticket) ? ('Opened chat with ' + (ticket.customer_name || ticket.whatsapp_phone || 'customer') + '.') : ('Opened ' + (ticket.ticket_reference || 'ticket') + ' for ' + (ticket.customer_name || ticket.customer_userid || ticket.whatsapp_phone || 'customer') + '.'));
   } catch (e) {
-    if (requestId !== state.ticketRequest) return;
+    if (state.pageLeaving || requestId !== state.ticketRequest) return;
+    if (restoring && [403, 404].includes(e.status)) {
+      clearTicketWorkspace();
+      await loadQueue({silent: true});
+      showError('The saved conversation is no longer available. Your queue is still open.');
+      return;
+    }
     if(e.status===403) {
       state.currentTicketData = null;
       state.ticketId = null;
       state.timelineSignature = '';
+      state.currentConversationOrigin = null;
+      saveSupportSelection();
       setComposerEnabled(false);
       clearMediaDraft();
-      text($('ticketTitle'), 'Private ticket');
-      text($('ticketSubtitle'), 'Conversation access is restricted to participating agents.');
+      text($('ticketTitle'), 'Private conversation');
+      text($('ticketSubtitle'), 'Conversation access is restricted to participating staff.');
       $('ticketHeadingStatus').replaceChildren();
       $('ticketHeaderMeta').replaceChildren();
-      $('conversation').innerHTML = '<div class="conversation-empty"><div class="empty-state-inner"><div class="empty-icon"><svg class="icon icon-lg" aria-hidden="true"><use href="#icon-lock"></use></svg></div><h3>Ticket access restricted</h3><p>You can only open tickets you have claimed or worked on.</p></div></div>';
+      $('conversation').innerHTML = '<div class="conversation-empty"><div class="empty-state-inner"><div class="empty-icon"><svg class="icon icon-lg" aria-hidden="true"><use href="#icon-lock"></use></svg></div><h3>Conversation access restricted</h3><p>You can only open conversations you are allowed to access.</p></div></div>';
       $('context').replaceChildren();
       $('actions').replaceChildren();
       $('readOnlyBanner').classList.add('hidden');
       await loadQueue({silent: true});
+    } else if (e.status === 404) {
+      clearTicketWorkspace();
+      await loadQueue({silent: true});
     }
     showError(e.message);
   } finally {
-    if (requestId === state.ticketRequest) $('workspaceLoading').classList.add('hidden');
+    if (requestId === state.ticketRequest) {
+      state.previousHistoryPending = false;
+      $('workspaceLoading').classList.add('hidden');
+    }
   }
 }
 
@@ -2323,7 +4803,7 @@ async function doAction(suffix, successMessage = 'Ticket updated.') {
     state.busy = false;
     setWorkspaceBusy(false);
   }
-  if (succeeded) await openTicket(state.ticketId, {silent: true});
+  if (succeeded) await openTicket(state.ticketId, {silent: true, refreshQueue: true});
 }
 
 async function setStatus(status) {
@@ -2343,12 +4823,56 @@ async function setStatus(status) {
     state.busy = false;
     setWorkspaceBusy(false);
   }
-  if (succeeded) await openTicket(state.ticketId, {silent: true});
+  if (succeeded) await openTicket(state.ticketId, {silent: true, refreshQueue: true});
 }
 
 async function resolveTicket() {
   if (!confirm('Resolve this ticket and return the WhatsApp conversation to AI?')) return;
   await doAction('/resolve', 'Ticket resolved and returned to AI.');
+}
+
+async function closeStaffChat() {
+  const data = state.currentTicketData;
+  if (state.busy || !state.ticketId || !isStaffChat(data?.ticket)) return;
+  if (!confirm('Close this chat? Its message history will stay in Chats and can be reopened later.')) return;
+  state.busy = true;
+  setWorkspaceBusy(true);
+  showError('');
+  try {
+    await api('/api/support/chats/' + state.ticketId + '/close', {method:'POST'});
+    notify('Chat closed. Its history is preserved and will be reused if you start this chat again.');
+    await openTicket(state.ticketId, {silent: true, refreshQueue: true, conversationOrigin: 'STAFF'});
+  } catch (error) {
+    showError(error.message);
+    notify(error.message, 'error');
+  } finally {
+    state.busy = false;
+    setWorkspaceBusy(false);
+  }
+}
+
+async function deleteHistoryTicket() {
+  const data = state.currentTicketData;
+  if (state.busy || !state.ticketId || !data?.permissions?.can_delete_history) return;
+  const reference = data.ticket?.ticket_reference || ('Ticket #' + state.ticketId);
+  if (!confirm('Permanently delete ' + reference + ' from History?\n\nThis deletes its saved messages, events, and locally stored attachments. This action cannot be undone.')) return;
+
+  const ticketId = state.ticketId;
+  state.busy = true;
+  setWorkspaceBusy(true);
+  showError('');
+  try {
+    await api('/api/support/tickets/' + ticketId, {method:'DELETE'});
+    notify(reference + ' deleted from History.');
+    clearTicketWorkspace();
+    await loadQueue();
+  } catch (error) {
+    showError(error.message);
+    notify(error.message, 'error');
+  } finally {
+    state.busy = false;
+    setWorkspaceBusy(false);
+  }
 }
 
 function stopMediaTracks() {
@@ -2385,7 +4909,7 @@ function clearMediaDraft() {
   $('imageInput').value = '';
   $('message').maxLength = 4096;
   $('message').placeholder = 'Reply to customer on WhatsApp';
-  text($('composerHelp'), 'Messages are sent from the WhatsApp number that received this ticket.');
+  text($('composerHelp'), 'Messages are sent from the WhatsApp number for this conversation.');
   updateComposerCount();
   updateComposerControls();
 }
@@ -2401,24 +4925,27 @@ function renderMediaDraft() {
   container.className = 'media-draft ' + draft.kind;
   const preview = document.createElement('div');
   preview.className = 'media-draft-preview';
-  if (draft.kind === 'image') {
+  if (draft.kind === 'image' || draft.kind === 'sticker') {
     const img = document.createElement('img');
     img.src = draft.url;
-    img.alt = 'Selected image preview';
+    img.alt = draft.kind === 'sticker' ? 'Selected sticker preview' : 'Selected image preview';
     preview.append(img);
+  } else if (draft.kind === 'audio') {
+    preview.append(createVoiceNotePlayer(draft.url, 'Voice note preview').player);
   } else {
-    const audio = document.createElement('audio');
-    audio.controls = true;
-    audio.preload = 'metadata';
-    audio.src = draft.url;
-    audio.setAttribute('aria-label', 'Voice note preview');
-    preview.append(audio);
+    preview.append(createIcon('file', 'icon icon-lg'));
   }
   const info = document.createElement('div');
   info.className = 'media-draft-info';
   const name = document.createElement('div');
   name.className = 'media-draft-name';
-  name.textContent = draft.kind === 'image' ? (draft.file.name || 'Selected image') : 'Voice note ready';
+  name.textContent = draft.kind === 'image'
+    ? (draft.file.name || 'Selected image')
+    : draft.kind === 'sticker'
+      ? (draft.file.name || 'WhatsApp sticker')
+    : draft.kind === 'document'
+      ? (draft.file.name || 'PDF document')
+      : 'Voice note ready';
   const size = document.createElement('div');
   size.className = 'media-draft-size';
   size.textContent = formatBytes(draft.file.size);
@@ -2433,14 +4960,20 @@ function renderMediaDraft() {
   actions.append(remove);
   container.append(preview, info, actions);
 
-  if (draft.kind === 'image') {
+  if (draft.kind === 'image' || draft.kind === 'document') {
     $('message').maxLength = 1024;
-    $('message').placeholder = 'Add an image caption (optional)';
-    text($('composerHelp'), 'The image and optional caption will be sent as a public WhatsApp reply.');
-  } else {
+    $('message').placeholder = draft.kind === 'image' ? 'Add an image caption (optional)' : 'Add a PDF caption (optional)';
+    text($('composerHelp'), draft.kind === 'image'
+      ? 'The image and optional caption will be sent as a public WhatsApp reply.'
+      : 'The PDF and optional caption will be sent as a public WhatsApp reply.');
+  } else if (draft.kind === 'audio') {
     $('message').value = '';
     $('message').placeholder = 'Voice note ready to send';
     text($('composerHelp'), 'Review the recording, then send it as a public WhatsApp voice note.');
+  } else {
+    $('message').value = '';
+    $('message').placeholder = 'Sticker ready to send';
+    text($('composerHelp'), 'The WebP sticker will be sent as a public WhatsApp reply.');
   }
   updateComposerCount();
   updateComposerControls();
@@ -2471,23 +5004,50 @@ function resizeComposer() {
   textarea.style.height = Math.min(textarea.scrollHeight, 154) + 'px';
 }
 
+function focusMessageComposer() {
+  window.requestAnimationFrame(() => {
+    const textarea = $('message');
+    if ((!state.composerEnabled && !state.editTarget) || state.busy || !textarea || textarea.disabled) return;
+    try { textarea.focus({preventScroll: true}); } catch (_) { textarea.focus(); }
+    const end = textarea.value.length;
+    try { textarea.setSelectionRange(end, end); } catch (_) {}
+  });
+}
+
 function updateComposerControls() {
-  const enabled = state.composerEnabled && !state.busy;
+  const enabled = (state.composerEnabled || Boolean(state.editTarget)) && !state.busy;
   const recording = Boolean(state.mediaRecorder);
   const draft = state.pendingMedia;
   const hasBody = Boolean($('message').value.trim());
   const canSend = enabled && !recording && (Boolean(draft) || hasBody);
 
-  $('imageBtn').disabled = !enabled || recording;
-  $('voiceBtn').disabled = !enabled;
+  $('imageBtn').disabled = !enabled || recording || Boolean(state.editTarget);
+  $('voiceBtn').disabled = !enabled || Boolean(state.editTarget);
+  $('locationBtn').disabled = !enabled || recording || Boolean(state.editTarget);
   $('voiceBtn').setAttribute('aria-pressed', recording ? 'true' : 'false');
   $('voiceBtn').setAttribute('aria-label', recording ? 'Stop voice recording' : 'Record a voice note');
   $('voiceBtn').setAttribute('data-tooltip', recording ? 'Stop recording' : 'Record voice note');
   setIcon($('voiceBtn'), recording ? 'square' : 'mic');
   $('message').disabled = !enabled || recording || Boolean(draft && draft.kind === 'audio');
   $('sendBtn').disabled = !canSend;
+  for (const replyButton of document.querySelectorAll('.message-reply-btn')) {
+    replyButton.disabled = !enabled;
+  }
+  for (const reactionMenu of document.querySelectorAll('.message-reaction-menu')) {
+    reactionMenu.classList.toggle('disabled', !enabled);
+    const summary = reactionMenu.querySelector('summary');
+    if (summary) summary.setAttribute('aria-disabled', enabled ? 'false' : 'true');
+    if (!enabled) reactionMenu.open = false;
+  }
+  for (const forwardButton of document.querySelectorAll('.message-forward-btn')) {
+    // Forwarding is independent from reply ownership. A resolved/history
+    // conversation is read-only but its messages can still be forwarded.
+    forwardButton.disabled = state.busy || state.forwardBusy;
+  }
   const label = $('sendBtn').querySelector('.send-label');
-  if (label) label.textContent = draft ? (draft.kind === 'image' ? 'Send image' : 'Send voice') : 'Send';
+  if (label) label.textContent = state.editTarget ? 'Save' : draft
+    ? (draft.kind === 'image' ? 'Send image' : draft.kind === 'sticker' ? 'Send sticker' : draft.kind === 'document' ? 'Send PDF' : 'Send voice')
+    : 'Send';
 }
 
 function recordingMimeType() {
@@ -2559,6 +5119,80 @@ function toggleVoiceRecording() {
   }
 }
 
+function showLocationError(message) {
+  const element = $('locationError');
+  element.textContent = message || '';
+  element.style.display = message ? 'block' : 'none';
+}
+
+function openLocationModal() {
+  if (!state.composerEnabled || state.busy || state.mediaRecorder) return;
+  showLocationError('');
+  $('locationForm').reset();
+  openDialog('locationModal', 'useCurrentLocationBtn');
+}
+
+function closeLocationModal() {
+  if (state.busy) return;
+  showLocationError('');
+  closeDialog('locationModal');
+}
+
+function useCurrentLocation() {
+  showLocationError('');
+  if (!navigator.geolocation) { showLocationError('Location access is not supported by this browser.'); return; }
+  const button = $('useCurrentLocationBtn');
+  setButtonBusy(button, true, 'Locating…');
+  navigator.geolocation.getCurrentPosition(
+    position => {
+      $('locationLatitude').value = Number(position.coords.latitude).toFixed(7);
+      $('locationLongitude').value = Number(position.coords.longitude).toFixed(7);
+      setButtonBusy(button, false);
+    },
+    error => {
+      showLocationError(error && error.code === 1 ? 'Location permission was denied.' : 'Could not determine your current location.');
+      setButtonBusy(button, false);
+    },
+    {enableHighAccuracy: true, timeout: 12000, maximumAge: 30000}
+  );
+}
+
+async function sendLocation(event) {
+  event.preventDefault();
+  if (state.busy || !state.ticketId || !$('locationForm').reportValidity()) return;
+  const latitude = Number($('locationLatitude').value);
+  const longitude = Number($('locationLongitude').value);
+  if (!Number.isFinite(latitude) || latitude < -90 || latitude > 90 || !Number.isFinite(longitude) || longitude < -180 || longitude > 180) {
+    showLocationError('Enter valid latitude and longitude coordinates.');
+    return;
+  }
+  state.busy = true;
+  setButtonBusy($('sendLocationBtn'), true, 'Sending…');
+  showLocationError('');
+  let succeeded = false;
+  try {
+    await api('/api/support/tickets/' + state.ticketId + '/location', {method:'POST', body: JSON.stringify({
+      latitude, longitude,
+      name: $('locationName').value.trim() || null,
+      address: $('locationAddress').value.trim() || null,
+      client_message_id: crypto.randomUUID(),
+      reply_to_message_id: state.replyTarget ? state.replyTarget.id : null
+    })});
+    clearReplyTarget();
+    closeDialog('locationModal');
+    notify('Location sent to the customer.');
+    succeeded = true;
+    await openTicket(state.ticketId, {silent: true, refreshQueue: true});
+  } catch (error) {
+    showLocationError(error.message);
+  } finally {
+    state.busy = false;
+    setButtonBusy($('sendLocationBtn'), false);
+    setWorkspaceBusy(false);
+  }
+  if (succeeded) focusMessageComposer();
+}
+
 function chooseImage() {
   if (state.composerEnabled && !state.busy && !state.mediaRecorder) $('imageInput').click();
 }
@@ -2566,14 +5200,15 @@ function chooseImage() {
 function imageSelected() {
   const file = $('imageInput').files && $('imageInput').files[0];
   if (!file) return;
-  if (!['image/jpeg', 'image/png'].includes(file.type)) {
-    showError('Use a JPEG or PNG image.');
+  if (!['image/jpeg', 'image/png', 'image/webp', 'application/pdf'].includes(file.type)) {
+    showError('Use a JPEG/PNG image, WebP sticker, or PDF document.');
     $('imageInput').value = '';
     return;
   }
-  setPendingMedia('image', file);
+  const kind = file.type === 'application/pdf' ? 'document' : file.type === 'image/webp' ? 'sticker' : 'image';
+  setPendingMedia(kind, file);
   $('message').focus();
-  setAppStatus('Image attached. You may add a caption before sending.');
+  setAppStatus(kind === 'document' ? 'PDF attached. You may add a caption before sending.' : kind === 'sticker' ? 'Sticker attached and ready to send.' : 'Image attached. You may add a caption before sending.');
 }
 
 async function sendMediaMessage() {
@@ -2581,20 +5216,24 @@ async function sendMediaMessage() {
   if (!draft || !state.ticketId || state.busy) return;
   state.busy = true;
   setWorkspaceBusy(true);
-  setButtonBusy($('sendBtn'), true, draft.kind === 'image' ? 'Sending image…' : 'Sending voice…');
+  setButtonBusy($('sendBtn'), true, draft.kind === 'image' ? 'Sending image…' : draft.kind === 'sticker' ? 'Sending sticker…' : draft.kind === 'document' ? 'Sending PDF…' : 'Sending voice…');
   showError('');
   const form = new FormData();
   form.append('media_type', draft.kind);
   form.append('client_message_id', crypto.randomUUID());
-  if (draft.kind === 'image') form.append('caption', $('message').value.trim());
-  form.append('file', draft.file, draft.file.name || (draft.kind === 'image' ? 'image' : 'voice-note'));
+  if (draft.kind === 'image' || draft.kind === 'document') form.append('caption', $('message').value.trim());
+  if (state.replyTarget) form.append('reply_to_message_id', String(state.replyTarget.id));
+  form.append('file', draft.file, draft.file.name || (draft.kind === 'image' ? 'image' : draft.kind === 'sticker' ? 'sticker.webp' : draft.kind === 'document' ? 'document.pdf' : 'voice-note'));
   let refresh = false;
+  let succeeded = false;
   try {
     await api('/api/support/tickets/' + state.ticketId + '/media', {method:'POST', body: form});
     $('message').value = '';
     clearMediaDraft();
-    notify(draft.kind === 'image' ? 'Image sent to the customer.' : 'Voice note sent to the customer.');
+    clearReplyTarget();
+    notify(draft.kind === 'image' ? 'Image sent to the customer.' : draft.kind === 'sticker' ? 'Sticker sent to the customer.' : draft.kind === 'document' ? 'PDF sent to the customer.' : 'Voice note sent to the customer.');
     refresh = true;
+    succeeded = true;
   } catch (error) {
     showError(error.message);
     notify(error.message, 'error');
@@ -2605,36 +5244,697 @@ async function sendMediaMessage() {
     setWorkspaceBusy(false);
     updateComposerCount();
   }
-  if (refresh) await openTicket(state.ticketId, {silent: true});
+  if (refresh) await openTicket(state.ticketId, {silent: true, refreshQueue: true});
+  if (succeeded) focusMessageComposer();
 }
 
 async function sendMessage() {
+  if (state.editTarget) {
+    const target = state.editTarget;
+    const content = $('message').value.trim();
+    if (!content || state.busy || !state.ticketId) return;
+    const visibleTicketId = state.ticketId;
+    state.busy = true; setButtonBusy($('sendBtn'), true, 'Saving…'); showError('');
+    try {
+      const result = await api('/api/support/tickets/' + target.ticketId + '/messages/' + target.id, {
+        method: 'PATCH', body: JSON.stringify({content, version: target.version})
+      });
+      changeCachedMessage(target.ticketId, target.id, result.message);
+      cancelMessageEdit(false);
+      refreshMessageSearchAfterChange(target.id);
+      if (String(state.ticketId) === String(visibleTicketId)) {
+        await openTicket(visibleTicketId, {silent: true, refreshHistory: target.ticketId !== Number(visibleTicketId)});
+      }
+      notify('Message updated for everyone on WhatsApp.');
+    } catch (error) {
+      showError(error.message);
+      notify(error.message, 'error');
+    } finally {
+      state.busy = false; setButtonBusy($('sendBtn'), false); updateComposerControls();
+    }
+    return;
+  }
   if (state.pendingMedia) return sendMediaMessage();
   const body = $('message').value.trim();
-  if (!body || state.busy || !state.ticketId) return;
-  state.busy = true;
-  setWorkspaceBusy(true);
-  setButtonBusy($('sendBtn'), true, 'Sending…');
-  showError('');
+  if (!body || state.busy || !state.ticketId || !state.composerEnabled) return;
+  const ticketId = state.ticketId;
+  const reply = state.replyTarget ? {...state.replyTarget} : null;
   const clientMessageId = crypto.randomUUID();
-  let refresh = false;
+  const optimistic = {
+    client_message_id: clientMessageId,
+    ticket_id: ticketId,
+    sender_type: 'AGENT', sender_id: state.agent?.id,
+    sender_name: state.agent?.name || 'Support agent', direction: 'OUTBOUND',
+    message_type: 'text', body, send_status: 'PENDING',
+    created_at: new Date().toISOString(),
+    reply_to: reply ? {id: reply.id, sender_name: reply.actor, body: reply.preview} : null
+  };
+  state.localMessages.set(clientMessageId, {ticketId, message: optimistic});
+  upsertTimelineMessage(optimistic, ticketId);
+  $('message').value = '';
+  clearReplyTarget();
+  resizeComposer();
+  updateComposerCount();
+  updateComposerControls();
+  showError('');
+  focusMessageComposer();
+  const send = async () => {
+    try {
+      const result = await api('/api/support/tickets/' + ticketId + '/messages', {
+        method: 'POST',
+        body: JSON.stringify({body, client_message_id: clientMessageId, reply_to_message_id: reply?.id || null})
+      });
+      state.localMessages.delete(clientMessageId);
+      if (result.message) upsertTimelineMessage(result.message, ticketId);
+      loadQueue({silent: true}).catch(() => {});
+    } catch (error) {
+      optimistic.send_status = (!error.status || /WhatsApp accepted/i.test(error.message || '')) ? 'UNKNOWN' : 'FAILED';
+      optimistic.error_message = error.message || 'Message could not be sent.';
+      if (state.localMessages.has(clientMessageId)) {
+        upsertTimelineMessage(optimistic, ticketId);
+      }
+      if (String(state.ticketId) === String(ticketId)) showError(optimistic.error_message);
+      notify(optimistic.error_message, 'error');
+    }
+  };
+  state.textSendChain = state.textSendChain.then(send, send);
+}
+
+function showMessagePreferencesError(message) {
+  const element = $('messagePreferencesError');
+  element.textContent = message || '';
+  element.style.display = message ? 'block' : 'none';
+}
+
+function updateMessagePreferenceCounts() {
+  text($('customGreetingCount'), $('customGreetingMessage').value.length + ' / 2000');
+  text($('customResolutionCount'), $('customResolutionMessage').value.length + ' / 2000');
+}
+
+async function loadMessagePreferences() {
+  const data = await api('/api/support/message-preferences');
+  $('customGreetingMessage').value = data.greeting_message || '';
+  $('customResolutionMessage').value = data.resolution_message || '';
+  updateMessagePreferenceCounts();
+  return data;
+}
+
+async function openMessagePreferencesModal() {
+  if (!state.authenticated || state.messagePreferencesBusy) return;
+  showMessagePreferencesError('');
+  openDialog('messagePreferencesModal', 'customGreetingMessage');
+  state.messagePreferencesBusy = true;
+  setButtonBusy($('saveMessagePreferencesBtn'), true, 'Loading…');
   try {
-    await api('/api/support/tickets/' + state.ticketId + '/messages', {method:'POST', body: JSON.stringify({body, client_message_id: clientMessageId})});
-    $('message').value = '';
-    resizeComposer();
-    updateComposerCount();
-    notify('Reply sent to the customer.');
-    refresh = true;
+    await loadMessagePreferences();
   } catch (error) {
-    showError(error.message);
-    notify(error.message, 'error');
-    refresh = true;
+    showMessagePreferencesError(error.message);
   } finally {
-    state.busy = false;
-    setButtonBusy($('sendBtn'), false);
-    setWorkspaceBusy(false);
+    state.messagePreferencesBusy = false;
+    setButtonBusy($('saveMessagePreferencesBtn'), false);
   }
-  if (refresh) await openTicket(state.ticketId, {silent: true});
+}
+
+function closeMessagePreferencesModal() {
+  if (state.messagePreferencesBusy) return;
+  showMessagePreferencesError('');
+  closeDialog('messagePreferencesModal');
+}
+
+async function saveMessagePreferences(event) {
+  event.preventDefault();
+  if (!state.authenticated || state.messagePreferencesBusy) return;
+  const form = $('messagePreferencesForm');
+  if (!form.reportValidity()) return;
+  state.messagePreferencesBusy = true;
+  setButtonBusy($('saveMessagePreferencesBtn'), true, 'Saving…');
+  showMessagePreferencesError('');
+  try {
+    const data = await api('/api/support/message-preferences', {
+      method: 'PUT',
+      body: JSON.stringify({
+        greeting_message: $('customGreetingMessage').value,
+        resolution_message: $('customResolutionMessage').value
+      })
+    });
+    $('customGreetingMessage').value = data.greeting_message || '';
+    $('customResolutionMessage').value = data.resolution_message || '';
+    updateMessagePreferenceCounts();
+    notify('Automatic messages saved.');
+    closeDialog('messagePreferencesModal');
+  } catch (error) {
+    showMessagePreferencesError(error.message);
+  } finally {
+    state.messagePreferencesBusy = false;
+    setButtonBusy($('saveMessagePreferencesBtn'), false);
+  }
+}
+
+const AI_REASON_LABELS = {
+  MANUAL_ON: 'Manual control is ON',
+  MANUAL_OFF: 'Manual control is OFF',
+  WITHIN_SCHEDULE: 'Within scheduled AI hours',
+  OUTSIDE_SCHEDULE: 'Outside scheduled AI hours'
+};
+
+function showAiSettingsError(message) {
+  const element = $('aiSettingsError');
+  element.textContent = message || '';
+  element.style.display = message ? 'block' : 'none';
+}
+
+function selectedAiControlMode() {
+  return document.querySelector('input[name="aiControlMode"]:checked')?.value || 'MANUAL';
+}
+
+function syncAiSettingsFields() {
+  const scheduled = selectedAiControlMode() === 'SCHEDULED';
+  $('aiManualFields').classList.toggle('hidden', scheduled);
+  $('aiScheduledFields').classList.toggle('hidden', !scheduled);
+  $('aiNextChange').classList.toggle('hidden', !scheduled);
+}
+
+function validIanaTimezone(value) {
+  try {
+    new Intl.DateTimeFormat('en-US', {timeZone: value}).format(new Date());
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+function validateAiSettingsForm() {
+  showAiSettingsError('');
+  for (const id of ['aiScheduleStart', 'aiScheduleEnd', 'aiScheduleTimezone']) {
+    $(id).setAttribute('aria-invalid', 'false');
+  }
+  if (selectedAiControlMode() !== 'SCHEDULED') return true;
+
+  const start = $('aiScheduleStart').value.trim();
+  const end = $('aiScheduleEnd').value.trim();
+  const timezone = $('aiScheduleTimezone').value.trim();
+  const hhmm = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
+  if (!hhmm.test(start)) {
+    $('aiScheduleStart').setAttribute('aria-invalid', 'true');
+    showAiSettingsError('Choose a valid AI start time in HH:mm format.');
+    return false;
+  }
+  if (!hhmm.test(end)) {
+    $('aiScheduleEnd').setAttribute('aria-invalid', 'true');
+    showAiSettingsError('Choose a valid AI end time in HH:mm format.');
+    return false;
+  }
+  if (start === end) {
+    $('aiScheduleStart').setAttribute('aria-invalid', 'true');
+    $('aiScheduleEnd').setAttribute('aria-invalid', 'true');
+    showAiSettingsError('AI start and end times must be different.');
+    return false;
+  }
+  if (!timezone || !validIanaTimezone(timezone)) {
+    $('aiScheduleTimezone').setAttribute('aria-invalid', 'true');
+    showAiSettingsError('Enter a valid IANA timezone, for example Asia/Beirut or UTC.');
+    return false;
+  }
+  return true;
+}
+
+function renderAiSettingsUnavailable(message) {
+  state.aiSettings = null;
+  text($('aiHeaderStatus'), '?');
+  $('aiHeaderDot').className = 'ai-status-dot';
+  $('aiHeaderBtn').setAttribute('aria-label', 'AI assistant status unavailable');
+  $('aiHeaderBtn').setAttribute('title', message || 'AI assistant status unavailable');
+}
+
+function syncAiSettingsEditability() {
+  const editable = canManageAiSettings();
+  for (const id of ['aiModeManual', 'aiModeScheduled', 'aiManualEnabled', 'aiScheduleStart', 'aiScheduleEnd', 'aiScheduleTimezone']) {
+    $(id).disabled = !editable;
+  }
+  $('saveAiSettingsBtn').classList.toggle('hidden', !editable);
+  text($('cancelAiSettingsBtn'), editable ? 'Cancel' : 'Close');
+  text(
+    $('aiSettingsModalSubtitle'),
+    editable
+      ? 'Control global AI availability for new inbound WhatsApp messages.'
+      : 'View the current global AI availability. Only Supervisors and Admins can change it.'
+  );
+}
+
+function renderAiSettings(settings) {
+  state.aiSettings = settings;
+  const enabled = Boolean(settings?.effective_ai_enabled);
+  text($('aiHeaderStatus'), enabled ? 'ON' : 'OFF');
+  $('aiHeaderDot').className = 'ai-status-dot ' + (enabled ? 'on' : 'off');
+  $('aiHeaderBtn').setAttribute('aria-label', 'AI assistant is ' + (enabled ? 'on' : 'off'));
+  $('aiHeaderBtn').setAttribute('title', 'AI assistant: ' + (enabled ? 'ON' : 'OFF') + '. Select to view settings.');
+  const status = $('aiEffectiveStatus');
+  status.textContent = enabled ? 'ON' : 'OFF';
+  status.classList.toggle('off', !enabled);
+  text($('aiEffectiveReason'), AI_REASON_LABELS[settings?.effective_reason] || settings?.effective_reason || 'Current status unavailable');
+
+  const mode = settings?.control_mode === 'SCHEDULED' ? 'SCHEDULED' : 'MANUAL';
+  $('aiModeManual').checked = mode === 'MANUAL';
+  $('aiModeScheduled').checked = mode === 'SCHEDULED';
+  $('aiManualEnabled').value = settings?.manual_ai_enabled ? 'true' : 'false';
+  $('aiScheduleStart').value = settings?.schedule?.start_time || '';
+  $('aiScheduleEnd').value = settings?.schedule?.end_time || '';
+  $('aiScheduleTimezone').value = settings?.schedule?.timezone || '';
+  syncAiSettingsFields();
+  syncAiSettingsEditability();
+
+  text(
+    $('aiNextChange'),
+    settings?.next_transition_at
+      ? 'Next automatic change: ' + fmtInTimezone(settings.next_transition_at, settings?.schedule?.timezone)
+      : 'Next automatic change: —'
+  );
+  const updater = settings?.updated_by?.name ? ' by ' + settings.updated_by.name : '';
+  text(
+    $('aiUpdatedMeta'),
+    settings?.updated_at
+      ? 'Last saved ' + fmt(settings.updated_at) + updater + '. Settings are authoritative across backend instances.'
+      : 'Saved configuration is authoritative across backend instances.'
+  );
+}
+
+async function loadAiSettings() {
+  if (!state.authenticated) return;
+  const settings = await api('/api/support/ai-settings');
+  renderAiSettings(settings);
+}
+
+async function openAiSettingsModal() {
+  if (!state.authenticated) return;
+  showAiSettingsError('');
+  syncAiSettingsEditability();
+  openDialog('aiSettingsModal', 'aiModeManual');
+  state.aiSettingsBusy = true;
+  setButtonBusy($('saveAiSettingsBtn'), true, 'Loading…');
+  try {
+    await loadAiSettings();
+  } catch (error) {
+    renderAiSettingsUnavailable(error.message);
+    showAiSettingsError(error.message);
+    syncAiSettingsEditability();
+  } finally {
+    state.aiSettingsBusy = false;
+    setButtonBusy($('saveAiSettingsBtn'), false);
+  }
+}
+
+function closeAiSettingsModal() {
+  if (state.aiSettingsBusy) return;
+  showAiSettingsError('');
+  closeDialog('aiSettingsModal');
+}
+
+async function saveAiSettings(event) {
+  event.preventDefault();
+  if (state.aiSettingsBusy || !canManageAiSettings() || !state.aiSettings) return;
+  if (!validateAiSettingsForm()) return;
+
+  const payload = {
+    control_mode: selectedAiControlMode(),
+    manual_ai_enabled: $('aiManualEnabled').value === 'true',
+    schedule: {
+      start_time: $('aiScheduleStart').value.trim(),
+      end_time: $('aiScheduleEnd').value.trim(),
+      timezone: $('aiScheduleTimezone').value.trim()
+    },
+    version: Number(state.aiSettings.version)
+  };
+
+  state.aiSettingsBusy = true;
+  setButtonBusy($('saveAiSettingsBtn'), true, 'Saving…');
+  showAiSettingsError('');
+  try {
+    await api('/api/support/ai-settings', {method:'PUT', body: JSON.stringify(payload)});
+    // Re-fetch the authoritative effective state instead of assuming the local form
+    // reflects timezone boundaries or a concurrent update correctly.
+    await loadAiSettings();
+    notify('AI assistant settings saved.');
+  } catch (error) {
+    showAiSettingsError(error.status === 409 ? error.message + ' Reload the settings and try again.' : error.message);
+    if (error.status === 409) {
+      try { await loadAiSettings(); } catch (_) {}
+    }
+  } finally {
+    state.aiSettingsBusy = false;
+    setButtonBusy($('saveAiSettingsBtn'), false);
+  }
+}
+
+function showWhatsAppFeedback(id, message) {
+  const element = $(id);
+  element.textContent = message || '';
+  element.style.display = message ? 'block' : 'none';
+}
+
+function clearWhatsAppFeedback() {
+  showWhatsAppFeedback('whatsappError', '');
+  showWhatsAppFeedback('whatsappSuccess', '');
+}
+
+function renderWhatsAppRegistry(payload) {
+  state.whatsappRegistry = payload || {accounts: [], numbers: []};
+  const accounts = Array.isArray(state.whatsappRegistry.accounts) ? state.whatsappRegistry.accounts : [];
+  const numbers = Array.isArray(state.whatsappRegistry.numbers) ? state.whatsappRegistry.numbers : [];
+  const accountContainer = $('whatsappAccounts');
+  const numberContainer = $('whatsappNumbers');
+  accountContainer.replaceChildren();
+  numberContainer.replaceChildren();
+
+  if (!accounts.length) {
+    accountContainer.append(emptyMarkup('No WABA synced yet', 'Enter a WhatsApp Business Account ID above, or receive a signed webhook so the account can be discovered.', 'phone').outer);
+  } else {
+    for (const account of accounts) {
+      const row = document.createElement('div');
+      row.className = 'whatsapp-account-row';
+      const copy = document.createElement('div');
+      const title = document.createElement('div');
+      title.className = 'whatsapp-row-title';
+      title.textContent = account.name || 'WhatsApp Business Account';
+      const subtitle = document.createElement('div');
+      subtitle.className = 'whatsapp-row-subtitle';
+      subtitle.textContent = 'WABA ' + account.waba_id + (account.last_synced_at ? ' · synced ' + fmt(account.last_synced_at) : ' · not synced yet');
+      copy.append(title, subtitle);
+      const sync = document.createElement('button');
+      sync.type = 'button';
+      sync.className = 'btn small';
+      sync.append(createIcon('refresh', 'icon icon-sm'), document.createTextNode('Sync'));
+      sync.onclick = () => syncWaba(account.waba_id);
+      row.append(copy, sync);
+      accountContainer.append(row);
+    }
+  }
+
+  if (!numbers.length) {
+    numberContainer.append(emptyMarkup('No phone numbers found', 'Sync a WABA to fetch its registered WhatsApp phone numbers from Meta.', 'phone').outer);
+    return;
+  }
+
+  for (const item of numbers) {
+    const row = document.createElement('div');
+    row.className = 'whatsapp-number-row';
+    const copy = document.createElement('div');
+    const title = document.createElement('div');
+    title.className = 'whatsapp-row-title';
+    title.textContent = item.display_phone_number || item.verified_name || ('Phone ' + item.phone_number_id);
+    const subtitle = document.createElement('div');
+    subtitle.className = 'whatsapp-row-subtitle';
+    subtitle.textContent = (item.verified_name ? item.verified_name + ' · ' : '') + 'ID ' + item.phone_number_id + (item.source === 'LINKED_DEVICE' ? ' · Linked device' : item.waba_id ? ' · WABA ' + item.waba_id : ' · Cloud API');
+    const meta = document.createElement('div');
+    meta.className = 'whatsapp-row-meta';
+    meta.append(createMetaChip(item.is_enabled ? 'Active in app' : 'Not active', item.is_enabled ? 'check-circle' : 'clock'));
+    if (item.quality_rating) meta.append(createMetaChip('Quality ' + item.quality_rating, 'activity'));
+    if (!item.provider_present) meta.append(createMetaChip(item.source === 'LINKED_DEVICE' ? 'Connection not configured' : 'Missing from latest Meta sync', 'alert'));
+    copy.append(title, subtitle, meta);
+
+    const action = document.createElement('button');
+    action.type = 'button';
+    action.className = 'btn small' + (item.is_enabled ? ' danger' : ' primary');
+    action.disabled = state.whatsappBusy || state.linkedDeviceBusy || (!item.provider_present && !item.is_enabled);
+    action.textContent = item.is_enabled ? (item.source === 'LINKED_DEVICE' ? 'Deactivate' : 'Remove from app') : 'Add to app';
+    action.onclick = () => setWhatsAppNumberState(item.phone_number_id, !item.is_enabled);
+    row.append(copy, action);
+    if (item.source === 'LINKED_DEVICE') {
+      const remove = document.createElement('button');
+      remove.type = 'button'; remove.className = 'btn small danger';
+      remove.textContent = 'Remove and unlink';
+      remove.disabled = state.whatsappBusy || state.linkedDeviceBusy;
+      remove.onclick = () => removeLinkedDeviceNumber(item.phone_number_id);
+      row.append(remove);
+    }
+    numberContainer.append(row);
+  }
+  if (state.linkedDeviceStatus) renderLinkedDeviceStatus(state.linkedDeviceStatus);
+}
+
+function renderLinkedDeviceStatus(payload) {
+  state.linkedDeviceStatus = payload;
+  const section = $('linkedDeviceSection');
+  section.classList.toggle('hidden', !payload?.configured);
+  const container = $('linkedDeviceLines');
+  container.replaceChildren();
+  $('addLinkedDeviceBtn').disabled = state.linkedDeviceBusy || state.whatsappBusy;
+  $('addLinkedDeviceBtn').textContent = pendingLinkedDeviceAddition() ? 'Retry linking' : 'Link another number';
+  if (!payload?.configured) return;
+  for (const line of payload.lines || []) {
+    const row = document.createElement('div');
+    row.className = 'linked-device-line';
+    const heading = document.createElement('strong');
+    heading.textContent = line.display_phone_number || ('WhatsApp line ' + line.line_id);
+    const status = document.createElement('div');
+    status.className = 'muted';
+    const labels = {connected: 'Connected', connecting: 'Connecting…', qr: 'Scan this code with the phone you want to connect', logged_out: 'Not paired', disconnected: 'Disconnected', error: 'Connection failed'};
+    status.textContent = labels[line.status] || 'Not paired';
+    if (line.error) status.textContent += ' · ' + line.error;
+    if (line.pending_callbacks) status.textContent += ' · ' + line.pending_callbacks + ' updates pending';
+    if (line.failed_callbacks) status.textContent += ' · ' + line.failed_callbacks + ' failed updates need administrator attention';
+    row.append(heading, status);
+    if (line.status === 'qr' && typeof line.qr_data_url === 'string' && line.qr_data_url.startsWith('data:image/png;base64,')) {
+      const qr = document.createElement('img');
+      qr.className = 'linked-device-qr';
+      qr.src = line.qr_data_url;
+      qr.alt = 'Scan to pair WhatsApp line ' + line.line_id;
+      row.append(qr);
+    }
+    const connected = line.status === 'connected';
+    if (!connected) {
+      const pair = document.createElement('button');
+      pair.type = 'button'; pair.className = 'btn small';
+      pair.textContent = line.status === 'qr' ? 'Refresh pairing' : 'Pair WhatsApp';
+      pair.disabled = state.linkedDeviceBusy || state.whatsappBusy || line.status === 'connecting';
+      pair.onclick = () => changeLinkedDeviceConnection(line.line_id, 'connect');
+      row.append(pair);
+    }
+    const remove = document.createElement('button');
+    remove.type = 'button'; remove.className = 'btn small danger';
+    remove.textContent = 'Remove and unlink';
+    remove.disabled = state.linkedDeviceBusy || state.whatsappBusy;
+    remove.onclick = () => removeLinkedDeviceNumber(line.line_id);
+    row.append(remove);
+    container.append(row);
+  }
+  text($('linkedDeviceStatus'), 'Only paired lines added to the app can send or receive messages here.');
+}
+
+async function loadLinkedDeviceStatus() {
+  if (!canManageWhatsApp() || !state.agent?.linked_device_available || state.linkedDeviceBusy) return;
+  const request = ++state.linkedDeviceRequest;
+  try {
+    const payload = await api('/api/support/whatsapp-linked-device/status');
+    if (request === state.linkedDeviceRequest && state.activeModal === 'whatsappModal') renderLinkedDeviceStatus(payload);
+  } catch (error) {
+    if (request !== state.linkedDeviceRequest || state.activeModal !== 'whatsappModal') return;
+    $('linkedDeviceSection').classList.remove('hidden');
+    $('linkedDeviceLines').replaceChildren();
+    text($('linkedDeviceStatus'), error.message || 'The WhatsApp connection service is unavailable.');
+    $('addLinkedDeviceBtn').disabled = state.linkedDeviceBusy || state.whatsappBusy;
+  }
+}
+
+function linkedDeviceAdditionStorageKey() {
+  return 'shipment-support-linked-device-addition:' + (state.agent?.id || '');
+}
+
+function pendingLinkedDeviceAddition() {
+  if (state.linkedDeviceAdditionId) return state.linkedDeviceAdditionId;
+  try {
+    const pending = sessionStorage.getItem(linkedDeviceAdditionStorageKey());
+    if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(pending || '')) state.linkedDeviceAdditionId = pending;
+  } catch (_) {}
+  return state.linkedDeviceAdditionId;
+}
+
+function saveLinkedDeviceAddition(requestId) {
+  state.linkedDeviceAdditionId = requestId;
+  try {
+    if (requestId) sessionStorage.setItem(linkedDeviceAdditionStorageKey(), requestId);
+    else sessionStorage.removeItem(linkedDeviceAdditionStorageKey());
+  } catch (_) {}
+}
+
+async function addLinkedDeviceNumber() {
+  if (!canManageWhatsApp() || !state.agent?.linked_device_available || state.linkedDeviceBusy || state.whatsappBusy) return;
+  // Keep the same request ID after a lost response so retrying resumes its line.
+  saveLinkedDeviceAddition(pendingLinkedDeviceAddition() || crypto.randomUUID());
+  state.linkedDeviceBusy = true;
+  state.linkedDeviceRequest++;
+  clearWhatsAppFeedback();
+  setButtonBusy($('addLinkedDeviceBtn'), true, 'Linking…');
+  try {
+    const payload = await api('/api/support/whatsapp-linked-device/lines', {
+      method: 'POST', body: JSON.stringify({request_id: state.linkedDeviceAdditionId}),
+    });
+    saveLinkedDeviceAddition(null);
+    if (payload.registry) renderWhatsAppRegistry(payload.registry);
+    renderLinkedDeviceStatus(payload);
+    const added = (payload.lines || []).find(line => line.line_id === payload.added_line_id);
+    showWhatsAppFeedback('whatsappSuccess', added?.status === 'connected'
+      ? 'WhatsApp number connected. Choose Add to app to activate it.'
+      : 'Scan the new pairing code using the number you want to link, then choose Add to app.');
+  } catch (error) {
+    if (error.status === 409) {
+      saveLinkedDeviceAddition(null);
+      showWhatsAppFeedback('whatsappError', error.message + ' Choose Link another number to start a new pairing.');
+    } else showWhatsAppFeedback('whatsappError', error.message + ' Retry linking to resume this request.');
+  } finally {
+    state.linkedDeviceBusy = false;
+    setButtonBusy($('addLinkedDeviceBtn'), false);
+    if (state.linkedDeviceStatus) renderLinkedDeviceStatus(state.linkedDeviceStatus);
+    else {
+      $('addLinkedDeviceBtn').disabled = false;
+      $('addLinkedDeviceBtn').textContent = state.linkedDeviceAdditionId ? 'Retry linking' : 'Link another number';
+    }
+    if (state.linkedDeviceAdditionId) {
+      try { await loadWhatsAppRegistry(); }
+      catch (_) { await loadLinkedDeviceStatus(); }
+    } else await loadLinkedDeviceStatus();
+  }
+}
+
+async function removeLinkedDeviceNumber(lineId) {
+  if (!canManageWhatsApp() || state.linkedDeviceBusy || state.whatsappBusy) return;
+  if (!confirm('Remove and unlink this WhatsApp number completely? It will be signed out and removed from the app. Active conversations on this number will be closed; their chat history will be kept.')) return;
+  state.linkedDeviceBusy = true;
+  state.linkedDeviceRequest++;
+  clearWhatsAppFeedback();
+  if (state.linkedDeviceStatus) renderLinkedDeviceStatus(state.linkedDeviceStatus);
+  if (state.whatsappRegistry) renderWhatsAppRegistry(state.whatsappRegistry);
+  try {
+    const payload = await api('/api/support/whatsapp-linked-device/lines/' + encodeURIComponent(lineId), {
+      method: 'DELETE', body: JSON.stringify({close_active_tickets: true}),
+    });
+    saveLinkedDeviceAddition(null);
+    if (payload.registry) renderWhatsAppRegistry(payload.registry);
+    renderLinkedDeviceStatus(payload);
+    showWhatsAppFeedback('whatsappSuccess', 'WhatsApp number removed and unlinked. Its chat history remains available.');
+  } catch (error) {
+    showWhatsAppFeedback('whatsappError', error.message);
+  } finally {
+    state.linkedDeviceBusy = false;
+    try { await loadWhatsAppRegistry(); }
+    catch (_) {
+      if (state.whatsappRegistry) renderWhatsAppRegistry(state.whatsappRegistry);
+      if (state.linkedDeviceStatus) renderLinkedDeviceStatus(state.linkedDeviceStatus);
+    }
+  }
+}
+
+async function changeLinkedDeviceConnection(lineId, action) {
+  if (!canManageWhatsApp() || state.linkedDeviceBusy) return;
+  if (action === 'disconnect' && !confirm('Unlink this WhatsApp device? You will need to pair it again to use this connection.')) return;
+  state.linkedDeviceBusy = true;
+  state.linkedDeviceRequest++;
+  clearWhatsAppFeedback();
+  try {
+    const payload = await api('/api/support/whatsapp-linked-device/lines/' + encodeURIComponent(lineId) + '/' + action, {method: 'POST'});
+    renderLinkedDeviceStatus(payload);
+    if (action === 'disconnect') showWhatsAppFeedback('whatsappSuccess', 'WhatsApp device unlinked.');
+  } catch (error) {
+    showWhatsAppFeedback('whatsappError', error.message);
+  } finally {
+    state.linkedDeviceBusy = false;
+    if (state.linkedDeviceStatus) renderLinkedDeviceStatus(state.linkedDeviceStatus);
+  }
+}
+
+async function loadWhatsAppRegistry() {
+  if (!canManageWhatsApp()) return;
+  const payload = await api('/api/support/whatsapp-numbers');
+  renderWhatsAppRegistry(payload);
+  await loadLinkedDeviceStatus();
+}
+
+async function openWhatsAppModal() {
+  if (!canManageWhatsApp() || state.whatsappBusy) return;
+  clearWhatsAppFeedback();
+  openDialog('whatsappModal', 'wabaIdInput');
+  state.whatsappBusy = true;
+  $('refreshWhatsAppBtn').disabled = true;
+  try {
+    await loadWhatsAppRegistry();
+  } catch (error) {
+    showWhatsAppFeedback('whatsappError', error.message);
+  } finally {
+    state.whatsappBusy = false;
+    $('refreshWhatsAppBtn').disabled = false;
+    if (state.whatsappRegistry) renderWhatsAppRegistry(state.whatsappRegistry);
+  }
+}
+
+function closeWhatsAppModal() {
+  if (state.whatsappBusy || state.linkedDeviceBusy) return;
+  state.linkedDeviceRequest++;
+  $('linkedDeviceLines').replaceChildren();
+  state.linkedDeviceStatus = null;
+  clearWhatsAppFeedback();
+  closeDialog('whatsappModal');
+}
+
+async function syncWaba(wabaId) {
+  if (!canManageWhatsApp() || state.whatsappBusy) return;
+  const value = String(wabaId || '').trim();
+  if (!/^[0-9]{5,64}$/.test(value)) {
+    showWhatsAppFeedback('whatsappError', 'Enter a valid numeric WABA ID.');
+    return;
+  }
+  state.whatsappBusy = true;
+  clearWhatsAppFeedback();
+  setButtonBusy($('syncWabaBtn'), true, 'Syncing…');
+  try {
+    const payload = await api('/api/support/whatsapp-accounts/sync', {method:'POST', body: JSON.stringify({waba_id: value})});
+    renderWhatsAppRegistry(payload);
+    $('wabaIdInput').value = '';
+    showWhatsAppFeedback('whatsappSuccess', 'Meta account synced. New phone numbers remain disabled until you add them to the app.');
+  } catch (error) {
+    showWhatsAppFeedback('whatsappError', error.message);
+  } finally {
+    state.whatsappBusy = false;
+    setButtonBusy($('syncWabaBtn'), false);
+    if (state.whatsappRegistry) renderWhatsAppRegistry(state.whatsappRegistry);
+  }
+}
+
+async function syncWabaForm(event) {
+  event.preventDefault();
+  if (!$('wabaSyncForm').reportValidity()) return;
+  await syncWaba($('wabaIdInput').value);
+}
+
+async function setWhatsAppNumberState(phoneNumberId, enabled) {
+  if (!canManageWhatsApp() || state.whatsappBusy || state.linkedDeviceBusy) return;
+  if (!enabled && !confirm('Remove this WhatsApp number from the chatbot and support app? Historical tickets will remain available.')) return;
+  state.whatsappBusy = true;
+  clearWhatsAppFeedback();
+  try {
+    const payload = await api('/api/support/whatsapp-numbers/' + encodeURIComponent(phoneNumberId), {method:'PUT', body: JSON.stringify({enabled: Boolean(enabled)})});
+    renderWhatsAppRegistry(payload);
+    showWhatsAppFeedback('whatsappSuccess', enabled ? 'WhatsApp number added to the app.' : 'WhatsApp number removed from the app.');
+  } catch (error) {
+    showWhatsAppFeedback('whatsappError', error.message);
+  } finally {
+    state.whatsappBusy = false;
+    if (state.whatsappRegistry) renderWhatsAppRegistry(state.whatsappRegistry);
+  }
+}
+
+async function refreshWhatsAppRegistry() {
+  if (!canManageWhatsApp() || state.whatsappBusy) return;
+  state.whatsappBusy = true;
+  clearWhatsAppFeedback();
+  setButtonBusy($('refreshWhatsAppBtn'), true, 'Refreshing…');
+  try {
+    await loadWhatsAppRegistry();
+  } catch (error) {
+    showWhatsAppFeedback('whatsappError', error.message);
+  } finally {
+    state.whatsappBusy = false;
+    setButtonBusy($('refreshWhatsAppBtn'), false);
+    if (state.whatsappRegistry) renderWhatsAppRegistry(state.whatsappRegistry);
+  }
 }
 
 function showStaffFeedback(id, message) {
@@ -2998,6 +6298,335 @@ async function deleteStaffAccount(item) {
   }
 }
 
+function showStartChatError(message) {
+  const element = $('startChatError');
+  element.textContent = message || '';
+  element.style.display = message ? 'block' : 'none';
+}
+
+async function openStartChatModal(contact = null) {
+  if (!state.authenticated || state.chatBusy) return;
+  showStartChatError('');
+  $('startChatForm').reset();
+  if (contact) {
+    $('startChatPhone').value = contact.normalized_phone || contact.phone || '';
+    $('startChatName').value = contact.display_name || contact.name || '';
+  }
+  $('startChatLine').replaceChildren(new Option('Loading WhatsApp lines…', ''));
+  openDialog('startChatModal', contact ? 'startChatBody' : 'startChatPhone');
+  try {
+    const data = await api('/api/support/chat-lines');
+    state.chatLines = Array.isArray(data.items) ? data.items : [];
+    const select = $('startChatLine');
+    select.replaceChildren();
+    if (!state.chatLines.length) {
+      select.append(new Option('No enabled WhatsApp lines', ''));
+      showStartChatError('No WhatsApp line is enabled for outbound chats.');
+      $('confirmStartChatBtn').disabled = true;
+      return;
+    }
+    for (const line of state.chatLines) {
+      const label = line.display_phone_number || line.verified_name || line.phone_number_id;
+      select.append(new Option(label, line.phone_number_id));
+    }
+    $('confirmStartChatBtn').disabled = false;
+  } catch (error) {
+    showStartChatError(error.message);
+    $('confirmStartChatBtn').disabled = true;
+  }
+}
+
+function closeStartChatModal() {
+  if (state.chatBusy) return;
+  showStartChatError('');
+  closeDialog('startChatModal');
+}
+
+async function submitStartChat(event) {
+  event.preventDefault();
+  if (state.chatBusy || !$('startChatForm').reportValidity()) return;
+  state.chatBusy = true;
+  setButtonBusy($('confirmStartChatBtn'), true, 'Starting…');
+  showStartChatError('');
+  try {
+    const data = await api('/api/support/chats', {method:'POST', body: JSON.stringify({
+      phone_number: $('startChatPhone').value.trim(),
+      business_phone_number_id: $('startChatLine').value,
+      customer_name: $('startChatName').value.trim() || null,
+      body: $('startChatBody').value.trim()
+    })});
+    closeDialog('startChatModal');
+    setQueueView('chats', {load: false});
+    state.page = 1;
+    saveSupportSelection();
+    await loadQueue();
+    const chat = data.chat || data.ticket;
+    if (chat && chat.id) await openTicket(chat.id, {conversationOrigin: 'STAFF'});
+    notify(data.reopened ? 'Existing WhatsApp chat reopened with its full history.' : 'WhatsApp chat started.');
+  } catch (error) {
+    showStartChatError(error.message);
+  } finally {
+    state.chatBusy = false;
+    setButtonBusy($('confirmStartChatBtn'), false);
+  }
+}
+
+function renderGoogleContactsStatus(status) {
+  state.googleContactsStatus = status || null;
+  const connected = Boolean(status && status.connected);
+  const configured = Boolean(status && status.configured);
+  const account = status && status.account;
+  text($('googleContactsTitle'), connected ? (account?.name || 'Google Contacts') : 'Google Contacts');
+  text($('googleContactsStatus'), connected
+    ? ((account?.email || 'Connected Google account') + (account?.last_synced_at ? ' · synced ' + relativeTime(account.last_synced_at) : ' · not synced yet'))
+    : (configured ? 'Not connected' : 'Google OAuth is not configured on this server'));
+  const manager = canManageGoogleContacts();
+  $('googleContactsConnectBtn').classList.toggle('hidden', connected || !manager);
+  $('googleContactsConnectBtn').disabled = state.googleContactsBusy || !configured;
+  // Syncing only refreshes the already-connected shared account, so every
+  // authenticated staff member may do it. Account ownership changes remain
+  // Supervisor/Admin-only.
+  $('googleContactsSyncBtn').classList.toggle('hidden', !connected);
+  $('googleContactsDisconnectBtn').classList.toggle('hidden', !connected || !manager);
+  $('googleContactsSyncBtn').disabled = state.googleContactsBusy;
+  $('googleContactsDisconnectBtn').disabled = state.googleContactsBusy;
+}
+
+async function loadGoogleContactsStatus() {
+  if (!state.authenticated) return;
+  const status = await api('/api/support/google-contacts/status');
+  renderGoogleContactsStatus(status);
+}
+
+async function connectGoogleContacts() {
+  if (state.googleContactsBusy) return;
+  state.googleContactsBusy = true;
+  renderGoogleContactsStatus(state.googleContactsStatus || {configured: true, connected: false});
+  try {
+    const data = await api('/api/support/google-contacts/connect', {method:'POST'});
+    const popup = window.open(data.authorization_url, 'googleContactsOAuth', 'popup=yes,width=560,height=720,resizable=yes,scrollbars=yes');
+    if (!popup) throw new Error('Allow pop-ups for this support site to connect Google Contacts.');
+    popup.focus();
+  } catch (error) {
+    notify(error.message, 'error');
+  } finally {
+    state.googleContactsBusy = false;
+    renderGoogleContactsStatus(state.googleContactsStatus || {configured: true, connected: false});
+  }
+}
+
+async function syncGoogleContacts() {
+  if (state.googleContactsBusy) return;
+  state.googleContactsBusy = true;
+  renderGoogleContactsStatus(state.googleContactsStatus);
+  try {
+    const data = await api('/api/support/google-contacts/sync', {method:'POST'});
+    notify('Google Contacts synced · ' + Number(data.contact_count || 0) + ' contacts available.');
+    await Promise.all([loadGoogleContactsStatus(), refreshAllQueueCounts()]);
+    if (state.view === 'contacts') await loadQueue({silent: true});
+  } catch (error) {
+    notify(error.message, 'error');
+  } finally {
+    state.googleContactsBusy = false;
+    renderGoogleContactsStatus(state.googleContactsStatus);
+  }
+}
+
+function chooseVcfContactsFile() {
+  if (state.vcfImportBusy) return;
+  $('vcfContactsInput').click();
+}
+
+async function importSelectedVcfContacts() {
+  const input = $('vcfContactsInput');
+  const file = input.files && input.files[0];
+  if (!file || state.vcfImportBusy) return;
+  if (!file.name.toLocaleLowerCase().endsWith('.vcf')) {
+    input.value = '';
+    notify('Choose a .vcf contacts file.', 'error');
+    return;
+  }
+  if (file.size > 10 * 1024 * 1024) {
+    input.value = '';
+    notify('The VCF file is larger than the 10 MB import limit.', 'error');
+    return;
+  }
+
+  state.vcfImportBusy = true;
+  const button = $('importVcfContactsBtn');
+  setButtonBusy(button, true, 'Importing…');
+  try {
+    const form = new FormData();
+    form.append('file', file, file.name);
+    const data = await api('/api/support/contacts/import-vcf', {method:'POST', body: form});
+    const imported = Number(data.imported || 0);
+    const updated = Number(data.updated || 0);
+    const duplicates = Number(data.duplicates_removed || 0);
+    const skipped = Number(data.skipped_without_phone || 0) + Number(data.skipped_invalid_phone || 0);
+    let message = 'VCF imported · ' + imported + ' new contact' + (imported === 1 ? '' : 's');
+    if (updated) message += ' · ' + updated + ' updated';
+    if (duplicates) message += ' · ' + duplicates + ' duplicate' + (duplicates === 1 ? '' : 's') + ' merged';
+    if (skipped) message += ' · ' + skipped + ' skipped';
+    notify(message);
+    await refreshAllQueueCounts();
+    if (state.view === 'contacts') await loadQueue({silent: true});
+  } catch (error) {
+    notify(error.message, 'error');
+  } finally {
+    input.value = '';
+    state.vcfImportBusy = false;
+    setButtonBusy(button, false);
+  }
+}
+
+async function disconnectGoogleContacts() {
+  if (state.googleContactsBusy || !confirm('Disconnect Google Contacts and remove its synced contacts from this support account? Manually saved contacts will remain.')) return;
+  state.googleContactsBusy = true;
+  renderGoogleContactsStatus(state.googleContactsStatus);
+  try {
+    await api('/api/support/google-contacts', {method:'DELETE'});
+    notify('Google Contacts disconnected.');
+    await Promise.all([loadGoogleContactsStatus(), refreshAllQueueCounts()]);
+    if (state.view === 'contacts') await loadQueue({silent: true});
+  } catch (error) {
+    notify(error.message, 'error');
+  } finally {
+    state.googleContactsBusy = false;
+    renderGoogleContactsStatus(state.googleContactsStatus);
+  }
+}
+
+function forwardChoiceRow({kind, id, name, phone, subtitle, badgeLabel = null}) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  const key = kind + ':' + id;
+  button.className = 'contact-picker-row' + (state.forwardSelection?.key === key ? ' selected' : '');
+  const copy = document.createElement('div');
+  const strong = document.createElement('strong');
+  strong.dir = 'auto';
+  strong.textContent = name || phone || 'Contact';
+  const detail = document.createElement('span');
+  detail.textContent = subtitle || phone || '';
+  copy.append(strong, detail);
+  const badge = document.createElement('span');
+  badge.className = 'contact-source' + (badgeLabel === 'Google' ? ' google' : badgeLabel === 'VCF' ? ' vcf' : '');
+  badge.textContent = badgeLabel || (kind === 'contact' ? 'Contact' : 'Conversation');
+  button.append(copy, badge);
+  button.onclick = () => {
+    state.forwardSelection = {key, kind, id, name, phone};
+    renderForwardChoices($('forwardSearch').value.trim());
+    $('confirmForwardBtn').disabled = false;
+  };
+  return button;
+}
+
+function renderForwardChoices(query = '') {
+  const normalized = String(query || '').trim().toLocaleLowerCase();
+  const contactsContainer = $('forwardContactsList');
+  const conversationsContainer = $('forwardConversationsList');
+  contactsContainer.replaceChildren();
+  conversationsContainer.replaceChildren();
+  const contacts = (state.forwardContacts || []).filter(item => {
+    if (!normalized) return true;
+    return [item.display_name, item.normalized_phone, item.email].filter(Boolean).join(' ').toLocaleLowerCase().includes(normalized);
+  });
+  const conversations = (state.forwardConversations || []).filter(item => {
+    if (!normalized) return true;
+    return [item.customer_name, item.whatsapp_phone, item.ticket_reference].filter(Boolean).join(' ').toLocaleLowerCase().includes(normalized);
+  });
+  if (!contacts.length) contactsContainer.append(emptyMarkup('No matching contacts', 'Save a contact, sync Google Contacts, or import a VCF file.', 'users').outer);
+  else for (const item of contacts) contactsContainer.append(forwardChoiceRow({kind:'contact', id:item.contact_key, name:item.display_name, phone:item.normalized_phone, subtitle:(item.email ? item.normalized_phone + ' · ' + item.email : item.normalized_phone), badgeLabel:item.source === 'google' ? 'Google' : item.source === 'vcf' ? 'VCF' : 'Saved'}));
+  if (!conversations.length) conversationsContainer.append(emptyMarkup('No matching active conversations', 'You can still forward directly to a contact.', 'message').outer);
+  else for (const item of conversations) conversationsContainer.append(forwardChoiceRow({kind:'conversation', id:Number(item.id), name:item.customer_name || item.whatsapp_phone, phone:item.whatsapp_phone, subtitle:item.ticket_reference || ('Conversation #' + item.id)}));
+}
+
+async function loadForwardChoices(query = '') {
+  const requestId = ++state.forwardChoiceRequest;
+  const [contacts, mine, chats] = await Promise.all([
+    api('/api/support/contacts?page=1&page_size=100&q=' + encodeURIComponent(query)),
+    api('/api/support/tickets?view=mine&page=1&page_size=100'),
+    api('/api/support/tickets?view=chats&page=1&page_size=100')
+  ]);
+  if (requestId !== state.forwardChoiceRequest) return;
+  state.forwardContacts = Array.isArray(contacts.items) ? contacts.items : [];
+  const all = [...(mine.items || []), ...(chats.items || [])];
+  const seen = new Set();
+  state.forwardConversations = all.filter(item => {
+    if (!item || seen.has(String(item.id))) return false;
+    seen.add(String(item.id));
+    return String(item.id) !== String(state.ticketId)
+      && String(item.current_assignee_id || '') === String(state.agent && state.agent.id || '')
+      && !['RESOLVED', 'CLOSED'].includes(String(item.status || ''))
+      && Boolean(item.active_key);
+  });
+  renderForwardChoices(query);
+}
+
+function showForwardError(message) {
+  const element = $('forwardError');
+  element.textContent = message || '';
+  element.style.display = message ? 'block' : 'none';
+}
+
+async function openForwardModal(message) {
+  if (!message || !message.id || state.forwardBusy) return;
+  state.forwardTarget = {ticketId: Number(state.ticketId), messageId: Number(message.id), preview: messagePreview(message)};
+  state.forwardSelection = null;
+  state.forwardContacts = [];
+  state.forwardConversations = [];
+  text($('forwardSubtitle'), 'Forward: ' + state.forwardTarget.preview);
+  showForwardError('');
+  $('forwardSearch').value = '';
+  $('forwardContactsList').replaceChildren(emptyMarkup('Loading contacts', 'Loading saved and Google contacts…', 'users').outer);
+  $('forwardConversationsList').replaceChildren(emptyMarkup('Loading conversations', 'Loading active conversations…', 'message').outer);
+  $('confirmForwardBtn').disabled = true;
+  openDialog('forwardModal', 'forwardSearch');
+  try {
+    await loadForwardChoices('');
+  } catch (error) {
+    showForwardError(error.message);
+  }
+}
+
+function closeForwardModal() {
+  if (state.forwardBusy) return;
+  state.forwardTarget = null;
+  state.forwardSelection = null;
+  state.forwardChoiceRequest += 1;
+  state.forwardContacts = [];
+  state.forwardConversations = [];
+  showForwardError('');
+  closeDialog('forwardModal');
+}
+
+async function confirmForward() {
+  if (state.forwardBusy || !state.forwardTarget || !state.forwardSelection) return;
+  state.forwardBusy = true;
+  setButtonBusy($('confirmForwardBtn'), true, 'Forwarding…');
+  showForwardError('');
+  try {
+    if (state.forwardSelection.kind === 'conversation') {
+      await api('/api/support/tickets/' + state.forwardTarget.ticketId + '/messages/' + state.forwardTarget.messageId + '/forward', {
+        method:'POST', body: JSON.stringify({destination_ticket_id: Number(state.forwardSelection.id)})
+      });
+    } else {
+      await api('/api/support/tickets/' + state.forwardTarget.ticketId + '/messages/' + state.forwardTarget.messageId + '/forward-contact', {
+        method:'POST', body: JSON.stringify({phone_number: state.forwardSelection.phone, customer_name: state.forwardSelection.name || null})
+      });
+    }
+    closeDialog('forwardModal');
+    state.forwardTarget = null;
+    state.forwardSelection = null;
+    notify('Message forwarded.');
+    refreshAllQueueCounts().catch(() => {});
+  } catch (error) {
+    showForwardError(error.message);
+  } finally {
+    state.forwardBusy = false;
+    setButtonBusy($('confirmForwardBtn'), false);
+  }
+}
+
 function showTransferError(message) {
   const element = $('transferError');
   element.textContent = message || '';
@@ -3015,6 +6644,10 @@ function closeTransferModal() {
 async function openTransferModal() {
   const data = state.currentTicketData;
   if (!data || !data.permissions.can_transfer || state.transferBusy) return;
+  const chat = isStaffChat(data.ticket);
+  text($('transferModalTitle'), chat ? 'Transfer chat' : 'Transfer ticket');
+  text($('transferModalSubtitle'), chat ? 'Assign this chat to another staff member.' : 'Assign this conversation to another staff member.');
+  $('confirmTransferBtn').lastChild.textContent = chat ? 'Transfer chat' : 'Transfer ticket';
   showTransferError('');
   $('transferTarget').replaceChildren(new Option('Loading staff…', ''));
   $('confirmTransferBtn').disabled = true;
@@ -3047,7 +6680,8 @@ async function confirmTransfer() {
   }
   const target = state.transferTargets.find(item => Number(item.id) === targetId);
   if (!target) return;
-  if (!confirm('Transfer this ticket to ' + target.name + '? You will become read-only unless it is transferred back to you.')) return;
+  const chat = isStaffChat(state.currentTicketData?.ticket);
+  if (!confirm('Transfer this ' + (chat ? 'chat' : 'ticket') + ' to ' + target.name + '? You will become read-only unless it is transferred back to you.')) return;
   state.transferBusy = true;
   setButtonBusy($('confirmTransferBtn'), true, 'Transferring…');
   showTransferError('');
@@ -3055,8 +6689,8 @@ async function confirmTransfer() {
     await api('/api/support/tickets/' + state.ticketId + '/transfer', {method:'POST', body: JSON.stringify({target_staff_id: targetId})});
     closeDialog('transferModal');
     state.transferTargets = [];
-    notify('Ticket transferred to ' + target.name + '.');
-    await openTicket(state.ticketId, {silent: true});
+    notify((chat ? 'Chat' : 'Ticket') + ' transferred to ' + target.name + '.');
+    await openTicket(state.ticketId, {silent: true, refreshQueue: true});
   } catch (error) {
     showTransferError(error.message);
   } finally {
@@ -3066,17 +6700,41 @@ async function confirmTransfer() {
 }
 
 $('loginForm').addEventListener('submit', login);
+$('sessionRetryBtn').addEventListener('click', bootstrap);
 $('loginThemeBtn').addEventListener('click', toggleTheme);
 $('themeBtn').addEventListener('click', toggleTheme);
 $('logoutBtn').addEventListener('click', logout);
+$('startChatBtn').addEventListener('click', () => openStartChatModal());
+$('messagePreferencesBtn').addEventListener('click', openMessagePreferencesModal);
+$('aiHeaderBtn').addEventListener('click', openAiSettingsModal);
 $('manageStaffBtn').addEventListener('click', openStaffModal);
+$('manageWhatsAppBtn').addEventListener('click', openWhatsAppModal);
+$('googleContactsConnectBtn').addEventListener('click', connectGoogleContacts);
+$('importVcfContactsBtn').addEventListener('click', chooseVcfContactsFile);
+$('vcfContactsInput').addEventListener('change', importSelectedVcfContacts);
+$('googleContactsSyncBtn').addEventListener('click', syncGoogleContacts);
+$('googleContactsDisconnectBtn').addEventListener('click', disconnectGoogleContacts);
 $('refreshQueueBtn').addEventListener('click', () => loadQueue());
 $('previousPageBtn').addEventListener('click', () => changePage(-1));
 $('nextPageBtn').addEventListener('click', () => changePage(1));
 $('queue').addEventListener('keydown', handleQueueKeydown);
 $('queueSearch').addEventListener('input', event => {
   state.query = event.target.value;
-  renderQueue();
+  if (state.view === 'contacts') {
+    if (state.globalSearchTimer) clearTimeout(state.globalSearchTimer);
+    state.globalSearchTimer = setTimeout(() => loadQueue({silent: true}), 220);
+    return;
+  }
+  if (state.query.trim().length >= 2) {
+    state.globalSearchBusy = true;
+    renderQueue();
+    scheduleGlobalMessageSearch();
+  } else {
+    state.globalSearchResults = [];
+    state.globalSearchRequest += 1;
+    if (state.globalSearchTimer) { clearTimeout(state.globalSearchTimer); state.globalSearchTimer = null; }
+    renderQueue();
+  }
 });
 $('queueSearch').addEventListener('keydown', event => {
   if (event.key === 'Escape' && state.query) {
@@ -3090,7 +6748,22 @@ $('tabs').addEventListener('click', event => {
   if (button) setQueueView(button.dataset.view);
 });
 $('mobileBackBtn').addEventListener('click', closeMobileTicket);
-$('contextToggleBtn').addEventListener('click', openContextPanel);
+$('contextToggleBtn').addEventListener('click', toggleContextPanel);
+$('conversationSearchBtn').addEventListener('click', openConversationSearch);
+$('conversationSearchClose').addEventListener('click', () => closeConversationSearch());
+$('conversationSearchPrev').addEventListener('click', () => moveConversationSearch(-1));
+$('conversationSearchNext').addEventListener('click', () => moveConversationSearch(1));
+$('conversationSearchInput').addEventListener('input', scheduleConversationSearch);
+$('conversationSearchInput').addEventListener('keydown', event => {
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    closeConversationSearch();
+  } else if (event.key === 'Enter') {
+    event.preventDefault();
+    if (event.shiftKey) moveConversationSearch(-1);
+    else moveConversationSearch(1);
+  }
+});
 $('closeContextBtn').addEventListener('click', () => closeContextPanel());
 $('contextBackdrop').addEventListener('click', () => closeContextPanel());
 $('dismissErrorBtn').addEventListener('click', () => showError(''));
@@ -3101,7 +6774,14 @@ $('conversation').addEventListener('scroll', updateScrollLatestButton, {passive:
 
 $('imageBtn').addEventListener('click', chooseImage);
 $('voiceBtn').addEventListener('click', toggleVoiceRecording);
+$('locationBtn').addEventListener('click', openLocationModal);
 $('cancelRecordingBtn').addEventListener('click', cancelVoiceRecording);
+$('cancelReplyBtn').addEventListener('click', clearReplyTarget);
+$('cancelEditBtn').addEventListener('click', () => cancelMessageEdit());
+$('cancelMessageDeleteBtn').addEventListener('click', closeMessageDelete);
+$('cancelMessageDeleteActionBtn').addEventListener('click', closeMessageDelete);
+$('deleteMeBtn').addEventListener('click', () => deleteMessage('me'));
+$('deleteEveryoneBtn').addEventListener('click', () => deleteMessage('everyone'));
 $('imageInput').addEventListener('change', imageSelected);
 $('sendBtn').addEventListener('click', sendMessage);
 $('message').addEventListener('input', () => {
@@ -3110,12 +6790,140 @@ $('message').addEventListener('input', () => {
   updateComposerControls();
 });
 $('message').addEventListener('keydown', event => {
+  if (event.key === 'Escape' && state.editTarget) { event.preventDefault(); cancelMessageEdit(); return; }
   if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
     event.preventDefault();
     sendMessage();
   }
 });
 
+$('closeMessagePreferencesBtn').addEventListener('click', closeMessagePreferencesModal);
+$('cancelMessagePreferencesBtn').addEventListener('click', closeMessagePreferencesModal);
+$('messagePreferencesForm').addEventListener('submit', saveMessagePreferences);
+$('customGreetingMessage').addEventListener('input', updateMessagePreferenceCounts);
+$('customResolutionMessage').addEventListener('input', updateMessagePreferenceCounts);
+
+$('closeAiSettingsBtn').addEventListener('click', closeAiSettingsModal);
+$('cancelAiSettingsBtn').addEventListener('click', closeAiSettingsModal);
+$('aiSettingsForm').addEventListener('submit', saveAiSettings);
+$('aiModeManual').addEventListener('change', syncAiSettingsFields);
+$('aiModeScheduled').addEventListener('change', syncAiSettingsFields);
+
+$('closeWhatsAppBtn').addEventListener('click', closeWhatsAppModal);
+$('addLinkedDeviceBtn').addEventListener('click', addLinkedDeviceNumber);
+$('refreshWhatsAppBtn').addEventListener('click', refreshWhatsAppRegistry);
+$('wabaSyncForm').addEventListener('submit', syncWabaForm);
+$('closeLocationBtn').addEventListener('click', closeLocationModal);
+$('cancelLocationBtn').addEventListener('click', closeLocationModal);
+$('useCurrentLocationBtn').addEventListener('click', useCurrentLocation);
+$('locationForm').addEventListener('submit', sendLocation);
+$('closeMediaViewerBtn').addEventListener('click', closeMediaViewer);
+$('editMediaBtn').addEventListener('click', enterImageEditor);
+$('editorSendBtn').addEventListener('click', sendEditedImage);
+$('editorSelectBtn').addEventListener('click', () => {
+  if (!state.imageEditor) return;
+  state.imageEditor.mode = 'select';
+  $('editorSelectBtn').setAttribute('aria-pressed', 'true');
+  $('editorDrawBtn').setAttribute('aria-pressed', 'false');
+  $('editorTextBtn').setAttribute('aria-pressed', 'false');
+});
+$('editorDrawBtn').addEventListener('click', () => {
+  if (!state.imageEditor) return;
+  state.imageEditor.mode = 'draw';
+  $('editorSelectBtn').setAttribute('aria-pressed', 'false');
+  $('editorDrawBtn').setAttribute('aria-pressed', 'true');
+  $('editorTextBtn').setAttribute('aria-pressed', 'false');
+});
+$('editorTextBtn').addEventListener('click', () => {
+  if (!state.imageEditor) return;
+  state.imageEditor.mode = 'text';
+  $('editorSelectBtn').setAttribute('aria-pressed', 'false');
+  $('editorDrawBtn').setAttribute('aria-pressed', 'false');
+  $('editorTextBtn').setAttribute('aria-pressed', 'true');
+});
+$('editorUndoBtn').addEventListener('click', () => state.imageEditor?.undo());
+$('editorRedoBtn').addEventListener('click', () => state.imageEditor?.redo());
+$('editorEditTextBtn').addEventListener('click', () => state.imageEditor?.editText());
+$('editorDeleteBtn').addEventListener('click', () => state.imageEditor?.removeSelected());
+$('editorColor').addEventListener('change', () => state.imageEditor?.setStyle());
+$('editorSize').addEventListener('change', () => state.imageEditor?.setStyle());
+$('zoomOutBtn').addEventListener('click', () => changeMediaZoom(-0.25));
+$('zoomInBtn').addEventListener('click', () => changeMediaZoom(0.25));
+$('zoomResetBtn').addEventListener('click', resetMediaZoom);
+$('mediaViewerModal').addEventListener('keydown', event => {
+  if (event.key !== 'Enter' || event.shiftKey || event.isComposing || event.repeat ||
+      !state.imageEditor || event.target.closest('button, textarea, select')) return;
+  event.preventDefault();
+  sendEditedImage();
+});
+document.addEventListener('keydown', event => {
+  if (event.code !== 'Space' || !state.imageEditor ||
+      event.target.closest('input, textarea, button, select')) return;
+  window.mediaEditorSpaceDown = true;
+  event.preventDefault();
+});
+window.addEventListener('keyup', event => {
+  if (event.code === 'Space') window.mediaEditorSpaceDown = false;
+});
+window.addEventListener('blur', () => { window.mediaEditorSpaceDown = false; });
+$('mediaViewerBody').addEventListener('wheel', event => {
+  if (state.activeModal !== 'mediaViewerModal' || $('mediaViewerTools').classList.contains('hidden')) return;
+  event.preventDefault();
+  zoomMediaAt(state.mediaZoom * Math.exp(-event.deltaY * 0.0015), event.clientX, event.clientY);
+}, {passive: false});
+const mediaPointers = new Map();
+let lastPinch = null;
+const viewerBody = $('mediaViewerBody');
+viewerBody.addEventListener('pointerdown', event => {
+  if (!state.mediaSource) return;
+  const editor = state.imageEditor;
+  const navigating = editor && (event.button === 1 || window.mediaEditorSpaceDown ||
+    (editor.mode === 'select' && !editor.pointer && state.mediaZoom > 1));
+  if (editor && !navigating && event.pointerType !== 'touch') return;
+  mediaPointers.set(event.pointerId, {x: event.clientX, y: event.clientY});
+  if (mediaPointers.size === 2 && editor) {
+    editor.cancelActiveStroke();
+    for (const pointerId of mediaPointers.keys()) viewerBody.setPointerCapture(pointerId);
+  } else if (navigating || !editor) viewerBody.setPointerCapture(event.pointerId);
+  if (mediaPointers.size === 2) lastPinch = null;
+  if (state.mediaZoom > 1) viewerBody.classList.add('panning');
+  if (navigating || mediaPointers.size > 1 || !editor) event.preventDefault();
+});
+viewerBody.addEventListener('pointermove', event => {
+  if (!mediaPointers.has(event.pointerId)) return;
+  if (state.imageEditor?.pointer && mediaPointers.size === 1) return;
+  const previous = mediaPointers.get(event.pointerId);
+  mediaPointers.set(event.pointerId, {x: event.clientX, y: event.clientY});
+  if (mediaPointers.size === 1 && state.mediaZoom > 1) {
+    state.mediaTranslateX += event.clientX - previous.x;
+    state.mediaTranslateY += event.clientY - previous.y;
+    applyMediaZoom();
+  } else if (mediaPointers.size === 2) {
+    const [a, b] = [...mediaPointers.values()];
+    const now = {distance: Math.hypot(a.x - b.x, a.y - b.y), x: (a.x + b.x) / 2, y: (a.y + b.y) / 2};
+    if (lastPinch) {
+      zoomMediaAt(state.mediaZoom * now.distance / Math.max(1, lastPinch.distance), lastPinch.x, lastPinch.y);
+      state.mediaTranslateX += now.x - lastPinch.x;
+      state.mediaTranslateY += now.y - lastPinch.y;
+      applyMediaZoom();
+    }
+    lastPinch = now;
+  }
+  event.preventDefault();
+});
+for (const name of ['pointerup', 'pointercancel', 'lostpointercapture']) viewerBody.addEventListener(name, event => {
+  mediaPointers.delete(event.pointerId);
+  lastPinch = null;
+  viewerBody.classList.remove('panning');
+});
+viewerBody.addEventListener('dblclick', event => {
+  if (!state.mediaSource || state.imageEditor?.selected >= 0) return;
+  zoomMediaAt(state.mediaZoom > 1 ? 1 : 2, event.clientX, event.clientY);
+});
+window.addEventListener('resize', () => {
+  state.imageEditor?.resize();
+  applyMediaZoom();
+});
 $('closeStaffBtn').addEventListener('click', closeStaffModal);
 $('createStaffBtn').addEventListener('click', openCreateStaff);
 $('refreshStaffBtn').addEventListener('click', loadStaffAccounts);
@@ -3133,38 +6941,94 @@ $('createStaffPasswordConfirm').addEventListener('input', () => validatePassword
 $('editStaffPassword').addEventListener('input', () => setFieldError('editStaffPasswordConfirm', 'editPasswordMatchError', ''));
 $('editStaffPasswordConfirm').addEventListener('input', () => validatePasswordPair('editStaffPassword', 'editStaffPasswordConfirm', 'editPasswordMatchError', false));
 
+$('closeStartChatBtn').addEventListener('click', closeStartChatModal);
+$('cancelStartChatBtn').addEventListener('click', closeStartChatModal);
+$('startChatForm').addEventListener('submit', submitStartChat);
+$('closeForwardBtn').addEventListener('click', closeForwardModal);
+$('cancelForwardBtn').addEventListener('click', closeForwardModal);
+$('confirmForwardBtn').addEventListener('click', confirmForward);
+$('forwardSearch').addEventListener('input', event => {
+  const query = event.target.value.trim();
+  if (state.forwardSearchTimer) clearTimeout(state.forwardSearchTimer);
+  renderForwardChoices(query);
+  state.forwardSearchTimer = setTimeout(() => {
+    loadForwardChoices(query).catch(error => showForwardError(error.message));
+  }, 220);
+});
+
 $('closeTransferBtn').addEventListener('click', closeTransferModal);
 $('cancelTransferBtn').addEventListener('click', closeTransferModal);
 $('confirmTransferBtn').addEventListener('click', confirmTransfer);
 
 document.addEventListener('keydown', handleGlobalKeydown);
+document.addEventListener('pointerdown', unlockNotificationAudio);
 document.addEventListener('click', event => {
   for (const menu of document.querySelectorAll('.action-menu[open]')) {
     if (!menu.contains(event.target)) menu.open = false;
   }
 });
-window.addEventListener('resize', () => {
-  if (window.innerWidth > 1100 && state.contextOpen) closeContextPanel(false);
+window.addEventListener('message', event => {
+  if (event.origin !== window.location.origin || !event.data || typeof event.data !== 'object') return;
+  if (event.data.type === 'google_contacts_connected') {
+    notify(event.data.message || 'Google Contacts connected.');
+    Promise.all([loadGoogleContactsStatus(), refreshAllQueueCounts()]).then(() => {
+      if (state.view === 'contacts') loadQueue({silent: true});
+    }).catch(() => {});
+  } else if (event.data.type === 'google_contacts_error') {
+    notify(event.data.message || 'Google Contacts connection failed.', 'error');
+  }
 });
-window.addEventListener('beforeunload', stopMediaTracks);
-
-document.addEventListener('visibilitychange', () => {
-  if (!document.hidden && state.authenticated && !state.busy && !state.activeModal) {
-    if (state.ticketId) openTicket(state.ticketId, {silent: true});
-    else loadQueue({silent: true});
+window.addEventListener('resize', syncContextLayout);
+window.addEventListener('beforeunload', () => {
+  markPageLeaving();
+  stopMediaTracks();
+});
+window.addEventListener('pagehide', markPageLeaving);
+window.addEventListener('pageshow', event => {
+  state.pageLeaving = false;
+  if (event.persisted && state.authenticated) {
+    if (state.ticketId) openTicket(state.ticketId, {silent: true}).catch(() => {});
+    else loadQueue({silent: true}).catch(() => {});
   }
 });
 
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) clearAttentionIndicator();
+  if (!document.hidden && state.authenticated && !state.busy && !state.activeModal) {
+    if (state.ticketId && !state.conversationSearchOpen) openTicket(state.ticketId, {silent: true});
+    else if (!state.ticketId) loadQueue({silent: true});
+  }
+});
+
+restoreLayoutPreferences();
+installColumnResizer({id: 'queueResizer', variableName: '--queue-width', storageKey: LAYOUT_STORAGE.queueWidth, minimum: 260, maximum: 520, direction: 1, enabled: () => window.innerWidth > 800});
+installColumnResizer({id: 'contextResizer', variableName: '--context-width', storageKey: LAYOUT_STORAGE.contextWidth, minimum: 260, maximum: 520, direction: -1, enabled: () => window.innerWidth > 1100 && state.contextOpen});
 updateComposerCount();
+updateMessagePreferenceCounts();
 updateComposerControls();
 updateQueueSummary();
 bootstrap();
 setInterval(() => {
-  if (!state.authenticated || state.busy || state.mediaRecorder || state.activeModal || document.hidden) return;
+  if (!state.authenticated || state.busy || state.mediaRecorder || state.activeModal || state.conversationSearchOpen) return;
   const audioPlaying = [...document.querySelectorAll('#conversation audio')].some(audio => !audio.paused && !audio.ended);
   if (state.ticketId && !audioPlaying) openTicket(state.ticketId, {silent: true});
   else if (!state.ticketId) loadQueue({silent: true});
-}, __POLL_MS__);
+}, Math.max(3000, __POLL_MS__));
+setInterval(() => {
+  if (state.authenticated && state.activeModal === 'whatsappModal' && !state.whatsappBusy && !state.linkedDeviceBusy) loadLinkedDeviceStatus();
+}, 2000);
+setInterval(() => {
+  if (!state.authenticated || state.busy || state.activeModal) return;
+  pollUnassignedActivity();
+}, Math.max(2000, __POLL_MS__));
+setInterval(() => {
+  if (!state.authenticated) return;
+  refreshAllQueueCounts();
+}, Math.max(5000, __POLL_MS__));
+setInterval(() => {
+  if (!state.authenticated || state.aiSettingsBusy || document.hidden) return;
+  loadAiSettings().catch(error => renderAiSettingsUnavailable(error.message));
+}, Math.max(30000, __POLL_MS__));
 </script>
 </body>
 </html>'''

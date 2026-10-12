@@ -131,6 +131,68 @@ class StaffRepository:
                 )
                 return await cur.fetchone()
 
+
+    async def get_message_preferences(self, staff_id: int) -> dict[str, Any]:
+        pool = await self._ensure_pool()
+        async with pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(
+                    """
+                    SELECT custom_greeting_message, custom_resolution_message, updated_at
+                    FROM staff
+                    WHERE id = %s
+                    LIMIT 1
+                    """,
+                    (int(staff_id),),
+                )
+                row = await cur.fetchone()
+                if row is None:
+                    raise StaffNotFoundError("Staff account not found.")
+                return row
+
+    async def update_message_preferences(
+        self,
+        staff_id: int,
+        *,
+        greeting_message: str | None,
+        resolution_message: str | None,
+    ) -> dict[str, Any]:
+        """Persist one staff member's customer-facing automatic messages."""
+        pool = await self._ensure_pool()
+        async with pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                locks = await self._acquire_named_locks(
+                    cur, [self._account_lock_key(int(staff_id))]
+                )
+                try:
+                    await cur.execute(
+                        """
+                        UPDATE staff
+                        SET custom_greeting_message = %s,
+                            custom_resolution_message = %s,
+                            updated_at = UTC_TIMESTAMP(6)
+                        WHERE id = %s
+                        """,
+                        (greeting_message, resolution_message, int(staff_id)),
+                    )
+                    # rowcount may be zero when values are unchanged, so verify the
+                    # authenticated staff row rather than treating that as not-found.
+                    await cur.execute(
+                        """
+                        SELECT custom_greeting_message, custom_resolution_message, updated_at
+                        FROM staff
+                        WHERE id = %s
+                        LIMIT 1
+                        """,
+                        (int(staff_id),),
+                    )
+                    row = await cur.fetchone()
+                    if row is None:
+                        raise StaffNotFoundError("Staff account not found.")
+                    return row
+                finally:
+                    await self._release_named_locks(cur, locks)
+
     async def get_public_staff_by_id(self, staff_id: int) -> dict[str, Any] | None:
         pool = await self._ensure_pool()
         async with pool.acquire() as conn:
@@ -246,6 +308,33 @@ class StaffRepository:
                     LIMIT 1
                     """,
                     (token_hash,),
+                )
+                return await cur.fetchone()
+
+    async def get_active_session_by_id(self, session_id: int) -> dict[str, Any] | None:
+        pool = await self._ensure_pool()
+        async with pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(
+                    """
+                    SELECT
+                        s.id AS session_id,
+                        s.staff_id,
+                        s.csrf_hash,
+                        s.expires_at,
+                        st.name,
+                        st.email,
+                        st.role,
+                        st.is_active
+                    FROM staff_sessions s
+                    INNER JOIN staff st ON st.id = s.staff_id
+                    WHERE s.id = %s
+                      AND s.revoked_at IS NULL
+                      AND s.expires_at > UTC_TIMESTAMP(6)
+                      AND st.is_active = 1
+                    LIMIT 1
+                    """,
+                    (int(session_id),),
                 )
                 return await cur.fetchone()
 

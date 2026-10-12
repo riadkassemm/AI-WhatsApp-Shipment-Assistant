@@ -128,11 +128,11 @@ def test_pending_request_is_kept_when_model_asks_for_userid_without_auth_flag() 
         assert conversation.auth_state == "awaiting_credentials"
         assert conversation.pending_request == "bade tshefle order"
         assert conversation.pending_tool_name is None
-        assert client.sent == [(conversation.phone_number, "B3atle l user ID taba3ak.")]
+        assert client.sent == [(conversation.phone_number, "Please b3atle el user ID.")]
         assert not _ARABIC_SCRIPT_RE.search(client.sent[0][1])
         assert conversation.messages[-1] == {
             "role": "assistant",
-            "content": "B3atle l user ID taba3ak.",
+            "content": "Please b3atle el user ID.",
         }
 
     asyncio.run(run())

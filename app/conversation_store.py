@@ -310,6 +310,11 @@ def _inbound_message_key(
     return f"whatsapp:inbound:{message_id}"
 
 
+def _inbound_revoked_key(message_id: str) -> str:
+    digest = hashlib.sha256(message_id.encode("utf-8")).hexdigest()
+    return f"whatsapp:inbound-revoked:{digest}"
+
+
 def _sender_digest(phone_number: str) -> str:
     return hashlib.sha256(str(phone_number).encode("utf-8")).hexdigest()
 
@@ -393,6 +398,13 @@ class BaseConversationStore:
         """
         Release a processing claim after a retryable failure.
         """
+        raise NotImplementedError
+
+    async def mark_inbound_revoked(self, message_id: str) -> None:
+        """Prevent a revoked customer message queued earlier from running."""
+        raise NotImplementedError
+
+    async def is_inbound_revoked(self, message_id: str) -> bool:
         raise NotImplementedError
 
     async def claim_conversation_processing(
@@ -624,6 +636,7 @@ class InMemoryConversationStore(
         self._conversation_claims: dict[str, tuple[str, str, float]] = {}
         self._outbound_replies: dict[str, tuple[str, str, float]] = {}
         self._pending_inbound_work: dict[str, list[dict[str, Any]]] = {}
+        self._revoked_inbound: dict[str, float] = {}
 
         # Short-lived password-first auth values. These never enter Conversation
         # JSON/history and are popped immediately when the missing userid arrives.
@@ -775,6 +788,16 @@ class InMemoryConversationStore(
                 message_id,
                 None,
             )
+
+    async def mark_inbound_revoked(self, message_id: str) -> None:
+        self._revoked_inbound[message_id] = time.monotonic() + INBOUND_COMPLETED_TTL_SECONDS
+
+    async def is_inbound_revoked(self, message_id: str) -> bool:
+        expiry = self._revoked_inbound.get(message_id, 0)
+        if expiry > time.monotonic():
+            return True
+        self._revoked_inbound.pop(message_id, None)
+        return False
 
 
     @staticmethod
@@ -1280,6 +1303,15 @@ class RedisConversationStore(
             ),
             expected,
         )
+
+    async def mark_inbound_revoked(self, message_id: str) -> None:
+        await self._client.set(
+            _inbound_revoked_key(message_id), "1",
+            ex=INBOUND_COMPLETED_TTL_SECONDS,
+        )
+
+    async def is_inbound_revoked(self, message_id: str) -> bool:
+        return bool(await self._client.exists(_inbound_revoked_key(message_id)))
 
 
 def _build_store() -> BaseConversationStore:

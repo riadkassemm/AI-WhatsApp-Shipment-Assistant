@@ -7,6 +7,7 @@ import time
 
 from fastapi import FastAPI, Request, Response
 
+from app.ai_availability import EffectiveAIAvailability, ai_availability_service
 from app.ai_tools import NEEDS_VERIFIED_IDENTITY, dispatch_tool_call
 from app.config import settings
 from app.conversation_store import Conversation, conversation_store
@@ -52,12 +53,17 @@ from app.security import (
 from app.support_api import router as support_api_router
 from app.support_repository import SupportConflictError
 from app.support_media import SupportMediaError
+from app.support_models import HandoffRequest
 from app.support_service import sanitize_support_text, support_service
 from app.support_ui import router as support_ui_router
+from app.linked_device_api import router as linked_device_api_router
+from app.whatsapp_registry import WhatsAppRegistryError, whatsapp_registry_service
 from app.whatsapp_client import (
     IncomingWhatsAppMessage,
     WhatsAppSendError,
     extract_incoming_message,
+    get_transport,
+    is_linked_device_message,
     whatsapp_client,
 )
 
@@ -68,6 +74,7 @@ logger = logging.getLogger("shipment-bot")
 app = FastAPI(title="AI Shipment Assistant - WhatsApp Backend")
 app.include_router(support_api_router)
 app.include_router(support_ui_router)
+app.include_router(linked_device_api_router)
 
 
 @app.middleware("http")
@@ -176,13 +183,22 @@ def _queued_inbound_item(
         "message_type": incoming.message_type,
         "text": incoming.text,
         "timestamp": incoming.timestamp,
+        "business_account_id": incoming.business_account_id,
         "business_phone_number_id": incoming.business_phone_number_id,
         "business_display_phone_number": incoming.business_display_phone_number,
         "media_id": incoming.media_id,
         "media_mime_type": incoming.media_mime_type,
         "media_sha256": incoming.media_sha256,
         "media_caption": incoming.media_caption,
+        "media_filename": incoming.media_filename,
         "is_voice": incoming.is_voice,
+        "context_message_id": incoming.context_message_id,
+        "location_latitude": incoming.location_latitude,
+        "location_longitude": incoming.location_longitude,
+        "location_name": incoming.location_name,
+        "location_address": incoming.location_address,
+        "reaction_message_id": incoming.reaction_message_id,
+        "reaction_emoji": incoming.reaction_emoji,
         "claim_token": claim_token,
     }
 
@@ -199,6 +215,15 @@ def _incoming_from_queued_item(item: dict) -> IncomingWhatsAppMessage | None:
     media_mime_type = item.get("media_mime_type")
     media_sha256 = item.get("media_sha256")
     media_caption = item.get("media_caption")
+    media_filename = item.get("media_filename")
+    context_message_id = item.get("context_message_id")
+    location_latitude = item.get("location_latitude")
+    location_longitude = item.get("location_longitude")
+    location_name = item.get("location_name")
+    location_address = item.get("location_address")
+    reaction_message_id = item.get("reaction_message_id")
+    reaction_emoji = item.get("reaction_emoji")
+    business_account_id = item.get("business_account_id")
     business_phone_number_id = item.get("business_phone_number_id")
     business_display_phone_number = item.get("business_display_phone_number")
     return IncomingWhatsAppMessage(
@@ -207,6 +232,7 @@ def _incoming_from_queued_item(item: dict) -> IncomingWhatsAppMessage | None:
         message_type=str(message_type),
         text=str(text) if text is not None else None,
         timestamp=str(timestamp) if timestamp else None,
+        business_account_id=(str(business_account_id) if business_account_id else None),
         business_phone_number_id=(
             str(business_phone_number_id) if business_phone_number_id else None
         ),
@@ -217,7 +243,17 @@ def _incoming_from_queued_item(item: dict) -> IncomingWhatsAppMessage | None:
         media_mime_type=str(media_mime_type) if media_mime_type else None,
         media_sha256=str(media_sha256) if media_sha256 else None,
         media_caption=str(media_caption) if media_caption is not None else None,
+        media_filename=str(media_filename) if media_filename is not None else None,
         is_voice=bool(item.get("is_voice")),
+        context_message_id=(str(context_message_id) if context_message_id else None),
+        location_latitude=(float(location_latitude) if location_latitude is not None else None),
+        location_longitude=(float(location_longitude) if location_longitude is not None else None),
+        location_name=str(location_name) if location_name is not None else None,
+        location_address=str(location_address) if location_address is not None else None,
+        reaction_message_id=(
+            str(reaction_message_id) if reaction_message_id is not None else None
+        ),
+        reaction_emoji=(str(reaction_emoji) if reaction_emoji is not None else None),
     )
 
 
@@ -259,6 +295,7 @@ def _combine_inbound_burst(items: list[dict]) -> IncomingWhatsAppMessage | None:
         message_type="text",
         text=combined_text,
         timestamp=latest.timestamp,
+        business_account_id=latest.business_account_id,
         business_phone_number_id=latest.business_phone_number_id,
         business_display_phone_number=latest.business_display_phone_number,
     )
@@ -309,6 +346,20 @@ async def _requeue_inbound_items_front(phone_number: str, items: list[dict]) -> 
 
 async def _collect_inbound_burst(phone_number: str) -> list[dict]:
     debounce = max(0.0, float(settings.whatsapp_message_burst_debounce_seconds))
+    if debounce:
+        # Human-owned conversations do not benefit from the AI turn debounce.
+        # Route their queued messages immediately so the support timeline updates
+        # without an intentional quiet-period wait.
+        business_id, separator, customer_phone = phone_number.partition(":")
+        try:
+            active_ticket = await support_service.get_active_ticket(
+                customer_phone if separator else phone_number,
+                business_phone_number_id=business_id if separator else None,
+            )
+            if active_ticket:
+                debounce = 0.0
+        except Exception:
+            logger.exception("Could not check active ticket before inbound queue debounce")
     max_wait = max(debounce, float(settings.whatsapp_message_burst_max_wait_seconds))
     if debounce:
         started = time.monotonic()
@@ -347,6 +398,23 @@ async def _process_inbound_burst(phone_number: str, items: list[dict]) -> Respon
     if not items:
         return _json_response(200, {"status": "queue_empty"})
 
+    # A WhatsApp revoke can arrive after its original webhook was acknowledged
+    # but before this durable queue is drained. Drop only that provider ID.
+    try:
+        revoked = [
+            item for item in items
+            if await _is_inbound_revoked(str(item.get("message_id") or ""))
+        ]
+    except Exception:
+        await _requeue_inbound_items_front(phone_number, items)
+        return _json_response(503, {"status": "revocation_state_unavailable"})
+    if revoked:
+        await _complete_queued_inbound_items(revoked)
+        revoked_ids = {id(item) for item in revoked}
+        items = [item for item in items if id(item) not in revoked_ids]
+        if not items:
+            return _json_response(200, {"status": "revoked_message_ignored"})
+
     # Never merge messages while a human owns the ticket; the support timeline should
     # retain each exact inbound WhatsApp message as its own durable row.
     first_incoming = _incoming_from_queued_item(items[0]) if items else None
@@ -359,7 +427,27 @@ async def _process_inbound_burst(phone_number: str, items: list[dict]) -> Respon
     except Exception:
         active_ticket = object()
 
-    combined = None if active_ticket is not None else _combine_inbound_burst(items)
+    combined = None
+    combined_ai_availability: EffectiveAIAvailability | None = None
+    if active_ticket is None:
+        candidate = _combine_inbound_burst(items)
+        if candidate is not None:
+            # Do not collapse several original WhatsApp messages into one synthetic
+            # turn while AI is globally unavailable. Human support must retain each
+            # original inbound message ID in its durable timeline.
+            try:
+                availability = await ai_availability_service.get_effective_ai_availability()
+            except Exception:
+                availability = None
+                logger.exception(
+                    "AI availability could not be evaluated before inbound burst routing: "
+                    "customer_ref=%s",
+                    safe_log_identifier(phone_number, "wa"),
+                )
+            if availability is not None and availability.effective_ai_enabled:
+                combined = candidate
+                combined_ai_availability = availability
+
     if combined is not None:
         logger.info(
             "Processing WhatsApp message burst: customer_ref=%s count=%d last_message_id=%s",
@@ -367,7 +455,10 @@ async def _process_inbound_burst(phone_number: str, items: list[dict]) -> Respon
             len(items),
             combined.message_id,
         )
-        response = await _process_incoming_message(combined)
+        response = await _process_incoming_message(
+            combined,
+            ai_availability_snapshot=combined_ai_availability,
+        )
         if _response_is_retryable(response):
             await _requeue_inbound_items_front(phone_number, items)
             return response
@@ -450,6 +541,13 @@ def _reply_idempotency_key(source_message_id: str) -> str:
     return f"primary-customer-reply:{source_message_id}"
 
 
+async def _is_inbound_revoked(message_id: str | None) -> bool:
+    if not message_id or not is_linked_device_message(message_id):
+        return False
+    checker = getattr(conversation_store, "is_inbound_revoked", None)
+    return bool(await checker(message_id)) if callable(checker) else False
+
+
 async def _send_text_once(
     *,
     to: str,
@@ -470,6 +568,9 @@ async def _send_text_once(
     if not source_message_id:
         return await _provider_send()
 
+    if await _is_inbound_revoked(source_message_id):
+        return {"revoked": True}
+
     key = _reply_idempotency_key(source_message_id)
     token = await conversation_store.claim_outbound_reply(key)
     if token is None:
@@ -478,6 +579,10 @@ async def _send_text_once(
             source_message_id,
         )
         return {"deduplicated": True}
+
+    if await _is_inbound_revoked(source_message_id):
+        await conversation_store.complete_outbound_reply(key, token)
+        return {"revoked": True}
 
     try:
         response = await _provider_send()
@@ -1071,6 +1176,9 @@ async def _handle_ai_result(
                 source_whatsapp_message_id=source_message_id,
                 source_message_text=user_message_for_ticket,
                 source_whatsapp_timestamp=(incoming.timestamp if incoming else None),
+                reply_to_whatsapp_message_id=(
+                    incoming.context_message_id if incoming else None
+                ),
                 business_phone_number_id=(
                     incoming.business_phone_number_id if incoming else None
                 ),
@@ -1417,8 +1525,182 @@ async def verify_webhook(request: Request) -> Response:
         return Response(content=challenge, media_type="text/plain")
     return Response(status_code=403)
 
+def _human_inbound_body(
+    incoming: IncomingWhatsAppMessage,
+    parsed_auth: CredentialExtraction,
+) -> str:
+    if incoming.message_type == "image" and incoming.media_id:
+        return sanitize_support_text(incoming.media_caption).strip() or "Image"
+    if incoming.message_type == "sticker" and incoming.media_id:
+        return "Sticker"
+    if incoming.message_type == "audio" and incoming.media_id:
+        return "Voice note" if incoming.is_voice else "Audio message"
+    if incoming.message_type == "document" and incoming.media_id:
+        caption = sanitize_support_text(incoming.media_caption).strip()
+        filename = sanitize_support_text(incoming.media_filename).strip()
+        return caption or filename or "PDF document"
+    if incoming.message_type == "location":
+        name = sanitize_support_text(incoming.location_name).strip()
+        address = sanitize_support_text(incoming.location_address).strip()
+        if name and address:
+            return f"Location: {name} — {address}"
+        if name or address:
+            return f"Location: {name or address}"
+        if incoming.location_latitude is not None and incoming.location_longitude is not None:
+            return f"Location: {incoming.location_latitude:.6f}, {incoming.location_longitude:.6f}"
+        return "Location"
+    if incoming.text is None:
+        return f"[Unsupported WhatsApp {incoming.message_type} message received]"
+    if parsed_auth.secret_detected:
+        return sanitize_support_text(parsed_auth.redacted_text)
+    return sanitize_support_text(incoming.text)
+
+
+async def _handoff_incoming_without_ai(
+    *,
+    conversation: Conversation,
+    incoming: IncomingWhatsAppMessage,
+    parsed_auth: CredentialExtraction,
+    reason: str,
+    summary: str,
+    status_name: str,
+) -> Response:
+    """Ensure one inbound message is durably owned by human support, without AI.
+
+    Ticket creation is the authoritative boundary. Existing repository uniqueness
+    constraints make concurrent/retried calls idempotent. Media is downloaded only
+    after the ticket and timeline row exist; metadata alone is enough to identify a
+    WhatsApp voice note for routing.
+    """
+    source_text = _human_inbound_body(incoming, parsed_auth) if incoming.text is not None else None
+    try:
+        ticket, created = await support_service.finalize_handoff(
+            conversation=conversation,
+            handoff=HandoffRequest(reason=reason, summary=summary),
+            source_whatsapp_message_id=incoming.message_id,
+            source_message_text=source_text,
+            source_whatsapp_timestamp=incoming.timestamp,
+            reply_to_whatsapp_message_id=incoming.context_message_id,
+            business_phone_number_id=incoming.business_phone_number_id,
+            business_display_phone_number=incoming.business_display_phone_number,
+        )
+    except Exception:
+        logger.exception(
+            "Durable human handoff failed before AI routing: customer_ref=%s "
+            "message_id=%s reason=%s",
+            safe_log_identifier(conversation.phone_number, "wa"),
+            incoming.message_id,
+            reason,
+        )
+        return _json_response(503, {"status": "human_handoff_unavailable"})
+
+    # finalize_handoff persists text triggers itself. Media and other non-text
+    # messages need their own durable timeline row after the ticket exists.
+    if incoming.text is None:
+        try:
+            message, _message_created = await support_service.route_human_inbound(
+                ticket=ticket,
+                body=_human_inbound_body(incoming, parsed_auth),
+                whatsapp_message_id=incoming.message_id,
+                whatsapp_timestamp=incoming.timestamp,
+                message_type=incoming.message_type,
+                reply_to_whatsapp_message_id=incoming.context_message_id,
+                location_latitude=incoming.location_latitude,
+                location_longitude=incoming.location_longitude,
+                location_name=incoming.location_name,
+                location_address=incoming.location_address,
+                current_language=conversation.current_language,
+                communication_style=conversation.communication_style,
+            )
+            if incoming.message_type in {"image", "audio", "document", "sticker"} and incoming.media_id:
+                try:
+                    await support_service.capture_inbound_media(
+                        ticket=ticket,
+                        message=message,
+                        media_id=incoming.media_id,
+                        message_type=incoming.message_type,
+                        expected_mime_type=incoming.media_mime_type,
+                        filename=incoming.media_filename,
+                    )
+                except SupportMediaError as exc:
+                    if exc.retryable:
+                        logger.warning(
+                            "Human-handoff media capture will be retried: customer_ref=%s "
+                            "message_id=%s type=%s reason=%s error=%s",
+                            safe_log_identifier(conversation.phone_number, "wa"),
+                            incoming.message_id,
+                            incoming.message_type,
+                            reason,
+                            sanitize_support_text(str(exc))[:300],
+                        )
+                        return _json_response(503, {"status": "media_capture_retry"})
+                    logger.warning(
+                        "Human-handoff media could not be stored: customer_ref=%s "
+                        "message_id=%s type=%s reason=%s error=%s",
+                        safe_log_identifier(conversation.phone_number, "wa"),
+                        incoming.message_id,
+                        incoming.message_type,
+                        reason,
+                        sanitize_support_text(str(exc))[:300],
+                    )
+        except SupportConflictError:
+            # An agent may resolve a just-created ticket before this secondary media
+            # row is inserted. Retrying the webhook is safer than losing the inbound.
+            logger.warning(
+                "Human handoff changed state while persisting inbound: customer_ref=%s "
+                "message_id=%s reason=%s",
+                safe_log_identifier(conversation.phone_number, "wa"),
+                incoming.message_id,
+                reason,
+            )
+            return _json_response(503, {"status": "human_message_persist_failed"})
+        except Exception:
+            logger.exception(
+                "Failed to persist inbound after human handoff: customer_ref=%s "
+                "message_id=%s reason=%s",
+                safe_log_identifier(conversation.phone_number, "wa"),
+                incoming.message_id,
+                reason,
+            )
+            return _json_response(503, {"status": "human_message_persist_failed"})
+
+    try:
+        await _send_text_once(
+            to=conversation.phone_number,
+            body=handoff_confirmation(conversation.communication_style),
+            source_message_id=incoming.message_id,
+            phone_number_id=conversation.business_phone_number_id,
+        )
+    except Exception:
+        # Human ownership is already durable. Do not undo it or fall back to AI if
+        # the optional customer-facing transfer confirmation cannot be sent.
+        logger.exception(
+            "Human handoff persisted but transfer confirmation failed: customer_ref=%s "
+            "message_id=%s reason=%s",
+            safe_log_identifier(conversation.phone_number, "wa"),
+            incoming.message_id,
+            reason,
+        )
+
+    logger.info(
+        "Inbound routed to human without AI: customer_ref=%s message_id=%s "
+        "ticket_id=%s reason=%s created=%s",
+        safe_log_identifier(conversation.phone_number, "wa"),
+        incoming.message_id,
+        ticket["id"],
+        reason,
+        created,
+    )
+    return _json_response(
+        200,
+        {"status": status_name, "ticket_id": ticket["id"], "duplicate": not created},
+    )
+
+
 async def _process_incoming_message(
     incoming: IncomingWhatsAppMessage,
+    *,
+    ai_availability_snapshot: EffectiveAIAvailability | None = None,
 ) -> Response:
     """
     Process one uniquely claimed inbound WhatsApp message.
@@ -1427,6 +1709,38 @@ async def _process_incoming_message(
     """
 
     from_number = incoming.from_number
+
+    # Reactions mutate metadata on an existing message. They must never enter the
+    # AI pipeline, create a new ticket, or appear as standalone timeline messages.
+    if incoming.message_type == "reaction":
+        try:
+            reaction = await support_service.route_whatsapp_reaction(
+                from_number=incoming.from_number,
+                target_whatsapp_message_id=incoming.reaction_message_id,
+                emoji=incoming.reaction_emoji,
+                provider_reaction_id=incoming.message_id,
+                provider_timestamp=incoming.timestamp,
+                business_phone_number_id=incoming.business_phone_number_id,
+            )
+        except Exception:
+            logger.exception(
+                "Could not persist WhatsApp reaction: message_id=%s target_id=%s",
+                incoming.message_id,
+                incoming.reaction_message_id,
+            )
+            return _json_response(503, {"status": "reaction_persist_failed"})
+        return _json_response(
+            200,
+            {
+                "status": (
+                    "reaction_removed"
+                    if reaction is not None and not str(reaction.get("emoji") or "")
+                    else "reaction_updated"
+                    if reaction is not None
+                    else "reaction_target_not_found"
+                )
+            },
+        )
 
     # Never log inbound body. Password-only messages can be
     # indistinguishable from ordinary text until conversation state
@@ -1603,25 +1917,9 @@ async def _process_incoming_message(
 
     if active_ticket is not None:
 
-        if incoming.message_type == "image" and incoming.media_id:
-            body = sanitize_support_text(incoming.media_caption).strip() or "Image"
-        elif incoming.message_type == "audio" and incoming.media_id:
-            body = "Voice note" if incoming.is_voice else "Audio message"
-        elif incoming.text is None:
-            body = (
-                f"[Unsupported WhatsApp "
-                f"{incoming.message_type} message received]"
-            )
-
-        elif parsed_auth.secret_detected:
-            # Staff may see the customer's authentication message for continuity,
-            # but never the password itself.
-            body = sanitize_support_text(parsed_auth.redacted_text)
-
-        else:
-            body = sanitize_support_text(
-                incoming.text
-            )
+        # Staff may see authentication attempts for continuity, but never the
+        # password itself. The same formatter is used by automatic handoffs.
+        body = _human_inbound_body(incoming, parsed_auth)
 
         try:
             _message, created = (
@@ -1637,12 +1935,17 @@ async def _process_incoming_message(
                     message_type=(
                         incoming.message_type
                     ),
+                    reply_to_whatsapp_message_id=incoming.context_message_id,
+                    location_latitude=incoming.location_latitude,
+                    location_longitude=incoming.location_longitude,
+                    location_name=incoming.location_name,
+                    location_address=incoming.location_address,
                     current_language=conversation.current_language,
                     communication_style=conversation.communication_style,
                 )
             )
 
-            if incoming.message_type in {"image", "audio"} and incoming.media_id:
+            if incoming.message_type in {"image", "audio", "document", "sticker"} and incoming.media_id:
                 try:
                     await support_service.capture_inbound_media(
                         ticket=active_ticket,
@@ -1650,6 +1953,7 @@ async def _process_incoming_message(
                         media_id=incoming.media_id,
                         message_type=incoming.message_type,
                         expected_mime_type=incoming.media_mime_type,
+                        filename=incoming.media_filename,
                     )
                 except SupportMediaError as exc:
                     if exc.retryable:
@@ -1735,6 +2039,106 @@ async def _process_incoming_message(
                     "duplicate": not created,
                 },
             )
+
+    # =========================================================
+    # HIGH-PRIORITY HUMAN MEDIA ROUTING / AI AVAILABILITY
+    # =========================================================
+
+    # The customer-service application supports WhatsApp images, audio/voice,
+    # PDFs, and customer locations for human agents, but the AI pipeline does not
+    # currently process those message types. Route them into the existing human pipeline
+    # before evaluating AI availability. The media is then downloaded and attached
+    # to the durable ticket so staff can view/play it in the support dashboard.
+    #
+    # Meta marks push-to-talk voice notes as type=audio with audio.voice=true; that
+    # flag only selects the more specific handoff reason/status. No transcription,
+    # image analysis, semantic normalization, or other AI call is attempted.
+    if incoming.message_type in {"image", "audio", "document", "sticker", "location"}:
+        is_voice_note = incoming.message_type == "audio" and incoming.is_voice
+        media_label = (
+            "voice note"
+            if is_voice_note
+            else "image"
+            if incoming.message_type == "image"
+            else "sticker"
+            if incoming.message_type == "sticker"
+            else "PDF document"
+            if incoming.message_type == "document"
+            else "location"
+            if incoming.message_type == "location"
+            else "audio message"
+        )
+        logger.info(
+            "AI-unsupported WhatsApp media received - handing conversation to human: "
+            "customer_ref=%s message_id=%s type=%s voice=%s",
+            customer_ref,
+            incoming.message_id,
+            incoming.message_type,
+            incoming.is_voice,
+        )
+        return await _handoff_incoming_without_ai(
+            conversation=conversation,
+            incoming=incoming,
+            parsed_auth=parsed_auth,
+            reason=(
+                "VOICE_NOTE_UNSUPPORTED"
+                if is_voice_note
+                else "LOCATION_UNSUPPORTED_BY_AI"
+                if incoming.message_type == "location"
+                else "MEDIA_UNSUPPORTED_BY_AI"
+            ),
+            summary=(
+                f"Customer sent a WhatsApp {media_label}. "
+                "It is available to human support, but AI processing for this message type is disabled."
+            ),
+            status_name=(
+                "handed_off_voice_note"
+                if is_voice_note
+                else "handed_off_location"
+                if incoming.message_type == "location"
+                else "handed_off_media"
+            ),
+        )
+
+    # Persistent MariaDB settings are the deployment-wide source of truth. This
+    # check intentionally happens before auth resume, semantic normalization, quota
+    # consumption, prompt/model work, or any other OpenAI-backed operation. If the
+    # settings store is unavailable, fail closed and let the webhook retry rather
+    # than risk an unintended paid AI call.
+    try:
+        ai_availability = (
+            ai_availability_snapshot
+            if ai_availability_snapshot is not None
+            else await ai_availability_service.get_effective_ai_availability()
+        )
+    except Exception:
+        logger.exception(
+            "AI availability evaluation failed closed: customer_ref=%s message_id=%s",
+            customer_ref,
+            incoming.message_id,
+        )
+        return _json_response(503, {"status": "ai_availability_unavailable"})
+
+    if not ai_availability.effective_ai_enabled:
+        logger.info(
+            "AI unavailable globally - handing conversation to human: customer_ref=%s "
+            "message_id=%s control_mode=%s effective_reason=%s",
+            customer_ref,
+            incoming.message_id,
+            ai_availability.configuration.control_mode,
+            ai_availability.effective_reason,
+        )
+        return await _handoff_incoming_without_ai(
+            conversation=conversation,
+            incoming=incoming,
+            parsed_auth=parsed_auth,
+            reason="AI_DISABLED_GLOBAL",
+            summary=(
+                "AI assistant is globally unavailable for this inbound message "
+                f"({ai_availability.effective_reason})."
+            ),
+            status_name="handed_off_ai_disabled",
+        )
 
     # =========================================================
     # UNSUPPORTED NON-TEXT
@@ -1978,6 +2382,12 @@ async def receive_message(
             },
         )
 
+    return await process_whatsapp_payload(payload, source="cloud")
+
+
+async def process_whatsapp_payload(payload: dict, *, source: str = "cloud") -> Response:
+    """Use the same durable inbound pipeline for both WhatsApp connections."""
+
     # =========================================================
     # DELIVERY / READ STATUS CALLBACKS
     # =========================================================
@@ -2022,6 +2432,44 @@ async def receive_message(
                 "status": "ignored"
             },
         )
+
+    if get_transport(incoming.business_phone_number_id) != source:
+        return _json_response(200, {"status": "ignored", "reason": "inactive_transport"})
+
+    # =========================================================
+    # MANAGED WHATSAPP NUMBER ROUTING
+    # =========================================================
+    # The database-backed registry is authoritative for dynamic phone-number
+    # enablement. New Meta numbers are discovered but stay disabled until a
+    # Supervisor/Admin explicitly adds them to the app. The legacy .env number
+    # remains enabled as a backwards-compatible seed.
+    try:
+        line_enabled = await whatsapp_registry_service.observe_inbound(
+            waba_id=incoming.business_account_id if source == "cloud" else None,
+            phone_number_id=incoming.business_phone_number_id,
+            display_phone_number=incoming.business_display_phone_number,
+        )
+    except WhatsAppRegistryError:
+        logger.exception(
+            "Could not evaluate inbound WhatsApp number registry: phone_number_id=%s",
+            incoming.business_phone_number_id,
+        )
+        return _json_response(503, {"status": "whatsapp_registry_unavailable"})
+
+    if not line_enabled:
+        logger.info(
+            "Ignoring inbound message for disabled/unmanaged WhatsApp number: phone_number_id=%s message_id=%s",
+            incoming.business_phone_number_id,
+            incoming.message_id,
+        )
+        return _json_response(200, {"status": "ignored", "reason": "whatsapp_number_disabled"})
+
+    try:
+        if await _is_inbound_revoked(incoming.message_id):
+            return _json_response(200, {"status": "revoked_message_ignored"})
+    except Exception:
+        logger.exception("Could not check inbound WhatsApp revocation marker: message_id=%s", incoming.message_id)
+        return _json_response(503, {"status": "revocation_state_unavailable"})
 
     # =========================================================
     # GLOBAL INBOUND MESSAGE IDEMPOTENCY

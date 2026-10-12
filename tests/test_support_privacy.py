@@ -84,11 +84,43 @@ def test_regular_agent_cannot_open_unrelated_active_conversation(monkeypatch: py
         monkeypatch.setattr(support_service_module.support_repository, "list_messages", fake_messages)
         monkeypatch.setattr(support_service_module.support_repository, "list_events", fake_events)
 
-        with pytest.raises(SupportForbiddenError, match="tickets you have worked on"):
+        with pytest.raises(SupportForbiddenError, match="cannot view this conversation"):
             await service.ticket_detail(42, agent)
         assert calls == {"messages": 0, "events": 0}
 
     asyncio.run(run())
+
+
+def test_realtime_ticket_event_is_filtered_before_delivery(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def run() -> None:
+        service = SupportService()
+        agent = SupportAgent(id="7", name="Agent A", role="agent")
+
+        async def fake_get_ticket(_ticket_id: int) -> dict[str, Any]:
+            return _ticket(assignee="9")
+
+        async def fake_participated(_ticket_id: int, _agent_id: str) -> bool:
+            return False
+
+        monkeypatch.setattr(support_service_module.support_repository, "get_ticket", fake_get_ticket)
+        monkeypatch.setattr(
+            support_service_module.support_repository,
+            "agent_has_participated",
+            fake_participated,
+        )
+
+        assert await service.can_receive_support_event(
+            {"type": "customer_message", "ticket_id": 42}, agent
+        ) is False
+        assert await service.can_receive_support_event(
+            {"type": "contacts_synced"}, agent
+        ) is True
+
+    asyncio.run(run())
+
+
+def test_notification_ui_requires_backend_authorization_marker() -> None:
+    assert "if (payload.authorized !== true) return;" in _HTML
 
 
 def test_regular_agent_cannot_fetch_unrelated_ticket_media(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -117,7 +149,10 @@ def test_regular_agent_cannot_fetch_unrelated_ticket_media(monkeypatch: pytest.M
             should_not_load_message,
         )
 
-        with pytest.raises(SupportForbiddenError, match="media from tickets you have worked on"):
+        with pytest.raises(
+            SupportForbiddenError,
+            match="media from conversations available to you",
+        ):
             await service.get_ticket_media(42, 123, agent)
 
     asyncio.run(run())
@@ -152,6 +187,30 @@ def test_previous_participant_can_keep_watching_transferred_ticket(monkeypatch: 
         assert detail["permissions"]["can_reply"] is False
 
     asyncio.run(run())
+
+
+def test_closed_conversations_are_visible_to_other_staff_without_reply_permission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def get_ticket(_ticket_id: int) -> dict[str, Any]:
+        return _ticket(assignee="9", status="RESOLVED")
+
+    async def rows(*_args: Any, **_kwargs: Any) -> list[dict[str, Any]]:
+        return []
+
+    async def no_participation(*_args: Any, **_kwargs: Any) -> bool:
+        raise AssertionError("closed history should not require participation")
+
+    monkeypatch.setattr(support_service_module.support_repository, "get_ticket", get_ticket)
+    monkeypatch.setattr(support_service_module.support_repository, "list_messages", rows)
+    monkeypatch.setattr(support_service_module.support_repository, "list_events", rows)
+    monkeypatch.setattr(support_service_module.support_repository, "agent_has_participated", no_participation)
+
+    detail = asyncio.run(SupportService().ticket_detail(
+        42, SupportAgent(id="7", name="Agent A", role="agent"),
+    ))
+    assert detail["ticket"]["id"] == 42
+    assert detail["permissions"]["can_reply"] is False
 
 
 def test_unassigned_ticket_remains_visible_for_claiming(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -294,9 +353,9 @@ class _FakePool:
         return _AcquireContext(self.connection)
 
 
-def test_regular_agent_history_and_active_queries_are_participation_scoped() -> None:
+def test_regular_agent_history_is_shared_but_active_queries_remain_participation_scoped() -> None:
     async def run() -> None:
-        for view in ("history", "active", "waiting"):
+        for view in ("active", "waiting"):
             calls: list[tuple[str, tuple[Any, ...]]] = []
             repository = SupportRepository()
             repository._pool = _FakePool(calls)  # type: ignore[assignment]
@@ -313,6 +372,13 @@ def test_regular_agent_history_and_active_queries_are_participation_scoped() -> 
                 assert "$.from_agent_id" in sql
                 assert "$.to_agent_id" in sql
                 assert params.count("7") >= 4
+
+        calls: list[tuple[str, tuple[Any, ...]]] = []
+        repository = SupportRepository()
+        repository._pool = _FakePool(calls)  # type: ignore[assignment]
+        await repository.list_tickets(view="history", agent_id="7", can_view_all=False)
+        assert len(calls) == 2
+        assert all("TICKET_CLAIMED" not in sql for sql, _params in calls)
 
     asyncio.run(run())
 
@@ -338,8 +404,8 @@ def test_supervisor_history_query_remains_global() -> None:
 
 
 def test_dashboard_clears_ticket_panel_when_server_denies_private_ticket() -> None:
-    assert "Conversation access is restricted to participating agents." in _HTML
-    assert "You can only open tickets you have claimed or worked on." in _HTML
+    assert "Conversation access is restricted to participating staff." in _HTML
+    assert "You can only open conversations you are allowed to access." in _HTML
     assert "if(e.status===403)" in _HTML
 
 
@@ -364,3 +430,60 @@ def test_dashboard_wipes_previous_agent_workspace_and_disables_fetch_cache() -> 
     assert "Ticket conversation will appear here." in _HTML
     assert "clearTicketWorkspace();$('dashboard').classList.add('hidden')" in _HTML
     assert "cache:'no-store'" in _HTML
+
+
+def test_ticket_detail_handles_db_native_values_and_missing_first_message(monkeypatch) -> None:
+    """A handoff ticket must remain viewable even if its trigger-message copy failed.
+
+    This also protects the API from MariaDB-native scalar types reaching FastAPI's
+    response encoder and causing an opaque 500.
+    """
+    import asyncio
+    from datetime import timedelta
+    from decimal import Decimal
+
+    from app.support_auth import SupportAgent
+    from app.customer_directory import CustomerIdentity
+    import app.support_service as support_service_module
+
+    ticket = {
+        "id": 52,
+        "ticket_reference": "CS-TEST-52",
+        "active_key": "123:96100000000",
+        "whatsapp_phone": "96100000000",
+        "status": "NEW",
+        "current_assignee_id": None,
+        "customer_id": None,
+        "tracking_reference": None,
+        "context_json": "{}",
+        "created_at": support_service_module.datetime(2026, 9, 17, 12, 0, 0),
+        "driver_decimal": Decimal("1.25"),
+        "driver_bytes": b"ok",
+        "driver_duration": timedelta(seconds=30),
+    }
+
+    async def fake_get_ticket(ticket_id: int):
+        return dict(ticket)
+
+    async def fake_list_messages(ticket_id: int, *, limit: int = 100, before_id=None, user_id=None):
+        return []
+
+    async def fake_list_events(ticket_id: int, limit: int = 100):
+        return []
+
+    async def fake_resolve(phone: str):
+        return CustomerIdentity(source="guest", phone=phone)
+
+    monkeypatch.setattr(support_service_module.support_repository, "get_ticket", fake_get_ticket)
+    monkeypatch.setattr(support_service_module.support_repository, "list_messages", fake_list_messages)
+    monkeypatch.setattr(support_service_module.support_repository, "list_events", fake_list_events)
+    monkeypatch.setattr(support_service_module.customer_directory, "resolve", fake_resolve)
+
+    actor = SupportAgent(id="6", name="Admin", role="admin")
+    detail = asyncio.run(support_service_module.support_service.ticket_detail(52, actor))
+
+    assert detail["messages"] == []
+    assert detail["ticket"]["driver_decimal"] == 1.25
+    assert detail["ticket"]["driver_bytes"] == "ok"
+    assert detail["ticket"]["driver_duration"] == 30.0
+    assert detail["permissions"]["can_claim"] is True

@@ -1,0 +1,14 @@
+# Replace the host and email with the production values before validation.
+{
+    email operations@example.com
+}
+
+support.example.com {
+    # These endpoints are internal monitoring/provider callbacks.
+    @internal path /api/whatsapp/linked-device/events /health /health/* /ready /ready/* /metrics /metrics/*
+    respond @internal 404
+
+    # No file_server: support media and credentials stay behind app authorization.
+    # Caddy flushes text/event-stream responses immediately by default.
+    reverse_proxy 127.0.0.1:8000
+}

@@ -118,16 +118,16 @@ def style_repair_instruction(style: str | None) -> str:
 def reply_guard_fallback(style: str | None) -> str:
     """Safe deterministic text used only when generation and repair both fail."""
     if style == "fr":
-        return "Je n’ai pas pu formater la réponse correctement. Réessayez dans un instant."
+        return "Veuillez clarifier votre demande avec plus de détails afin que je puisse la traiter correctement."
     if style == "ar":
-        return "تعذّر تنسيق الرد بشكل صحيح حالياً. حاول مرة أخرى بعد قليل."
+        return "يرجى توضيح طلبك بمزيد من التفاصيل حتى أتمكن من معالجته بشكل صحيح."
     if style == "leb_ar":
-        return "ما قدرت نسّق الجواب بشكل صحيح هلّق. جرّب كمان شوي."
+        return "بليز وضّح طلبك مع تفاصيل أكتر كرمال إقدر عالجه بشكل صحيح."
     if style == "leb_arabizi":
-        return "Ma 2dert na2el l jawab bi siyagha mazbouta halla2. Jarreb ba3d shway."
+        return "Please waddeh talabak ma3 details aktar kermal e2dar 3aljo sah."
     if style == "mixed":
-        return "Ma 2dert format l reply mazbout halla2. Jarreb again ba3d shway."
-    return "I couldn’t format the reply correctly just now. Please try again shortly."
+        return "Please clarify your request ma3 details aktar kermal e2dar a3mello processing mazbout."
+    return "Please clarify your request with more details so I can process it correctly."
 
 
 def _display_value(value: Any) -> str | None:
@@ -845,8 +845,8 @@ def render_shipping_route_options(
             "fr": f"Voici les catégories et services enregistrés de {origin} vers {destination} :",
             "ar": f"هذه الفئات والخدمات المسجلة من {origin} إلى {destination}:",
             "leb_ar": f"هيدي الفئات والخدمات المسجّلة من {origin} على {destination}:",
-            "leb_arabizi": f"Hayde l categories w services l msajjalin mn {origin} 3a {destination}:",
-            "mixed": f"Hayde the registered categories and services mn {origin} 3a {destination}:",
+            "leb_arabizi": f"Hol el categories w services li msajjalin mn {origin} 3a {destination}:",
+            "mixed": f"Hol the registered categories and services mn {origin} 3a {destination}:",
             "en": f"These are the registered categories and services from {origin} to {destination}:",
         }
     elif destination:
@@ -854,8 +854,8 @@ def render_shipping_route_options(
             "fr": f"Voici les options enregistrées vers {destination} :",
             "ar": f"هذه خيارات الشحن المسجلة إلى {destination}:",
             "leb_ar": f"هيدي خيارات الشحن المسجّلة على {destination}:",
-            "leb_arabizi": f"Hayde l shipping options l msajjalin 3a {destination}:",
-            "mixed": f"Hayde the registered shipping options 3a {destination}:",
+            "leb_arabizi": f"Hol el shipping options li msajjalin 3a {destination}:",
+            "mixed": f"Hol the registered shipping options 3a {destination}:",
             "en": f"These are the registered shipping options to {destination}:",
         }
     elif origin:
@@ -863,8 +863,8 @@ def render_shipping_route_options(
             "fr": f"Voici les options enregistrées au départ de {origin} :",
             "ar": f"هذه خيارات الشحن المسجلة من {origin}:",
             "leb_ar": f"هيدي خيارات الشحن المسجّلة من {origin}:",
-            "leb_arabizi": f"Hayde l shipping options l msajjalin mn {origin}:",
-            "mixed": f"Hayde the registered shipping options mn {origin}:",
+            "leb_arabizi": f"Hol el shipping options li msajjalin mn {origin}:",
+            "mixed": f"Hol the registered shipping options mn {origin}:",
             "en": f"These are the registered shipping options from {origin}:",
         }
     else:
@@ -872,8 +872,8 @@ def render_shipping_route_options(
             "fr": "Voici les options actuellement enregistrées dans le catalogue :",
             "ar": "هذه الخيارات المسجلة حالياً في جدول أسعار الشحن:",
             "leb_ar": "هيدي الخيارات المسجّلة هلّق بجدول أسعار الشحن:",
-            "leb_arabizi": "Hayde l options l msajjalin halla2 b shipping rates table:",
-            "mixed": "Hayde the options currently registered in the shipping-rates table:",
+            "leb_arabizi": "Hol el options li msajjalin halla2 bel shipping rates table:",
+            "mixed": "Hol the options currently registered in the shipping-rates table:",
             "en": "These are the options currently registered in the shipping-rate catalogue:",
         }
 
@@ -927,9 +927,9 @@ def render_shipping_route_options(
         "fr": "Ces catégories proviennent du tableau des tarifs; ce n'est pas une liste douanière complète des articles interdits.",
         "ar": "هذه الفئات مأخوذة من جدول الأسعار وليست قائمة جمركية كاملة بالممنوعات.",
         "leb_ar": "هيدي الفئات من جدول الأسعار، مش لائحة جمركية كاملة بالممنوعات.",
-        "leb_arabizi": "Hayde l categories mn rate table, mesh le2i7a jemrokiye kemle lal mamnou3at.",
-        "mixed": "Hayde categories from the rate table, mesh a complete customs/prohibited-items list.",
-        "en": "These categories come from the rate table; they are not a complete customs or prohibited-items list.",
+        "leb_arabizi": "Hol el categories mn rate table.",
+        "mixed": "Hol el categories from the rate table.",
+        "en": "These categories come from the rate table.",
     }
     lines.append(scope.get(style or "en", scope["en"]))
     rendered = "\n".join(lines).strip()

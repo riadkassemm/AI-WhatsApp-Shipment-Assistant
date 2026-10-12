@@ -1,0 +1,25 @@
+[Unit]
+Description=WhatsApp Support Development HTTPS Endpoint
+Wants=network-online.target whatsapp-api.service
+After=network-online.target whatsapp-api.service
+PartOf=whatsapp-dev.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=exec
+User=whatsapp-ingress
+Group=whatsapp-ingress
+# Replace the binary path with the installed ngrok path.
+ExecStart=/usr/local/bin/ngrok start support-dev --config /etc/whatsapp-support/ngrok.yml
+Restart=always
+RestartSec=5
+TimeoutStopSec=20
+UMask=0077
+StateDirectory=whatsapp-support-ingress
+StateDirectoryMode=0700
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+CapabilityBoundingSet=
+RestrictSUIDSGID=true

@@ -1,0 +1,9 @@
+[Unit]
+Description=WhatsApp Support Development Stack
+# The database tunnel and Redis are shared dependencies. Their units deliberately
+# have no PartOf relationship to this target and retain their existing lifecycle.
+Wants=network-online.target shipment-db-tunnel.service redis-server.service shipment-bot.service whatsapp-bridge.service ngrok.service
+After=network-online.target
+
+[Install]
+WantedBy=multi-user.target

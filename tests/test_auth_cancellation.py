@@ -102,7 +102,15 @@ def test_abandon_pending_auth_clears_all_partial_state_and_one_time_password() -
     asyncio.run(run())
 
 
-def test_explicit_cancel_stops_login_instead_of_becoming_a_password() -> None:
+def test_explicit_cancel_stops_login_instead_of_becoming_a_password(monkeypatch) -> None:
+    async def ai_on():
+        return types.SimpleNamespace(effective_ai_enabled=True)
+
+    monkeypatch.setattr(
+        main.ai_availability_service,
+        "get_effective_ai_availability",
+        ai_on,
+    )
     async def run() -> None:
         store = InMemoryConversationStore()
         phone = "96170123456"
@@ -173,7 +181,15 @@ def test_explicit_cancel_stops_login_instead_of_becoming_a_password() -> None:
     asyncio.run(run())
 
 
-def test_shipping_topic_switch_clears_stale_login_and_processes_new_request() -> None:
+def test_shipping_topic_switch_clears_stale_login_and_processes_new_request(monkeypatch) -> None:
+    async def ai_on():
+        return types.SimpleNamespace(effective_ai_enabled=True)
+
+    monkeypatch.setattr(
+        main.ai_availability_service,
+        "get_effective_ai_availability",
+        ai_on,
+    )
     async def run() -> None:
         store = InMemoryConversationStore()
         phone = "96170123456"

@@ -1,0 +1,24 @@
+[Unit]
+Description=WhatsApp Support Linked Device Bridge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=whatsapp-support
+Group=whatsapp-support
+WorkingDirectory=/opt/whatsapp_chatbot_v19/whatsapp_bridge
+# Use the absolute installed Node binary; PATH from an interactive shell is not loaded.
+ExecStart=/usr/bin/node /opt/whatsapp_chatbot_v19/whatsapp_bridge/src/index.js
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=35
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/whatsapp_chatbot_v19/var/whatsapp-linked-device
+
+[Install]
+WantedBy=multi-user.target

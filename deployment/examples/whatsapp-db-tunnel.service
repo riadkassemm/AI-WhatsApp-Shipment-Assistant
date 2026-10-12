@@ -1,0 +1,22 @@
+[Unit]
+Description=Private MariaDB Forward for WhatsApp Support
+Wants=network-online.target
+After=network-online.target
+PartOf=whatsapp-dev.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=exec
+User=whatsapp-tunnel
+Group=whatsapp-tunnel
+ExecStart=/usr/bin/ssh -F /etc/whatsapp-support/ssh/client.conf -NT whatsapp-support-database
+Restart=always
+RestartSec=5
+TimeoutStopSec=15
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+CapabilityBoundingSet=
+RestrictSUIDSGID=true

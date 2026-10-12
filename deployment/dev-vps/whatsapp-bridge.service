@@ -1,0 +1,27 @@
+[Unit]
+Description=WhatsApp Support Development Linked Device Bridge
+Wants=network-online.target
+After=network-online.target shipment-bot.service
+PartOf=whatsapp-dev.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=exec
+User=whatsapp-support
+Group=whatsapp-support
+WorkingDirectory=/opt/whatsapp-support/current/whatsapp_bridge
+EnvironmentFile=/etc/whatsapp-support/app.env
+ExecStart=/usr/bin/node /opt/whatsapp-support/current/whatsapp_bridge/src/index.js
+Restart=always
+RestartSec=5
+TimeoutStopSec=35
+UMask=0077
+StateDirectory=whatsapp-support
+StateDirectoryMode=0700
+ReadWritePaths=/var/lib/whatsapp-support
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+CapabilityBoundingSet=
+RestrictSUIDSGID=true
