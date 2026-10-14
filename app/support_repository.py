@@ -124,6 +124,10 @@ _SUPPORT_SCHEMA_MIGRATIONS: tuple[tuple[str, dict[str, set[str]]], ...] = (
             "support_message_change_events": {"event_id", "message_id", "provider_timestamp"},
         },
     ),
+    (
+        "migrations/20261014_whatsapp_number_display_names.sql",
+        {"whatsapp_phone_numbers": {"display_name"}},
+    ),
 )
 
 
@@ -233,9 +237,11 @@ class SupportRepository:
             async with conn.cursor(aiomysql.DictCursor) as cur:
                 await cur.execute(
                     """
-                    SELECT *
-                    FROM support_tickets
-                    WHERE id = %s
+                    SELECT t.*, n.display_name
+                    FROM support_tickets t
+                    LEFT JOIN whatsapp_phone_numbers n
+                      ON n.phone_number_id = t.business_phone_number_id
+                    WHERE t.id = %s
                     LIMIT 1
                     """,
                     (ticket_id,),
@@ -379,9 +385,11 @@ class SupportRepository:
             async with conn.cursor(aiomysql.DictCursor) as cur:
                 await cur.execute(
                     """
-                    SELECT *
-                    FROM support_tickets
-                    WHERE source_whatsapp_message_id = %s
+                    SELECT t.*, n.display_name
+                    FROM support_tickets t
+                    LEFT JOIN whatsapp_phone_numbers n
+                      ON n.phone_number_id = t.business_phone_number_id
+                    WHERE t.source_whatsapp_message_id = %s
                     LIMIT 1
                     """,
                     (whatsapp_message_id,),
@@ -401,19 +409,21 @@ class SupportRepository:
                 if business_phone_number_id:
                     await cur.execute(
                         """
-                        SELECT *
-                        FROM support_tickets
-                        WHERE whatsapp_phone = %s
-                          AND active_key IS NOT NULL
-                          AND status IN (%s, %s, %s, %s, %s)
+                        SELECT t.*, n.display_name
+                        FROM support_tickets t
+                        LEFT JOIN whatsapp_phone_numbers n
+                          ON n.phone_number_id = t.business_phone_number_id
+                        WHERE t.whatsapp_phone = %s
+                          AND t.active_key IS NOT NULL
+                          AND t.status IN (%s, %s, %s, %s, %s)
                           AND (
-                                business_phone_number_id = %s
+                                t.business_phone_number_id = %s
                                 OR (
-                                    business_phone_number_id IS NULL
-                                    AND active_key = %s
+                                    t.business_phone_number_id IS NULL
+                                    AND t.active_key = %s
                                 )
                               )
-                        ORDER BY id DESC
+                        ORDER BY t.id DESC
                         LIMIT 1
                         """,
                         (
@@ -426,12 +436,14 @@ class SupportRepository:
                 else:
                     await cur.execute(
                         """
-                        SELECT *
-                        FROM support_tickets
-                        WHERE whatsapp_phone = %s
-                          AND active_key IS NOT NULL
-                          AND status IN (%s, %s, %s, %s, %s)
-                        ORDER BY id DESC
+                        SELECT t.*, n.display_name
+                        FROM support_tickets t
+                        LEFT JOIN whatsapp_phone_numbers n
+                          ON n.phone_number_id = t.business_phone_number_id
+                        WHERE t.whatsapp_phone = %s
+                          AND t.active_key IS NOT NULL
+                          AND t.status IN (%s, %s, %s, %s, %s)
+                        ORDER BY t.id DESC
                         LIMIT 1
                         """,
                         (phone_number, *ACTIVE_TICKET_STATUSES),
@@ -511,17 +523,19 @@ class SupportRepository:
             async with conn.cursor(aiomysql.DictCursor) as cur:
                 await cur.execute(
                     """
-                    SELECT *
-                    FROM support_tickets
-                    WHERE id <> %s
-                      AND (%s IS NULL OR id < %s)
+                    SELECT t.*, n.display_name
+                    FROM support_tickets t
+                    LEFT JOIN whatsapp_phone_numbers n
+                      ON n.phone_number_id = t.business_phone_number_id
+                    WHERE t.id <> %s
+                      AND (%s IS NULL OR t.id < %s)
                       AND (
-                            whatsapp_phone = %s
-                            OR REGEXP_REPLACE(whatsapp_phone, '[^0-9]', '') IN (%s, %s)
+                            t.whatsapp_phone = %s
+                            OR REGEXP_REPLACE(t.whatsapp_phone, '[^0-9]', '') IN (%s, %s)
                           )
-                      AND active_key IS NULL
-                      AND status IN ('RESOLVED', 'CLOSED')
-                    ORDER BY id DESC
+                      AND t.active_key IS NULL
+                      AND t.status IN ('RESOLVED', 'CLOSED')
+                    ORDER BY t.id DESC
                     LIMIT %s
                     """,
                     (current_ticket_id, before_ticket_id, before_ticket_id,
@@ -733,12 +747,14 @@ class SupportRepository:
             async with conn.cursor(aiomysql.DictCursor) as cur:
                 await cur.execute(
                     """
-                    SELECT *
-                    FROM support_tickets
-                    WHERE conversation_origin = 'STAFF'
-                      AND whatsapp_phone = %s
-                      AND business_phone_number_id = %s
-                    ORDER BY id DESC
+                    SELECT t.*, n.display_name
+                    FROM support_tickets t
+                    LEFT JOIN whatsapp_phone_numbers n
+                      ON n.phone_number_id = t.business_phone_number_id
+                    WHERE t.conversation_origin = 'STAFF'
+                      AND t.whatsapp_phone = %s
+                      AND t.business_phone_number_id = %s
+                    ORDER BY t.id DESC
                     LIMIT 1
                     """,
                     (phone_number, business_phone_number_id),
@@ -2032,9 +2048,12 @@ class SupportRepository:
                         m.location_address, m.provider_media_filename, m.created_at,
                         t.ticket_reference, t.customer_name, t.customer_userid,
                         t.whatsapp_phone, t.status, t.conversation_origin,
-                        t.business_display_phone_number, t.business_phone_number_id
+                        t.business_display_phone_number, t.business_phone_number_id,
+                        n.display_name
                     FROM support_ticket_messages m
                     INNER JOIN support_tickets t ON t.id = m.ticket_id
+                    LEFT JOIN whatsapp_phone_numbers n
+                      ON n.phone_number_id = t.business_phone_number_id
                     WHERE {access_where} AND {search_where}
                     ORDER BY m.created_at DESC, m.id DESC
                     LIMIT %s
@@ -2679,8 +2698,9 @@ class SupportRepository:
                 await cur.execute(
                     f"""
                     SELECT
-                        id, ticket_reference, whatsapp_phone, customer_id,
+                        support_tickets.id, ticket_reference, whatsapp_phone, customer_id,
                         business_phone_number_id, business_display_phone_number,
+                        n.display_name,
                         conversation_origin, initiated_by_staff_id, initiated_by_staff_name,
                         customer_userid, customer_name,
                         LEFT(reason, 300) AS reason,
@@ -2688,11 +2708,13 @@ class SupportRepository:
                         tracking_reference, requested_action, current_language,
                         communication_style, status,
                         current_assignee_id, current_assignee_name,
-                        created_at, updated_at, last_activity_at, assigned_at,
-                        resolved_at, closed_at
+                        support_tickets.created_at, support_tickets.updated_at,
+                        last_activity_at, assigned_at, resolved_at, closed_at
                     FROM support_tickets
+                    LEFT JOIN whatsapp_phone_numbers n
+                      ON n.phone_number_id = support_tickets.business_phone_number_id
                     WHERE {where}
-                    ORDER BY last_activity_at DESC, id DESC
+                    ORDER BY last_activity_at DESC, support_tickets.id DESC
                     LIMIT %s OFFSET %s
                     """,
                     tuple(list_params),

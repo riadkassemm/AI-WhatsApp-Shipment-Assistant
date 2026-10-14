@@ -197,6 +197,7 @@ def _history_ticket_summary(row: dict[str, Any]) -> dict[str, Any]:
         "conversation_origin",
         "business_phone_number_id",
         "business_display_phone_number",
+        "display_name",
         "created_at",
         "updated_at",
         "last_activity_at",

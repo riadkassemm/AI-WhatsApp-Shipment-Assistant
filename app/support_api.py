@@ -196,6 +196,12 @@ class WhatsAppNumberStateRequest(BaseModel):
     enabled: bool
 
 
+class WhatsAppNumberNameRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    display_name: str | None = Field(..., max_length=80)
+
+
 def _translate_error(exc: Exception) -> HTTPException:
     if isinstance(exc, AIControlForbiddenError):
         return HTTPException(status_code=403, detail=str(exc))
@@ -438,6 +444,20 @@ async def update_whatsapp_number_state(
     try:
         return await whatsapp_registry_service.set_number_enabled(
             agent, phone_number_id, payload.enabled
+        )
+    except Exception as exc:
+        raise _translate_error(exc) from exc
+
+
+@router.put("/whatsapp-numbers/{phone_number_id}/name")
+async def update_whatsapp_number_name(
+    phone_number_id: str,
+    payload: WhatsAppNumberNameRequest,
+    agent: SupportAgent = Depends(require_support_csrf),
+) -> dict:
+    try:
+        return await whatsapp_registry_service.set_number_display_name(
+            agent, phone_number_id, payload.display_name
         )
     except Exception as exc:
         raise _translate_error(exc) from exc

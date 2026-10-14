@@ -316,12 +316,16 @@ def test_repository_history_and_search_count_staff_chat_starter_as_participant()
         assert len(calls) == 2
         assert "support_tickets.initiated_by_staff_id = %s" in calls[0][0]
         assert calls[0][1] == ("7", "7", "7", "7", "7")
+        assert "LEFT JOIN whatsapp_phone_numbers n" in calls[1][0]
+        assert "n.display_name" in calls[1][0]
 
         calls.clear()
         await repository.search_messages(query="hello", agent_id="7")
         assert len(calls) == 1
         assert "t.initiated_by_staff_id = %s" in calls[0][0]
         assert calls[0][1][:5] == ("7", "7", "7", "7", "7")
+        assert "LEFT JOIN whatsapp_phone_numbers n" in calls[0][0]
+        assert "n.display_name" in calls[0][0]
 
         calls.clear()
         await repository.list_previous_customer_tickets(
@@ -330,8 +334,14 @@ def test_repository_history_and_search_count_staff_chat_starter_as_participant()
             before_ticket_id=199,
             limit=5,
         )
-        assert "ORDER BY id DESC" in calls[0][0]
-        assert "REGEXP_REPLACE(whatsapp_phone" in calls[0][0]
+        assert "ORDER BY t.id DESC" in calls[0][0]
+        assert "REGEXP_REPLACE(t.whatsapp_phone" in calls[0][0]
+        assert "LEFT JOIN whatsapp_phone_numbers n" in calls[0][0]
         assert calls[0][1] == (300, 199, 199, "+961 70 123 456", "96170123456", "0096170123456", 5)
+
+        calls.clear()
+        await repository.get_ticket(300)
+        assert "LEFT JOIN whatsapp_phone_numbers n" in calls[0][0]
+        assert "n.display_name" in calls[0][0]
 
     asyncio.run(run())

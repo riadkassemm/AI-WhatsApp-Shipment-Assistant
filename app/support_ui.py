@@ -615,7 +615,16 @@ body.column-resizing * { cursor: col-resize !important; }
 .context-divider { display: flex; align-items: center; gap: 8px; margin: 0 auto 18px; width: max-content; max-width: 100%; padding: 6px 10px; border: 1px dashed var(--border-strong); border-radius: 999px; color: var(--text-muted); background: var(--surface); font-size: 11px; }
 .previous-ticket-divider { margin: 24px 0 12px; padding: 9px 11px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-muted); color: var(--text-muted); font-size: 11px; }
 .previous-ticket-divider strong { color: var(--text-strong); }
-.previous-ticket-divider span { margin-left: 6px; }
+.previous-ticket-divider > span { margin-left: 6px; }
+.support-number-label { display: inline-block; max-width: 100%; vertical-align: bottom; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.support-number-label.has-alias { display: inline-grid; cursor: help; }
+.support-number-label.has-alias > span { grid-area: 1 / 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.support-number-label .support-number-raw { visibility: hidden; }
+.support-number-label.has-alias:is(:hover, :focus) .support-number-alias,
+.ticket-row:focus-visible .support-number-label.has-alias .support-number-alias { visibility: hidden; }
+.support-number-label.has-alias:is(:hover, :focus) .support-number-raw,
+.ticket-row:focus-visible .support-number-label.has-alias .support-number-raw { visibility: visible; }
+.support-number-label:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: 2px; }
 .history-load-row { display: flex; justify-content: center; margin: 12px 0 18px; }
 .history-load-row .btn { white-space: normal; text-align: center; }
 .message-row.previous-ticket-msg { opacity: 0.9; }
@@ -771,6 +780,10 @@ body.column-resizing * { cursor: col-resize !important; }
 .whatsapp-row-title { color: var(--text-strong); font-size: 12px; font-weight: 800; }
 .whatsapp-row-subtitle { margin-top: 2px; color: var(--text-muted); font-size: 10px; overflow-wrap: anywhere; }
 .whatsapp-row-meta { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 6px; }
+.whatsapp-number-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 7px; }
+.whatsapp-name-editor { grid-column: 1 / -1; display: flex; align-items: flex-end; flex-wrap: wrap; gap: 8px; padding-top: 3px; }
+.whatsapp-name-editor .field { flex: 1 1 220px; min-width: 0; margin: 0; }
+.whatsapp-name-editor .btn { min-height: 42px; }
 .whatsapp-sync-form { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: end; margin-top: 15px; }
 .whatsapp-sync-form .field { margin: 0; }
 .modal-card.media-viewer-card { width: min(1200px, 96vw); height: min(92vh, 960px); }
@@ -986,7 +999,7 @@ body.column-resizing * { cursor: col-resize !important; }
   .ticket-row { padding-inline: 12px; }
   .ticket-summary, .ticket-row-meta { margin-left: 43px; }
   .ticket-heading-avatar { display: none; }
-  .ticket-subtitle { max-width: 50vw; }
+  .ticket-subtitle { max-width: 100%; white-space: normal; overflow: visible; }
   .message-stack { width: min(92%, 620px); }
   .message-sender { margin-bottom: 4px; }
   .message-bubble { padding: 9px 10px; }
@@ -999,6 +1012,8 @@ body.column-resizing * { cursor: col-resize !important; }
   .staff-view-heading, .section-title { align-items: flex-start; flex-direction: column; }
   .staff-actions-header { width: 100%; }
   .staff-actions-header .btn { flex: 1; }
+  .whatsapp-number-actions { grid-column: 1 / -1; justify-content: flex-start; }
+  .whatsapp-name-editor .btn { flex: 1 1 auto; }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -1517,7 +1532,7 @@ body.column-resizing * { cursor: col-resize !important; }
     <div class="modal-body">
       <div class="staff-feedback error-box" id="startChatError" role="alert"></div>
       <form id="startChatForm" novalidate>
-        <div class="field"><label for="startChatLine">Send from</label><select id="startChatLine" required></select></div>
+        <div class="field"><label for="startChatLine">Send from</label><select id="startChatLine" required></select><div class="field-hint" id="startChatLinePreview"></div></div>
         <div class="field"><label for="startChatPhone">Customer WhatsApp number</label><input id="startChatPhone" type="tel" inputmode="tel" placeholder="96170123456" maxlength="32" required /><div class="field-hint">Use the international number, with or without +.</div></div>
         <div class="field"><label for="startChatName">Customer name <span class="muted">(optional)</span></label><input id="startChatName" type="text" maxlength="191" /></div>
         <div class="field"><label for="startChatBody">First message</label><textarea id="startChatBody" rows="5" maxlength="4096" required placeholder="Write the first WhatsApp message"></textarea></div>
@@ -2691,15 +2706,57 @@ function queueSearchText(ticket) {
     ticket.tracking_reference,
     ticket.requested_action,
     ticket.current_assignee_name,
+    ticket.display_name,
     ticket.business_display_phone_number,
     ticket.business_phone_number_id
   ].filter(Boolean).join(' ').toLocaleLowerCase();
 }
 
-function supportNumberLabel(ticket) {
-  if (ticket && ticket.business_display_phone_number) return ticket.business_display_phone_number;
-  if (ticket && ticket.business_phone_number_id) return 'WhatsApp number ID ' + ticket.business_phone_number_id;
+function supportNumberAlias(item) {
+  if (!item) return '';
+  const direct = String(item.display_name || '').trim();
+  if (direct) return direct;
+  const id = item.business_phone_number_id || item.phone_number_id || item.line_id;
+  const registered = (state.whatsappRegistry?.numbers || []).find(number => String(number.phone_number_id) === String(id));
+  return String(registered?.display_name || '').trim();
+}
+
+function supportNumberRaw(item) {
+  if (item && (item.business_display_phone_number || item.display_phone_number)) {
+    return String(item.business_display_phone_number || item.display_phone_number);
+  }
+  const id = item?.business_phone_number_id || item?.phone_number_id || item?.line_id;
+  if (id) return 'WhatsApp number ID ' + id;
   return 'Default WhatsApp number';
+}
+
+function supportNumberLabel(item) {
+  return supportNumberAlias(item) || supportNumberRaw(item);
+}
+
+function createSupportNumberLabel(item, {focusable = true} = {}) {
+  const alias = supportNumberAlias(item);
+  const raw = supportNumberRaw(item);
+  const label = document.createElement('span');
+  label.className = 'support-number-label' + (alias && alias !== raw ? ' has-alias' : '');
+  label.title = raw;
+  if (alias && alias !== raw) {
+    const name = document.createElement('span');
+    name.className = 'support-number-alias';
+    name.textContent = alias;
+    const number = document.createElement('span');
+    number.className = 'support-number-raw';
+    number.textContent = raw;
+    label.append(name, number);
+    label.setAttribute('aria-label', alias + ', WhatsApp number ' + raw);
+    if (focusable) {
+      label.tabIndex = 0;
+      label.onpointerdown = event => { if (event.pointerType === 'touch') label.focus(); };
+    }
+  } else {
+    label.textContent = raw;
+  }
+  return label;
 }
 
 function isStaffChat(ticket) {
@@ -2720,9 +2777,10 @@ function createMetaChip(label, iconName, className = 'meta-chip') {
   chip.className = className;
   if (iconName) chip.append(createIcon(iconName, 'icon icon-sm'));
   const copy = document.createElement('span');
-  copy.textContent = label;
+  if (typeof label === 'string') copy.textContent = label;
+  else copy.append(label);
   chip.append(copy);
-  chip.title = label;
+  chip.title = typeof label === 'string' ? label : label.title;
   return chip;
 }
 
@@ -2803,7 +2861,7 @@ function createTicketRow(ticket) {
   const meta = document.createElement('div');
   meta.className = 'ticket-row-meta';
   meta.append(conversationStatusBadge(ticket));
-  meta.append(createMetaChip(supportNumberLabel(ticket), 'message', 'channel-pill'));
+  meta.append(createMetaChip(createSupportNumberLabel(ticket, {focusable: false}), 'message', 'channel-pill'));
   if (ticket.current_assignee_name) meta.append(createMetaChip(ticket.current_assignee_name, 'user'));
   if (ticket.tracking_reference) meta.append(createMetaChip(ticket.tracking_reference, 'truck'));
 
@@ -3907,11 +3965,12 @@ function timelineSignature(data) {
   const previous = (data.previous_ticket_history || []).map(thread => [
     thread.ticket?.id,
     thread.ticket?.updated_at,
+    thread.ticket?.display_name,
     thread.messages_has_more,
     ((thread.context || {}).recent_messages || []).map(message => [message.role, message.content]),
     (thread.messages || []).map(messageSignature)
   ]);
-  return JSON.stringify([data.ticket?.id, data.ticket?.updated_at, data.messages_has_more,
+  return JSON.stringify([data.ticket?.id, data.ticket?.updated_at, data.ticket?.display_name, data.messages_has_more,
     data.previous_ticket_history_has_more, messages, events, recent, previous]);
 }
 
@@ -4111,8 +4170,8 @@ function renderConversation(data, {forceScroll = false, preserveAudio = true, pr
       (historicalTicket.ticket_reference || ('#' + historicalTicket.id));
     const details = document.createElement('span');
     const closedAt = historicalTicket.closed_at || historicalTicket.resolved_at || historicalTicket.last_activity_at;
-    const historyLine = supportNumberLabel(historicalTicket);
-    details.textContent = (closedAt ? fmt(closedAt) + ' · ' : '') + formatStatus(historicalTicket.status || 'Resolved') + ' · ' + historyLine;
+    details.append(document.createTextNode((closedAt ? fmt(closedAt) + ' · ' : '') +
+      formatStatus(historicalTicket.status || 'Resolved') + ' · '), createSupportNumberLabel(historicalTicket));
     divider.append(title, details);
     inner.append(divider);
     const historicalMessages = Array.isArray(thread.messages) ? thread.messages : [];
@@ -4395,7 +4454,8 @@ function appendContextCard(container, title, entries, {summary = false} = {}) {
       term.textContent = label;
       const description = document.createElement('dd');
       description.dir = 'auto';
-      description.textContent = contextValue(value);
+      if (value && typeof value === 'object' && typeof value.append === 'function') description.append(value);
+      else description.textContent = contextValue(value);
       if (kind === 'code') description.classList.add('code');
       item.append(term, description);
       list.append(item);
@@ -4489,14 +4549,14 @@ function renderContext(ticket, context, shipment, identity = null, permissions =
     appendContextCard(container, 'Chat', [
       ['Status', ticket.active_key ? 'Open' : 'Closed'],
       ['Owner', ticket.current_assignee_name || 'Unassigned'],
-      ['WhatsApp line', supportNumberLabel(ticket)],
+      ['WhatsApp line', createSupportNumberLabel(ticket)],
       ['Started', fmt(ticket.created_at)]
     ]);
   } else {
     appendContextCard(container, 'Ticket', [
       ['Status', formatStatus(ticket.status)],
       ['Assignee', ticket.current_assignee_name || 'Unassigned'],
-      ['Received on', supportNumberLabel(ticket)],
+      ['Received on', createSupportNumberLabel(ticket)],
       ['Created', fmt(ticket.created_at)]
     ]);
   }
@@ -4506,7 +4566,10 @@ function renderContext(ticket, context, shipment, identity = null, permissions =
 function renderTicketHeader(ticket) {
   const customer = ticket.customer_name || ticket.customer_userid || ticket.whatsapp_phone || 'Unknown customer';
   text($('ticketTitle'), isStaffChat(ticket) ? customer : (ticket.ticket_reference || ('Ticket #' + ticket.id)));
-  text($('ticketSubtitle'), isStaffChat(ticket) ? ('Chat · ' + ticket.whatsapp_phone + ' · ' + supportNumberLabel(ticket)) : (customer + ' · Received on ' + supportNumberLabel(ticket)));
+  $('ticketSubtitle').replaceChildren(
+    document.createTextNode(isStaffChat(ticket) ? ('Chat · ' + ticket.whatsapp_phone + ' · ') : (customer + ' · Received on ')),
+    createSupportNumberLabel(ticket)
+  );
   text($('ticketAvatar'), initials(customer));
   $('ticketHeadingStatus').replaceChildren(conversationStatusBadge(ticket));
   const meta = $('ticketHeaderMeta');
@@ -5707,7 +5770,7 @@ function renderWhatsAppRegistry(payload) {
     const copy = document.createElement('div');
     const title = document.createElement('div');
     title.className = 'whatsapp-row-title';
-    title.textContent = item.display_phone_number || item.verified_name || ('Phone ' + item.phone_number_id);
+    title.append(createSupportNumberLabel(item));
     const subtitle = document.createElement('div');
     subtitle.className = 'whatsapp-row-subtitle';
     subtitle.textContent = (item.verified_name ? item.verified_name + ' · ' : '') + 'ID ' + item.phone_number_id + (item.source === 'LINKED_DEVICE' ? ' · Linked device' : item.waba_id ? ' · WABA ' + item.waba_id : ' · Cloud API');
@@ -5718,24 +5781,118 @@ function renderWhatsAppRegistry(payload) {
     if (!item.provider_present) meta.append(createMetaChip(item.source === 'LINKED_DEVICE' ? 'Connection not configured' : 'Missing from latest Meta sync', 'alert'));
     copy.append(title, subtitle, meta);
 
+    const actions = document.createElement('div');
+    actions.className = 'whatsapp-number-actions';
+    const rename = document.createElement('button');
+    rename.type = 'button';
+    rename.className = 'btn small';
+    rename.disabled = state.whatsappBusy || state.linkedDeviceBusy;
+    rename.textContent = item.display_name ? 'Edit name' : 'Rename';
+    rename.setAttribute('aria-label', (item.display_name ? 'Edit name for ' : 'Rename ') + supportNumberRaw(item));
+    rename.onclick = () => openWhatsAppNumberNameEditor(item, row, rename);
+    actions.append(rename);
+
     const action = document.createElement('button');
     action.type = 'button';
     action.className = 'btn small' + (item.is_enabled ? ' danger' : ' primary');
     action.disabled = state.whatsappBusy || state.linkedDeviceBusy || (!item.provider_present && !item.is_enabled);
     action.textContent = item.is_enabled ? (item.source === 'LINKED_DEVICE' ? 'Deactivate' : 'Remove from app') : 'Add to app';
     action.onclick = () => setWhatsAppNumberState(item.phone_number_id, !item.is_enabled);
-    row.append(copy, action);
+    actions.append(action);
     if (item.source === 'LINKED_DEVICE') {
       const remove = document.createElement('button');
       remove.type = 'button'; remove.className = 'btn small danger';
       remove.textContent = 'Remove and unlink';
       remove.disabled = state.whatsappBusy || state.linkedDeviceBusy;
       remove.onclick = () => removeLinkedDeviceNumber(item.phone_number_id);
-      row.append(remove);
+      actions.append(remove);
     }
+    row.append(copy, actions);
     numberContainer.append(row);
   }
   if (state.linkedDeviceStatus) renderLinkedDeviceStatus(state.linkedDeviceStatus);
+}
+
+function openWhatsAppNumberNameEditor(item, row, button) {
+  if (!canManageWhatsApp() || state.whatsappBusy || state.linkedDeviceBusy || row.querySelector('.whatsapp-name-editor')) return;
+  const editor = document.createElement('form');
+  editor.className = 'whatsapp-name-editor';
+  const field = document.createElement('label');
+  field.className = 'field';
+  const caption = document.createElement('span');
+  caption.textContent = 'Custom name for ' + supportNumberRaw(item);
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.maxLength = 80;
+  input.placeholder = 'For example, TestNumber';
+  input.value = item.display_name || '';
+  input.autocomplete = 'off';
+  const hint = document.createElement('span');
+  hint.className = 'field-hint';
+  hint.textContent = 'Leave blank to show the phone number.';
+  field.append(caption, input, hint);
+  const save = document.createElement('button');
+  save.type = 'submit'; save.className = 'btn small primary'; save.textContent = 'Save name';
+  const cancel = document.createElement('button');
+  cancel.type = 'button'; cancel.className = 'btn small'; cancel.textContent = 'Cancel';
+  cancel.onclick = () => { editor.remove(); button.disabled = false; button.focus(); };
+  editor.onsubmit = event => { event.preventDefault(); renameWhatsAppNumber(item.phone_number_id, input.value, save); };
+  editor.append(field, save, cancel);
+  row.append(editor);
+  button.disabled = true;
+  input.focus();
+}
+
+function refreshVisibleSupportNumberName(phoneNumberId, displayName) {
+  const matches = ticket => ticket && String(ticket.business_phone_number_id) === String(phoneNumberId);
+  for (const ticket of state.queueItems || []) if (matches(ticket)) ticket.display_name = displayName;
+  for (const item of state.globalSearchResults || []) if (matches(item)) item.display_name = displayName;
+  for (const line of state.chatLines || []) if (String(line.phone_number_id) === String(phoneNumberId)) line.display_name = displayName;
+  const scrollTop = $('queue').scrollTop;
+  renderQueue();
+  $('queue').scrollTop = scrollTop;
+  const data = state.currentTicketData;
+  if (!data) return;
+  const currentChanged = matches(data.ticket);
+  if (currentChanged) data.ticket.display_name = displayName;
+  let historyChanged = false;
+  for (const thread of state.previousTicketHistory || []) {
+    if (matches(thread.ticket)) { thread.ticket.display_name = displayName; historyChanged = true; }
+  }
+  if (currentChanged) {
+    renderTicketHeader(data.ticket);
+    renderContext(data.ticket, data.context || {}, data.shipment || null,
+      data.customer_identity || null, data.permissions || null);
+  }
+  if (historyChanged) renderConversation(data, {preserveAudio: true});
+  if (currentChanged || historyChanged) state.timelineSignature = timelineSignature(data);
+}
+
+async function renameWhatsAppNumber(phoneNumberId, value, button) {
+  if (!canManageWhatsApp() || state.whatsappBusy || state.linkedDeviceBusy) return;
+  const displayName = String(value || '').trim() || null;
+  state.whatsappBusy = true;
+  clearWhatsAppFeedback();
+  setButtonBusy(button, true, 'Saving…');
+  let saved = false;
+  try {
+    const payload = await api('/api/support/whatsapp-numbers/' + encodeURIComponent(phoneNumberId) + '/name',
+      {method: 'PUT', body: JSON.stringify({display_name: displayName})});
+    renderWhatsAppRegistry(payload);
+    refreshVisibleSupportNumberName(phoneNumberId, displayName);
+    saved = true;
+    showWhatsAppFeedback('whatsappSuccess', displayName ? 'WhatsApp number renamed.' : 'Custom name removed.');
+    await Promise.allSettled([
+      loadQueue({silent: true}),
+      state.ticketId ? openTicket(state.ticketId, {silent: true, refreshHistory: true}) : Promise.resolve()
+    ]);
+  } catch (error) {
+    showWhatsAppFeedback('whatsappError', error.message);
+  } finally {
+    state.whatsappBusy = false;
+    if (button.isConnected) setButtonBusy(button, false);
+    if (saved && state.whatsappRegistry) renderWhatsAppRegistry(state.whatsappRegistry);
+  }
 }
 
 function renderLinkedDeviceStatus(payload) {
@@ -5751,7 +5908,10 @@ function renderLinkedDeviceStatus(payload) {
     const row = document.createElement('div');
     row.className = 'linked-device-line';
     const heading = document.createElement('strong');
-    heading.textContent = line.display_phone_number || ('WhatsApp line ' + line.line_id);
+    const registryNumber = (state.whatsappRegistry?.numbers || []).find(item => String(item.phone_number_id) === String(line.line_id));
+    heading.append(createSupportNumberLabel({line_id: line.line_id,
+      display_phone_number: line.display_phone_number || registryNumber?.display_phone_number,
+      display_name: registryNumber?.display_name}));
     const status = document.createElement('div');
     status.className = 'muted';
     const labels = {connected: 'Connected', connecting: 'Connecting…', qr: 'Scan this code with the phone you want to connect', logged_out: 'Not paired', disconnected: 'Disconnected', error: 'Connection failed'};
@@ -6380,6 +6540,7 @@ async function openStartChatModal(contact = null) {
     $('startChatName').value = contact.display_name || contact.name || '';
   }
   $('startChatLine').replaceChildren(new Option('Loading WhatsApp lines…', ''));
+  $('startChatLinePreview').replaceChildren();
   openDialog('startChatModal', contact ? 'startChatBody' : 'startChatPhone');
   try {
     const data = await api('/api/support/chat-lines');
@@ -6388,19 +6549,31 @@ async function openStartChatModal(contact = null) {
     select.replaceChildren();
     if (!state.chatLines.length) {
       select.append(new Option('No enabled WhatsApp lines', ''));
+      $('startChatLinePreview').replaceChildren();
       showStartChatError('No WhatsApp line is enabled for outbound chats.');
       $('confirmStartChatBtn').disabled = true;
       return;
     }
     for (const line of state.chatLines) {
-      const label = line.display_phone_number || line.verified_name || line.phone_number_id;
-      select.append(new Option(label, line.phone_number_id));
+      const option = new Option(supportNumberLabel(line), line.phone_number_id);
+      option.title = supportNumberRaw(line);
+      select.append(option);
     }
+    renderStartChatLinePreview();
     $('confirmStartChatBtn').disabled = false;
   } catch (error) {
     showStartChatError(error.message);
     $('confirmStartChatBtn').disabled = true;
   }
+}
+
+function renderStartChatLinePreview() {
+  const select = $('startChatLine');
+  const preview = $('startChatLinePreview');
+  const line = (state.chatLines || []).find(item => String(item.phone_number_id) === String(select.value));
+  if (!line) { preview.replaceChildren(); select.title = ''; return; }
+  select.title = supportNumberRaw(line);
+  preview.replaceChildren(document.createTextNode('Selected line: '), createSupportNumberLabel(line));
 }
 
 function closeStartChatModal() {
@@ -6879,6 +7052,7 @@ $('closeWhatsAppBtn').addEventListener('click', closeWhatsAppModal);
 $('addLinkedDeviceBtn').addEventListener('click', addLinkedDeviceNumber);
 $('refreshWhatsAppBtn').addEventListener('click', refreshWhatsAppRegistry);
 $('wabaSyncForm').addEventListener('submit', syncWabaForm);
+$('startChatLine').addEventListener('change', renderStartChatLinePreview);
 $('closeLocationBtn').addEventListener('click', closeLocationModal);
 $('cancelLocationBtn').addEventListener('click', closeLocationModal);
 $('useCurrentLocationBtn').addEventListener('click', useCurrentLocation);

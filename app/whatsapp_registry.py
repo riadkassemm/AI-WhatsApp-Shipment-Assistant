@@ -344,6 +344,19 @@ class WhatsAppRegistryService:
                 "WhatsApp number registry is not installed. Apply "
                 "migrations/20260921_whatsapp_number_registry.sql."
             )
+        columns = await self.repository.fetch_all(
+            """
+            SELECT COLUMN_NAME AS column_name
+            FROM INFORMATION_SCHEMA.COLUMNS
+            WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s AND COLUMN_NAME = %s
+            """,
+            (settings.db_name, "whatsapp_phone_numbers", "display_name"),
+        )
+        if not columns:
+            raise WhatsAppRegistrySchemaError(
+                "WhatsApp number display names are not installed. Apply "
+                "migrations/20261014_whatsapp_number_display_names.sql."
+            )
 
     async def _seed_legacy_number(self) -> None:
         phone_id = str(settings.whatsapp_phone_number_id or "").strip()
@@ -505,6 +518,7 @@ class WhatsAppRegistryService:
             "phone_number_id": str(row.get("phone_number_id") or ""),
             "waba_id": str(row.get("waba_id") or "") or None,
             "display_phone_number": row.get("display_phone_number"),
+            "display_name": row.get("display_name"),
             "verified_name": row.get("verified_name"),
             "quality_rating": row.get("quality_rating"),
             "is_enabled": bool(row.get("is_enabled")),
@@ -528,7 +542,7 @@ class WhatsAppRegistryService:
         )
         numbers = await self.repository.fetch_all(
             """
-            SELECT phone_number_id, waba_id, display_phone_number, verified_name,
+            SELECT phone_number_id, waba_id, display_phone_number, display_name, verified_name,
                    quality_rating, is_enabled, provider_present, source,
                    last_synced_at, created_at, updated_at
             FROM whatsapp_phone_numbers
@@ -541,6 +555,56 @@ class WhatsAppRegistryService:
             "numbers": [self._normalize_number(row) for row in numbers
                         if not (row.get("source") == "LINKED_DEVICE" and not row.get("provider_present") and str(row.get("phone_number_id")) in removed_ids)],
         }
+
+    async def set_number_display_name(
+        self,
+        agent: SupportAgent,
+        phone_number_id: str,
+        display_name: str | None,
+    ) -> dict[str, Any]:
+        self._require_manager(agent)
+        phone_number_id = _clean_id(phone_number_id, label="phone-number ID")
+        name = str(display_name or "").strip() or None
+        if name is not None and (len(name) > 80 or any(ord(char) < 32 or ord(char) == 127 for char in name)):
+            raise WhatsAppRegistryValidationError(
+                "Display name must be at most 80 characters and cannot contain control characters."
+            )
+        await self._ensure_schema()
+        await self._seed_legacy_number()
+        row = await self.repository.fetch_one(
+            """
+            SELECT phone_number_id, waba_id, source, provider_present, display_name
+            FROM whatsapp_phone_numbers
+            WHERE phone_number_id = %s
+            LIMIT 1
+            """,
+            (phone_number_id,),
+        )
+        if not row or (row.get("source") == "LINKED_DEVICE" and not row.get("provider_present")):
+            raise WhatsAppRegistryValidationError("This WhatsApp number is not available in the app.")
+        if row.get("display_name") == name:
+            return await self.list_payload(agent)
+        await self.repository.execute(
+            """
+            UPDATE whatsapp_phone_numbers
+            SET display_name = %s, updated_by_staff_id = %s
+            WHERE phone_number_id = %s
+            """,
+            (name, int(agent.id), phone_number_id),
+        )
+        await self._audit(
+            action="WHATSAPP_NUMBER_RENAMED",
+            actor_staff_id=int(agent.id),
+            waba_id=str(row.get("waba_id") or "") or None,
+            phone_number_id=phone_number_id,
+            details={"from": row.get("display_name"), "to": name},
+        )
+        logger.info(
+            "WhatsApp number display name changed: actor_staff_id=%s phone_number_id=%s",
+            agent.id,
+            phone_number_id,
+        )
+        return await self.list_payload(agent)
 
     async def prepare_linked_device_removal(
         self, agent: SupportAgent, line_id: str, *, close_active_tickets: bool,
@@ -773,7 +837,7 @@ class WhatsAppRegistryService:
         await self._seed_legacy_number()
         rows = await self.repository.fetch_all(
             """
-            SELECT phone_number_id, display_phone_number, verified_name, source
+            SELECT phone_number_id, display_phone_number, display_name, verified_name, source
             FROM whatsapp_phone_numbers
             WHERE is_enabled = 1 AND provider_present = 1
             ORDER BY COALESCE(display_phone_number, verified_name, phone_number_id)
@@ -783,6 +847,7 @@ class WhatsAppRegistryService:
             {
                 "phone_number_id": str(row.get("phone_number_id") or ""),
                 "display_phone_number": row.get("display_phone_number"),
+                "display_name": row.get("display_name"),
                 "verified_name": row.get("verified_name"),
             }
             for row in rows

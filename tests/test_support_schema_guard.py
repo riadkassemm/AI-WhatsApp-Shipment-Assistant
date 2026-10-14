@@ -43,6 +43,7 @@ def test_support_schema_guard_accepts_current_schema():
             "provider_timestamp",
         },
         "support_message_user_deletions": {"message_id", "user_id", "deleted_at"},
+        "whatsapp_phone_numbers": {"display_name"},
     }
     columns["support_ticket_messages"].update({"edited_at", "deleted_for_everyone_at", "deleted_by", "version"})
     add_linked_device_schema(columns)
@@ -77,6 +78,7 @@ def test_support_schema_guard_identifies_whatsapp_features_migration():
             "provider_timestamp",
         },
         "support_message_user_deletions": {"message_id", "user_id", "deleted_at"},
+        "whatsapp_phone_numbers": {"display_name"},
     }
     columns["support_ticket_messages"].update({"edited_at", "deleted_for_everyone_at", "deleted_by", "version"})
     add_linked_device_schema(columns)
@@ -108,6 +110,7 @@ def test_support_schema_guard_identifies_reaction_migration():
             "forwarded_from_message_id",
         },
         "support_message_user_deletions": {"message_id", "user_id", "deleted_at"},
+        "whatsapp_phone_numbers": {"display_name"},
     }
     columns["support_ticket_messages"].update({"edited_at", "deleted_for_everyone_at", "deleted_by", "version"})
     add_linked_device_schema(columns)
@@ -126,4 +129,17 @@ def test_support_schema_guard_identifies_linked_device_migration():
                 columns.setdefault(table, set()).update(required)
     assert _missing_support_schema_migrations(columns) == [
         "migrations/20261012_linked_device_message_changes.sql"
+    ]
+
+
+def test_support_schema_guard_identifies_number_display_name_migration():
+    from app.support_repository import _SUPPORT_SCHEMA_MIGRATIONS
+
+    columns = {}
+    for path, requirements in _SUPPORT_SCHEMA_MIGRATIONS:
+        if "20261014" not in path:
+            for table, required in requirements.items():
+                columns.setdefault(table, set()).update(required)
+    assert _missing_support_schema_migrations(columns) == [
+        "migrations/20261014_whatsapp_number_display_names.sql"
     ]

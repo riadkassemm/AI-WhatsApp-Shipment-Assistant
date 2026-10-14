@@ -87,6 +87,7 @@ const text = (element, value) => {element.textContent = value};
 const state = {linkedDeviceBusy: false, whatsappBusy: false, whatsappRegistry: {numbers: [
   {phone_number_id: '90001', is_enabled: true}, {phone_number_id: '90002', is_enabled: false}]}};
 const pendingLinkedDeviceAddition = () => null;
+const createSupportNumberLabel = line => {const node = element(); node.textContent = line.display_name || line.display_phone_number || line.line_id; return node};
 const changes = [];
 const changeLinkedDeviceConnection = (...args) => changes.push(args);
 const removeLinkedDeviceNumber = id => changes.push(['remove', id]);
@@ -323,6 +324,107 @@ assert.equal(e.pointer, null);
 assert.equal(e.objects.length, e.history[e.historyIndex].length);
 """
     result = subprocess.run(["node", "-e", script], text=True, capture_output=True, timeout=15)
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is unavailable")
+def test_custom_support_number_label_reveals_raw_phone_on_hover_and_focus() -> None:
+    helpers = _HTML[_HTML.index("function supportNumberAlias("): _HTML.index("function isStaffChat(")]
+    script = r"""
+const assert = require('node:assert/strict');
+function element() {return {children: [], attributes: {}, append(...nodes) {this.children.push(...nodes)},
+  setAttribute(name, value) {this.attributes[name] = value}, focus() {this.focused = true}}}
+const document = {createElement: element};
+const state = {whatsappRegistry: {numbers: [{phone_number_id: '90005', display_name: 'TestNumber',
+  display_phone_number: '447451212752'}]}};
+""" + helpers + r"""
+const ticket = {business_phone_number_id: '90005', business_display_phone_number: '447451212752',
+  display_name: 'TestNumber'};
+const label = createSupportNumberLabel(ticket);
+assert.equal(supportNumberLabel(ticket), 'TestNumber');
+assert.match(label.className, /has-alias/);
+assert.equal(label.children[0].textContent, 'TestNumber');
+assert.equal(label.children[1].textContent, '447451212752');
+assert.equal(label.title, '447451212752');
+assert.equal(label.tabIndex, 0);
+assert.match(label.attributes['aria-label'], /TestNumber.*447451212752/);
+label.onpointerdown({pointerType: 'touch'});
+assert.equal(label.focused, true, 'a tap makes the number visible using the focus style');
+
+const queueLabel = createSupportNumberLabel(ticket, {focusable: false});
+assert.equal(queueLabel.tabIndex, undefined, 'the queue does not nest a keyboard stop inside its button');
+const linked = createSupportNumberLabel({line_id: '90005', display_phone_number: '447451212752'});
+assert.equal(linked.children[0].textContent, 'TestNumber', 'linked status can use registry alias');
+const plain = createSupportNumberLabel({phone_number_id: '90002', display_phone_number: '96176063972'});
+assert.equal(plain.textContent, '96176063972');
+assert.equal(plain.children.length, 0);
+"""
+    result = subprocess.run(["node", "-e", script], text=True, capture_output=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    assert ".support-number-label.has-alias:is(:hover, :focus) .support-number-raw," in _HTML
+    assert ".support-number-label.has-alias:is(:hover, :focus) .support-number-alias," in _HTML
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is unavailable")
+def test_renaming_support_number_persists_then_updates_open_views() -> None:
+    functions = _HTML[_HTML.index("function refreshVisibleSupportNumberName("): _HTML.index("function renderLinkedDeviceStatus(")]
+    script = r"""
+const assert = require('node:assert/strict');
+const queue = {scrollTop: 27};
+const $ = name => {assert.equal(name, 'queue'); return queue};
+const ticket = {business_phone_number_id: '90005', display_name: null};
+const historical = {ticket: {business_phone_number_id: '90005', display_name: null}};
+const data = {ticket, context: {}, shipment: null, customer_identity: null, permissions: {},
+  previous_ticket_history: [historical]};
+const state = {whatsappBusy: false, linkedDeviceBusy: false, whatsappRegistry: null,
+  queueItems: [{business_phone_number_id: '90005', display_name: null}], globalSearchResults: [],
+  chatLines: [{phone_number_id: '90005', display_name: null}],
+  currentTicketData: data, previousTicketHistory: [historical], ticketId: 5};
+const canManageWhatsApp = () => true;
+const clearWhatsAppFeedback = () => {};
+const feedback = [];
+const showWhatsAppFeedback = (kind, value) => feedback.push([kind, value]);
+const setButtonBusy = (button, busy) => {button.disabled = busy};
+const renderWhatsAppRegistry = payload => {state.whatsappRegistry = payload};
+let queueRenders = 0, headerRenders = 0, contextRenders = 0, historyRenders = 0;
+const renderQueue = () => {queueRenders++; queue.scrollTop = 0};
+const renderTicketHeader = () => {headerRenders++};
+const renderContext = () => {contextRenders++};
+const renderConversation = (_, options) => {assert.equal(options.preserveAudio, true); historyRenders++};
+const timelineSignature = () => 'updated';
+let queueReloads = 0, ticketReloads = 0;
+const loadQueue = async options => {assert.deepEqual(options, {silent: true}); queueReloads++};
+const openTicket = async (id, options) => {
+  assert.equal(id, 5); assert.deepEqual(options, {silent: true, refreshHistory: true}); ticketReloads++;
+};
+const requests = [];
+const api = async (path, options) => {
+  requests.push([path, options.method, JSON.parse(options.body)]);
+  return {accounts: [], numbers: [{phone_number_id: '90005', display_name: JSON.parse(options.body).display_name}]};
+};
+""" + functions + r"""
+(async () => {
+  await renameWhatsAppNumber('90005', ' TestNumber ', {isConnected: true});
+  assert.deepEqual(requests[0], ['/api/support/whatsapp-numbers/90005/name', 'PUT', {display_name: 'TestNumber'}]);
+  assert.equal(state.whatsappRegistry.numbers[0].display_name, 'TestNumber');
+  assert.equal(ticket.display_name, 'TestNumber');
+  assert.equal(historical.ticket.display_name, 'TestNumber');
+  assert.equal(state.queueItems[0].display_name, 'TestNumber');
+  assert.equal(state.chatLines[0].display_name, 'TestNumber');
+  assert.equal(queue.scrollTop, 27);
+  assert.equal(queueRenders, 1);
+  assert.equal(headerRenders, 1);
+  assert.equal(contextRenders, 1);
+  assert.equal(historyRenders, 1);
+  assert.equal(queueReloads, 1);
+  assert.equal(ticketReloads, 1);
+  await renameWhatsAppNumber('90005', '   ', {isConnected: true});
+  assert.deepEqual(requests[1][2], {display_name: null}, 'an empty name restores the raw phone');
+  assert.equal(ticket.display_name, null);
+  assert.deepEqual(feedback.map(item => item[0]), ['whatsappSuccess', 'whatsappSuccess']);
+})().catch(error => {console.error(error); process.exitCode = 1});
+"""
+    result = subprocess.run(["node", "-e", script], text=True, capture_output=True, timeout=10)
     assert result.returncode == 0, result.stderr
 
 
@@ -1197,6 +1299,7 @@ const $ = id => id === 'conversation' ? conversation : new Node(id);
 const state = {conversationSearchOpen: false, historyLoadBusy: false, agent: {role: 'AGENT'}};
 const isStaffChat = ticket => ticket.conversation_origin === 'STAFF';
 const supportNumberLabel = () => 'Business line';
+const createSupportNumberLabel = () => {const node = new Node('span'); node.textContent = 'Business line'; return node};
 const formatStatus = value => value;
 const fmt = value => value;
 const createIcon = () => new Node('icon');

@@ -19,6 +19,7 @@ from app.whatsapp_registry import (
     WhatsAppRegistryConflictError,
     WhatsAppRegistryForbiddenError,
     WhatsAppRegistryRepository,
+    WhatsAppRegistrySchemaError,
     WhatsAppRegistryService,
     WhatsAppRegistryValidationError,
 )
@@ -31,6 +32,7 @@ class FakeRepository:
             "phone_number_id": "1375394715655384",
             "waba_id": "999999999999999",
             "display_phone_number": "+961 00 000 000",
+            "display_name": None,
             "verified_name": "MIK Export",
             "quality_rating": "GREEN",
             "is_enabled": False,
@@ -41,6 +43,7 @@ class FakeRepository:
             "updated_at": None,
         }
         self.audit_actions: list[str] = []
+        self.has_display_name_column = True
 
     async def fetch_all(self, query, params=()):
         if "INFORMATION_SCHEMA.TABLES" in query:
@@ -49,6 +52,8 @@ class FakeRepository:
                 {"table_name": "whatsapp_phone_numbers"},
                 {"table_name": "whatsapp_integration_audit"},
             ]
+        if "INFORMATION_SCHEMA.COLUMNS" in query:
+            return [{"column_name": "display_name"}] if self.has_display_name_column else []
         if "FROM whatsapp_business_accounts" in query:
             return [{"waba_id": "999999999999999", "name": "MIK", "is_active": 1}]
         if "FROM whatsapp_phone_numbers" in query:
@@ -65,6 +70,8 @@ class FakeRepository:
     async def execute(self, query, params=()):
         if "UPDATE whatsapp_phone_numbers" in query and "SET is_enabled" in query:
             self.number["is_enabled"] = bool(params[0])
+        if "UPDATE whatsapp_phone_numbers" in query and "SET display_name" in query:
+            self.number["display_name"] = params[0]
         if "INSERT INTO whatsapp_integration_audit" in query:
             self.audit_actions.append(str(params[0]))
         return 1
@@ -130,6 +137,80 @@ def test_manager_can_enable_discovered_number() -> None:
     )
     assert result["numbers"][0]["is_enabled"] is True
     assert "WHATSAPP_NUMBER_ENABLED" in repo.audit_actions
+
+
+def test_manager_can_rename_meta_number_and_clear_name_without_changing_routing() -> None:
+    repo = FakeRepository()
+    service = WhatsAppRegistryService(repo)
+    original_phone = repo.number["display_phone_number"]
+    original_id = repo.number["phone_number_id"]
+
+    result = asyncio.run(service.set_number_display_name(actor("supervisor"), original_id, "  TestNumber  "))
+    assert result["numbers"][0]["display_name"] == "TestNumber"
+    assert result["numbers"][0]["display_phone_number"] == original_phone
+    assert repo.number["phone_number_id"] == original_id
+    assert repo.audit_actions == ["WHATSAPP_NUMBER_RENAMED"]
+
+    result = asyncio.run(service.set_number_display_name(actor("admin"), original_id, "   "))
+    assert result["numbers"][0]["display_name"] is None
+    assert result["numbers"][0]["display_phone_number"] == original_phone
+    assert repo.audit_actions == ["WHATSAPP_NUMBER_RENAMED", "WHATSAPP_NUMBER_RENAMED"]
+
+
+def test_linked_number_rename_is_separate_from_paired_phone(monkeypatch) -> None:
+    from app import whatsapp_registry
+
+    repo = FakeRepository()
+    repo.number.update(phone_number_id="90005", source="LINKED_DEVICE", display_phone_number="447451212752")
+    monkeypatch.setattr(whatsapp_registry, "configured_linked_device_lines", lambda: {"90005": ""})
+    monkeypatch.setattr(whatsapp_registry, "get_transport", lambda line_id: "linked_device")
+    service = WhatsAppRegistryService(repo)
+    result = asyncio.run(service.set_number_display_name(actor("admin"), "90005", "TestNumber"))
+    assert result["numbers"][0]["display_name"] == "TestNumber"
+    assert result["numbers"][0]["display_phone_number"] == "447451212752"
+    repo.number["is_enabled"] = True
+    assert asyncio.run(service.list_enabled_numbers(actor("agent")))[0]["display_name"] == "TestNumber"
+
+
+def test_number_rename_rejects_agent_unknown_number_and_invalid_name() -> None:
+    repo = FakeRepository()
+    service = WhatsAppRegistryService(repo)
+    with pytest.raises(WhatsAppRegistryForbiddenError):
+        asyncio.run(service.set_number_display_name(actor("agent"), repo.number["phone_number_id"], "Label"))
+    with pytest.raises(WhatsAppRegistryValidationError, match="numeric"):
+        asyncio.run(service.set_number_display_name(actor("admin"), "other", "Label"))
+    with pytest.raises(WhatsAppRegistryValidationError, match="control characters"):
+        asyncio.run(service.set_number_display_name(actor("admin"), repo.number["phone_number_id"], "Bad\nName"))
+    with pytest.raises(WhatsAppRegistryValidationError, match="not available"):
+        repo.number = {}
+        asyncio.run(service.set_number_display_name(actor("admin"), "1375394715655384", "Label"))
+    assert repo.audit_actions == []
+
+
+def test_number_alias_migration_is_additive_and_schema_guard_is_actionable() -> None:
+    migration = (Path(__file__).resolve().parents[1] / "migrations" / "20261014_whatsapp_number_display_names.sql").read_text()
+    assert "ADD COLUMN IF NOT EXISTS display_name" in migration
+    assert "DROP " not in migration.upper()
+    repo = FakeRepository()
+    repo.has_display_name_column = False
+    with pytest.raises(WhatsAppRegistrySchemaError, match="20261014_whatsapp_number_display_names.sql"):
+        asyncio.run(WhatsAppRegistryService(repo).list_payload(actor("admin")))
+
+
+def test_number_rename_api_contract_uses_manager_service_and_returns_updated_registry(monkeypatch) -> None:
+    from app import support_api
+
+    calls = []
+
+    async def rename(agent, phone_number_id, display_name):
+        calls.append((agent.role, phone_number_id, display_name))
+        return {"accounts": [], "numbers": [{"phone_number_id": phone_number_id, "display_name": display_name}]}
+
+    monkeypatch.setattr(support_api.whatsapp_registry_service, "set_number_display_name", rename)
+    payload = support_api.WhatsAppNumberNameRequest(display_name="TestNumber")
+    result = asyncio.run(support_api.update_whatsapp_number_name("90005", payload, actor("admin")))
+    assert result == {"accounts": [], "numbers": [{"phone_number_id": "90005", "display_name": "TestNumber"}]}
+    assert calls == [("admin", "90005", "TestNumber")]
 
 
 def test_disabling_number_with_active_tickets_is_rejected() -> None:
