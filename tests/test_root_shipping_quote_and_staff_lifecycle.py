@@ -397,6 +397,53 @@ def test_supervisor_cannot_delete_deactivate_or_demote_self() -> None:
     asyncio.run(run())
 
 
+def test_supervisor_can_change_own_credentials_and_revoke_session() -> None:
+    async def run() -> None:
+        actor = SupportAgent(id="1", name="Supervisor", role="supervisor")
+        target = {
+            "id": 1, "name": "Supervisor", "email": "old@example.com",
+            "role": "supervisor", "is_active": 1,
+        }
+        repo = staff_management.staff_repository
+        original_get = repo.get_staff_by_id
+        original_update = repo.update_staff
+        original_hash = staff_management._hash_password
+        calls: dict[str, object] = {}
+
+        async def get_target(_staff_id: int):
+            return target
+
+        async def update_target(staff_id: int, **kwargs):
+            calls["update"] = (staff_id, kwargs)
+            return {**target, "name": kwargs["name"], "email": kwargs["email"]}
+
+        async def hash_password(password: str) -> str:
+            assert password == "NewLongPassword123!"
+            return "hashed-password"
+
+        repo.get_staff_by_id = get_target  # type: ignore[method-assign]
+        repo.update_staff = update_target  # type: ignore[method-assign]
+        staff_management._hash_password = hash_password
+        try:
+            result = await staff_management.update_staff_account(
+                actor, 1, name="My New Name", email="new@example.com",
+                password="NewLongPassword123!",
+            )
+        finally:
+            repo.get_staff_by_id = original_get  # type: ignore[method-assign]
+            repo.update_staff = original_update  # type: ignore[method-assign]
+            staff_management._hash_password = original_hash
+
+        staff_id, values = calls["update"]  # type: ignore[misc]
+        assert staff_id == 1
+        assert values["email_normalized"] == "new@example.com"
+        assert values["password_hash"] == "hashed-password"
+        assert values["revoke_sessions"] is True
+        assert result["current_session_revoked"] is True
+
+    asyncio.run(run())
+
+
 def test_supervisor_can_modify_and_delete_another_supervisor() -> None:
     async def run() -> None:
         actor = SupportAgent(id="1", name="Supervisor One", role="supervisor")

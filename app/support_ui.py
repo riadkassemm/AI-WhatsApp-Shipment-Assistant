@@ -159,7 +159,7 @@ button, input, select, textarea { font: inherit; }
 button, a, input, select, textarea { -webkit-tap-highlight-color: transparent; }
 button { color: inherit; }
 a { color: var(--primary); }
-::selection { background: var(--primary-soft); color: var(--text-strong); }
+::selection { background: var(--primary); color: var(--primary-contrast); }
 .hidden { display: none !important; }
 .sr-only {
   position: absolute !important;
@@ -635,7 +635,7 @@ body.column-resizing * { cursor: col-resize !important; }
 .message-row.outbound .message-stack { grid-column: 1; grid-row: 1; justify-self: end; align-items: flex-end; }
 .message-avatar { width: 32px; height: 32px; font-size: 10px; }
 .message-stack { width: min(72%, 640px); min-width: 0; display: flex; flex-direction: column; align-items: flex-start; }
-.message-bubble { width: fit-content; max-width: 100%; padding: 10px 12px; border: 1px solid var(--border); border-radius: 4px 14px 14px 14px; background: var(--surface); box-shadow: var(--shadow-xs); }
+.message-bubble { width: fit-content; max-width: 100%; padding: 10px 12px; border: 1px solid var(--border); border-radius: 4px 14px 14px 14px; background: var(--surface); box-shadow: var(--shadow-xs); user-select: text; -webkit-user-select: text; }
 .message-row.outbound .message-bubble { border-radius: 14px 4px 14px 14px; border-color: color-mix(in srgb, var(--primary) 18%, var(--border)); background: var(--primary-soft); }
 .message-row.ai .message-bubble { background: var(--surface-muted); }
 .message-row.context-msg { opacity: 0.83; }
@@ -645,7 +645,7 @@ body.column-resizing * { cursor: col-resize !important; }
 .message-quote { width: min(100%, 520px); margin-bottom: 8px; padding: 7px 9px; border-left: 3px solid var(--primary); border-radius: 7px; background: color-mix(in srgb, var(--primary-soft) 55%, var(--surface)); color: var(--text-muted); font-size: 10px; }
 .message-quote strong { display: block; margin-bottom: 2px; color: var(--text-strong); font-size: 10px; }
 .message-quote span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.message-body { color: var(--text-strong); white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; user-select: text; -webkit-user-select: text; }
+.message-body { color: var(--text-strong); white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; user-select: text !important; -webkit-user-select: text !important; cursor: text; }
 .message-body a { color: var(--primary); text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 2px; overflow-wrap: anywhere; }
 .message-body a:hover { color: var(--primary-hover); }
 .message-search-highlight { background: color-mix(in srgb, var(--warning) 42%, transparent); color: inherit; border-radius: 3px; padding: 0 1px; }
@@ -1489,12 +1489,12 @@ body.column-resizing * { cursor: col-resize !important; }
       </div>
 
       <div class="staff-view hidden" id="staffCreateView">
-        <div class="staff-view-heading"><div><strong>Create staff account</strong><div class="muted">Add a new agent or administrator.</div></div><button class="btn" id="backFromCreateBtn" type="button"><svg class="icon" aria-hidden="true"><use href="#icon-arrow-left"></use></svg>Back to staff</button></div>
+        <div class="staff-view-heading"><div><strong>Create staff account</strong><div class="muted">Add a new agent, administrator, or supervisor.</div></div><button class="btn" id="backFromCreateBtn" type="button"><svg class="icon" aria-hidden="true"><use href="#icon-arrow-left"></use></svg>Back to staff</button></div>
         <form id="createStaffForm" novalidate>
           <div class="staff-grid">
             <div class="field"><label for="createStaffName">Name <span class="required-mark" aria-hidden="true">*</span></label><input id="createStaffName" type="text" minlength="2" maxlength="120" autocomplete="off" required /></div>
             <div class="field"><label for="createStaffEmail">Email <span class="required-mark" aria-hidden="true">*</span></label><input id="createStaffEmail" type="email" maxlength="320" autocomplete="off" required /></div>
-            <div class="field"><label for="createStaffRole">Role <span class="required-mark" aria-hidden="true">*</span></label><select id="createStaffRole" required><option value="agent">Agent</option><option value="admin">Admin</option></select></div>
+            <div class="field"><label for="createStaffRole">Role <span class="required-mark" aria-hidden="true">*</span></label><select id="createStaffRole" required><option value="agent">Agent</option><option value="admin">Admin</option><option value="supervisor">Supervisor</option></select></div>
             <div></div>
             <div class="field"><label for="createStaffPassword">Initial password <span class="required-mark" aria-hidden="true">*</span></label><input id="createStaffPassword" type="password" minlength="12" maxlength="72" autocomplete="new-password" required aria-describedby="createPasswordHint" /><div class="field-hint" id="createPasswordHint">12 characters minimum; 72 UTF-8 bytes maximum.</div></div>
             <div class="field"><label for="createStaffPasswordConfirm">Confirm password <span class="required-mark" aria-hidden="true">*</span></label><input id="createStaffPasswordConfirm" type="password" minlength="12" maxlength="72" autocomplete="new-password" required aria-describedby="createPasswordMatchError" /><div class="field-error hidden" id="createPasswordMatchError" role="alert"></div></div>
@@ -1645,6 +1645,7 @@ const state = {
   historySelectionEpoch: 0,
   timelineSignature: '',
   pendingConversationRender: null,
+  conversationSelectionPointer: null,
   agent: null,
   busy: false,
   authenticated: false,
@@ -4199,6 +4200,18 @@ function selectedConversationText() {
   return selection.toString();
 }
 
+function beginConversationSelection(event) {
+  if (event.button === 0 && event.target.closest?.('.message-body, .message-quote, .message-sender')) {
+    state.conversationSelectionPointer = event.pointerId;
+  }
+}
+
+function finishConversationSelection(event) {
+  if (state.conversationSelectionPointer !== event.pointerId) return;
+  state.conversationSelectionPointer = null;
+  window.setTimeout(flushPendingConversationRender, 0);
+}
+
 function handleConversationCopy(event) {
   const selected = selectedConversationText();
   if (!selected || !event.clipboardData?.setData) return;
@@ -4208,7 +4221,7 @@ function handleConversationCopy(event) {
 
 function flushPendingConversationRender() {
   const pending = state.pendingConversationRender;
-  if (!pending || selectedConversationText()) return;
+  if (!pending || state.conversationSelectionPointer !== null || selectedConversationText()) return;
   state.pendingConversationRender = null;
   if (String(pending.data?.ticket?.id) !== String(state.ticketId)) return;
   const data = state.currentTicketData || pending.data;
@@ -4217,7 +4230,7 @@ function flushPendingConversationRender() {
 }
 
 function renderConversation(data, {forceScroll = false, preserveAudio = true, preserveScrollAnchor = null} = {}) {
-  if (!forceScroll && selectedConversationText()) {
+  if (!forceScroll && (state.conversationSelectionPointer !== null || selectedConversationText())) {
     state.pendingConversationRender = {data, options: {forceScroll, preserveAudio, preserveScrollAnchor}};
     return;
   }
@@ -6293,7 +6306,9 @@ function resetEditStaffForm() {
   state.editingStaffOriginal = null;
   $('editStaffForm').reset();
   $('editStaffRole').value = 'agent';
+  $('editStaffRole').disabled = false;
   $('editStaffActive').checked = true;
+  $('editStaffActive').disabled = false;
   text($('editStaffHeading'), 'Edit staff account');
   setFieldError('editStaffPasswordConfirm', 'editPasswordMatchError', '');
 }
@@ -6362,7 +6377,7 @@ function backToStaffList() {
 }
 
 function beginStaffEdit(item) {
-  if (!item || (item.role === 'supervisor' && String(item.id) === String(state.agent?.id))) return;
+  if (!item) return;
   clearStaffFeedback();
   resetEditStaffForm();
   state.editingStaffId = String(item.id);
@@ -6371,6 +6386,9 @@ function beginStaffEdit(item) {
   $('editStaffEmail').value = item.email || '';
   $('editStaffRole').value = ['agent', 'admin', 'supervisor'].includes(item.role) ? item.role : 'agent';
   $('editStaffActive').checked = Boolean(item.is_active);
+  const isSelf = String(item.id) === String(state.agent?.id);
+  $('editStaffRole').disabled = isSelf;
+  $('editStaffActive').disabled = isSelf;
   $('editStaffPassword').value = '';
   $('editStaffPasswordConfirm').value = '';
   text($('editStaffHeading'), 'Edit ' + (item.name || item.email || 'staff account'));
@@ -6436,15 +6454,8 @@ function renderStaffAccounts(items) {
     const actions = document.createElement('div');
     actions.className = 'staff-row-actions';
     actions.setAttribute('role', 'cell');
-    if (item.role !== 'supervisor' || String(item.id) !== String(state.agent?.id)) {
-      actions.append(staffButton(item.is_active ? 'Edit' : 'Edit / reactivate', () => beginStaffEdit(item), '', 'edit'));
-      if (item.is_active && String(item.id) !== String(state.agent?.id)) actions.append(staffButton('Delete', () => deleteStaffAccount(item), 'danger', 'trash'));
-    } else {
-      const protectedLabel = document.createElement('span');
-      protectedLabel.className = 'muted';
-      protectedLabel.textContent = 'Your account';
-      actions.append(protectedLabel);
-    }
+    actions.append(staffButton(item.is_active ? 'Edit' : 'Edit / reactivate', () => beginStaffEdit(item), '', 'edit'));
+    if (item.is_active && String(item.id) !== String(state.agent?.id)) actions.append(staffButton('Delete', () => deleteStaffAccount(item), 'danger', 'trash'));
     row.append(identity, email, role, active, actions);
     fragment.append(row);
   }
@@ -6571,10 +6582,11 @@ async function updateStaffAccount(event) {
     setStaffView('list');
     showStaffFeedback('staffSuccess', 'Updated ' + data.staff.name + ' (' + data.staff.role + ').');
     notify('Staff account updated.');
-    await loadStaffAccounts();
     if (sessionRevoked) {
       alert('Your credentials changed, so this staff session was revoked. Please sign in again.');
       showLogin();
+    } else {
+      await loadStaffAccounts();
     }
   } catch (error) {
     if (!handleStaffConflict(error)) showStaffFeedback('staffError', error.message);
@@ -7284,6 +7296,13 @@ $('confirmTransferBtn').addEventListener('click', confirmTransfer);
 document.addEventListener('keydown', handleGlobalKeydown);
 document.addEventListener('copy', handleConversationCopy);
 document.addEventListener('selectionchange', flushPendingConversationRender);
+$('conversation').addEventListener('pointerdown', beginConversationSelection);
+window.addEventListener('pointerup', finishConversationSelection);
+window.addEventListener('pointercancel', finishConversationSelection);
+window.addEventListener('blur', () => {
+  state.conversationSelectionPointer = null;
+  flushPendingConversationRender();
+});
 document.addEventListener('pointerdown', unlockNotificationAudio);
 document.addEventListener('click', event => {
   for (const menu of document.querySelectorAll('.action-menu[open]')) {

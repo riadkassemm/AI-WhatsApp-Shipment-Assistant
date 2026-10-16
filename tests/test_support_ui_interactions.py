@@ -46,7 +46,8 @@ const document = {
     result = subprocess.run(["node", "-e", script], text=True, capture_output=True, timeout=10)
     assert result.returncode == 0, result.stderr
     assert "copy.onclick = () => copyMessageText(bodyText);" in _HTML
-    assert ".message-body {" in _HTML and "user-select: text;" in _HTML
+    assert ".message-body {" in _HTML and "user-select: text !important;" in _HTML
+    assert "::selection { background: var(--primary); color: var(--primary-contrast); }" in _HTML
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is unavailable")
@@ -59,8 +60,9 @@ const outside = {id: 'composer'};
 const conversation = {contains(node) {return node === inside}};
 const $ = id => {assert.equal(id, 'conversation'); return conversation};
 let selection = {isCollapsed: false, anchorNode: inside, focusNode: inside, toString() {return 'selected customer text'}};
-const window = {getSelection() {return selection}};
-const state = {ticketId: 42, pendingConversationRender: null,
+const scheduled = [];
+const window = {getSelection() {return selection}, setTimeout(callback) {scheduled.push(callback)}};
+const state = {ticketId: 42, pendingConversationRender: null, conversationSelectionPointer: null,
   currentTicketData: {ticket: {id: 42}, messages: [{body: 'latest'}]}};
 const renders = [];
 const renderConversation = (data, options) => renders.push([data, options]);
@@ -73,6 +75,14 @@ handleConversationCopy({clipboardData: clipboard, preventDefault() {prevented = 
 assert.equal(clipboard.value, 'selected customer text');
 assert.equal(prevented, true);
 state.pendingConversationRender = {data: state.currentTicketData, options: {preserveAudio: true}};
+beginConversationSelection({button: 0, pointerId: 7, target: {closest: () => ({})}});
+selection = {isCollapsed: true, anchorNode: inside, focusNode: inside, toString() {return ''}};
+flushPendingConversationRender();
+assert.equal(renders.length, 0, 'refresh waits from pointer down, before text is highlighted');
+selection = {isCollapsed: false, anchorNode: inside, focusNode: inside, toString() {return 'selected customer text'}};
+finishConversationSelection({pointerId: 7});
+scheduled.shift()();
+assert.equal(renders.length, 0, 'refresh waits after the pointer is released while text remains selected');
 flushPendingConversationRender();
 assert.equal(renders.length, 0, 'new messages wait while text remains selected');
 selection = {isCollapsed: true, anchorNode: inside, focusNode: inside, toString() {return ''}};
@@ -86,7 +96,8 @@ assert.equal(selectedConversationText(), '', 'the composer keeps its native copy
 """
     result = subprocess.run(["node", "-e", script], text=True, capture_output=True, timeout=10)
     assert result.returncode == 0, result.stderr
-    assert "if (!forceScroll && selectedConversationText()) {" in _HTML
+    assert "if (!forceScroll && (state.conversationSelectionPointer !== null || selectedConversationText())) {" in _HTML
+    assert "$('conversation').addEventListener('pointerdown', beginConversationSelection);" in _HTML
     assert "document.addEventListener('copy', handleConversationCopy);" in _HTML
 
 
@@ -1374,7 +1385,7 @@ conversation.clientHeight = 80;
 conversation.scrollTop = 0;
 const document = {createElement: tag => new Node(tag), createTextNode: value => ({textContent: value, children: []})};
 const $ = id => id === 'conversation' ? conversation : new Node(id);
-const state = {conversationSearchOpen: false, historyLoadBusy: false, agent: {role: 'AGENT'}};
+const state = {conversationSearchOpen: false, historyLoadBusy: false, conversationSelectionPointer: null, agent: {role: 'AGENT'}};
 const isStaffChat = ticket => ticket.conversation_origin === 'STAFF';
 const supportNumberLabel = () => 'Business line';
 const createSupportNumberLabel = () => {const node = new Node('span'); node.textContent = 'Business line'; return node};

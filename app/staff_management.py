@@ -20,8 +20,8 @@ from app.support_auth import SupportAgent, normalize_staff_email
 
 logger = logging.getLogger("shipment-bot")
 
-CREATABLE_STAFF_ROLES = {"agent", "admin"}
-ASSIGNABLE_STAFF_ROLES = CREATABLE_STAFF_ROLES | {"supervisor"}
+CREATABLE_STAFF_ROLES = {"agent", "admin", "supervisor"}
+ASSIGNABLE_STAFF_ROLES = CREATABLE_STAFF_ROLES
 _EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
 

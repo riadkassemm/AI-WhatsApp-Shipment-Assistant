@@ -7,7 +7,6 @@ import sys
 import types
 
 import pytest
-from pydantic import ValidationError
 
 os.environ.setdefault("REDIS_URL", "")
 
@@ -241,7 +240,7 @@ def test_unknown_goods_category_lists_available_rates_instead_of_misquoting_one(
     asyncio.run(run())
 
 
-def test_supervisor_can_create_agent_or_admin_without_exposing_hash() -> None:
+def test_supervisor_can_create_every_staff_role_without_exposing_hash() -> None:
     async def run(role: str) -> None:
         actor = SupportAgent(id="7", name="Supervisor", role="supervisor")
         calls: dict[str, object] = {}
@@ -267,13 +266,19 @@ def test_supervisor_can_create_agent_or_admin_without_exposing_hash() -> None:
                 "updated_at": None,
             }
 
+        async def hash_password(password: str) -> str:
+            assert password == "LongInitialPass123!"
+            return "hashed-password"
+
         repo = staff_management.staff_repository
         original_lookup = repo.get_staff_by_email
         original_create = repo.create_staff
         original_public = repo.get_public_staff_by_id
+        original_hash = staff_management._hash_password
         repo.get_staff_by_email = get_by_email  # type: ignore[method-assign]
         repo.create_staff = create_staff  # type: ignore[method-assign]
         repo.get_public_staff_by_id = get_public  # type: ignore[method-assign]
+        staff_management._hash_password = hash_password
         try:
             result = await staff_management.create_staff_account(
                 actor,
@@ -286,6 +291,7 @@ def test_supervisor_can_create_agent_or_admin_without_exposing_hash() -> None:
             repo.get_staff_by_email = original_lookup  # type: ignore[method-assign]
             repo.create_staff = original_create  # type: ignore[method-assign]
             repo.get_public_staff_by_id = original_public  # type: ignore[method-assign]
+            staff_management._hash_password = original_hash
 
         assert result["role"] == role
         assert result["email"] == "new@example.com"
@@ -298,9 +304,10 @@ def test_supervisor_can_create_agent_or_admin_without_exposing_hash() -> None:
 
     asyncio.run(run("agent"))
     asyncio.run(run("admin"))
+    asyncio.run(run("supervisor"))
 
 
-def test_agent_cannot_manage_staff_and_supervisor_role_cannot_be_created() -> None:
+def test_agent_cannot_manage_staff_and_supervisor_role_can_be_created() -> None:
     agent = SupportAgent(id="8", name="Agent", role="agent")
 
     async def run() -> None:
@@ -309,13 +316,13 @@ def test_agent_cannot_manage_staff_and_supervisor_role_cannot_be_created() -> No
 
     asyncio.run(run())
 
-    with pytest.raises(ValidationError):
-        CreateStaffRequest(
-            name="Another Supervisor",
-            email="supervisor@example.com",
-            password="LongInitialPass123!",
-            role="supervisor",  # type: ignore[arg-type]
-        )
+    payload = CreateStaffRequest(
+        name="Another Supervisor",
+        email="supervisor@example.com",
+        password="LongInitialPass123!",
+        role="supervisor",
+    )
+    assert payload.role == "supervisor"
 
 
 def test_support_ui_exposes_staff_management_only_through_supervisor_gate() -> None:
@@ -324,5 +331,5 @@ def test_support_ui_exposes_staff_management_only_through_supervisor_gate() -> N
     assert "'/api/support/staff'" in _HTML
     assert 'value="agent"' in _HTML
     assert 'value="admin"' in _HTML
-    assert '<select id="createStaffRole" required><option value="agent">Agent</option><option value="admin">Admin</option></select>' in _HTML
+    assert '<select id="createStaffRole" required><option value="agent">Agent</option><option value="admin">Admin</option><option value="supervisor">Supervisor</option></select>' in _HTML
     assert '<select id="editStaffRole" required><option value="agent">Agent</option><option value="admin">Admin</option><option value="supervisor">Supervisor</option></select>' in _HTML
