@@ -365,7 +365,7 @@ def test_supervisor_updates_credentials_role_activation_and_deletes_agent() -> N
     asyncio.run(run())
 
 
-def test_self_delete_and_supervisor_structural_changes_are_blocked() -> None:
+def test_supervisor_cannot_delete_deactivate_or_demote_self() -> None:
     async def run() -> None:
         actor = SupportAgent(id="1", name="Supervisor", role="supervisor")
         target = {
@@ -389,8 +389,65 @@ def test_self_delete_and_supervisor_structural_changes_are_blocked() -> None:
                 await staff_management.delete_staff_account(actor, 1)
             with pytest.raises(staff_management.StaffManagementConflictError):
                 await staff_management.update_staff_account(actor, 1, is_active=False)
+            with pytest.raises(staff_management.StaffManagementConflictError):
+                await staff_management.update_staff_account(actor, 1, role="admin")
         finally:
             repo.get_staff_by_id = original_get  # type: ignore[method-assign]
+
+    asyncio.run(run())
+
+
+def test_supervisor_can_modify_and_delete_another_supervisor() -> None:
+    async def run() -> None:
+        actor = SupportAgent(id="1", name="Supervisor One", role="supervisor")
+        target = {
+            "id": 2, "name": "Supervisor Two", "email": "two@example.com",
+            "role": "supervisor", "is_active": 1,
+        }
+        calls: dict[str, object] = {}
+        repo = staff_management.staff_repository
+        original_get = repo.get_staff_by_id
+        original_update = repo.update_staff
+        original_delete = repo.soft_delete_staff
+
+        async def get_target(staff_id: int):
+            assert staff_id == 2
+            return target
+
+        async def update_target(staff_id: int, **kwargs):
+            calls["update"] = (staff_id, kwargs)
+            return {**target, "name": kwargs["name"], "role": kwargs["role"]}
+
+        async def delete_target(staff_id: int):
+            calls["delete"] = staff_id
+            return {**target, "is_active": 0}
+
+        repo.get_staff_by_id = get_target  # type: ignore[method-assign]
+        repo.update_staff = update_target  # type: ignore[method-assign]
+        repo.soft_delete_staff = delete_target  # type: ignore[method-assign]
+        try:
+            updated = await staff_management.update_staff_account(
+                actor, 2, name="Supervisor Updated", role="supervisor"
+            )
+            deleted = await staff_management.delete_staff_account(actor, 2)
+            agent = SupportAgent(id="3", name="Agent", role="agent")
+            with pytest.raises(staff_management.StaffManagementForbiddenError):
+                await staff_management.update_staff_account(agent, 2, name="Not allowed")
+            with pytest.raises(staff_management.StaffManagementForbiddenError):
+                await staff_management.delete_staff_account(agent, 2)
+        finally:
+            repo.get_staff_by_id = original_get  # type: ignore[method-assign]
+            repo.update_staff = original_update  # type: ignore[method-assign]
+            repo.soft_delete_staff = original_delete  # type: ignore[method-assign]
+
+        assert updated["name"] == "Supervisor Updated"
+        assert updated["role"] == "supervisor"
+        staff_id, kwargs = calls["update"]  # type: ignore[misc]
+        assert staff_id == 2
+        assert kwargs["role"] == "supervisor"
+        assert calls["delete"] == 2
+        assert deleted["is_active"] is False
+        assert deleted["deleted"] is True
 
     asyncio.run(run())
 
@@ -404,6 +461,7 @@ def test_staff_api_and_ui_expose_full_lifecycle() -> None:
         is_active=False,
     )
     assert payload.role == "admin"
+    assert UpdateStaffRequest(role="supervisor").role == "supervisor"
     api_source = open("app/support_api.py", encoding="utf-8").read()
     assert '@router.patch("/staff/{staff_id}")' in api_source
     assert '@router.delete("/staff/{staff_id}")' in api_source

@@ -645,7 +645,7 @@ body.column-resizing * { cursor: col-resize !important; }
 .message-quote { width: min(100%, 520px); margin-bottom: 8px; padding: 7px 9px; border-left: 3px solid var(--primary); border-radius: 7px; background: color-mix(in srgb, var(--primary-soft) 55%, var(--surface)); color: var(--text-muted); font-size: 10px; }
 .message-quote strong { display: block; margin-bottom: 2px; color: var(--text-strong); font-size: 10px; }
 .message-quote span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.message-body { color: var(--text-strong); white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }
+.message-body { color: var(--text-strong); white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; user-select: text; -webkit-user-select: text; }
 .message-body a { color: var(--primary); text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 2px; overflow-wrap: anywhere; }
 .message-body a:hover { color: var(--primary-hover); }
 .message-search-highlight { background: color-mix(in srgb, var(--warning) 42%, transparent); color: inherit; border-radius: 3px; padding: 0 1px; }
@@ -1510,7 +1510,7 @@ body.column-resizing * { cursor: col-resize !important; }
           <div class="staff-grid">
             <div class="field"><label for="editStaffName">Name <span class="required-mark" aria-hidden="true">*</span></label><input id="editStaffName" type="text" minlength="2" maxlength="120" autocomplete="off" required /></div>
             <div class="field"><label for="editStaffEmail">Email <span class="required-mark" aria-hidden="true">*</span></label><input id="editStaffEmail" type="email" maxlength="320" autocomplete="off" required /></div>
-            <div class="field"><label for="editStaffRole">Role <span class="required-mark" aria-hidden="true">*</span></label><select id="editStaffRole" required><option value="agent">Agent</option><option value="admin">Admin</option></select></div>
+            <div class="field"><label for="editStaffRole">Role <span class="required-mark" aria-hidden="true">*</span></label><select id="editStaffRole" required><option value="agent">Agent</option><option value="admin">Admin</option><option value="supervisor">Supervisor</option></select></div>
             <label class="inline-check"><input id="editStaffActive" type="checkbox" checked /> Account active</label>
             <div class="field"><label for="editStaffPassword">New password <span class="muted">(optional)</span></label><input id="editStaffPassword" type="password" minlength="12" maxlength="72" autocomplete="new-password" aria-describedby="editPasswordHint" /><div class="field-hint" id="editPasswordHint">Leave blank to keep the current password.</div></div>
             <div class="field"><label for="editStaffPasswordConfirm">Confirm new password</label><input id="editStaffPasswordConfirm" type="password" minlength="12" maxlength="72" autocomplete="new-password" aria-describedby="editPasswordMatchError" /><div class="field-error hidden" id="editPasswordMatchError" role="alert"></div></div>
@@ -1644,6 +1644,7 @@ const state = {
   historyLoadRequest: 0,
   historySelectionEpoch: 0,
   timelineSignature: '',
+  pendingConversationRender: null,
   agent: null,
   busy: false,
   authenticated: false,
@@ -2279,6 +2280,8 @@ function installColumnResizer({id, variableName, storageKey, minimum, maximum, d
     stop();
   });
   handle.addEventListener('pointercancel', stop);
+  handle.addEventListener('lostpointercapture', stop);
+  window.addEventListener('blur', stop);
   handle.addEventListener('keydown', event => {
     if (enabled && !enabled()) return;
     if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
@@ -2487,6 +2490,7 @@ function clearTicketWorkspace() {
   state.historyLoadRequest += 1;
   state.historySelectionEpoch += 1;
   state.timelineSignature = '';
+  state.pendingConversationRender = null;
   state.composerEnabled = false;
   closeConversationSearch(false);
   state.queueItems = [];
@@ -3209,6 +3213,45 @@ function messagePreview(message) {
   return body || 'Message';
 }
 
+function messageTextForCopy(message) {
+  if (!message || message.deleted_for_everyone_at) return '';
+  const body = String(message.body || message.content || '');
+  if (!body.trim()) return '';
+  const kind = String(message.media_kind || message.message_type || '').toLowerCase();
+  const defaultMediaLabel = ['Image', 'Sticker', 'Voice note', 'Audio message', 'PDF document', 'Location'].includes(body);
+  return (message.media_url || kind === 'location') && defaultMediaLabel ? '' : body;
+}
+
+async function copyMessageText(value) {
+  if (!value) return;
+  try {
+    if (navigator.clipboard?.writeText) {
+      try {
+        await navigator.clipboard.writeText(value);
+        notify('Message copied.');
+        return;
+      } catch (_) {
+        // Some browsers deny the Clipboard API while still allowing a user-initiated copy.
+      }
+    }
+    const field = document.createElement('textarea');
+    field.value = value;
+    field.readOnly = true;
+    field.style.position = 'fixed';
+    field.style.left = '-9999px';
+    document.body.append(field);
+    try {
+      field.select();
+      if (!document.execCommand?.('copy')) throw new Error('Copy failed');
+    } finally {
+      field.remove();
+    }
+    notify('Message copied.');
+  } catch (_) {
+    notify('Could not copy the message. Try selecting its text.', 'error');
+  }
+}
+
 function renderReplyDraft() {
   const container = $('replyDraft');
   const target = state.replyTarget;
@@ -3792,9 +3835,8 @@ function addMessage(container, m, extraClass = '') {
     bubble.append(card);
   }
 
-  const bodyText = m.body || m.content || '';
-  const defaultMediaLabel = ['Image', 'Sticker', 'Voice note', 'Audio message', 'PDF document', 'Location'].includes(bodyText);
-  if (!deleted && bodyText && !((m.media_url || kind === 'location') && defaultMediaLabel)) {
+  const bodyText = messageTextForCopy(m);
+  if (bodyText) {
     const body = document.createElement('div');
     body.className = 'message-body';
     body.dir = 'auto';
@@ -3822,6 +3864,13 @@ function addMessage(container, m, extraClass = '') {
     edit.type = 'button'; edit.className = 'btn message-action-btn'; edit.textContent = 'Edit';
     edit.onclick = () => startMessageEdit(m);
     meta.append(edit);
+  }
+  if (bodyText) {
+    const copy = document.createElement('button');
+    copy.type = 'button'; copy.className = 'btn message-action-btn'; copy.textContent = 'Copy';
+    copy.setAttribute('aria-label', 'Copy message text');
+    copy.onclick = () => copyMessageText(bodyText);
+    meta.append(copy);
   }
   if (m.id && (!extraClass || canChangeWhatsAppMessage(m, 'everyone'))) {
     const remove = document.createElement('button');
@@ -4141,7 +4190,38 @@ function historyLoadButton(label, handler, ariaLabel = label) {
   return row;
 }
 
+function selectedConversationText() {
+  if (typeof window === 'undefined' || typeof window.getSelection !== 'function') return '';
+  const selection = window.getSelection();
+  const conversation = $('conversation');
+  if (!selection || selection.isCollapsed || !conversation?.contains ||
+      !conversation.contains(selection.anchorNode) || !conversation.contains(selection.focusNode)) return '';
+  return selection.toString();
+}
+
+function handleConversationCopy(event) {
+  const selected = selectedConversationText();
+  if (!selected || !event.clipboardData?.setData) return;
+  event.clipboardData.setData('text/plain', selected);
+  event.preventDefault();
+}
+
+function flushPendingConversationRender() {
+  const pending = state.pendingConversationRender;
+  if (!pending || selectedConversationText()) return;
+  state.pendingConversationRender = null;
+  if (String(pending.data?.ticket?.id) !== String(state.ticketId)) return;
+  const data = state.currentTicketData || pending.data;
+  renderConversation(data, pending.options);
+  state.timelineSignature = timelineSignature(data);
+}
+
 function renderConversation(data, {forceScroll = false, preserveAudio = true, preserveScrollAnchor = null} = {}) {
+  if (!forceScroll && selectedConversationText()) {
+    state.pendingConversationRender = {data, options: {forceScroll, preserveAudio, preserveScrollAnchor}};
+    return;
+  }
+  state.pendingConversationRender = null;
   const conversation = $('conversation');
   const nearBottom = conversation.scrollHeight - conversation.scrollTop - conversation.clientHeight < 140;
   const previousScrollTop = conversation.scrollTop;
@@ -4764,6 +4844,7 @@ async function openTicket(id, {silent = false, refreshQueue = false, refreshHist
   const isNewSelection = String(state.ticketId || '') !== String(id || '');
   if (!isNewSelection && silent && !refreshHistory && state.previousHistoryPending) return;
   if (isNewSelection) {
+    state.pendingConversationRender = null;
     state.currentTicketData = null;
     setComposerEnabled(false);
     cancelMessageEdit(false);
@@ -6281,14 +6362,14 @@ function backToStaffList() {
 }
 
 function beginStaffEdit(item) {
-  if (!item || item.role === 'supervisor') return;
+  if (!item || (item.role === 'supervisor' && String(item.id) === String(state.agent?.id))) return;
   clearStaffFeedback();
   resetEditStaffForm();
   state.editingStaffId = String(item.id);
   state.editingStaffOriginal = {...item};
   $('editStaffName').value = item.name || '';
   $('editStaffEmail').value = item.email || '';
-  $('editStaffRole').value = item.role === 'admin' ? 'admin' : 'agent';
+  $('editStaffRole').value = ['agent', 'admin', 'supervisor'].includes(item.role) ? item.role : 'agent';
   $('editStaffActive').checked = Boolean(item.is_active);
   $('editStaffPassword').value = '';
   $('editStaffPasswordConfirm').value = '';
@@ -6355,13 +6436,13 @@ function renderStaffAccounts(items) {
     const actions = document.createElement('div');
     actions.className = 'staff-row-actions';
     actions.setAttribute('role', 'cell');
-    if (item.role !== 'supervisor') {
+    if (item.role !== 'supervisor' || String(item.id) !== String(state.agent?.id)) {
       actions.append(staffButton(item.is_active ? 'Edit' : 'Edit / reactivate', () => beginStaffEdit(item), '', 'edit'));
-      if (item.is_active) actions.append(staffButton('Delete', () => deleteStaffAccount(item), 'danger', 'trash'));
+      if (item.is_active && String(item.id) !== String(state.agent?.id)) actions.append(staffButton('Delete', () => deleteStaffAccount(item), 'danger', 'trash'));
     } else {
       const protectedLabel = document.createElement('span');
       protectedLabel.className = 'muted';
-      protectedLabel.textContent = 'Protected';
+      protectedLabel.textContent = 'Your account';
       actions.append(protectedLabel);
     }
     row.append(identity, email, role, active, actions);
@@ -7201,6 +7282,8 @@ $('cancelTransferBtn').addEventListener('click', closeTransferModal);
 $('confirmTransferBtn').addEventListener('click', confirmTransfer);
 
 document.addEventListener('keydown', handleGlobalKeydown);
+document.addEventListener('copy', handleConversationCopy);
+document.addEventListener('selectionchange', flushPendingConversationRender);
 document.addEventListener('pointerdown', unlockNotificationAudio);
 document.addEventListener('click', event => {
   for (const menu of document.querySelectorAll('.action-menu[open]')) {

@@ -20,7 +20,8 @@ from app.support_auth import SupportAgent, normalize_staff_email
 
 logger = logging.getLogger("shipment-bot")
 
-MANAGEABLE_STAFF_ROLES = {"agent", "admin"}
+CREATABLE_STAFF_ROLES = {"agent", "admin"}
+ASSIGNABLE_STAFF_ROLES = CREATABLE_STAFF_ROLES | {"supervisor"}
 _EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
 
@@ -144,10 +145,14 @@ def _validate_password(password: str) -> bytes:
     return encoded
 
 
-def _validate_role(role: str) -> str:
+def _validate_role(role: str, *, allow_supervisor: bool = False) -> str:
     normalized = str(role or "").strip().casefold()
-    if normalized not in MANAGEABLE_STAFF_ROLES:
-        raise StaffManagementValidationError("Role must be either agent or admin.")
+    allowed = ASSIGNABLE_STAFF_ROLES if allow_supervisor else CREATABLE_STAFF_ROLES
+    if normalized not in allowed:
+        raise StaffManagementValidationError(
+            "Role must be agent, admin, or supervisor."
+            if allow_supervisor else "Role must be either agent or admin."
+        )
     return normalized
 
 
@@ -215,14 +220,6 @@ def _authorize_target_change(
             "You cannot deactivate your own active staff account.",
             code="self_deactivation_forbidden",
         )
-
-    # Bootstrap supervisor accounts remain protected from web structural changes.
-    if target_role == "supervisor":
-        structural = deleting or requested_role is not None or requested_active is not None
-        if not is_self or structural:
-            raise StaffManagementForbiddenError(
-                "Supervisor accounts are protected from role, activation, and deletion changes in the web dashboard."
-            )
 
 
 async def list_staff_accounts(actor: SupportAgent) -> list[dict[str, Any]]:
@@ -311,7 +308,7 @@ async def update_staff_account(
     normalized_email: str | None = None
     if email is not None:
         clean_email, normalized_email = _validate_email(email)
-    clean_role = _validate_role(role) if role is not None else None
+    clean_role = _validate_role(role, allow_supervisor=True) if role is not None else None
     password_hash = await _hash_password(password) if password is not None else None
 
     _authorize_target_change(

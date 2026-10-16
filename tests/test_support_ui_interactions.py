@@ -14,6 +14,83 @@ from app.config import settings
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is unavailable")
+def test_message_copy_handles_text_and_clipboard_fallback() -> None:
+    helpers = _HTML[_HTML.index("function messageTextForCopy("): _HTML.index("function renderReplyDraft(")]
+    script = r"""
+const assert = require('node:assert/strict');
+const notifications = [];
+const notify = (...args) => notifications.push(args);
+let clipboardValue = '';
+const navigator = {clipboard: {writeText: async value => {clipboardValue = value}}};
+let fallbackValue = '';
+const document = {
+  body: {append(field) {this.field = field}},
+  createElement() {return {value: '', style: {}, select() {fallbackValue = this.value}, remove() {}}},
+  execCommand(command) {assert.equal(command, 'copy'); return true}
+};
+""" + helpers + r"""
+(async () => {
+  const text = '  Tracking 123\nhttps://example.com  ';
+  assert.equal(messageTextForCopy({body: text}), text, 'copy keeps the exact message text');
+  assert.equal(messageTextForCopy({body: text, deleted_for_everyone_at: 'now'}), '');
+  assert.equal(messageTextForCopy({body: 'Voice note', media_kind: 'audio', media_url: '/audio'}), '');
+  assert.equal(messageTextForCopy({body: 'caption', media_kind: 'image', media_url: '/image'}), 'caption');
+  await copyMessageText(text);
+  assert.equal(clipboardValue, text);
+  navigator.clipboard.writeText = async () => {throw new Error('Permission denied')};
+  await copyMessageText('Fallback text');
+  assert.equal(fallbackValue, 'Fallback text');
+  assert.deepEqual(notifications, [['Message copied.'], ['Message copied.']]);
+})().catch(error => {console.error(error); process.exitCode = 1});
+"""
+    result = subprocess.run(["node", "-e", script], text=True, capture_output=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    assert "copy.onclick = () => copyMessageText(bodyText);" in _HTML
+    assert ".message-body {" in _HTML and "user-select: text;" in _HTML
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is unavailable")
+def test_selected_conversation_text_survives_refresh_and_ctrl_c() -> None:
+    selection_helpers = _HTML[_HTML.index("function selectedConversationText("): _HTML.index("function renderConversation(")]
+    script = r"""
+const assert = require('node:assert/strict');
+const inside = {id: 'message text'};
+const outside = {id: 'composer'};
+const conversation = {contains(node) {return node === inside}};
+const $ = id => {assert.equal(id, 'conversation'); return conversation};
+let selection = {isCollapsed: false, anchorNode: inside, focusNode: inside, toString() {return 'selected customer text'}};
+const window = {getSelection() {return selection}};
+const state = {ticketId: 42, pendingConversationRender: null,
+  currentTicketData: {ticket: {id: 42}, messages: [{body: 'latest'}]}};
+const renders = [];
+const renderConversation = (data, options) => renders.push([data, options]);
+const timelineSignature = () => 'latest-signature';
+""" + selection_helpers + r"""
+assert.equal(selectedConversationText(), 'selected customer text');
+const clipboard = {value: '', setData(type, value) {assert.equal(type, 'text/plain'); this.value = value}};
+let prevented = false;
+handleConversationCopy({clipboardData: clipboard, preventDefault() {prevented = true}});
+assert.equal(clipboard.value, 'selected customer text');
+assert.equal(prevented, true);
+state.pendingConversationRender = {data: state.currentTicketData, options: {preserveAudio: true}};
+flushPendingConversationRender();
+assert.equal(renders.length, 0, 'new messages wait while text remains selected');
+selection = {isCollapsed: true, anchorNode: inside, focusNode: inside, toString() {return ''}};
+flushPendingConversationRender();
+assert.equal(renders.length, 1);
+assert.equal(renders[0][1].preserveAudio, true);
+assert.equal(state.timelineSignature, 'latest-signature');
+assert.equal(state.pendingConversationRender, null);
+selection = {isCollapsed: false, anchorNode: outside, focusNode: outside, toString() {return 'draft'}};
+assert.equal(selectedConversationText(), '', 'the composer keeps its native copy behavior');
+"""
+    result = subprocess.run(["node", "-e", script], text=True, capture_output=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    assert "if (!forceScroll && selectedConversationText()) {" in _HTML
+    assert "document.addEventListener('copy', handleConversationCopy);" in _HTML
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is unavailable")
 def test_outbound_whatsapp_event_refreshes_queue_without_interrupting_open_ticket() -> None:
     functions = _HTML[
         _HTML.index("function disconnectSupportEvents("):
@@ -599,6 +676,7 @@ try {
 @pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is unavailable")
 def test_remote_edit_keeps_draft_on_rejection_and_checks_message_owner() -> None:
     message_time = _HTML[_HTML.index("function messageOccurredAt("): _HTML.index("function fmt(")]
+    copy_helpers = _HTML[_HTML.index("function messageTextForCopy("): _HTML.index("function renderReplyDraft(")]
     cache_change = _HTML[_HTML.index("function changeCachedMessage("): _HTML.index("function upsertTimelineMessage(")]
     controls = _HTML[_HTML.index("function canChangeWhatsAppMessage("): _HTML.index("async function sendMessageReaction(")]
     add_message = _HTML[_HTML.index("function addMessage("): _HTML.index("function addEvent(")]
@@ -672,7 +750,7 @@ const api = async (path, options) => {
   };
   return {};
 };
-""" + message_time + cache_change + controls + add_message + sending + r"""
+""" + message_time + copy_helpers + cache_change + controls + add_message + sending + r"""
 (async () => {
   const own = {id: 5, version: 3, sender_type: 'AGENT', sender_id: '7', body: 'original', can_edit: true, can_delete_for_everyone: true};
   assert.equal(canChangeWhatsAppMessage(own, 'edit'), true);

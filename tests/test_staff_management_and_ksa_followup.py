@@ -324,4 +324,5 @@ def test_support_ui_exposes_staff_management_only_through_supervisor_gate() -> N
     assert "'/api/support/staff'" in _HTML
     assert 'value="agent"' in _HTML
     assert 'value="admin"' in _HTML
-    assert 'value="supervisor"' not in _HTML
+    assert '<select id="createStaffRole" required><option value="agent">Agent</option><option value="admin">Admin</option></select>' in _HTML
+    assert '<select id="editStaffRole" required><option value="agent">Agent</option><option value="admin">Admin</option><option value="supervisor">Supervisor</option></select>' in _HTML
