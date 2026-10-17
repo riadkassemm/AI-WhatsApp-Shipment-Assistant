@@ -47,6 +47,20 @@ class WhatsAppRegistryConflictError(WhatsAppRegistryError):
     pass
 
 
+def _utc_isoformat(value: Any) -> Any:
+    """Serialize a naive UTC datetime with an explicit offset.
+
+    last_synced_at is written from _utcnow(), but the driver returns a naive
+    datetime and the database runs in local time. Without an offset the browser
+    reads it as the viewer's local time (e.g. "synced 3h ago" in UTC+3).
+    """
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc).isoformat()
+    return value
+
+
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
@@ -507,7 +521,7 @@ class WhatsAppRegistryService:
             "waba_id": str(row.get("waba_id") or ""),
             "name": row.get("name"),
             "is_active": bool(row.get("is_active")),
-            "last_synced_at": row.get("last_synced_at"),
+            "last_synced_at": _utc_isoformat(row.get("last_synced_at")),
             "created_at": row.get("created_at"),
             "updated_at": row.get("updated_at"),
         }
@@ -524,7 +538,7 @@ class WhatsAppRegistryService:
             "is_enabled": bool(row.get("is_enabled")),
             "provider_present": bool(row.get("provider_present")),
             "source": row.get("source"),
-            "last_synced_at": row.get("last_synced_at"),
+            "last_synced_at": _utc_isoformat(row.get("last_synced_at")),
             "created_at": row.get("created_at"),
             "updated_at": row.get("updated_at"),
         }
