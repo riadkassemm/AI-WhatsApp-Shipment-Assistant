@@ -177,7 +177,8 @@ async def get_current_agent(request: Request) -> SupportAgent:
             detail="Staff account is not authorized for support access.",
         )
 
-    _schedule_session_touch(int(session["session_id"]))
+    session_id = int(session["session_id"])
+    _schedule_session_touch(session_id)
 
     return SupportAgent(
         id=str(session["staff_id"]),
