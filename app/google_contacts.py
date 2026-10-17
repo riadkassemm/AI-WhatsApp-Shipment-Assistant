@@ -7,7 +7,7 @@ import html
 import json
 import logging
 import secrets
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlencode
 
@@ -39,6 +39,20 @@ OAUTH_STATE_TTL_SECONDS = 10 * 60
 SYNC_LOCK_KEY = "support:google-contacts-sync-lock"
 SYNC_LOCK_TTL_SECONDS = 180
 PERSON_FIELDS = "names,phoneNumbers,emailAddresses,metadata"
+
+
+def _utc_isoformat(value: Any) -> Any:
+    """Serialize a naive UTC datetime with an explicit offset.
+
+    The column is written with UTC_TIMESTAMP(6), but the driver returns a naive
+    datetime and the database runs in local time. Without an offset the browser
+    reads it as the viewer's local time (e.g. "synced 3h ago" in UTC+3).
+    """
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc).isoformat()
+    return value
 
 
 class GoogleContactsError(Exception):
@@ -190,7 +204,7 @@ class GoogleContactsService:
             "account": {
                 "email": account.get("google_email"),
                 "name": account.get("google_display_name"),
-                "last_synced_at": account.get("last_synced_at"),
+                "last_synced_at": _utc_isoformat(account.get("last_synced_at")),
             },
         }
 
@@ -566,7 +580,7 @@ class GoogleContactsService:
 
         count = await self.count_contacts()
         await publish_support_event("contacts_synced", contact_count=count)
-        return {"contact_count": count, "full_sync": full_sync, "synced_at": datetime.utcnow().isoformat() + "Z"}
+        return {"contact_count": count, "full_sync": full_sync, "synced_at": datetime.now(timezone.utc).isoformat()}
 
     async def disconnect(self) -> None:
         async with self._sync_lock():

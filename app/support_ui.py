@@ -2268,6 +2268,17 @@ function initials(value) {
   return (words[0][0] + words[words.length - 1][0]).toUpperCase();
 }
 
+// Server timestamps are UTC, but some API fields arrive without an offset
+// ("2026-10-18T00:20:00"), which Date() would read as the viewer's local time.
+const NAIVE_SERVER_TIMESTAMP = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(:\d{2}(\.\d+)?)?$/;
+
+function parseServerDate(value) {
+  if (value instanceof Date) return value;
+  const text = typeof value === 'string' ? value.trim() : '';
+  if (NAIVE_SERVER_TIMESTAMP.test(text)) return new Date(text.replace(' ', 'T') + 'Z');
+  return new Date(value);
+}
+
 function messageOccurredAt(message) {
   const numeric = Number(message?.whatsapp_timestamp);
   if (Number.isFinite(numeric) && numeric > 0) {
@@ -2282,14 +2293,14 @@ function messageOccurredAt(message) {
 
 function fmt(value) {
   if (!value) return '—';
-  const date = new Date(value);
+  const date = parseServerDate(value);
   if (Number.isNaN(date.getTime())) return String(value);
   return new Intl.DateTimeFormat(undefined, {dateStyle: 'medium', timeStyle: 'short'}).format(date);
 }
 
 function fmtInTimezone(value, timezone) {
   if (!value) return '—';
-  const date = new Date(value);
+  const date = parseServerDate(value);
   if (Number.isNaN(date.getTime())) return String(value);
   try {
     return new Intl.DateTimeFormat(undefined, {
@@ -2308,7 +2319,7 @@ function fmtInTimezone(value, timezone) {
 
 function relativeTime(value) {
   if (!value) return '—';
-  const date = new Date(value);
+  const date = parseServerDate(value);
   if (Number.isNaN(date.getTime())) return '—';
   const seconds = Math.round((date.getTime() - Date.now()) / 1000);
   const absolute = Math.abs(seconds);
@@ -3462,7 +3473,7 @@ function createTicketRow(ticket) {
   time.dateTime = ticket.last_activity_at || '';
   time.title = fmt(ticket.last_activity_at);
   time.textContent = relativeTime(ticket.last_activity_at);
-  const waitedMinutes = (Date.now() - new Date(ticket.last_activity_at || '').getTime()) / 60000;
+  const waitedMinutes = (Date.now() - parseServerDate(ticket.last_activity_at || '').getTime()) / 60000;
   if (WAITING_AGE_VIEWS.includes(state.view) && Number.isFinite(waitedMinutes) && waitedMinutes >= WAITING_AGE_WARN_MINUTES) {
     const overdue = waitedMinutes >= WAITING_AGE_ALERT_MINUTES;
     time.classList.add(overdue ? 'age-alert' : 'age-warn');
@@ -4639,14 +4650,14 @@ function addEvent(container, event) {
 
 function dayKey(value) {
   if (!value) return '';
-  const date = new Date(value);
+  const date = parseServerDate(value);
   if (Number.isNaN(date.getTime())) return '';
   return date.getFullYear() + '-' + date.getMonth() + '-' + date.getDate();
 }
 
 function dayLabel(value) {
   if (!value) return '';
-  const date = new Date(value);
+  const date = parseServerDate(value);
   if (Number.isNaN(date.getTime())) return '';
   const today = new Date();
   const yesterday = new Date();
@@ -7215,7 +7226,7 @@ function renderStaffAccounts(items) {
     }
     const created = document.createElement('div');
     created.className = 'staff-created';
-    const createdAt = new Date(item.created_at);
+    const createdAt = parseServerDate(item.created_at);
     created.textContent = 'Created ' + (Number.isNaN(createdAt.getTime()) ? fmt(item.created_at) : new Intl.DateTimeFormat(undefined, {dateStyle: 'medium'}).format(createdAt));
     created.title = fmt(item.created_at);
     identity.append(name, created);
