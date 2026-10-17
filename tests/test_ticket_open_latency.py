@@ -274,3 +274,30 @@ def test_session_last_seen_is_written_in_the_background_and_throttled(monkeypatc
         await asyncio.gather(*support_auth._session_touch_tasks)
 
     asyncio.run(run())
+
+
+def test_valid_session_authenticates_and_schedules_last_seen(monkeypatch) -> None:
+    from starlette.requests import Request
+
+    touched: list[int] = []
+
+    async def get_active_session(_token_hash: str):
+        return {"session_id": 31, "staff_id": 4, "name": "Agent Four", "role": "agent", "csrf_hash": "abc"}
+
+    async def touch_session(session_id: int) -> None:
+        touched.append(session_id)
+
+    monkeypatch.setattr(support_auth.staff_repository, "get_active_session", get_active_session)
+    monkeypatch.setattr(support_auth.staff_repository, "touch_session", touch_session)
+    monkeypatch.setattr(support_auth, "_session_touched_at", {})
+
+    async def run() -> SupportAgent:
+        cookie = f"{support_auth.settings.support_cookie_name}=token-value".encode()
+        request = Request({"type": "http", "method": "GET", "path": "/api/support/me", "headers": [(b"cookie", cookie)]})
+        agent = await support_auth.get_current_agent(request)
+        await asyncio.gather(*support_auth._session_touch_tasks)
+        return agent
+
+    agent = asyncio.run(run())
+    assert (agent.id, agent.role, agent.session_id, agent.csrf_hash) == ("4", "agent", 31, "abc")
+    assert touched == [31]
