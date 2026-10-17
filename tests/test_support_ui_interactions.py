@@ -1648,3 +1648,62 @@ const openTicket = async (id, options) => {
 """
     result = subprocess.run(["node", "-e", script], text=True, capture_output=True, timeout=10)
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is unavailable")
+def test_status_menu_stays_open_across_background_refreshes() -> None:
+    render = _HTML[_HTML.index("function actionButton("): _HTML.index("function setWorkspaceBusy(")]
+    script = r"""
+const assert = require('assert');
+const makeElement = tag => ({
+  tagName: tag.toUpperCase(), children: [], dataset: {}, attributes: {}, open: false, className: '',
+  append(...nodes) { this.children.push(...nodes) },
+  replaceChildren() { this.children = [] },
+  setAttribute(name, value) { this.attributes[name] = value },
+  contains(node) { return node === this || this.children.some(child => child.contains && child.contains(node)) },
+  focus() { document.activeElement = this },
+  querySelector(selector) {
+    for (const child of this.children) {
+      if (selector === '.action-menu' && child.className === 'action-menu') return child;
+    }
+    return null;
+  },
+});
+const document = {activeElement: null, createElement: makeElement};
+const container = makeElement('div');
+const $ = () => container;
+const createIcon = () => makeElement('svg');
+const state = {busy: false, ticketId: '41'};
+const isStaffChat = () => false;
+const formatStatus = status => status;
+const noop = () => {};
+const openTransferModal = noop, resolveTicket = noop, deleteHistoryTicket = noop, setStatus = noop;
+const closeStaffChat = noop, doAction = noop;
+const data = {
+  ticket: {status: 'IN_PROGRESS', active_key: 'k'},
+  permissions: {can_claim: false, can_transfer: true, can_operate: true, can_delete_history: false},
+};
+""" + render + r"""
+const menu = () => container.querySelector('.action-menu');
+renderActions(data);
+assert.equal(menu().open, false);
+
+menu().open = true;
+const items = menu().children[1].children;
+items[1].focus();
+renderActions(data);
+assert.equal(menu().open, true, 'a refresh of the same ticket keeps the menu open');
+assert.equal(document.activeElement, menu().children[1].children[1], 'focus stays on the same status option');
+assert.equal(document.activeElement.dataset.status, 'WAITING_INTERNAL');
+
+menu().open = false;
+renderActions(data);
+assert.equal(menu().open, false, 'a closed menu stays closed');
+
+menu().open = true;
+state.ticketId = '42';
+renderActions(data);
+assert.equal(menu().open, false, 'switching tickets closes the menu');
+"""
+    result = subprocess.run(["node", "-e", script], text=True, capture_output=True, timeout=10)
+    assert result.returncode == 0, result.stderr

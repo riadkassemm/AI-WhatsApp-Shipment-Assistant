@@ -5359,6 +5359,16 @@ function actionButton(label, handler, className = '', iconName = null) {
 
 function renderActions(data) {
   const container = $('actions');
+  // Background refreshes re-render the header every few seconds. Keep the status
+  // menu open (and its focused item) across a refresh of the same ticket so it
+  // only closes when the agent picks an option, clicks away or switches tickets.
+  const ticketKey = String(state.ticketId || '');
+  const previousMenu = container.querySelector('.action-menu');
+  const keepMenuOpen = Boolean(previousMenu && previousMenu.open && container.dataset.ticketId === ticketKey);
+  const focusedMenuItem = keepMenuOpen && previousMenu.contains(document.activeElement)
+    ? (document.activeElement.dataset.status || 'summary')
+    : '';
+  container.dataset.ticketId = ticketKey;
   container.replaceChildren();
   const ticket = data.ticket;
   const permissions = data.permissions;
@@ -5392,10 +5402,18 @@ function renderActions(data) {
           setStatus(status);
         }, 'ghost', status === 'IN_PROGRESS' ? 'activity' : 'clock');
         button.setAttribute('role', 'menuitem');
+        button.dataset.status = status;
         panel.append(button);
       }
       menu.append(summary, panel);
       container.append(menu);
+      if (keepMenuOpen) {
+        menu.open = true;
+        const focusTarget = focusedMenuItem === 'summary'
+          ? summary
+          : Array.from(panel.children).find(button => button.dataset.status === focusedMenuItem);
+        if (focusTarget) focusTarget.focus({preventScroll: true});
+      }
     }
     container.append(actionButton('Resolve & return to AI', resolveTicket, 'success-action', 'check-circle'));
   }
