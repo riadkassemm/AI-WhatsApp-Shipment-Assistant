@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 import re
 from typing import Any
@@ -37,56 +38,53 @@ class CustomerDirectory:
             "' ', ''), '-', ''), '(', ''), ')', ''), '.', '')"
         )
 
+    def __init__(self) -> None:
+        # Opening a connection costs several database round trips, and the
+        # directory is consulted every time a conversation is opened. Reuse a
+        # small pool instead of connecting per query.
+        self._pool: aiomysql.Pool | None = None
+        self._pool_lock: asyncio.Lock | None = None
+
+    async def _ensure_pool(self) -> aiomysql.Pool:
+        if self._pool is not None:
+            return self._pool
+        if self._pool_lock is None:
+            self._pool_lock = asyncio.Lock()
+        async with self._pool_lock:
+            if self._pool is None:
+                self._pool = await aiomysql.create_pool(
+                    host=settings.db_host,
+                    port=settings.db_port,
+                    user=settings.db_user,
+                    password=settings.db_password,
+                    db=settings.db_name,
+                    minsize=1,
+                    maxsize=6,
+                    autocommit=True,
+                    charset="utf8mb4",
+                )
+        return self._pool
+
     async def _fetchone(self, query: str, params: tuple[Any, ...]) -> dict[str, Any] | None:
-        connection = await aiomysql.connect(
-            host=settings.db_host,
-            port=settings.db_port,
-            user=settings.db_user,
-            password=settings.db_password,
-            db=settings.db_name,
-            autocommit=True,
-            charset="utf8mb4",
-        )
-        try:
+        pool = await self._ensure_pool()
+        async with pool.acquire() as connection:
             async with connection.cursor(aiomysql.DictCursor) as cursor:
                 await cursor.execute(query, params)
                 return await cursor.fetchone()
-        finally:
-            connection.close()
 
     async def _fetchall(self, query: str, params: tuple[Any, ...]) -> list[dict[str, Any]]:
-        connection = await aiomysql.connect(
-            host=settings.db_host,
-            port=settings.db_port,
-            user=settings.db_user,
-            password=settings.db_password,
-            db=settings.db_name,
-            autocommit=True,
-            charset="utf8mb4",
-        )
-        try:
+        pool = await self._ensure_pool()
+        async with pool.acquire() as connection:
             async with connection.cursor(aiomysql.DictCursor) as cursor:
                 await cursor.execute(query, params)
                 return list(await cursor.fetchall())
-        finally:
-            connection.close()
 
     async def _execute(self, query: str, params: tuple[Any, ...]) -> int:
-        connection = await aiomysql.connect(
-            host=settings.db_host,
-            port=settings.db_port,
-            user=settings.db_user,
-            password=settings.db_password,
-            db=settings.db_name,
-            autocommit=True,
-            charset="utf8mb4",
-        )
-        try:
+        pool = await self._ensure_pool()
+        async with pool.acquire() as connection:
             async with connection.cursor() as cursor:
                 await cursor.execute(query, params)
                 return int(cursor.rowcount or 0)
-        finally:
-            connection.close()
 
     async def _registered_user(self, phone: str) -> dict[str, Any] | None:
         normalized = normalize_phone(phone)
@@ -147,7 +145,12 @@ class CustomerDirectory:
 
     async def resolve(self, phone: str) -> CustomerIdentity:
         normalized = normalize_phone(phone)
-        user = await self._registered_user(normalized)
+        # A registered user wins over a saved contact; look both up at once so
+        # opening a conversation waits for one lookup instead of two in a row.
+        user, contact = await asyncio.gather(
+            self._registered_user(normalized),
+            self._saved_contact(normalized),
+        )
         if user:
             return CustomerIdentity(
                 source="registered_user",
@@ -156,7 +159,6 @@ class CustomerDirectory:
                 user_id=str(user.get("id")) if user.get("id") is not None else None,
                 userid=str(user.get("userid")) if user.get("userid") is not None else None,
             )
-        contact = await self._saved_contact(normalized)
         if contact:
             return CustomerIdentity(
                 source="saved_contact",
