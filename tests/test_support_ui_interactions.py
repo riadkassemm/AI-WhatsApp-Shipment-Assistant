@@ -207,7 +207,7 @@ const state = {linkedDeviceBusy: false, whatsappBusy: false, linkedDeviceRequest
 let manager = true;
 const canManageWhatsApp = () => manager;
 let consent = false;
-const confirm = message => {assert.match(message, /Active conversations.*closed/); assert.match(message, /history.*kept/); return consent};
+const confirmDialog = async ({message}) => {assert.match(message, /Active conversations.*closed/); assert.match(message, /history.*kept/); return consent};
 const clearWhatsAppFeedback = () => {};
 const renderLinkedDeviceStatus = payload => {state.linkedDeviceStatus = payload};
 const renderWhatsAppRegistry = payload => {state.whatsappRegistry = payload};
@@ -233,6 +233,7 @@ const api = async (path, options) => {
   assert.equal(requests.length, 0);
   manager = true;
   const removing = removeLinkedDeviceNumber('90002');
+  await new Promise(resolve => setTimeout(resolve, 0)); // let the in-app confirmation settle
   assert.equal(state.linkedDeviceBusy, true);
   assert.equal(state.linkedDeviceStatus.lines.length, 2);
   assert.equal(state.whatsappRegistry.numbers.length, 2);
