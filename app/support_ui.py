@@ -253,6 +253,8 @@ kbd {
   box-shadow: 0 0 0 4px var(--focus-ring);
 }
 :where(input, select, textarea):focus-visible { outline-offset: 0; }
+:where(input[type="radio"], input[type="checkbox"]):focus-visible { outline-offset: 2px; box-shadow: none; }
+.ai-mode-option input:focus-visible, .check-field input:focus-visible { outline: 0; }
 
 /* ---------- Buttons ---------- */
 .btn, .icon-btn, .queue-nav-btn, .ticket-row, .menu-summary {
@@ -1148,14 +1150,16 @@ body.column-resizing * { cursor: col-resize !important; }
 .whatsapp-sync-form { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: start; margin-top: 14px; }
 .whatsapp-sync-form .field { margin: 0; }
 .whatsapp-sync-form > .btn { margin-top: 24px; min-height: 38px; }
+.whatsapp-sync-form + .form-note { margin-top: 14px; }
 .linked-device-section { padding: 16px; margin-bottom: 22px; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--bg-subtle); }
 .linked-device-section .form-note { margin-top: 12px; background: var(--surface); }
 .linked-device-qr { display: block; width: 200px; max-width: 100%; height: auto; margin: 12px 0; padding: 10px; border: 1px solid var(--border); border-radius: var(--radius-md); background: #ffffff; image-rendering: pixelated; box-shadow: var(--shadow-sm); }
-.linked-device-line { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 12px 0; border-bottom: 1px solid var(--border); }
-.linked-device-line > strong { flex: 1 1 100%; color: var(--text-strong); font-size: var(--text-md); }
-.linked-device-line > .muted { flex: 1 1 100%; margin-top: -4px; font-size: var(--text-sm); }
-.linked-device-line > .linked-device-qr { flex: 0 0 auto; }
-.linked-device-line > .linked-device-qr + .btn { margin-left: 0; }
+.linked-device-line { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 2px 6px; padding: 12px 0; border-bottom: 1px solid var(--border); }
+.linked-device-line > strong { grid-column: 1; grid-row: 1; min-width: 0; color: var(--text-strong); font-size: var(--text-md); }
+.linked-device-line > .muted { grid-column: 1; grid-row: 2; min-width: 0; font-size: var(--text-sm); }
+.linked-device-line > .btn { grid-row: 1 / span 2; }
+.linked-device-line:not(:has(> .btn + .btn)) > .btn { grid-column: 2 / -1; justify-self: end; }
+.linked-device-line > .linked-device-qr { grid-column: 1; grid-row: 3; }
 .linked-device-line:last-child { border-bottom: 0; }
 .section-spaced { margin-top: 24px; }
 .whatsapp-card .section-title { padding-top: 2px; }
@@ -1203,21 +1207,32 @@ body.column-resizing * { cursor: col-resize !important; }
 .staff-view-heading .muted, .section-title .muted { margin-top: 2px; font-size: var(--text-sm); }
 .staff-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 16px; }
 .staff-grid .wide { grid-column: 1 / -1; }
-.inline-check { min-height: 38px; display: flex; align-items: center; gap: 9px; margin: 0 0 16px; padding-top: 22px; color: var(--text-strong); font-size: var(--text-md); font-weight: 500; cursor: pointer; }
-.inline-check input { width: 17px; height: 17px; margin: 0; accent-color: var(--primary); }
+.check-field { min-height: 38px; display: flex; align-items: center; gap: 9px; padding: 0 12px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--surface); color: var(--text-strong); font-size: var(--text-md); font-weight: 500; cursor: pointer; transition: border-color var(--transition), background-color var(--transition); }
+.field .check-field { font-size: var(--text-md); font-weight: 500; }
+.check-field:hover:not(.static) { border-color: color-mix(in srgb, var(--text-subtle) 60%, var(--border-strong)); }
+.check-field:has(input:focus-visible) { border-color: var(--focus); box-shadow: 0 0 0 3px var(--focus-ring); }
+.check-field:has(input:disabled) { background: var(--surface-muted); color: var(--text-muted); cursor: not-allowed; }
+.check-field input { width: 17px; height: 17px; margin: 0; accent-color: var(--primary); }
+.check-field.static { background: var(--bg-subtle); color: var(--text-muted); cursor: default; }
+.check-field.static .icon { color: var(--success); }
 .staff-actions-header { display: flex; gap: 8px; }
 .staff-list { margin-top: 14px; border: 1px solid var(--border); border-radius: var(--radius-md); overflow: hidden; }
-.staff-list-head, .staff-list-row { display: grid; grid-template-columns: minmax(150px, 1.2fr) minmax(170px, 1.4fr) 96px 90px minmax(132px, auto); gap: 12px; align-items: center; }
+.staff-list-head, .staff-list-row { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1.5fr) 104px 100px 184px; gap: 16px; align-items: center; }
+.staff-list-head > :last-child { padding-left: 2px; }
+.staff-list-row > * { min-width: 0; }
+.staff-list-row .role-badge, .staff-list-row .status-dot { justify-self: start; }
 .staff-list-head { position: sticky; top: 0; z-index: 1; padding: 8px 14px; border-bottom: 1px solid var(--border); background: var(--bg-subtle); color: var(--text-muted); font-size: var(--text-xs); font-weight: 600; letter-spacing: 0.02em; }
 .staff-list-row { padding: 11px 14px; border-bottom: 1px solid var(--border); transition: background-color var(--transition); }
 .staff-list-row:hover { background: var(--surface-hover); }
 .staff-list-row:last-child { border-bottom: 0; }
-.staff-name { color: var(--text-strong); font-size: var(--text-md); font-weight: 600; }
+.staff-name { display: flex; align-items: center; gap: 6px; min-width: 0; color: var(--text-strong); font-size: var(--text-md); font-weight: 600; }
+.staff-name-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.staff-you { flex: 0 0 auto; padding: 1px 6px; border-radius: var(--radius-full); background: var(--primary-soft); color: var(--primary-text); font-size: var(--text-xs); font-weight: 600; }
 .staff-created { margin-top: 1px; color: var(--text-subtle); font-size: var(--text-xs); }
-.staff-email { color: var(--text-muted); font-size: var(--text-sm); overflow-wrap: anywhere; }
+.staff-email { overflow: hidden; color: var(--text-muted); font-size: var(--text-sm); text-overflow: ellipsis; white-space: nowrap; }
 .staff-list-row .role-badge { background: var(--primary-soft); color: var(--primary-text); }
-.staff-row-actions { display: flex; justify-content: flex-end; gap: 5px; flex-wrap: wrap; }
-.staff-row-actions .btn { min-height: 30px; padding: 4px 9px; font-size: var(--text-sm); }
+.staff-row-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.staff-row-actions .btn { width: 100%; min-height: 32px; padding: 4px 10px; justify-content: center; font-size: var(--text-sm); }
 .transfer-summary { display: flex; gap: 9px; margin: 0 0 18px; padding: 11px 12px; border: 1px solid color-mix(in srgb, var(--info) 24%, var(--border)); border-radius: var(--radius-sm); background: var(--info-soft); color: var(--info); font-size: var(--text-sm); line-height: 1.5; }
 
 /* ---------- Toasts ---------- */
@@ -1360,13 +1375,12 @@ body.column-resizing * { cursor: col-resize !important; }
   .modal-body { padding: 16px 18px calc(18px + env(safe-area-inset-bottom)); }
   .staff-grid { grid-template-columns: 1fr; }
   .staff-grid .wide { grid-column: auto; }
-  .inline-check { padding-top: 0; }
   .staff-list-head { display: none; }
-  .staff-list-row { grid-template-columns: 1fr auto; gap: 8px 12px; }
+  .staff-list-row { grid-template-columns: minmax(0, 1fr) auto; gap: 8px 12px; }
   .staff-list-row .staff-email { grid-column: 1 / -1; }
   .staff-list-row .role-badge { grid-column: 1; }
-  .staff-list-row .status-dot { grid-column: 2; grid-row: 3; }
-  .staff-row-actions { grid-column: 1 / -1; justify-content: flex-start; padding-top: 4px; }
+  .staff-list-row .status-dot { grid-column: 2; grid-row: 3; justify-self: end; }
+  .staff-row-actions { grid-column: 1 / -1; padding-top: 4px; }
   .toast-region { right: 12px; left: 12px; bottom: 12px; width: auto; }
 }
 @keyframes sheet-in { from { transform: translateY(24px); opacity: 0.6; } to { transform: none; opacity: 1; } }
@@ -1390,6 +1404,10 @@ body.column-resizing * { cursor: col-resize !important; }
   .whatsapp-sync-form { grid-template-columns: 1fr; }
   .whatsapp-sync-form > .btn { margin-top: 0; }
   .whatsapp-number-actions { grid-column: 1 / -1; justify-content: flex-start; }
+  .linked-device-line { grid-template-columns: repeat(2, minmax(0, 1fr)); row-gap: 6px; }
+  .linked-device-line > strong, .linked-device-line > .muted, .linked-device-line > .linked-device-qr { grid-column: 1 / -1; }
+  .linked-device-line > .btn { grid-row: auto; }
+  .linked-device-line:not(:has(> .btn + .btn)) > .btn { grid-column: 1 / -1; justify-self: stretch; }
   .whatsapp-name-editor .btn { flex: 1 1 auto; }
 }
 
@@ -1882,7 +1900,7 @@ body.column-resizing * { cursor: col-resize !important; }
 
       <div class="staff-view" id="staffListView">
         <div class="section-title">
-          <div><strong>Existing staff</strong><div class="muted">Active and inactive support accounts.</div></div>
+          <div><strong>Existing staff</strong><div class="muted">Active and deactivated support accounts. Deleted accounts are removed from this list.</div></div>
           <div class="staff-actions-header"><button class="btn primary" id="createStaffBtn" type="button"><svg class="icon" aria-hidden="true"><use href="#icon-plus"></use></svg>Create staff</button><button class="btn" id="refreshStaffBtn" type="button"><svg class="icon" aria-hidden="true"><use href="#icon-refresh"></use></svg>Refresh</button></div>
         </div>
         <div class="staff-list" role="table" aria-label="Support staff accounts">
@@ -1898,9 +1916,9 @@ body.column-resizing * { cursor: col-resize !important; }
             <div class="field"><label for="createStaffName">Name <span class="required-mark" aria-hidden="true">*</span></label><input id="createStaffName" type="text" minlength="2" maxlength="120" autocomplete="off" required /></div>
             <div class="field"><label for="createStaffEmail">Email <span class="required-mark" aria-hidden="true">*</span></label><input id="createStaffEmail" type="email" maxlength="320" autocomplete="off" required /></div>
             <div class="field"><label for="createStaffRole">Role <span class="required-mark" aria-hidden="true">*</span></label><select id="createStaffRole" required><option value="agent">Agent</option><option value="admin">Admin</option><option value="supervisor">Supervisor</option></select></div>
-            <div></div>
+            <div class="field"><span class="field-label">Status</span><div class="check-field static"><svg class="icon icon-sm" aria-hidden="true"><use href="#icon-check-circle"></use></svg>Active after creation</div></div>
             <div class="field"><label for="createStaffPassword">Initial password <span class="required-mark" aria-hidden="true">*</span></label><input id="createStaffPassword" type="password" minlength="12" maxlength="72" autocomplete="new-password" required aria-describedby="createPasswordHint" /><div class="field-hint" id="createPasswordHint">12 characters minimum; 72 UTF-8 bytes maximum.</div></div>
-            <div class="field"><label for="createStaffPasswordConfirm">Confirm password <span class="required-mark" aria-hidden="true">*</span></label><input id="createStaffPasswordConfirm" type="password" minlength="12" maxlength="72" autocomplete="new-password" required aria-describedby="createPasswordMatchError" /><div class="field-error hidden" id="createPasswordMatchError" role="alert"></div></div>
+            <div class="field"><label for="createStaffPasswordConfirm">Confirm password <span class="required-mark" aria-hidden="true">*</span></label><input id="createStaffPasswordConfirm" type="password" minlength="12" maxlength="72" autocomplete="new-password" required aria-describedby="createPasswordConfirmHint createPasswordMatchError" /><div class="field-hint" id="createPasswordConfirmHint">Enter the same password again.</div><div class="field-error hidden" id="createPasswordMatchError" role="alert"></div></div>
           </div>
           <div class="form-note"><strong>Credential safety:</strong> Passwords are never displayed or returned by the API. New staff must sign in with the initial password you provide.</div>
           <div class="modal-actions"><button class="btn" id="cancelCreateStaffBtn" type="button">Cancel</button><button class="btn primary" id="createStaffSubmitBtn" type="submit"><svg class="icon" aria-hidden="true"><use href="#icon-plus"></use></svg>Create account</button></div>
@@ -1914,9 +1932,9 @@ body.column-resizing * { cursor: col-resize !important; }
             <div class="field"><label for="editStaffName">Name <span class="required-mark" aria-hidden="true">*</span></label><input id="editStaffName" type="text" minlength="2" maxlength="120" autocomplete="off" required /></div>
             <div class="field"><label for="editStaffEmail">Email <span class="required-mark" aria-hidden="true">*</span></label><input id="editStaffEmail" type="email" maxlength="320" autocomplete="off" required /></div>
             <div class="field"><label for="editStaffRole">Role <span class="required-mark" aria-hidden="true">*</span></label><select id="editStaffRole" required><option value="agent">Agent</option><option value="admin">Admin</option><option value="supervisor">Supervisor</option></select></div>
-            <label class="inline-check"><input id="editStaffActive" type="checkbox" checked /> Account active</label>
+            <div class="field"><span class="field-label">Status</span><label class="check-field"><input id="editStaffActive" type="checkbox" checked /> Account active</label></div>
             <div class="field"><label for="editStaffPassword">New password <span class="muted">(optional)</span></label><input id="editStaffPassword" type="password" minlength="12" maxlength="72" autocomplete="new-password" aria-describedby="editPasswordHint" /><div class="field-hint" id="editPasswordHint">Leave blank to keep the current password.</div></div>
-            <div class="field"><label for="editStaffPasswordConfirm">Confirm new password</label><input id="editStaffPasswordConfirm" type="password" minlength="12" maxlength="72" autocomplete="new-password" aria-describedby="editPasswordMatchError" /><div class="field-error hidden" id="editPasswordMatchError" role="alert"></div></div>
+            <div class="field"><label for="editStaffPasswordConfirm">Confirm new password</label><input id="editStaffPasswordConfirm" type="password" minlength="12" maxlength="72" autocomplete="new-password" aria-describedby="editPasswordConfirmHint editPasswordMatchError" /><div class="field-hint" id="editPasswordConfirmHint">Required only when setting a new password.</div><div class="field-error hidden" id="editPasswordMatchError" role="alert"></div></div>
           </div>
           <div class="form-note">Credential, role, or activation changes revoke the affected account’s current sessions.</div>
           <div class="modal-actions"><button class="btn" id="cancelEditStaffBtn" type="button">Cancel</button><button class="btn primary" id="editStaffSubmitBtn" type="submit"><svg class="icon" aria-hidden="true"><use href="#icon-check"></use></svg>Save changes</button></div>
@@ -7059,12 +7077,25 @@ function renderStaffAccounts(items) {
 
     const identity = document.createElement('div');
     identity.setAttribute('role', 'cell');
+    const isSelf = String(item.id) === String(state.agent?.id);
     const name = document.createElement('div');
     name.className = 'staff-name';
-    name.textContent = item.name || 'Unnamed';
+    const nameText = document.createElement('span');
+    nameText.className = 'staff-name-text';
+    nameText.textContent = item.name || 'Unnamed';
+    nameText.title = item.name || '';
+    name.append(nameText);
+    if (isSelf) {
+      const you = document.createElement('span');
+      you.className = 'staff-you';
+      you.textContent = 'You';
+      name.append(you);
+    }
     const created = document.createElement('div');
     created.className = 'staff-created';
-    created.textContent = 'Created ' + fmt(item.created_at);
+    const createdAt = new Date(item.created_at);
+    created.textContent = 'Created ' + (Number.isNaN(createdAt.getTime()) ? fmt(item.created_at) : new Intl.DateTimeFormat(undefined, {dateStyle: 'medium'}).format(createdAt));
+    created.title = fmt(item.created_at);
     identity.append(name, created);
     if (item.email_conflict) {
       const conflict = document.createElement('span');
@@ -7077,6 +7108,7 @@ function renderStaffAccounts(items) {
     email.className = 'staff-email';
     email.setAttribute('role', 'cell');
     email.textContent = item.email || '—';
+    email.title = item.email || '';
 
     const role = document.createElement('span');
     role.className = 'role-badge';
@@ -7086,13 +7118,20 @@ function renderStaffAccounts(items) {
     const active = document.createElement('span');
     active.className = 'status-dot' + (item.is_active ? '' : ' off');
     active.setAttribute('role', 'cell');
-    active.textContent = item.is_active ? 'Active' : 'Inactive';
+    active.textContent = item.is_active ? 'Active' : 'Deactivated';
 
     const actions = document.createElement('div');
     actions.className = 'staff-row-actions';
     actions.setAttribute('role', 'cell');
-    actions.append(staffButton(item.is_active ? 'Edit' : 'Edit / reactivate', () => beginStaffEdit(item), '', 'edit'));
-    if (item.is_active && String(item.id) !== String(state.agent?.id)) actions.append(staffButton('Delete', () => deleteStaffAccount(item), 'danger', 'trash'));
+    const label = item.name || item.email || 'staff account';
+    const edit = staffButton('Edit', () => beginStaffEdit(item), '', 'edit');
+    edit.setAttribute('aria-label', (item.is_active ? 'Edit ' : 'Edit or reactivate ') + label);
+    actions.append(edit);
+    if (!isSelf) {
+      const remove = staffButton('Delete', () => deleteStaffAccount(item), 'danger', 'trash');
+      remove.setAttribute('aria-label', 'Delete ' + label);
+      actions.append(remove);
+    }
     row.append(identity, email, role, active, actions);
     fragment.append(row);
   }
@@ -7241,12 +7280,12 @@ async function deleteStaffAccount(item) {
     showStaffFeedback('staffError', 'You cannot delete your own active account.');
     return;
   }
-  if (!(await confirmDialog({title: 'Delete staff account?', message: 'Delete this staff account? It will be deactivated and all of its sessions will be revoked.', confirmLabel: 'Delete account', tone: 'danger'}))) return;
+  if (!(await confirmDialog({title: 'Delete staff account?', message: 'Delete ' + (item.name || item.email || 'this staff account') + '? The account is removed from the staff list, signed out everywhere, and cannot be reactivated. Past conversations keep its name.', confirmLabel: 'Delete account', tone: 'danger'}))) return;
   state.staffBusy = true;
   try {
     await api('/api/support/staff/' + encodeURIComponent(item.id), {method:'DELETE'});
     showStaffFeedback('staffSuccess', 'Deleted ' + (item.name || item.email) + '.');
-    notify('Staff account deactivated.');
+    notify('Staff account deleted.');
     await loadStaffAccounts();
   } catch (error) {
     showStaffFeedback('staffError', error.message);

@@ -128,6 +128,10 @@ _SUPPORT_SCHEMA_MIGRATIONS: tuple[tuple[str, dict[str, set[str]]], ...] = (
         "migrations/20261014_whatsapp_number_display_names.sql",
         {"whatsapp_phone_numbers": {"display_name"}},
     ),
+    (
+        "migrations/20261017_staff_account_deletion.sql",
+        {"staff": {"deleted_at"}},
+    ),
 )
 
 

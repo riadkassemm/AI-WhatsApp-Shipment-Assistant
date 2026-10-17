@@ -198,7 +198,7 @@ Supported actions include:
 - reset a password;
 - change `agent` ↔ `admin` role;
 - deactivate or reactivate an account;
-- safely delete an account by deactivating it and revoking its sessions.
+- delete an active or deactivated account. Deletion revokes its sessions, removes it from the staff list, blocks sign-in, editing and reactivation, and frees its email for a new account. The row stays in MariaDB (`staff.deleted_at`) so tickets and audit records keep their references. Apply `migrations/20261017_staff_account_deletion.sql` before deploying this behavior.
 
 Safety rules include:
 
@@ -625,7 +625,7 @@ Staff management is exposed under the existing support application.
 | `GET` | `/api/support/staff` | List active and inactive staff accounts using a safe public projection. | `supervisor` or `admin` |
 | `POST` | `/api/support/staff` | Create an `agent` or `admin`. | `supervisor` or `admin`, authenticated session, CSRF |
 | `PATCH` | `/api/support/staff/{staff_id}` | Update identity, credentials, role, or activation state. | `supervisor` or `admin`, authenticated session, CSRF |
-| `DELETE` | `/api/support/staff/{staff_id}` | Safely deactivate the account and revoke sessions. | `supervisor` or `admin`, authenticated session, CSRF |
+| `DELETE` | `/api/support/staff/{staff_id}` | Delete the account from staff management (tombstoned row, sessions revoked, email freed). | `supervisor` or `admin`, authenticated session, CSRF |
 | `GET` | `/api/support/tickets?view=watching` | List active tickets the signed-in staff member previously transferred away and may continue observing. | Authenticated support staff |
 | `GET` | `/api/support/transfer-targets` | Return a minimal list of active staff eligible for assignment. | Authenticated support staff |
 | `POST` | `/api/support/tickets/{ticket_id}/transfer` | Atomically transfer an active assigned ticket to another active staff member. | Current assignee or supervisor, authenticated session, CSRF |
@@ -746,7 +746,7 @@ Install `ffmpeg` on the application host or set `SUPPORT_MEDIA_FFMPEG_PATH` to t
 - Canonical shipping logs record operation type and field-presence information rather than raw customer messages or provider response bodies.
 - Staff passwords and hashes are not returned by the API or written to logs.
 - Credential, role, and activation changes revoke active sessions.
-- Safe staff deletion preserves historical references by deactivating the account instead of hard-deleting its row.
+- Safe staff deletion preserves historical references by tombstoning the row (`deleted_at`) instead of hard-deleting it.
 - Support images, audio, and PDFs are stored outside the public web root and require an authenticated support session to retrieve.
 - Meta media URLs are never exposed directly to browser JavaScript; the backend downloads media with the WhatsApp token and serves only the validated local copy.
 - Global AI availability is read from MariaDB before any inbound OpenAI-backed path, and settings-store failures fail closed.
