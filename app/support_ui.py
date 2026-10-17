@@ -5392,6 +5392,7 @@ function renderActions(data) {
     if (permissions.can_operate && ticket.active_key) {
       container.append(actionButton('Close chat', closeStaffChat, 'danger', 'check-circle'));
     }
+    if (permissions.can_delete_chat) container.append(actionButton('Delete chat', deleteStaffChat, 'danger', 'trash'));
     return;
   }
 
@@ -5840,6 +5841,30 @@ async function deleteHistoryTicket() {
   try {
     await api('/api/support/tickets/' + ticketId, {method:'DELETE'});
     notify(reference + ' deleted from History.');
+    clearTicketWorkspace();
+    await loadQueue();
+  } catch (error) {
+    showError(error.message);
+    notify(error.message, 'error');
+  } finally {
+    state.busy = false;
+    setWorkspaceBusy(false);
+  }
+}
+
+async function deleteStaffChat() {
+  const data = state.currentTicketData;
+  if (state.busy || !state.ticketId || !data?.permissions?.can_delete_chat) return;
+  const customer = data.ticket?.customer_name || data.ticket?.whatsapp_phone || 'this customer';
+  if (!(await confirmDialog({title: 'Delete chat?', message: 'Permanently delete the chat with ' + customer + '?\n\nThis deletes its saved messages, events, and locally stored attachments from the dashboard. Messages already delivered to the customer stay on their WhatsApp. This action cannot be undone.', confirmLabel: 'Delete permanently', tone: 'danger'}))) return;
+
+  const chatId = state.ticketId;
+  state.busy = true;
+  setWorkspaceBusy(true);
+  showError('');
+  try {
+    await api('/api/support/chats/' + chatId, {method:'DELETE'});
+    notify('Chat deleted.');
     clearTicketWorkspace();
     await loadQueue();
   } catch (error) {

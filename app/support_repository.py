@@ -287,37 +287,71 @@ class SupportRepository:
                             "Only resolved or closed history tickets can be deleted."
                         )
 
-                    await cur.execute(
-                        "DELETE FROM support_ticket_events WHERE ticket_id = %s",
-                        (ticket_id,),
-                    )
-                    await cur.execute(
-                        "DELETE FROM support_message_user_deletions WHERE message_id IN (SELECT id FROM support_ticket_messages WHERE ticket_id = %s)",
-                        (ticket_id,),
-                    )
-                    await cur.execute(
-                        "DELETE FROM support_message_change_events WHERE message_id IN (SELECT id FROM support_ticket_messages WHERE ticket_id = %s)",
-                        (ticket_id,),
-                    )
-                    await cur.execute(
-                        "DELETE FROM support_message_change_operations WHERE message_id IN (SELECT id FROM support_ticket_messages WHERE ticket_id = %s)",
-                        (ticket_id,),
-                    )
-                    await cur.execute(
-                        "DELETE FROM support_ticket_messages WHERE ticket_id = %s",
-                        (ticket_id,),
-                    )
-                    await cur.execute(
-                        "DELETE FROM support_tickets WHERE id = %s",
-                        (ticket_id,),
-                    )
-                    if cur.rowcount != 1:
+                    if await self._delete_ticket_rows(cur, ticket_id) != 1:
                         raise SupportRepositoryError("History ticket delete did not remove one ticket.")
                 await conn.commit()
             except Exception:
                 await conn.rollback()
                 raise
         return ticket
+
+    @staticmethod
+    async def _delete_ticket_rows(cur: Any, ticket_id: int) -> int:
+        """Delete one ticket/chat and its timeline rows; return deleted ticket rows.
+
+        Child rows are removed explicitly rather than depending on undocumented
+        foreign-key cascade behavior in existing deployments.
+        """
+        for statement in (
+            "DELETE FROM support_ticket_events WHERE ticket_id = %s",
+            "DELETE FROM support_message_reactions WHERE ticket_id = %s",
+            "DELETE FROM support_message_user_deletions WHERE message_id IN (SELECT id FROM support_ticket_messages WHERE ticket_id = %s)",
+            "DELETE FROM support_message_change_events WHERE message_id IN (SELECT id FROM support_ticket_messages WHERE ticket_id = %s)",
+            "DELETE FROM support_message_change_operations WHERE message_id IN (SELECT id FROM support_ticket_messages WHERE ticket_id = %s)",
+            "DELETE FROM support_ticket_messages WHERE ticket_id = %s",
+        ):
+            await cur.execute(statement, (ticket_id,))
+        await cur.execute("DELETE FROM support_tickets WHERE id = %s", (ticket_id,))
+        return int(cur.rowcount or 0)
+
+    async def delete_staff_chat(self, chat_id: int) -> dict[str, Any]:
+        """Hard-delete one closed staff-initiated chat and its timeline.
+
+        Like history tickets, the row is locked and revalidated in the same
+        transaction so a chat reopened concurrently (by a new staff message) is
+        never deleted while live.
+        """
+        if self._pool is None:
+            await self.connect()
+        assert self._pool is not None
+        async with self._pool.acquire() as conn:
+            await conn.begin()
+            try:
+                async with conn.cursor(aiomysql.DictCursor) as cur:
+                    await cur.execute(
+                        """
+                        SELECT id, ticket_reference, status, active_key, conversation_origin
+                        FROM support_tickets
+                        WHERE id = %s
+                        FOR UPDATE
+                        """,
+                        (chat_id,),
+                    )
+                    chat = await cur.fetchone()
+                    if not chat or str(chat.get("conversation_origin") or "") != "STAFF":
+                        raise SupportNotFoundError("Chat not found.")
+                    if (
+                        str(chat.get("status") or "") not in {"RESOLVED", "CLOSED"}
+                        or chat.get("active_key") is not None
+                    ):
+                        raise SupportConflictError("Close this chat before deleting it.")
+                    if await self._delete_ticket_rows(cur, chat_id) != 1:
+                        raise SupportRepositoryError("Chat delete did not remove one chat.")
+                await conn.commit()
+            except Exception:
+                await conn.rollback()
+                raise
+        return chat
 
     async def agent_has_participated(
         self,

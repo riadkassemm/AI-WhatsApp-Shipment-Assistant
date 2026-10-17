@@ -817,6 +817,12 @@ Resolved/closed support tickets can be permanently deleted from the **History** 
 
 Deletion is deliberately restricted to tickets whose status is `RESOLVED` or `CLOSED` and whose `active_key` is already cleared. The repository locks and revalidates the ticket before deleting its support messages, events, and ticket row in one transaction; active tickets cannot be deleted by racing the UI. Locally cached support attachments for the deleted ticket are then removed on a best-effort basis. No database migration is required for this feature.
 
+## Staff chat deletion
+
+Closed staff-initiated chats can be permanently deleted from the **Chats** view by Supervisor and Admin staff with the **Delete chat** action. An open chat must be closed first (**Close chat**). The backend enforces this independently of the UI through `DELETE /api/support/chats/{chat_id}` with the authenticated support session and CSRF protection.
+
+As with history tickets, the repository locks and revalidates the chat (staff origin, `RESOLVED`/`CLOSED`, `active_key` cleared) before deleting its messages, reactions, message-change records, events, and chat row in one transaction, so a chat reopened concurrently is never deleted while live. Locally cached attachments are then removed on a best-effort basis. Messages already delivered to the customer stay on their WhatsApp. No database migration is required.
+
 ## 2026-09-22 support UX update
 
 This build adds:
