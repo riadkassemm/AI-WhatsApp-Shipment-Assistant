@@ -125,6 +125,36 @@ async def authenticate_staff(email: str, password: str) -> StaffLoginSession | N
     )
 
 
+# last_seen_at is telemetry only. Recording it used to cost one blocking
+# database round trip on every dashboard request; write it in the background,
+# at most once per interval per session.
+_SESSION_TOUCH_INTERVAL_SECONDS = 60.0
+_session_touched_at: dict[int, float] = {}
+_session_touch_tasks: set[asyncio.Task] = set()
+
+
+async def _touch_session(session_id: int) -> None:
+    try:
+        await staff_repository.touch_session(session_id)
+    except Exception:
+        # Session validity was already established. A last-seen telemetry failure
+        # should not turn a valid request into an outage.
+        _session_touched_at.pop(session_id, None)
+        logger.exception("Could not update staff session last_seen_at: session_id=%s", session_id)
+
+
+def _schedule_session_touch(session_id: int) -> None:
+    now = asyncio.get_running_loop().time()
+    if now - _session_touched_at.get(session_id, float("-inf")) < _SESSION_TOUCH_INTERVAL_SECONDS:
+        return
+    if len(_session_touched_at) > 10_000:
+        _session_touched_at.clear()
+    _session_touched_at[session_id] = now
+    task = asyncio.create_task(_touch_session(session_id))
+    _session_touch_tasks.add(task)
+    task.add_done_callback(_session_touch_tasks.discard)
+
+
 async def get_current_agent(request: Request) -> SupportAgent:
     raw_token = request.cookies.get(settings.support_cookie_name, "")
     if not raw_token or len(raw_token) > 1024:
@@ -147,13 +177,7 @@ async def get_current_agent(request: Request) -> SupportAgent:
             detail="Staff account is not authorized for support access.",
         )
 
-    session_id = int(session["session_id"])
-    try:
-        await staff_repository.touch_session(session_id)
-    except Exception:
-        # Session validity was already established. A last-seen telemetry failure
-        # should not turn a valid request into an outage.
-        logger.exception("Could not update staff session last_seen_at: session_id=%s", session_id)
+    _schedule_session_touch(int(session["session_id"]))
 
     return SupportAgent(
         id=str(session["staff_id"]),

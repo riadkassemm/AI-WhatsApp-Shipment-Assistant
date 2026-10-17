@@ -726,6 +726,10 @@ select { cursor: pointer; }
 .skeleton-line.short { width: 38%; }
 .skeleton-line.medium { width: 62%; height: 12px; }
 .skeleton-line.long { width: 90%; }
+.conversation-skeleton { display: flex; flex-direction: column; gap: var(--space-4); padding: var(--space-6) var(--space-5); }
+.conversation-skeleton .skeleton { width: min(46%, 360px); height: 44px; border-radius: var(--radius-lg); }
+.conversation-skeleton .skeleton.outbound { align-self: flex-end; width: min(38%, 300px); }
+.conversation-skeleton .skeleton.tall { height: 68px; }
 .empty-state { min-height: 220px; display: grid; place-items: center; padding: 32px 24px; text-align: center; }
 .empty-state-inner { max-width: 290px; }
 .empty-icon { width: 44px; height: 44px; display: grid; place-items: center; margin: 0 auto 12px; border-radius: 12px; background: var(--surface-muted); color: var(--text-subtle); box-shadow: inset 0 0 0 1px var(--border); }
@@ -2089,6 +2093,7 @@ const state = {
   searchTargetMessageId: null,
   queueRequest: 0,
   ticketRequest: 0,
+  ticketPrefetch: new Map(),
   ticketId: null,
   currentTicketData: null,
   currentConversationOrigin: null,
@@ -3481,6 +3486,15 @@ function createTicketRow(ticket) {
 
   row.append(head, summary, meta);
   row.onclick = () => openTicket(ticket.id, {conversationOrigin: ticket.conversation_origin});
+  // Start loading as soon as the pointer rests on (or presses) a row, so the
+  // conversation is usually ready by the time the click lands.
+  let hoverTimer = null;
+  row.addEventListener('pointerenter', event => {
+    if (event.pointerType !== 'mouse') return;
+    hoverTimer = setTimeout(() => prefetchTicketDetail(ticket.id, ticket.conversation_origin), TICKET_HOVER_PREFETCH_DELAY_MS);
+  });
+  row.addEventListener('pointerleave', () => { clearTimeout(hoverTimer); hoverTimer = null; });
+  row.addEventListener('pointerdown', () => prefetchTicketDetail(ticket.id, ticket.conversation_origin));
   return row;
 }
 
@@ -5359,6 +5373,16 @@ function actionButton(label, handler, className = '', iconName = null) {
 
 function renderActions(data) {
   const container = $('actions');
+  // Background refreshes re-render the header every few seconds. Keep the status
+  // menu open (and its focused item) across a refresh of the same ticket so it
+  // only closes when the agent picks an option, clicks away or switches tickets.
+  const ticketKey = String(state.ticketId || '');
+  const previousMenu = container.querySelector('.action-menu');
+  const keepMenuOpen = Boolean(previousMenu && previousMenu.open && container.dataset.ticketId === ticketKey);
+  const focusedMenuItem = keepMenuOpen && previousMenu.contains(document.activeElement)
+    ? (document.activeElement.dataset.status || 'summary')
+    : '';
+  container.dataset.ticketId = ticketKey;
   container.replaceChildren();
   const ticket = data.ticket;
   const permissions = data.permissions;
@@ -5392,10 +5416,18 @@ function renderActions(data) {
           setStatus(status);
         }, 'ghost', status === 'IN_PROGRESS' ? 'activity' : 'clock');
         button.setAttribute('role', 'menuitem');
+        button.dataset.status = status;
         panel.append(button);
       }
       menu.append(summary, panel);
       container.append(menu);
+      if (keepMenuOpen) {
+        menu.open = true;
+        const focusTarget = focusedMenuItem === 'summary'
+          ? summary
+          : Array.from(panel.children).find(button => button.dataset.status === focusedMenuItem);
+        if (focusTarget) focusTarget.focus({preventScroll: true});
+      }
     }
     container.append(actionButton('Resolve & return to AI', resolveTicket, 'success-action', 'check-circle'));
   }
@@ -5508,6 +5540,63 @@ function moveConversationSearch(delta) {
   jumpToConversationSearchResult(next);
 }
 
+const TICKET_PREFETCH_TTL_MS = 5000;
+const TICKET_HOVER_PREFETCH_DELAY_MS = 120;
+
+function ticketOpenPath(id, conversationOrigin) {
+  // Mirrors the request openTicket makes for a newly selected conversation.
+  const origin = conversationOrigin || (state.view === 'chats' ? 'STAFF' : 'CUSTOMER');
+  const base = String(origin).toUpperCase() === 'STAFF' ? '/api/support/chats/' : '/api/support/tickets/';
+  return base + id + '?include_previous_history=true';
+}
+
+function prefetchTicketDetail(id, conversationOrigin) {
+  if (!id || String(id) === String(state.ticketId || '')) return;
+  const path = ticketOpenPath(id, conversationOrigin);
+  const now = Date.now();
+  for (const [key, entry] of state.ticketPrefetch) {
+    if (now - entry.at > TICKET_PREFETCH_TTL_MS) state.ticketPrefetch.delete(key);
+  }
+  if (state.ticketPrefetch.has(path)) return;
+  // Settle into a result object so an unused prefetch never raises an
+  // unhandled rejection; a failed prefetch is simply retried by openTicket.
+  const result = api(path).then(data => ({ok: true, data}), () => ({ok: false}));
+  state.ticketPrefetch.set(path, {at: now, result});
+}
+
+function takeTicketPrefetch(path) {
+  const entry = state.ticketPrefetch.get(path);
+  if (!entry) return null;
+  state.ticketPrefetch.delete(path);
+  if (Date.now() - entry.at > TICKET_PREFETCH_TTL_MS) return null;
+  return entry.result.then(outcome => outcome.ok ? outcome.data : api(path));
+}
+
+function showTicketOpening(id) {
+  // Answer the tap immediately: show the selected ticket's header from its queue
+  // row and a conversation placeholder while the full details load.
+  const summary = state.view === 'contacts' ? null : (state.queueItems || []).find(item => String(item.id) === String(id));
+  if (summary) {
+    renderTicketHeader(summary);
+  } else {
+    text($('ticketTitle'), 'Opening conversation…');
+    text($('ticketSubtitle'), '');
+    $('ticketHeadingStatus').replaceChildren();
+    $('ticketHeaderMeta').replaceChildren();
+  }
+  $('actions').replaceChildren();
+  $('readOnlyBanner').classList.add('hidden');
+  const placeholder = document.createElement('div');
+  placeholder.className = 'conversation-skeleton';
+  placeholder.setAttribute('aria-hidden', 'true');
+  for (const variant of ['', 'outbound', 'tall', 'outbound', '']) {
+    const bubble = document.createElement('div');
+    bubble.className = 'skeleton ' + variant;
+    placeholder.append(bubble);
+  }
+  $('conversation').replaceChildren(placeholder);
+}
+
 async function openTicket(id, {silent = false, refreshQueue = false, refreshHistory = false, aroundMessageId = null, preserveSearch = false, conversationOrigin = null, restoring = false} = {}) {
   const isNewSelection = String(state.ticketId || '') !== String(id || '');
   if (!isNewSelection && silent && !refreshHistory && state.previousHistoryPending) return;
@@ -5538,6 +5627,7 @@ async function openTicket(id, {silent = false, refreshQueue = false, refreshHist
     state.historyLoadRequest += 1;
     state.historySelectionEpoch += 1;
     if (!preserveSearch) closeConversationSearch(false);
+    showTicketOpening(id);
   }
   state.ticketId = id;
   if (conversationOrigin) state.currentConversationOrigin = conversationOrigin;
@@ -5561,7 +5651,7 @@ async function openTicket(id, {silent = false, refreshQueue = false, refreshHist
     if (aroundMessageId) detailParams.set('around_message_id', String(aroundMessageId));
     if (needPreviousHistory) detailParams.set('include_previous_history', 'true');
     const detailPath = detailBase + id + (detailParams.toString() ? ('?' + detailParams.toString()) : '');
-    const data = await api(detailPath);
+    const data = await (takeTicketPrefetch(detailPath) || api(detailPath));
     if (requestId !== state.ticketRequest || String(state.ticketId) !== String(id)) return;
     if (needPreviousHistory && Array.isArray(data.previous_ticket_history)) {
       state.previousTicketHistory = state.previousHistoryExpanded
@@ -5655,6 +5745,9 @@ async function openTicket(id, {silent = false, refreshQueue = false, refreshHist
     } else if (e.status === 404) {
       clearTicketWorkspace();
       await loadQueue({silent: true});
+    } else if (isNewSelection) {
+      // Replace the loading placeholder so a failed open does not look like it is still loading.
+      $('conversation').replaceChildren(emptyMarkup('Could not open this conversation', 'Check your connection, then select the conversation again.', 'alert').outer);
     }
     showError(e.message);
   } finally {

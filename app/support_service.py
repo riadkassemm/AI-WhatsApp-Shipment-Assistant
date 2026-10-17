@@ -226,6 +226,18 @@ def _is_assignee(ticket: dict[str, Any], agent: SupportAgent) -> bool:
     return str(ticket.get("current_assignee_id") or "") == agent.id
 
 
+async def _gather_or_cancel(*awaitables: Any) -> list[Any]:
+    """Await all concurrently; if one fails, cancel the rest and re-raise it."""
+    tasks = [asyncio.ensure_future(awaitable) for awaitable in awaitables]
+    try:
+        return list(await asyncio.gather(*tasks))
+    except BaseException:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
+
+
 async def _can_view_ticket(ticket: dict[str, Any], agent: SupportAgent) -> bool:
     """Authorize confidential ticket contents for one support user.
 
@@ -1762,12 +1774,16 @@ class SupportService:
             if len(selected) > limit or len(candidates) < 100:
                 break
 
+        shown = list(reversed(selected[:limit]))
+        # Load the earlier tickets' messages concurrently; the order of the
+        # returned pages matches ``shown``.
+        pages = await _gather_or_cancel(*(
+            support_repository.list_messages(int(previous["id"]), limit=101, user_id=agent.id)
+            for previous in shown
+        ))
         history: list[dict[str, Any]] = []
-        for previous in reversed(selected[:limit]):
+        for previous, page in zip(shown, pages):
             previous_id = int(previous["id"])
-            page = await support_repository.list_messages(
-                previous_id, limit=101, user_id=agent.id
-            )
             history.append({
                 "ticket": _history_ticket_summary(previous),
                 "context": _decode_context(previous),
@@ -1867,52 +1883,68 @@ class SupportService:
                 "You cannot view this conversation."
             )
 
-        identity = None
-        try:
-            identity = await customer_directory.resolve(str(ticket.get("whatsapp_phone") or ""))
-            if identity.name and not ticket.get("customer_name"):
-                ticket = await support_repository.update_customer_identity(
-                    ticket_id,
-                    customer_name=identity.name,
-                    customer_id=(identity.user_id if identity.source == "registered_user" else None),
-                    customer_userid=(identity.userid if identity.source == "registered_user" else None),
-                )
-        except Exception:
-            logger.exception("Could not enrich ticket customer identity: ticket_id=%s", ticket_id)
-
-        if around_message_id is not None:
-            messages = await support_repository.list_messages_around(
-                ticket_id, around_message_id, before=70, after=70, user_id=agent.id
-            )
-            if not messages:
-                raise SupportNotFoundError("Search result message not found.")
-            messages_has_more = False
-        else:
-            page = await support_repository.list_messages(ticket_id, limit=151, user_id=agent.id)
-            messages_has_more = len(page) > 150
-            messages = page[-150:]
-        events = await support_repository.list_events(ticket_id, limit=150)
-
-        shipment_context = None
-        if ticket.get("customer_id") and ticket.get("tracking_reference"):
+        # Every lookup below is a database (or shipment API) round trip. They are
+        # independent of each other, so run them concurrently: opening a
+        # conversation then waits for the slowest branch, not for their sum.
+        # Shipment tracking still runs after identity enrichment because the
+        # enrichment can supply the customer_id it needs.
+        async def load_identity_and_shipment() -> tuple[Any, dict[str, Any], Any]:
+            enriched = ticket
+            identity = None
             try:
-                candidate = await shipment_client.track_shipment(
-                    customer_id=str(ticket["customer_id"]),
-                    tracking_number=str(ticket["tracking_reference"]),
-                )
-                if candidate.get("found") is True and candidate.get("authorized") is True:
-                    shipment_context = candidate
+                identity = await customer_directory.resolve(str(enriched.get("whatsapp_phone") or ""))
+                if identity.name and not enriched.get("customer_name"):
+                    enriched = await support_repository.update_customer_identity(
+                        ticket_id,
+                        customer_name=identity.name,
+                        customer_id=(identity.user_id if identity.source == "registered_user" else None),
+                        customer_userid=(identity.userid if identity.source == "registered_user" else None),
+                    )
             except Exception:
-                logger.exception(
-                    "Could not enrich support ticket with shipment context: ticket_id=%s",
-                    ticket_id,
+                logger.exception("Could not enrich ticket customer identity: ticket_id=%s", ticket_id)
+
+            shipment = None
+            if enriched.get("customer_id") and enriched.get("tracking_reference"):
+                try:
+                    candidate = await shipment_client.track_shipment(
+                        customer_id=str(enriched["customer_id"]),
+                        tracking_number=str(enriched["tracking_reference"]),
+                    )
+                    if candidate.get("found") is True and candidate.get("authorized") is True:
+                        shipment = candidate
+                except Exception:
+                    logger.exception(
+                        "Could not enrich support ticket with shipment context: ticket_id=%s",
+                        ticket_id,
+                    )
+            return identity, enriched, shipment
+
+        async def load_messages() -> tuple[list[dict[str, Any]], bool]:
+            if around_message_id is not None:
+                around = await support_repository.list_messages_around(
+                    ticket_id, around_message_id, before=70, after=70, user_id=agent.id
                 )
+                if not around:
+                    raise SupportNotFoundError("Search result message not found.")
+                return around, False
+            page = await support_repository.list_messages(ticket_id, limit=151, user_id=agent.id)
+            return page[-150:], len(page) > 150
+
+        async def load_history() -> dict[str, Any]:
+            if include_previous_history and str(ticket.get("whatsapp_phone") or "").strip():
+                return await self._history_page_for_ticket(ticket, agent)
+            return {"previous_ticket_history": [], "previous_ticket_history_has_more": False}
+
+        (identity, ticket, shipment_context), (messages, messages_has_more), events, history = (
+            await _gather_or_cancel(
+                load_identity_and_shipment(),
+                load_messages(),
+                support_repository.list_events(ticket_id, limit=150),
+                load_history(),
+            )
+        )
 
         safe_messages = _serialize_support_messages(ticket_id, messages)
-
-        history = {"previous_ticket_history": [], "previous_ticket_history_has_more": False}
-        if include_previous_history and str(ticket.get("whatsapp_phone") or "").strip():
-            history = await self._history_page_for_ticket(ticket, agent)
 
         return {
             "ticket": _safe_ticket_row(ticket),
