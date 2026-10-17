@@ -1600,3 +1600,51 @@ const api = () => {
 """
     result = subprocess.run(["node", "-e", script], text=True, capture_output=True, timeout=15)
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is unavailable")
+def test_claiming_a_ticket_moves_the_agent_to_my_tickets() -> None:
+    do_action = _HTML[_HTML.index("async function doAction("): _HTML.index("async function setStatus(")]
+    script = r"""
+const assert = require('assert');
+const state = {busy: false, ticketId: '41', view: 'unassigned'};
+const calls = [];
+let fail = false;
+const setWorkspaceBusy = () => {};
+const showError = () => {};
+const notify = () => {};
+const api = async path => {
+  calls.push(['api', path]);
+  if (fail) throw new Error('Ticket is already assigned');
+};
+const setQueueView = (view, options) => {
+  calls.push(['view', view, options]);
+  state.view = view;
+};
+const openTicket = async (id, options) => {
+  calls.push(['open', id, options.refreshQueue, state.view]);
+};
+""" + do_action + r"""
+(async () => {
+  await doAction('/claim', 'Ticket claimed.');
+  assert.deepStrictEqual(calls, [
+    ['api', '/api/support/tickets/41/claim'],
+    ['view', 'mine', {load: false}],
+    ['open', '41', true, 'mine'],
+  ]);
+
+  calls.length = 0;
+  state.view = 'unassigned';
+  fail = true;
+  await doAction('/claim', 'Ticket claimed.');
+  assert.deepStrictEqual(calls, [['api', '/api/support/tickets/41/claim']]);
+  assert.equal(state.view, 'unassigned', 'a failed claim stays in the current queue');
+
+  calls.length = 0;
+  fail = false;
+  await doAction('/resolve', 'Ticket resolved.');
+  assert.equal(calls.some(call => call[0] === 'view'), false, 'only claiming changes the queue');
+})().catch(error => {console.error(error); process.exitCode = 1});
+"""
+    result = subprocess.run(["node", "-e", script], text=True, capture_output=True, timeout=10)
+    assert result.returncode == 0, result.stderr

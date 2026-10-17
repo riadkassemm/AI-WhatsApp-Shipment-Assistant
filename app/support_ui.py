@@ -5682,7 +5682,11 @@ async function doAction(suffix, successMessage = 'Ticket updated.') {
     state.busy = false;
     setWorkspaceBusy(false);
   }
-  if (succeeded) await openTicket(state.ticketId, {silent: true, refreshQueue: true});
+  if (!succeeded) return;
+  // A claimed ticket now belongs to this agent: follow it into My tickets so the
+  // queue shows where it went. openTicket's refreshQueue loads the new view.
+  if (suffix === '/claim') setQueueView('mine', {load: false});
+  await openTicket(state.ticketId, {silent: true, refreshQueue: true});
 }
 
 async function setStatus(status) {
