@@ -801,6 +801,17 @@ async def search_support_messages(
         raise _translate_error(exc) from exc
 
 
+@router.delete("/chats/{chat_id}")
+async def delete_staff_chat(
+    chat_id: int,
+    agent: SupportAgent = Depends(require_support_csrf),
+) -> dict:
+    try:
+        return await support_service.delete_staff_chat(chat_id, agent=agent)
+    except Exception as exc:
+        raise _translate_error(exc) from exc
+
+
 @router.get("/chats/{chat_id}")
 async def chat_detail(
     chat_id: int,

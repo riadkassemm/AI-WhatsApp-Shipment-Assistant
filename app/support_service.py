@@ -2000,6 +2000,12 @@ class SupportService:
                     and ticket.get("active_key") is None
                     and ticket.get("status") in {"RESOLVED", "CLOSED"}
                 ),
+                "can_delete_chat": (
+                    agent.is_supervisor
+                    and str(ticket.get("conversation_origin") or "") == "STAFF"
+                    and ticket.get("active_key") is None
+                    and ticket.get("status") in {"RESOLVED", "CLOSED"}
+                ),
                 "is_supervisor": agent.is_supervisor,
             },
         }
@@ -2057,6 +2063,43 @@ class SupportService:
             "ticket_id": int(ticket_id),
             "ticket_reference": deleted.get("ticket_reference"),
         }
+
+    async def delete_staff_chat(
+        self,
+        chat_id: int,
+        *,
+        agent: SupportAgent,
+    ) -> dict[str, Any]:
+        """Permanently remove a closed staff-initiated chat.
+
+        Mirrors history ticket deletion: Supervisors and Admins only, and the
+        chat must be closed. The repository re-checks both under a row lock.
+        Closing already released the Redis conversation, so no cache cleanup
+        is needed here. Messages already delivered to the customer's WhatsApp
+        are not affected.
+        """
+        if not agent.is_supervisor:
+            raise SupportForbiddenError("Only Supervisors and Admins can delete chats.")
+
+        chat = await support_repository.get_ticket(chat_id)
+        if not chat or str(chat.get("conversation_origin") or "") != "STAFF":
+            raise SupportNotFoundError("Chat not found.")
+        if chat.get("active_key") is not None or chat.get("status") not in {"RESOLVED", "CLOSED"}:
+            raise SupportConflictError("Close this chat before deleting it.")
+
+        deleted = await support_repository.delete_staff_chat(chat_id)
+        try:
+            await asyncio.to_thread(support_media_store.delete_ticket_media, chat_id)
+        except Exception:
+            logger.exception("Deleted staff chat but local media cleanup failed: chat_id=%s", chat_id)
+
+        logger.info(
+            "Staff chat deleted: chat_id=%s actor_staff_id=%s actor_role=%s",
+            chat_id,
+            agent.id,
+            agent.role,
+        )
+        return {"deleted": True, "chat_id": int(chat_id)}
 
     async def transfer_targets(self, agent: SupportAgent) -> list[dict[str, Any]]:
         """Return the minimal active-staff directory needed for ticket transfers."""
