@@ -105,8 +105,8 @@ class StaffRepository:
                            is_active, last_login_at, failed_login_count, locked_until,
                            created_at, updated_at
                     FROM staff
-                    WHERE email_normalized = %s
-                       OR LOWER(TRIM(email)) = %s
+                    WHERE deleted_at IS NULL
+                      AND (email_normalized = %s OR LOWER(TRIM(email)) = %s)
                     ORDER BY id
                     LIMIT 1
                     """,
@@ -124,7 +124,7 @@ class StaffRepository:
                            is_active, last_login_at, failed_login_count, locked_until,
                            created_at, updated_at
                     FROM staff
-                    WHERE id = %s
+                    WHERE id = %s AND deleted_at IS NULL
                     LIMIT 1
                     """,
                     (int(staff_id),),
@@ -212,6 +212,7 @@ class StaffRepository:
                     f"""
                     SELECT {self._PUBLIC_COLUMNS}
                     FROM staff
+                    WHERE deleted_at IS NULL
                     ORDER BY is_active DESC, created_at DESC, id DESC
                     LIMIT {limit}
                     """
@@ -392,7 +393,8 @@ class StaffRepository:
             f"""
             SELECT {self._PUBLIC_COLUMNS}
             FROM staff
-            WHERE (email_normalized = %s OR LOWER(TRIM(email)) = %s)
+            WHERE deleted_at IS NULL
+              AND (email_normalized = %s OR LOWER(TRIM(email)) = %s)
               {exclusion}
             ORDER BY id
             LIMIT 1
@@ -472,7 +474,7 @@ class StaffRepository:
                                is_active, last_login_at, failed_login_count, locked_until,
                                created_at, updated_at
                         FROM staff
-                        WHERE id = %s
+                        WHERE id = %s AND deleted_at IS NULL
                         FOR UPDATE
                         """,
                         (int(staff_id),),
@@ -564,12 +566,56 @@ class StaffRepository:
         return updated
 
     async def soft_delete_staff(self, staff_id: int) -> dict[str, Any]:
-        """Deactivate and revoke sessions while preserving ticket/audit references."""
-        return await self.update_staff(
-            int(staff_id),
-            is_active=False,
-            revoke_sessions=True,
-        )
+        """Delete from staff management while preserving ticket/audit references.
+
+        The row is kept but deactivated, marked deleted and its sessions revoked.
+        Deleted rows are excluded from listing, lookup and editing. The normalized
+        email becomes a non-email placeholder so the unique key frees the address.
+        """
+        pool = await self._ensure_pool()
+        async with pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                locks = await self._acquire_named_locks(
+                    cur, [self._account_lock_key(int(staff_id))]
+                )
+                try:
+                    await conn.begin()
+                    await cur.execute(
+                        "SELECT id FROM staff WHERE id = %s AND deleted_at IS NULL FOR UPDATE",
+                        (int(staff_id),),
+                    )
+                    if not await cur.fetchone():
+                        raise StaffNotFoundError("Staff account not found.")
+                    await cur.execute(
+                        """
+                        UPDATE staff
+                        SET is_active = 0,
+                            deleted_at = UTC_TIMESTAMP(6),
+                            email_normalized = CONCAT('deleted:', id),
+                            updated_at = UTC_TIMESTAMP(6)
+                        WHERE id = %s
+                        """,
+                        (int(staff_id),),
+                    )
+                    await cur.execute(
+                        """
+                        UPDATE staff_sessions
+                        SET revoked_at = COALESCE(revoked_at, UTC_TIMESTAMP(6))
+                        WHERE staff_id = %s AND revoked_at IS NULL
+                        """,
+                        (int(staff_id),),
+                    )
+                    await conn.commit()
+                except Exception:
+                    await conn.rollback()
+                    raise
+                finally:
+                    await self._release_named_locks(cur, locks)
+
+        deleted = await self.get_public_staff_by_id(int(staff_id))
+        if not deleted:
+            raise StaffNotFoundError("Staff account not found after deletion.")
+        return deleted
 
 
 staff_repository = StaffRepository()
