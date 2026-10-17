@@ -376,7 +376,11 @@ async def update_staff_account(
 
 
 async def delete_staff_account(actor: SupportAgent, staff_id: int) -> dict[str, Any]:
-    """Soft-delete by deactivating the account and revoking all sessions."""
+    """Delete an active or inactive account from staff management.
+
+    The row is kept for ticket/audit references, but the account is hidden, can no
+    longer sign in, be edited or reactivated, and its sessions are revoked.
+    """
     _require_manager(actor)
     target = await staff_repository.get_staff_by_id(int(staff_id))
     if target is None:
@@ -390,24 +394,19 @@ async def delete_staff_account(actor: SupportAgent, staff_id: int) -> dict[str, 
         deleting=True,
     )
 
-    if not bool(target.get("is_active")):
-        result = _normalize_public_row(target)
-        result["deleted"] = True
-        result["already_inactive"] = True
-        return result
-
     try:
         deleted = await staff_repository.soft_delete_staff(int(staff_id))
     except StaffNotFoundError as exc:
         raise StaffManagementNotFoundError(str(exc)) from exc
 
     logger.info(
-        "Support staff account soft-deleted: actor_staff_id=%s target_staff_id=%s role=%s",
+        "Support staff account deleted: actor_staff_id=%s target_staff_id=%s role=%s was_active=%s",
         actor.id,
         staff_id,
         target.get("role"),
+        bool(target.get("is_active")),
     )
     result = _normalize_public_row(deleted)
     result["deleted"] = True
-    result["already_inactive"] = False
+    result["already_inactive"] = not bool(target.get("is_active"))
     return result

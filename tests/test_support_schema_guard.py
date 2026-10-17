@@ -44,6 +44,7 @@ def test_support_schema_guard_accepts_current_schema():
         },
         "support_message_user_deletions": {"message_id", "user_id", "deleted_at"},
         "whatsapp_phone_numbers": {"display_name"},
+        "staff": {"deleted_at"},
     }
     columns["support_ticket_messages"].update({"edited_at", "deleted_for_everyone_at", "deleted_by", "version"})
     add_linked_device_schema(columns)
@@ -79,6 +80,7 @@ def test_support_schema_guard_identifies_whatsapp_features_migration():
         },
         "support_message_user_deletions": {"message_id", "user_id", "deleted_at"},
         "whatsapp_phone_numbers": {"display_name"},
+        "staff": {"deleted_at"},
     }
     columns["support_ticket_messages"].update({"edited_at", "deleted_for_everyone_at", "deleted_by", "version"})
     add_linked_device_schema(columns)
@@ -111,6 +113,7 @@ def test_support_schema_guard_identifies_reaction_migration():
         },
         "support_message_user_deletions": {"message_id", "user_id", "deleted_at"},
         "whatsapp_phone_numbers": {"display_name"},
+        "staff": {"deleted_at"},
     }
     columns["support_ticket_messages"].update({"edited_at", "deleted_for_everyone_at", "deleted_by", "version"})
     add_linked_device_schema(columns)
@@ -142,4 +145,17 @@ def test_support_schema_guard_identifies_number_display_name_migration():
                 columns.setdefault(table, set()).update(required)
     assert _missing_support_schema_migrations(columns) == [
         "migrations/20261014_whatsapp_number_display_names.sql"
+    ]
+
+
+def test_support_schema_guard_identifies_staff_deletion_migration():
+    from app.support_repository import _SUPPORT_SCHEMA_MIGRATIONS
+
+    columns = {}
+    for path, requirements in _SUPPORT_SCHEMA_MIGRATIONS:
+        if "20261017" not in path:
+            for table, required in requirements.items():
+                columns.setdefault(table, set()).update(required)
+    assert _missing_support_schema_migrations(columns) == [
+        "migrations/20261017_staff_account_deletion.sql"
     ]
