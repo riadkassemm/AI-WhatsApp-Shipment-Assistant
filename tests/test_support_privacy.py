@@ -487,3 +487,38 @@ def test_ticket_detail_handles_db_native_values_and_missing_first_message(monkey
     assert detail["ticket"]["driver_bytes"] == "ok"
     assert detail["ticket"]["driver_duration"] == 30.0
     assert detail["permissions"]["can_claim"] is True
+
+
+def test_supervisor_active_queue_excludes_unclaimed_tickets() -> None:
+    import sqlite3
+
+    async def capture(can_view_all: bool) -> tuple[str, tuple[Any, ...]]:
+        calls: list[tuple[str, tuple[Any, ...]]] = []
+        repository = SupportRepository()
+        repository._pool = _FakePool(calls)  # type: ignore[assignment]
+        await repository.list_tickets(view="active", agent_id="1", can_view_all=can_view_all)
+        return calls[0]
+
+    count_sql, params = asyncio.run(capture(True))
+    database = sqlite3.connect(":memory:")
+    database.execute(
+        "CREATE TABLE support_tickets (id INTEGER, conversation_origin TEXT, status TEXT, "
+        "active_key TEXT, current_assignee_id TEXT)"
+    )
+    database.executemany(
+        "INSERT INTO support_tickets VALUES (?, ?, ?, ?, ?)",
+        [
+            (1, "CUSTOMER", "NEW", "line:1", None),  # unclaimed: belongs to Unassigned
+            (2, "CUSTOMER", "ASSIGNED", "line:2", "5"),
+            (3, None, "IN_PROGRESS", "line:3", "6"),
+            (4, "CUSTOMER", "WAITING_CUSTOMER", "line:4", "5"),
+            (5, "CUSTOMER", "RESOLVED", None, "5"),
+            (6, "STAFF", "ASSIGNED", "line:6", "5"),
+        ],
+    )
+    sql = count_sql.replace("SELECT COUNT(*) AS total", "SELECT id").replace("%s", "?")
+    assert sorted(row[0] for row in database.execute(sql, params)) == [2, 3, 4]
+
+    agent_sql, agent_params = asyncio.run(capture(False))
+    assert "current_assignee_id IS NOT NULL" in agent_sql
+    assert agent_sql.count("%s") == len(agent_params)

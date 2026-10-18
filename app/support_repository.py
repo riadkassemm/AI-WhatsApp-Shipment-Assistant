@@ -2700,7 +2700,11 @@ class SupportRepository:
             params.extend([agent_id, agent_id, agent_id])
         elif view == "active":
             placeholders = ",".join(["%s"] * len(ACTIVE_TICKET_STATUSES))
-            where = f"{regular_origin} AND status IN ({placeholders}) AND active_key IS NOT NULL"
+            # Unclaimed tickets belong to Unassigned, so Active only lists assigned work.
+            where = (
+                f"{regular_origin} AND status IN ({placeholders}) AND active_key IS NOT NULL"
+                " AND current_assignee_id IS NOT NULL"
+            )
             params.extend(ACTIVE_TICKET_STATUSES)
             if not can_view_all:
                 where = f"({where}) AND {participation_where}"
