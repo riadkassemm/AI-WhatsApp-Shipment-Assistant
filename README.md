@@ -247,6 +247,8 @@ For regular agents:
 
 Supervisors and administrators retain unrestricted ticket visibility and management access.
 
+For every role, **Active** lists only assigned tickets. Unclaimed `NEW` tickets appear in **Unassigned** until someone claims them.
+
 As shared-workstation hardening, support pages/API/media responses are marked `Cache-Control: no-store`, dashboard API fetches bypass the browser cache, and logging out clears the open ticket, conversation, context, queue, draft, and composer state before another staff account can sign in.
 
 This privacy update uses the existing claim/transfer audit trail and does not require an additional database migration.
