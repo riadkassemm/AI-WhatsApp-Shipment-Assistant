@@ -6,6 +6,9 @@ export const millis = value => {
   const numeric = Number(value?.toNumber ? value.toNumber() : value);
   return Number.isFinite(numeric) && numeric > 0 ? (numeric < 100_000_000_000 ? numeric * 1000 : numeric) : Date.now();
 };
+// WhatsApp media message kinds the dashboard stores and plays.
+export const MEDIA_TYPES = ['image', 'audio', 'document', 'sticker', 'video'];
+
 export function textBody(content) {
   const normalized = normalizeMessageContent(content);
   return normalized?.conversation ?? normalized?.extendedTextMessage?.text ?? null;
@@ -51,7 +54,7 @@ function chatMessageEvent(line, message, senderPhone, mediaId, type) {
     node.type = 'location'; node.location = { latitude: location.degreesLatitude, longitude: location.degreesLongitude, name: location.name, address: location.address };
     context = location.contextInfo;
   } else {
-    const candidate = ['image', 'audio', 'document', 'sticker'].find(type => content[`${type}Message`]);
+    const candidate = MEDIA_TYPES.find(type => content[`${type}Message`]);
     if (candidate && mediaId) {
       const media = content[`${candidate}Message`];
       node.type = candidate;

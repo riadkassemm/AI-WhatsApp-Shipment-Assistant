@@ -1014,3 +1014,36 @@ test('a corrupt store fails startup instead of silently discarding captured keys
   await writeFile(filename, '{broken', { mode: 0o600 });
   await assert.rejects(new FileStore(filename, () => ({})).load(), SyntaxError);
 });
+
+test('video messages are relayed with caption, MIME type and media reference in both directions', () => {
+  const line = { line_id: LINE, display_phone_number: '96170111111' };
+  const mediaId = `ldmedia:${LINE}:12345678-1234-1234-1234-123456789abc`;
+  const video = { videoMessage: { mimetype: 'video/mp4', caption: 'Box arrived crushed', fileSha256: Buffer.from([7, 8]), contextInfo: { stanzaId: 'QUOTED' } } };
+  const inbound = inboundEvent(line, { ...original('VIDEO', false), message: video }, PHONE, mediaId);
+  const node = inbound.payload.entry[0].changes[0].value.messages[0];
+  assert.equal(node.type, 'video');
+  assert.deepEqual(node.video, { id: mediaId, mime_type: 'video/mp4', caption: 'Box arrived crushed', filename: undefined, sha256: '0708' });
+  assert.equal(node.context.id, `ld:${LINE}:QUOTED`);
+  const fromPhone = outgoingEvent(line, { ...original('PHONE-VIDEO'), message: { videoMessage: { mimetype: 'video/mp4' } } }, PHONE, mediaId);
+  assert.equal(fromPhone.payload.entry[0].changes[0].value.messages[0].type, 'video', 'a video sent from the phone is not marked unsupported');
+  assert.equal(fromPhone.payload.entry[0].changes[0].value.messages[0].video.id, mediaId);
+});
+
+test('received videos are captured for download and dashboard videos are sent with their caption', async t => {
+  const { bridge, line, socket } = await fixture(t);
+  await bridge.receive(line, { ...original('CUSTOMER-VIDEO', false), message: { videoMessage: { mimetype: 'video/mp4', caption: 'Look' } } });
+  const event = bridge.outbox.data.entries.at(-1).event;
+  const node = event.payload.entry[0].changes[0].value.messages[0];
+  assert.equal(node.type, 'video');
+  assert.equal(line.store.data.media[node.video.id].mime_type, 'video/mp4');
+
+  const media = await bridge.uploadMedia(LINE, { content_base64: Buffer.from('mp4-bytes').toString('base64'), mime_type: 'video/mp4', filename: 'clip.mp4' });
+  const sent = [];
+  const sendMessage = socket.sendMessage;
+  socket.sendMessage = async (jid, content, options) => { sent.push(content); return sendMessage(jid, content, options); };
+  await bridge.send(LINE, { to: PHONE, type: 'video', video: { id: media.id, caption: 'Here is the return label video' }, client_message_id: 'video-send-1' });
+  assert.equal(sent.length, 1);
+  assert.equal(Buffer.from(sent[0].video).toString(), 'mp4-bytes');
+  assert.equal(sent[0].mimetype, 'video/mp4');
+  assert.equal(sent[0].caption, 'Here is the return label video');
+});

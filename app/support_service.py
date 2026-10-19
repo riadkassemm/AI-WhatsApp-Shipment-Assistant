@@ -20,9 +20,11 @@ from app.staff_repository import staff_repository
 from app.support_auth import SupportAgent
 from app.support_models import ALLOWED_TRANSITIONS, ACTIVE_TICKET_STATUSES, HandoffRequest
 from app.support_media import (
+    SUPPORT_MEDIA_MESSAGE_TYPES,
     SupportMediaError,
     StoredSupportMedia,
     max_media_bytes,
+    media_extension,
     media_kind_for_mime,
     normalize_mime_type,
     support_media_store,
@@ -389,7 +391,7 @@ def _serialize_support_messages(
             safe_row["body"] = sanitize_support_text(safe_row["body"])
         if isinstance(safe_row.get("error_message"), str):
             safe_row["error_message"] = sanitize_support_text(safe_row["error_message"])
-        if not safe_row.get("deleted_for_everyone_at") and str(safe_row.get("message_type") or "") in {"image", "audio", "document", "sticker"}:
+        if not safe_row.get("deleted_for_everyone_at") and str(safe_row.get("message_type") or "") in SUPPORT_MEDIA_MESSAGE_TYPES:
             message_id = int(safe_row["id"])
             asset = support_media_store.get(ticket_id, message_id)
             remote = support_media_store.get_remote_reference(ticket_id, message_id)
@@ -817,9 +819,9 @@ class SupportService:
                 )
             return True
 
-        if incoming.message_type not in {"text", "image", "audio", "document", "sticker", "location", "unsupported"}:
+        if incoming.message_type not in SUPPORT_MEDIA_MESSAGE_TYPES | {"text", "location", "unsupported"}:
             raise SupportValidationError("Unsupported linked-device outgoing message type.")
-        if incoming.message_type in {"image", "audio", "document", "sticker"}:
+        if incoming.message_type in SUPPORT_MEDIA_MESSAGE_TYPES:
             media_id = str(incoming.media_id or "")
             if not re.fullmatch(rf"ldmedia:{re.escape(line_id)}:[0-9a-fA-F]{{8}}-(?:[0-9a-fA-F]{{4}}-){{3}}[0-9a-fA-F]{{12}}", media_id):
                 raise SupportValidationError("Invalid linked-device outgoing media reference.")
@@ -840,6 +842,8 @@ class SupportService:
                 body = body[:4096 - len(marker)] + marker
         elif incoming.message_type == "image":
             body = sanitize_support_text(incoming.media_caption).strip() or "Image"
+        elif incoming.message_type == "video":
+            body = sanitize_support_text(incoming.media_caption).strip() or "Video"
         elif incoming.message_type == "audio":
             body = "Voice note" if incoming.is_voice else "Audio message"
         elif incoming.message_type == "document":
@@ -908,7 +912,7 @@ class SupportService:
                     message=_serialize_support_messages(int(ticket["id"]), [message])[0],
                 )
 
-        if incoming.message_type in {"image", "audio", "document", "sticker"}:
+        if incoming.message_type in SUPPORT_MEDIA_MESSAGE_TYPES:
             try:
                 await self.capture_inbound_media(
                     ticket=ticket, message=message, media_id=str(incoming.media_id),
@@ -1125,7 +1129,7 @@ class SupportService:
         if existing is not None:
             return existing
 
-        if message_type not in {"image", "audio", "document", "sticker"}:
+        if message_type not in SUPPORT_MEDIA_MESSAGE_TYPES:
             raise SupportMediaError("Unsupported inbound media type.")
 
         # Persist the provider reference before the network download. If Meta is
@@ -1207,6 +1211,8 @@ class SupportService:
                 or (
                     "customer-image"
                     if message_type == "image"
+                    else "customer-video"
+                    if message_type == "video"
                     else "customer-sticker.webp"
                     if message_type == "sticker"
                     else "customer-voice-note"
@@ -1263,7 +1269,7 @@ class SupportService:
             provider_media_id = remote.media_id
             media_type = remote.message_type
             expected_mime_type = remote.expected_mime_type or expected_mime_type
-        if not provider_media_id or media_type not in {"image", "audio", "document", "sticker"}:
+        if not provider_media_id or media_type not in SUPPORT_MEDIA_MESSAGE_TYPES:
             raise SupportNotFoundError("Media could not be recovered for this message.")
 
         # Lazy recovery is intentionally authenticated through this method. It is
@@ -1542,11 +1548,11 @@ class SupportService:
                 forwarded_from_ticket_id=source_ticket_id,
                 forwarded_from_message_id=source_message_id,
             )
-        elif kind in {"image", "audio", "document", "sticker"}:
+        elif kind in SUPPORT_MEDIA_MESSAGE_TYPES:
             asset = await self.get_ticket_media(source_ticket_id, source_message_id, agent)
             content = await asyncio.to_thread(asset.path.read_bytes)
             body = str(source.get("body") or "").strip()
-            caption = "" if body in {"Image", "Sticker", "Voice note", "Audio message", "PDF document"} else body
+            caption = "" if body in {"Image", "Video", "Sticker", "Voice note", "Audio message", "PDF document"} else body
             forwarded = await self.send_agent_media(
                 destination_ticket_id,
                 agent=agent,
@@ -1766,6 +1772,8 @@ class SupportService:
                 preview = filename or "PDF document"
             elif not preview and message_type == "image":
                 preview = "Image"
+            elif not preview and message_type == "video":
+                preview = "Video"
             elif not preview and message_type == "sticker":
                 preview = "Sticker"
             elif not preview and message_type == "audio":
@@ -2924,8 +2932,8 @@ class SupportService:
         forwarded_from_message_id: int | None = None,
     ) -> dict[str, Any]:
         media_type = str(media_type or "").lower().strip()
-        if media_type not in {"image", "audio", "document", "sticker"}:
-            raise SupportValidationError("Only images, stickers, voice notes, and PDF documents are supported.")
+        if media_type not in SUPPORT_MEDIA_MESSAGE_TYPES:
+            raise SupportValidationError("Only images, videos, stickers, voice notes, and PDF documents are supported.")
         if not client_message_id or len(client_message_id) > 191:
             raise SupportValidationError("A valid client_message_id is required.")
 
@@ -2953,6 +2961,20 @@ class SupportService:
             prepared_filename = filename or "image"
             safe_caption = sanitize_support_text(caption).strip()[:1024] if caption else ""
             body = safe_caption or "Image"
+        elif media_type == "video":
+            if media_kind_for_mime(normalized_mime) != "video":
+                raise SupportValidationError("Use an MP4 or 3GP video.")
+            if not content:
+                raise SupportValidationError("The video is empty.")
+            if len(content) > max_media_bytes("video"):
+                raise SupportValidationError(
+                    f"The video is larger than the {max_media_bytes('video') // (1024 * 1024)} MB WhatsApp limit."
+                )
+            prepared = content
+            prepared_mime = normalized_mime
+            prepared_filename = sanitize_support_text(filename).strip()[:180] or "video" + media_extension(normalized_mime)
+            safe_caption = sanitize_support_text(caption).strip()[:1024] if caption else ""
+            body = safe_caption or "Video"
         elif media_type == "sticker":
             if media_kind_for_mime(normalized_mime) != "sticker":
                 raise SupportValidationError("Use a WebP file for a WhatsApp sticker.")

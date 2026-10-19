@@ -213,7 +213,7 @@ def test_redirects_do_not_forward_bridge_secret(bridge):
 
 def test_download_response_bound_is_enforced(bridge, monkeypatch):
     bridge(lambda _: httpx.Response(200, content=b"oversized"))
-    for field in ["support_audio_max_bytes", "support_image_max_bytes", "support_document_max_bytes", "support_sticker_max_bytes"]:
+    for field in ["support_audio_max_bytes", "support_image_max_bytes", "support_document_max_bytes", "support_sticker_max_bytes", "support_video_max_bytes"]:
         monkeypatch.setattr(settings, field, 2)
     with pytest.raises(WhatsAppMediaError):
         asyncio.run(LinkedDeviceWhatsAppClient().download_media(MEDIA))

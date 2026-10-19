@@ -52,7 +52,7 @@ from app.security import (
 )
 from app.support_api import router as support_api_router
 from app.support_repository import SupportConflictError
-from app.support_media import SupportMediaError
+from app.support_media import SUPPORT_MEDIA_MESSAGE_TYPES, SupportMediaError
 from app.support_models import HandoffRequest
 from app.support_service import sanitize_support_text, support_service
 from app.support_ui import router as support_ui_router
@@ -1533,6 +1533,8 @@ def _human_inbound_body(
         return sanitize_support_text(incoming.media_caption).strip() or "Image"
     if incoming.message_type == "sticker" and incoming.media_id:
         return "Sticker"
+    if incoming.message_type == "video" and incoming.media_id:
+        return sanitize_support_text(incoming.media_caption).strip() or "Video"
     if incoming.message_type == "audio" and incoming.media_id:
         return "Voice note" if incoming.is_voice else "Audio message"
     if incoming.message_type == "document" and incoming.media_id:
@@ -1612,7 +1614,7 @@ async def _handoff_incoming_without_ai(
                 current_language=conversation.current_language,
                 communication_style=conversation.communication_style,
             )
-            if incoming.message_type in {"image", "audio", "document", "sticker"} and incoming.media_id:
+            if incoming.message_type in SUPPORT_MEDIA_MESSAGE_TYPES and incoming.media_id:
                 try:
                     await support_service.capture_inbound_media(
                         ticket=ticket,
@@ -1945,7 +1947,7 @@ async def _process_incoming_message(
                 )
             )
 
-            if incoming.message_type in {"image", "audio", "document", "sticker"} and incoming.media_id:
+            if incoming.message_type in SUPPORT_MEDIA_MESSAGE_TYPES and incoming.media_id:
                 try:
                     await support_service.capture_inbound_media(
                         ticket=active_ticket,
@@ -2044,7 +2046,7 @@ async def _process_incoming_message(
     # HIGH-PRIORITY HUMAN MEDIA ROUTING / AI AVAILABILITY
     # =========================================================
 
-    # The customer-service application supports WhatsApp images, audio/voice,
+    # The customer-service application supports WhatsApp images, videos, audio/voice,
     # PDFs, and customer locations for human agents, but the AI pipeline does not
     # currently process those message types. Route them into the existing human pipeline
     # before evaluating AI availability. The media is then downloaded and attached
@@ -2053,13 +2055,15 @@ async def _process_incoming_message(
     # Meta marks push-to-talk voice notes as type=audio with audio.voice=true; that
     # flag only selects the more specific handoff reason/status. No transcription,
     # image analysis, semantic normalization, or other AI call is attempted.
-    if incoming.message_type in {"image", "audio", "document", "sticker", "location"}:
+    if incoming.message_type in SUPPORT_MEDIA_MESSAGE_TYPES | {"location"}:
         is_voice_note = incoming.message_type == "audio" and incoming.is_voice
         media_label = (
             "voice note"
             if is_voice_note
             else "image"
             if incoming.message_type == "image"
+            else "video"
+            if incoming.message_type == "video"
             else "sticker"
             if incoming.message_type == "sticker"
             else "PDF document"

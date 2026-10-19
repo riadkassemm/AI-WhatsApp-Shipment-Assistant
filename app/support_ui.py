@@ -17,7 +17,9 @@ async def support_dashboard() -> HTMLResponse:
         return HTMLResponse("Support UI is disabled.", status_code=404)
     html = _HTML.replace(
         "__POLL_MS__", str(max(1, settings.support_queue_poll_seconds) * 1000)
-    ).replace("__CSRF_COOKIE__", settings.support_csrf_cookie_name)
+    ).replace("__CSRF_COOKIE__", settings.support_csrf_cookie_name).replace(
+        "__VIDEO_MAX_BYTES__", str(max(1, settings.support_video_max_bytes))
+    )
     return HTMLResponse(
         html,
         headers={
@@ -955,6 +957,7 @@ body.column-resizing * { cursor: col-resize !important; }
 .message-action-btn[data-action="delete"]:hover:not(:disabled) { background: var(--danger-soft); color: var(--danger); }
 .message-action-btn:disabled { background: transparent; }
 .message-action-btn[data-action="edit"] { --glyph: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 20h4l11-11-4-4L4 16zM13.5 6.5l4 4'/%3E%3C/svg%3E"); }
+.message-action-btn[data-action="copy-image"] { --glyph: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='8' y='8' width='12' height='12' rx='2'/%3E%3Cpath d='M16 8V5.5A1.5 1.5 0 0 0 14.5 4h-9A1.5 1.5 0 0 0 4 5.5v9A1.5 1.5 0 0 0 5.5 16H8'/%3E%3Cpath d='m10 18 3-3 2 2 1-1 2 2'/%3E%3C/svg%3E"); }
 .message-action-btn[data-action="copy"] { --glyph: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='8' y='8' width='12' height='12' rx='2'/%3E%3Cpath d='M16 8V5.5A1.5 1.5 0 0 0 14.5 4h-9A1.5 1.5 0 0 0 4 5.5v9A1.5 1.5 0 0 0 5.5 16H8'/%3E%3C/svg%3E"); }
 .message-action-btn[data-action="delete"] { --glyph: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13M10 11v5M14 11v5'/%3E%3C/svg%3E"); }
 .message-action-btn[data-action="dismiss"] { --glyph: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 6 12 12M18 6 6 18'/%3E%3C/svg%3E"); }
@@ -993,6 +996,7 @@ body.column-resizing * { cursor: col-resize !important; }
 .msg-media img { display: block; width: auto; max-width: min(420px, 100%); max-height: 400px; border-radius: var(--radius-md); object-fit: contain; background: var(--surface-muted); transition: filter var(--duration-fast) ease; }
 .media-open:hover img { filter: brightness(0.94); }
 .msg-media.sticker img { max-width: min(180px, 50vw); max-height: 180px; background: transparent; }
+.msg-media video { display: block; width: min(360px, 100%); max-height: 420px; border-radius: var(--radius-md); background: #000; }
 .msg-media audio { display: block; width: min(340px, 60vw); max-width: 100%; height: 40px; }
 .voice-note-player { display: flex; align-items: center; gap: 6px; max-width: 100%; }
 .voice-note-player audio { min-width: 0; flex: 1 1 auto; }
@@ -1052,7 +1056,7 @@ body.column-resizing * { cursor: col-resize !important; }
 .recording-bar .btn { margin-left: auto; }
 .media-draft { display: flex; align-items: center; gap: 12px; padding: 8px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-subtle); animation: pop-in var(--duration-fast) var(--ease-out); }
 .media-draft-preview { width: 64px; height: 52px; display: grid; place-items: center; flex: 0 0 auto; overflow: hidden; border-radius: var(--radius-sm); background: var(--surface-muted); }
-.media-draft-preview img { width: 100%; height: 100%; object-fit: cover; }
+.media-draft-preview img, .media-draft-preview video { width: 100%; height: 100%; object-fit: cover; }
 .media-draft-preview audio { width: min(300px, 52vw); }
 .media-draft.audio .media-draft-preview { width: auto; min-width: min(300px, 52vw); height: auto; background: transparent; }
 .media-draft.document .media-draft-preview { color: var(--primary-text); }
@@ -1210,7 +1214,18 @@ body.column-resizing * { cursor: col-resize !important; }
 .media-viewer-body canvas { display: block; position: absolute; max-width: none; max-height: none; transform-origin: center center; touch-action: none; box-shadow: var(--shadow-md); }
 .media-viewer-tools { display: flex; align-items: center; gap: 6px; margin-left: auto; flex-wrap: wrap; order: 1; }
 @media (max-width: 640px) { .media-viewer-tools { order: 3; flex: 1 1 100%; margin-left: 0; } }
-.image-editor-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px 14px; border-top: 1px solid var(--border); background: var(--surface-raised); }
+.image-editor-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; padding: 10px 14px; border-top: 1px solid var(--border); background: var(--surface-raised); }
+.image-editor-toolbar .editor-group { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; padding-right: 10px; border-right: 1px solid var(--border); }
+.image-editor-toolbar .editor-group.hidden { display: none; }
+.image-editor-toolbar .btn.small { gap: 5px; }
+.image-editor-toolbar .btn:disabled { opacity: .55; }
+.image-editor-toolbar .editor-hint { color: var(--text-muted); font-size: var(--text-sm); }
+.image-editor-toolbar .editor-finish { display: flex; flex: 1 1 260px; align-items: center; justify-content: flex-end; gap: 6px; min-width: 0; }
+.image-editor-toolbar .editor-finish input { flex: 1 1 auto; }
+@media (max-width: 700px) {
+  .image-editor-toolbar .editor-group .btn span { display: none; }
+  .image-editor-toolbar .editor-group { padding-right: 6px; }
+}
 .image-editor-toolbar label { display: flex; align-items: center; gap: 5px; color: var(--text-muted); font-size: var(--text-sm); }
 .image-editor-toolbar input[type="text"] { flex: 1 1 150px; min-width: 110px; min-height: 30px; padding: 4px 9px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--surface-input); color: var(--text-strong); }
 .image-editor-toolbar input[type="range"] { width: 90px; accent-color: var(--primary); }
@@ -1492,6 +1507,15 @@ body.column-resizing * { cursor: col-resize !important; }
   <symbol id="icon-alert" viewBox="0 0 24 24"><path d="M12 3 2.8 20h18.4z"/><path d="M12 9v4M12 16.5h.01"/></symbol>
   <symbol id="icon-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 10.5V17M12 7h.01"/></symbol>
   <symbol id="icon-image" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="8.5" cy="9" r="1.5"/><path d="m5 18 5-5 3 3 2-2 4 4"/></symbol>
+  <symbol id="icon-video" viewBox="0 0 24 24"><rect x="3" y="6" width="13" height="12" rx="2"/><path d="m16 10 5-3v10l-5-3z"/></symbol>
+  <symbol id="icon-rotate" viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/></symbol>
+  <symbol id="icon-crop" viewBox="0 0 24 24"><path d="M6 2v14a2 2 0 0 0 2 2h14"/><path d="M2 6h14a2 2 0 0 1 2 2v14"/></symbol>
+  <symbol id="icon-undo" viewBox="0 0 24 24"><path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/></symbol>
+  <symbol id="icon-redo" viewBox="0 0 24 24"><path d="m15 14 5-5-5-5"/><path d="M20 9H9.5a5.5 5.5 0 0 0 0 11H13"/></symbol>
+  <symbol id="icon-pen" viewBox="0 0 24 24"><path d="m15 5 4 4L8 20H4v-4z"/><path d="m13 7 4 4"/></symbol>
+  <symbol id="icon-type" viewBox="0 0 24 24"><path d="M4 7V5h16v2M12 5v14M9 19h6"/></symbol>
+  <symbol id="icon-pointer" viewBox="0 0 24 24"><path d="m5 3 14 7-6 2-2 6z"/></symbol>
+  <symbol id="icon-download" viewBox="0 0 24 24"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></symbol>
   <symbol id="icon-file" viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6z"/><path d="M14 3v5h5M8.5 13h7M8.5 16h7"/></symbol>
   <symbol id="icon-paperclip" viewBox="0 0 24 24"><path d="m8.5 12.5 6.2-6.2a3 3 0 1 1 4.2 4.2l-8.1 8.1a5 5 0 0 1-7.1-7.1l8-8"/></symbol>
   <symbol id="icon-reply" viewBox="0 0 24 24"><path d="m10 7-6 5 6 5v-3h3.5c3.3 0 5.6 1.2 7 3.5-.3-5.3-2.8-8-7.5-8H10z"/></symbol>
@@ -1748,8 +1772,8 @@ body.column-resizing * { cursor: col-resize !important; }
           </div>
           <div class="composer-toolbar">
             <div class="composer-tools">
-              <input id="imageInput" type="file" accept="image/jpeg,image/png,image/webp,application/pdf" class="hidden" />
-              <button class="icon-btn" id="imageBtn" type="button" disabled aria-label="Attach an image, sticker, or PDF" data-tooltip="Attach image, sticker, or PDF" data-tooltip-placement="top">
+              <input id="imageInput" type="file" accept="image/jpeg,image/png,image/webp,application/pdf,video/mp4,video/3gpp" class="hidden" />
+              <button class="icon-btn" id="imageBtn" type="button" disabled aria-label="Attach an image, video, sticker, or PDF" data-tooltip="Attach image, video, sticker, or PDF" data-tooltip-placement="top">
                 <svg class="icon" aria-hidden="true"><use href="#icon-paperclip"></use></svg>
               </button>
               <button class="icon-btn" id="voiceBtn" type="button" disabled aria-label="Record a voice note" aria-pressed="false" data-tooltip="Record voice note" data-tooltip-placement="top">
@@ -1927,8 +1951,9 @@ body.column-resizing * { cursor: col-resize !important; }
     <div class="modal-head">
       <div><h2 id="mediaViewerTitle">Attachment</h2><div class="modal-subtitle" id="mediaViewerSubtitle">Customer attachment</div></div>
       <div class="media-viewer-tools hidden" id="mediaViewerTools">
-        <button class="btn small" id="editMediaBtn" type="button">Edit</button>
-        <a class="btn small" id="downloadMediaBtn" href="#" download>Download</a>
+        <button class="btn small" id="editMediaBtn" type="button"><svg class="icon icon-sm" aria-hidden="true"><use href="#icon-edit"></use></svg>Edit</button>
+        <button class="btn small" id="copyMediaBtn" type="button"><svg class="icon icon-sm" aria-hidden="true"><use href="#icon-copy"></use></svg>Copy</button>
+        <a class="btn small" id="downloadMediaBtn" href="#" download><svg class="icon icon-sm" aria-hidden="true"><use href="#icon-download"></use></svg>Download</a>
         <button class="btn small" id="zoomOutBtn" type="button" aria-label="Zoom out">−</button>
         <span class="media-viewer-zoom" id="mediaViewerZoom">100%</span>
         <button class="btn small" id="zoomInBtn" type="button" aria-label="Zoom in">+</button>
@@ -1937,18 +1962,36 @@ body.column-resizing * { cursor: col-resize !important; }
       <button class="icon-btn modal-close" id="closeMediaViewerBtn" type="button" aria-label="Close attachment viewer"><svg class="icon" aria-hidden="true"><use href="#icon-x"></use></svg></button>
     </div>
     <div class="media-viewer-body" id="mediaViewerBody"></div>
-    <div class="image-editor-toolbar hidden" id="imageEditorToolbar">
-      <button class="btn small" id="editorSelectBtn" type="button" aria-pressed="false">Select</button>
-      <button class="btn small" id="editorDrawBtn" type="button" aria-pressed="true">Draw</button>
-      <button class="btn small" id="editorTextBtn" type="button" aria-pressed="false">Text</button>
-      <label>Color <input id="editorColor" type="color" value="#ff3b30" /></label>
-      <label>Size <input id="editorSize" type="range" min="2" max="40" value="8" /></label>
-      <button class="btn small" id="editorUndoBtn" type="button">Undo</button>
-      <button class="btn small" id="editorRedoBtn" type="button">Redo</button>
-      <button class="btn small" id="editorEditTextBtn" type="button">Edit selected text</button>
-      <button class="btn small" id="editorDeleteBtn" type="button">Remove selected</button>
-      <input id="editorCaption" type="text" maxlength="1024" placeholder="Caption (optional)" aria-label="Image caption" />
-      <button class="btn primary small" id="editorSendBtn" type="button">Send image</button>
+    <div class="image-editor-toolbar hidden" id="imageEditorToolbar" role="toolbar" aria-label="Image editing tools">
+      <div class="editor-group" role="group" aria-label="Editing tool">
+        <button class="btn small" id="editorDrawBtn" type="button" aria-pressed="true" title="Draw on the image"><svg class="icon icon-sm" aria-hidden="true"><use href="#icon-pen"></use></svg><span>Draw</span></button>
+        <button class="btn small" id="editorTextBtn" type="button" aria-pressed="false" title="Tap the image to add text"><svg class="icon icon-sm" aria-hidden="true"><use href="#icon-type"></use></svg><span>Text</span></button>
+        <button class="btn small" id="editorSelectBtn" type="button" aria-pressed="false" title="Select, move, or remove text and drawings"><svg class="icon icon-sm" aria-hidden="true"><use href="#icon-pointer"></use></svg><span>Select</span></button>
+        <button class="btn small" id="editorCropBtn" type="button" aria-pressed="false" title="Crop the image"><svg class="icon icon-sm" aria-hidden="true"><use href="#icon-crop"></use></svg><span>Crop</span></button>
+        <button class="btn small" id="editorRotateBtn" type="button" title="Rotate 90° clockwise"><svg class="icon icon-sm" aria-hidden="true"><use href="#icon-rotate"></use></svg><span>Rotate</span></button>
+      </div>
+      <div class="editor-group" role="group" aria-label="Style">
+        <label>Color <input id="editorColor" type="color" value="#ff3b30" /></label>
+        <label>Size <input id="editorSize" type="range" min="2" max="40" value="8" /></label>
+      </div>
+      <div class="editor-group" role="group" aria-label="History">
+        <button class="btn small" id="editorUndoBtn" type="button" title="Undo"><svg class="icon icon-sm" aria-hidden="true"><use href="#icon-undo"></use></svg><span>Undo</span></button>
+        <button class="btn small" id="editorRedoBtn" type="button" title="Redo"><svg class="icon icon-sm" aria-hidden="true"><use href="#icon-redo"></use></svg><span>Redo</span></button>
+      </div>
+      <div class="editor-group" role="group" aria-label="Selected item" id="editorSelectionActions">
+        <button class="btn small" id="editorEditTextBtn" type="button">Edit text</button>
+        <button class="btn small" id="editorDeleteBtn" type="button">Remove</button>
+      </div>
+      <div class="editor-group hidden" role="group" aria-label="Crop" id="editorCropActions">
+        <span class="editor-hint">Drag on the image to choose the area.</span>
+        <button class="btn small" id="editorCancelCropBtn" type="button">Cancel</button>
+        <button class="btn primary small" id="editorApplyCropBtn" type="button" disabled>Apply crop</button>
+      </div>
+      <div class="editor-finish">
+        <input id="editorCaption" type="text" maxlength="1024" placeholder="Caption (optional)" aria-label="Image caption" />
+        <button class="btn small" id="editorCopyBtn" type="button" title="Copy the edited image"><svg class="icon icon-sm" aria-hidden="true"><use href="#icon-copy"></use></svg><span>Copy</span></button>
+        <button class="btn primary small" id="editorSendBtn" type="button">Send image</button>
+      </div>
     </div>
   </div>
 </section>
@@ -2469,9 +2512,26 @@ function notify(message, type = 'success') {
   close.append(createIcon('x', 'icon icon-sm'));
   close.onclick = () => toast.remove();
   toast.append(copy, close);
+  positionToastRegion();
   $('toastRegion').append(toast);
   window.setTimeout(() => toast.remove(), 5200);
 }
+
+// Keep notifications above the reply composer so they never cover Send or
+// the attachment controls while they are visible.
+function positionToastRegion() {
+  const region = $('toastRegion');
+  const composer = document.querySelector('.composer-shell');
+  const rect = composer && composer.offsetParent !== null ? composer.getBoundingClientRect() : null;
+  const lift = rect && rect.height ? Math.max(0, window.innerHeight - rect.top) : 0;
+  region.style.bottom = lift ? Math.round(lift + 12) + 'px' : '';
+}
+
+if (typeof ResizeObserver === 'function') {
+  // The composer grows with attachments and long drafts; move visible toasts with it.
+  new ResizeObserver(() => positionToastRegion()).observe(document.querySelector('.composer-shell'));
+}
+window.addEventListener('resize', positionToastRegion);
 
 function unlockNotificationAudio() {
   try {
@@ -3033,7 +3093,8 @@ function handleGlobalKeydown(event) {
     }
     if (state.activeModal === 'mediaViewerModal') {
       event.preventDefault();
-      closeMediaViewer();
+      if (state.imageEditor?.mode === 'crop') state.imageEditor.cancelCrop();
+      else closeMediaViewer();
       return;
     }
     if (state.activeModal === 'messageDeleteModal') {
@@ -3939,6 +4000,7 @@ function messagePreview(message) {
   if (message.deleted_for_everyone_at) return 'Original message deleted';
   const kind = String(message.media_kind || message.message_type || '').toLowerCase();
   if (kind === 'image') return 'Image';
+  if (kind === 'video') return 'Video';
   if (kind === 'sticker') return 'Sticker';
   if (kind === 'audio') return 'Voice note';
   if (kind === 'document') return message.media_filename || 'PDF document';
@@ -3952,7 +4014,7 @@ function messageTextForCopy(message) {
   const body = String(message.body || message.content || '');
   if (!body.trim()) return '';
   const kind = String(message.media_kind || message.message_type || '').toLowerCase();
-  const defaultMediaLabel = ['Image', 'Sticker', 'Voice note', 'Audio message', 'PDF document', 'Location'].includes(body);
+  const defaultMediaLabel = ['Image', 'Video', 'Sticker', 'Voice note', 'Audio message', 'PDF document', 'Location'].includes(body);
   return (message.media_url || kind === 'location') && defaultMediaLabel ? '' : body;
 }
 
@@ -3984,6 +4046,48 @@ async function copyMessageText(value, copiedLabel = 'Message copied.') {
     return true;
   } catch (_) {
     notify('Could not copy the message. Try selecting its text.', 'error');
+    return false;
+  }
+}
+
+// The clipboard only accepts PNG images, so other formats are converted first.
+async function imageBlobAsPng(blob) {
+  if (blob.type === 'image/png') return blob;
+  const bitmap = await createImageBitmap(blob);
+  try {
+    const canvas = document.createElement('canvas');
+    canvas.width = bitmap.width;
+    canvas.height = bitmap.height;
+    canvas.getContext('2d').drawImage(bitmap, 0, 0);
+    const png = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
+    if (!png) throw new Error('Image conversion failed.');
+    return png;
+  } finally {
+    bitmap.close?.();
+  }
+}
+
+async function fetchImageBlob(src) {
+  const response = await fetch(src, {credentials: 'same-origin', cache: 'no-store'});
+  if (!response.ok) throw new Error('Image could not be loaded.');
+  return response.blob();
+}
+
+// source is an image URL or a function returning a Promise<Blob>. The clipboard
+// write starts inside the click with a pending item, so browsers keep the gesture.
+async function copyImageToClipboard(source) {
+  if (!source) return false;
+  if (!navigator.clipboard?.write || typeof ClipboardItem === 'undefined') {
+    notify('This browser cannot copy images. Use Download instead.', 'error');
+    return false;
+  }
+  try {
+    const png = Promise.resolve(typeof source === 'function' ? source() : fetchImageBlob(source)).then(imageBlobAsPng);
+    await navigator.clipboard.write([new ClipboardItem({'image/png': png})]);
+    notify('Image copied.');
+    return true;
+  } catch (_) {
+    notify('Could not copy the image. Try Download instead.', 'error');
     return false;
   }
 }
@@ -4213,7 +4317,9 @@ function openMediaViewer({kind, src, title, subtitle}) {
   state.mediaSource = kind === 'image' ? src : null;
   resetMediaZoom();
   $('mediaViewerTools').classList.toggle('hidden', kind !== 'image');
-  $('editMediaBtn').classList.toggle('hidden', kind !== 'image' || !state.composerEnabled);
+  // Editing is always available: without reply access the result can still be copied.
+  $('editMediaBtn').classList.toggle('hidden', kind !== 'image');
+  $('copyMediaBtn').classList.toggle('hidden', kind !== 'image');
   $('downloadMediaBtn').classList.toggle('hidden', kind !== 'image');
   if (kind === 'image') $('downloadMediaBtn').href = src;
   if (kind === 'document') {
@@ -4247,45 +4353,117 @@ async function closeMediaViewer() {
   closeDialog('mediaViewerModal');
 }
 
+function updateImageEditorToolbar() {
+  const editor = state.imageEditor;
+  if (!editor) return;
+  for (const [id, mode] of [['editorDrawBtn', 'draw'], ['editorTextBtn', 'text'], ['editorSelectBtn', 'select'], ['editorCropBtn', 'crop']]) {
+    $(id).setAttribute('aria-pressed', editor.mode === mode ? 'true' : 'false');
+  }
+  $('editorUndoBtn').disabled = !editor.canUndo;
+  $('editorRedoBtn').disabled = !editor.canRedo;
+  $('editorEditTextBtn').disabled = editor.selectedType !== 'text';
+  $('editorDeleteBtn').disabled = editor.selected < 0;
+  const cropping = editor.mode === 'crop';
+  $('editorCropActions').classList.toggle('hidden', !cropping);
+  $('editorSelectionActions').classList.toggle('hidden', cropping);
+  $('editorApplyCropBtn').disabled = !editor.normalizedCrop();
+}
+
+function setImageEditorMode(mode) {
+  if (state.imageEditor && !state.imageEditor.sending) state.imageEditor.setMode(mode);
+}
+
+// target 'send' edits a conversation image and sends the result as a new image;
+// target 'draft' edits the image attached in the composer before it is sent.
+async function startImageEditor(blob, target) {
+  if (!['image/jpeg', 'image/png', 'image/webp'].includes(blob.type)) throw new Error('This image format cannot be edited.');
+  const bitmap = await createImageBitmap(blob, {imageOrientation: 'from-image'});
+  let editor;
+  try {
+    editor = new window.ChatImageEditor(bitmap, blob.type);
+  } catch (error) {
+    bitmap.close?.();
+    throw error;
+  }
+  editor.target = target;
+  editor.onChange = updateImageEditorToolbar;
+  editor.onResize = () => resetMediaZoom();
+  const body = $('mediaViewerBody');
+  body.replaceChildren(); body.classList.remove('can-pan', 'panning'); body.classList.add('editing');
+  state.mediaZoom = 1; state.mediaTranslateX = 0; state.mediaTranslateY = 0;
+  for (const id of ['editMediaBtn', 'copyMediaBtn', 'downloadMediaBtn']) $(id).classList.add('hidden');
+  $('imageEditorToolbar').classList.remove('hidden');
+  $('editorCaption').value = '';
+  $('editorCaption').classList.toggle('hidden', target === 'draft');
+  text($('editorSendBtn'), target === 'draft' ? 'Apply edits' : 'Send image');
+  $('editorSendBtn').classList.toggle('hidden', target === 'send' && !state.composerEnabled);
+  state.imageEditor = editor;
+  body.append(editor.canvas);
+  editor.resize();
+  applyMediaZoom();
+  updateImageEditorToolbar();
+  editor.canvas.focus();
+}
+
 async function enterImageEditor() {
-  if (!state.mediaSource || !state.composerEnabled || state.imageEditor) return;
+  if (!state.mediaSource || state.imageEditor) return;
   if (!window.ChatImageEditor) { notify('Image editor is unavailable. Reload and try again.', 'error'); return; }
   const source = new URL(state.mediaSource, location.href);
   if (source.origin !== location.origin || !source.pathname.startsWith('/api/support/tickets/')) return;
   $('editMediaBtn').disabled = true;
-  let bitmap = null;
   try {
     const response = await fetch(source.href, {credentials: 'same-origin', cache: 'no-store'});
     if (!response.ok) throw new Error('Image could not be loaded for editing.');
-    const blob = await response.blob();
-    if (!['image/jpeg', 'image/png', 'image/webp'].includes(blob.type)) throw new Error('This image format cannot be edited.');
-    bitmap = await createImageBitmap(blob, {imageOrientation: 'from-image'});
-    const editor = new window.ChatImageEditor(bitmap, blob.type);
-    const body = $('mediaViewerBody');
-    body.replaceChildren(); body.classList.remove('can-pan', 'panning'); body.classList.add('editing');
-    state.mediaZoom = 1; state.mediaTranslateX = 0; state.mediaTranslateY = 0;
-    $('editMediaBtn').classList.add('hidden');
-    $('downloadMediaBtn').classList.add('hidden');
-    $('imageEditorToolbar').classList.remove('hidden');
-    $('editorCaption').value = '';
-    $('editorSelectBtn').setAttribute('aria-pressed', 'false');
-    $('editorDrawBtn').setAttribute('aria-pressed', 'true');
-    $('editorTextBtn').setAttribute('aria-pressed', 'false');
-    state.imageEditor = editor;
-    body.append(editor.canvas);
-    editor.resize();
-    applyMediaZoom();
-    editor.canvas.focus();
+    await startImageEditor(await response.blob(), 'send');
   } catch (error) {
-    if (bitmap && !state.imageEditor) bitmap.close?.();
     notify(error.message || 'Image could not be edited.', 'error');
   }
   finally { $('editMediaBtn').disabled = false; }
 }
 
+async function editPendingImage() {
+  const draft = state.pendingMedia;
+  if (!draft || draft.kind !== 'image' || state.busy || state.imageEditor) return;
+  if (!window.ChatImageEditor) { notify('Image editor is unavailable. Reload and try again.', 'error'); return; }
+  openMediaViewer({kind: 'image', src: draft.url, title: 'Edit image', subtitle: draft.file.name || 'Image to send'});
+  try {
+    await startImageEditor(draft.file, 'draft');
+  } catch (error) {
+    notify(error.message || 'Image could not be edited.', 'error');
+  }
+}
+
+async function applyDraftImageEdits() {
+  const editor = state.imageEditor;
+  if (!editor || editor.sending) return;
+  const draft = state.pendingMedia;
+  if (!draft || draft.kind !== 'image') { notify('The attached image was removed, so the edits cannot be applied.', 'error'); return; }
+  editor.sending = true;
+  setButtonBusy($('editorSendBtn'), true, 'Applying…');
+  try {
+    const blob = await editor.blob();
+    const name = (draft.file.name || 'image').replace(/\.[^.]+$/, '') + (blob.type === 'image/png' ? '.png' : '.jpg');
+    const file = new File([blob], name, {type: blob.type});
+    editor.dispose(); state.imageEditor = null;
+    $('imageEditorToolbar').classList.add('hidden');
+    $('mediaViewerBody').classList.remove('editing');
+    await closeMediaViewer();
+    setPendingMedia('image', file);
+    notify('Edits applied. Add a caption if you like, then send.');
+    focusMessageComposer();
+  } catch (error) {
+    notify(error.message || 'The edits could not be applied.', 'error');
+  } finally {
+    editor.sending = false;
+    setButtonBusy($('editorSendBtn'), false);
+  }
+}
+
 async function sendEditedImage() {
   const editor = state.imageEditor;
-  if (!editor || editor.sending || !state.ticketId) return;
+  if (editor?.target === 'draft') return applyDraftImageEdits();
+  if (editor?.mode === 'crop') { editor.applyCrop(); return; }
+  if (!editor || editor.sending || !state.ticketId || !state.composerEnabled) return;
   editor.sending = true;
   setButtonBusy($('editorSendBtn'), true, 'Sending…');
   try {
@@ -4458,9 +4636,9 @@ function addMessage(container, m, extraClass = '') {
     tombstone.className = 'message-body';
     tombstone.textContent = 'This message was deleted';
     bubble.append(tombstone);
-  } else if (['image', 'audio', 'document', 'sticker'].includes(kind)) {
+  } else if (['image', 'audio', 'document', 'sticker', 'video'].includes(kind)) {
     const media = document.createElement('div');
-    media.className = 'msg-media' + (kind === 'sticker' ? ' sticker' : '');
+    media.className = 'msg-media' + (kind === 'sticker' ? ' sticker' : kind === 'video' ? ' video' : '');
     if (m.media_url) {
       if (kind === 'image' || kind === 'sticker') {
         const open = document.createElement('button');
@@ -4491,6 +4669,30 @@ function addMessage(container, m, extraClass = '') {
         open.onclick = () => openMediaViewer({kind: 'image', src: m.media_url, title: (kind === 'sticker' ? 'Sticker' : 'Image') + ' from ' + messageActor(m), subtitle: fmt(messageOccurredAt(m))});
         open.append(img);
         media.append(open, recovery);
+      } else if (kind === 'video') {
+        const video = document.createElement('video');
+        video.controls = true;
+        video.preload = 'metadata';
+        video.playsInline = true;
+        video.src = m.media_url;
+        video.setAttribute('aria-label', 'Video from ' + messageActor(m));
+        const recovery = document.createElement('div');
+        recovery.className = 'media-unavailable hidden';
+        const recoveryText = document.createElement('span');
+        recoveryText.textContent = 'Video loading failed. The server can retry the WhatsApp media download.';
+        const retry = document.createElement('button');
+        retry.type = 'button';
+        retry.className = 'btn small';
+        retry.textContent = 'Retry video';
+        retry.onclick = () => {
+          recovery.classList.add('hidden');
+          video.src = m.media_url + (m.media_url.includes('?') ? '&' : '?') + 'retry=' + Date.now();
+          video.load();
+        };
+        recovery.append(recoveryText, retry);
+        video.onerror = () => recovery.classList.remove('hidden');
+        video.onloadedmetadata = () => recovery.classList.add('hidden');
+        media.append(video, recovery);
       } else if (kind === 'document') {
         const card = document.createElement('div');
         card.className = 'document-card';
@@ -4534,6 +4736,8 @@ function addMessage(container, m, extraClass = '') {
       unavailable.className = 'media-unavailable';
       unavailable.textContent = kind === 'image'
         ? 'Image is not available in support storage.'
+        : kind === 'video'
+          ? 'Video is not available in support storage.'
         : kind === 'sticker'
           ? 'Sticker is not available in support storage.'
         : kind === 'document'
@@ -4613,6 +4817,13 @@ function addMessage(container, m, extraClass = '') {
     labelMessageAction(copy, 'copy', 'Copy text');
     copy.onclick = () => copyMessageText(bodyText);
     actions.append(copy);
+  }
+  if ((kind === 'image' || kind === 'sticker') && m.media_url && !deleted) {
+    const copyImage = document.createElement('button');
+    copyImage.type = 'button'; copyImage.className = 'btn message-action-btn'; copyImage.textContent = 'Copy image';
+    labelMessageAction(copyImage, 'copy-image', 'Copy image');
+    copyImage.onclick = () => copyImageToClipboard(m.media_url);
+    actions.append(copyImage);
   }
   if (m.id && (!extraClass || canChangeWhatsAppMessage(m, 'everyone'))) {
     const remove = document.createElement('button');
@@ -6026,6 +6237,14 @@ function renderMediaDraft() {
     img.src = draft.url;
     img.alt = draft.kind === 'sticker' ? 'Selected sticker preview' : 'Selected image preview';
     preview.append(img);
+  } else if (draft.kind === 'video') {
+    const video = document.createElement('video');
+    video.src = draft.url;
+    video.muted = true;
+    video.preload = 'metadata';
+    video.playsInline = true;
+    video.setAttribute('aria-label', 'Selected video preview');
+    preview.append(video);
   } else if (draft.kind === 'audio') {
     preview.append(createVoiceNotePlayer(draft.url, 'Voice note preview').player);
   } else {
@@ -6037,6 +6256,8 @@ function renderMediaDraft() {
   name.className = 'media-draft-name';
   name.textContent = draft.kind === 'image'
     ? (draft.file.name || 'Selected image')
+    : draft.kind === 'video'
+      ? (draft.file.name || 'Selected video')
     : draft.kind === 'sticker'
       ? (draft.file.name || 'WhatsApp sticker')
     : draft.kind === 'document'
@@ -6053,15 +6274,22 @@ function renderMediaDraft() {
   remove.className = 'btn small';
   remove.append(createIcon('trash', 'icon icon-sm'), document.createTextNode('Remove'));
   remove.onclick = clearMediaDraft;
+  if (draft.kind === 'image') {
+    const edit = document.createElement('button');
+    edit.type = 'button';
+    edit.className = 'btn small';
+    edit.append(createIcon('edit', 'icon icon-sm'), document.createTextNode('Edit'));
+    edit.onclick = editPendingImage;
+    actions.append(edit);
+  }
   actions.append(remove);
   container.append(preview, info, actions);
 
-  if (draft.kind === 'image' || draft.kind === 'document') {
+  if (draft.kind === 'image' || draft.kind === 'document' || draft.kind === 'video') {
+    const label = draft.kind === 'image' ? 'image' : draft.kind === 'video' ? 'video' : 'PDF';
     $('message').maxLength = 1024;
-    $('message').placeholder = draft.kind === 'image' ? 'Add an image caption (optional)' : 'Add a PDF caption (optional)';
-    text($('composerHelp'), draft.kind === 'image'
-      ? 'The image and optional caption will be sent as a public WhatsApp reply.'
-      : 'The PDF and optional caption will be sent as a public WhatsApp reply.');
+    $('message').placeholder = 'Add a' + (label === 'image' ? 'n ' : ' ') + label + ' caption (optional)';
+    text($('composerHelp'), 'The ' + label + ' and optional caption will be sent as a public WhatsApp reply.');
   } else if (draft.kind === 'audio') {
     $('message').value = '';
     $('message').placeholder = 'Voice note ready to send';
@@ -6142,7 +6370,7 @@ function updateComposerControls() {
   }
   const label = $('sendBtn').querySelector('.send-label');
   if (label) label.textContent = state.editTarget ? 'Save' : draft
-    ? (draft.kind === 'image' ? 'Send image' : draft.kind === 'sticker' ? 'Send sticker' : draft.kind === 'document' ? 'Send PDF' : 'Send voice')
+    ? (draft.kind === 'image' ? 'Send image' : draft.kind === 'video' ? 'Send video' : draft.kind === 'sticker' ? 'Send sticker' : draft.kind === 'document' ? 'Send PDF' : 'Send voice')
     : 'Send';
 }
 
@@ -6293,18 +6521,25 @@ function chooseImage() {
   if (state.composerEnabled && !state.busy && !state.mediaRecorder) $('imageInput').click();
 }
 
+const VIDEO_MAX_BYTES = Number('__VIDEO_MAX_BYTES__') || 16 * 1024 * 1024;
+
 function imageSelected() {
   const file = $('imageInput').files && $('imageInput').files[0];
   if (!file) return;
-  if (!['image/jpeg', 'image/png', 'image/webp', 'application/pdf'].includes(file.type)) {
-    showError('Use a JPEG/PNG image, WebP sticker, or PDF document.');
+  if (!['image/jpeg', 'image/png', 'image/webp', 'application/pdf', 'video/mp4', 'video/3gpp'].includes(file.type)) {
+    showError('Use a JPEG/PNG image, MP4 video, WebP sticker, or PDF document.');
     $('imageInput').value = '';
     return;
   }
-  const kind = file.type === 'application/pdf' ? 'document' : file.type === 'image/webp' ? 'sticker' : 'image';
+  const kind = file.type === 'application/pdf' ? 'document' : file.type === 'image/webp' ? 'sticker' : file.type.startsWith('video/') ? 'video' : 'image';
+  if (kind === 'video' && file.size > VIDEO_MAX_BYTES) {
+    showError('This video is ' + formatBytes(file.size) + '. WhatsApp videos must be ' + formatBytes(VIDEO_MAX_BYTES) + ' or smaller.');
+    $('imageInput').value = '';
+    return;
+  }
   setPendingMedia(kind, file);
   $('message').focus();
-  setAppStatus(kind === 'document' ? 'PDF attached. You may add a caption before sending.' : kind === 'sticker' ? 'Sticker attached and ready to send.' : 'Image attached. You may add a caption before sending.');
+  setAppStatus(kind === 'document' ? 'PDF attached. You may add a caption before sending.' : kind === 'sticker' ? 'Sticker attached and ready to send.' : kind === 'video' ? 'Video attached. You may add a caption before sending.' : 'Image attached. You may add a caption before sending.');
 }
 
 async function sendMediaMessage() {
@@ -6312,14 +6547,14 @@ async function sendMediaMessage() {
   if (!draft || !state.ticketId || state.busy) return;
   state.busy = true;
   setWorkspaceBusy(true);
-  setButtonBusy($('sendBtn'), true, draft.kind === 'image' ? 'Sending image…' : draft.kind === 'sticker' ? 'Sending sticker…' : draft.kind === 'document' ? 'Sending PDF…' : 'Sending voice…');
+  setButtonBusy($('sendBtn'), true, draft.kind === 'image' ? 'Sending image…' : draft.kind === 'video' ? 'Sending video…' : draft.kind === 'sticker' ? 'Sending sticker…' : draft.kind === 'document' ? 'Sending PDF…' : 'Sending voice…');
   showError('');
   const form = new FormData();
   form.append('media_type', draft.kind);
   form.append('client_message_id', crypto.randomUUID());
-  if (draft.kind === 'image' || draft.kind === 'document') form.append('caption', $('message').value.trim());
+  if (['image', 'document', 'video'].includes(draft.kind)) form.append('caption', $('message').value.trim());
   if (state.replyTarget) form.append('reply_to_message_id', String(state.replyTarget.id));
-  form.append('file', draft.file, draft.file.name || (draft.kind === 'image' ? 'image' : draft.kind === 'sticker' ? 'sticker.webp' : draft.kind === 'document' ? 'document.pdf' : 'voice-note'));
+  form.append('file', draft.file, draft.file.name || (draft.kind === 'image' ? 'image' : draft.kind === 'video' ? 'video.mp4' : draft.kind === 'sticker' ? 'sticker.webp' : draft.kind === 'document' ? 'document.pdf' : 'voice-note'));
   let refresh = false;
   let succeeded = false;
   try {
@@ -6327,7 +6562,7 @@ async function sendMediaMessage() {
     $('message').value = '';
     clearMediaDraft();
     clearReplyTarget();
-    notify(draft.kind === 'image' ? 'Image sent to the customer.' : draft.kind === 'sticker' ? 'Sticker sent to the customer.' : draft.kind === 'document' ? 'PDF sent to the customer.' : 'Voice note sent to the customer.');
+    notify(draft.kind === 'image' ? 'Image sent to the customer.' : draft.kind === 'video' ? 'Video sent to the customer.' : draft.kind === 'sticker' ? 'Sticker sent to the customer.' : draft.kind === 'document' ? 'PDF sent to the customer.' : 'Voice note sent to the customer.');
     refresh = true;
     succeeded = true;
   } catch (error) {
@@ -8293,26 +8528,17 @@ $('locationForm').addEventListener('submit', sendLocation);
 $('closeMediaViewerBtn').addEventListener('click', closeMediaViewer);
 $('editMediaBtn').addEventListener('click', enterImageEditor);
 $('editorSendBtn').addEventListener('click', sendEditedImage);
-$('editorSelectBtn').addEventListener('click', () => {
-  if (!state.imageEditor) return;
-  state.imageEditor.mode = 'select';
-  $('editorSelectBtn').setAttribute('aria-pressed', 'true');
-  $('editorDrawBtn').setAttribute('aria-pressed', 'false');
-  $('editorTextBtn').setAttribute('aria-pressed', 'false');
-});
-$('editorDrawBtn').addEventListener('click', () => {
-  if (!state.imageEditor) return;
-  state.imageEditor.mode = 'draw';
-  $('editorSelectBtn').setAttribute('aria-pressed', 'false');
-  $('editorDrawBtn').setAttribute('aria-pressed', 'true');
-  $('editorTextBtn').setAttribute('aria-pressed', 'false');
-});
-$('editorTextBtn').addEventListener('click', () => {
-  if (!state.imageEditor) return;
-  state.imageEditor.mode = 'text';
-  $('editorSelectBtn').setAttribute('aria-pressed', 'false');
-  $('editorDrawBtn').setAttribute('aria-pressed', 'false');
-  $('editorTextBtn').setAttribute('aria-pressed', 'true');
+$('copyMediaBtn').addEventListener('click', () => copyImageToClipboard(state.mediaSource));
+$('editorSelectBtn').addEventListener('click', () => setImageEditorMode('select'));
+$('editorDrawBtn').addEventListener('click', () => setImageEditorMode('draw'));
+$('editorTextBtn').addEventListener('click', () => setImageEditorMode('text'));
+$('editorCropBtn').addEventListener('click', () => setImageEditorMode('crop'));
+$('editorRotateBtn').addEventListener('click', () => state.imageEditor?.rotate());
+$('editorApplyCropBtn').addEventListener('click', () => state.imageEditor?.applyCrop());
+$('editorCancelCropBtn').addEventListener('click', () => state.imageEditor?.cancelCrop());
+$('editorCopyBtn').addEventListener('click', () => {
+  const editor = state.imageEditor;
+  if (editor) copyImageToClipboard(() => editor.pngBlob());
 });
 $('editorUndoBtn').addEventListener('click', () => state.imageEditor?.undo());
 $('editorRedoBtn').addEventListener('click', () => state.imageEditor?.redo());

@@ -130,6 +130,8 @@ class Settings(BaseSettings):
     support_sticker_max_bytes: int = 500 * 1024
     support_audio_max_bytes: int = 16 * 1024 * 1024
     support_document_max_bytes: int = 25 * 1024 * 1024
+    # WhatsApp's own video limit is 16 MB.
+    support_video_max_bytes: int = 16 * 1024 * 1024
     support_media_download_timeout_seconds: float = 20.0
     support_media_transcode_timeout_seconds: float = 30.0
     support_media_ffmpeg_path: str = "ffmpeg"
