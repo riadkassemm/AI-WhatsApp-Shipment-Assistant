@@ -168,7 +168,7 @@ class LinkedDeviceWhatsAppClient:
         kind = payload.get("type")
         if kind == "reaction":
             self._message_reference(payload["reaction"].get("message_id"), line)
-        elif kind in {"image", "audio", "document", "sticker"}:
+        elif kind in {"image", "audio", "document", "sticker", "video"}:
             self._media_reference(payload[kind].get("id"), line)
         if client_message_id is not None:
             payload = {**payload, "client_message_id": client_message_id}
@@ -230,7 +230,7 @@ class LinkedDeviceWhatsAppClient:
 
     @staticmethod
     def _media_limit() -> int:
-        return max(int(settings.support_image_max_bytes), int(settings.support_audio_max_bytes), int(settings.support_document_max_bytes), int(settings.support_sticker_max_bytes))
+        return max(int(settings.support_image_max_bytes), int(settings.support_audio_max_bytes), int(settings.support_document_max_bytes), int(settings.support_sticker_max_bytes), int(settings.support_video_max_bytes))
 
     async def upload_media(self, *, content: bytes, mime_type: str, filename: str, phone_number_id: str | None = None) -> str:
         from app.whatsapp_client import WhatsAppMediaError, WhatsAppSendError

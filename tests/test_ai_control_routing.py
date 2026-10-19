@@ -514,6 +514,7 @@ def test_voice_note_always_handoffs_without_ai(monkeypatch, availability) -> Non
         ("image", False, "handed_off_media", "MEDIA_UNSUPPORTED_BY_AI"),
         ("audio", False, "handed_off_media", "MEDIA_UNSUPPORTED_BY_AI"),
         ("document", False, "handed_off_media", "MEDIA_UNSUPPORTED_BY_AI"),
+        ("video", False, "handed_off_media", "MEDIA_UNSUPPORTED_BY_AI"),
     ],
 )
 def test_human_supported_media_handoffs_and_is_never_sent_to_ai(
@@ -539,9 +540,11 @@ def test_human_supported_media_handoffs_and_is_never_sent_to_ai(
                     if message_type == "image"
                     else "application/pdf"
                     if message_type == "document"
+                    else "video/mp4"
+                    if message_type == "video"
                     else "audio/mpeg"
                 ),
-                media_caption=("Package photo" if message_type == "image" else None),
+                media_caption=("Package photo" if message_type in {"image", "video"} else None),
                 media_filename=("shipment.pdf" if message_type == "document" else None),
                 is_voice=is_voice,
             ),

@@ -239,10 +239,10 @@ class WhatsAppClient:
         context_message_id: str | None = None,
         client_message_id: str | None = None,
     ) -> dict:
-        if media_type not in {"image", "audio", "document", "sticker"}:
+        if media_type not in {"image", "audio", "document", "sticker", "video"}:
             raise WhatsAppSendError("Unsupported WhatsApp media type.", delivery_uncertain=False)
         media_node: dict[str, str | bool] = {"id": media_id}
-        if media_type in {"image", "document"} and caption:
+        if media_type in {"image", "document", "video"} and caption:
             media_node["caption"] = caption
         if media_type == "document" and filename:
             media_node["filename"] = filename
@@ -552,7 +552,7 @@ def extract_incoming_message(payload: dict) -> IncomingWhatsAppMessage | None:
             text = text_node.get("body")
             if text is not None:
                 text = str(text)
-        elif message_type in {"image", "audio", "document", "sticker"}:
+        elif message_type in {"image", "audio", "document", "sticker", "video"}:
             media_node = message.get(message_type) or {}
             if media_node.get("id"):
                 media_id = str(media_node.get("id"))
@@ -560,7 +560,7 @@ def extract_incoming_message(payload: dict) -> IncomingWhatsAppMessage | None:
                 media_mime_type = str(media_node.get("mime_type"))
             if media_node.get("sha256"):
                 media_sha256 = str(media_node.get("sha256"))
-            if message_type in {"image", "document"} and media_node.get("caption") is not None:
+            if message_type in {"image", "document", "video"} and media_node.get("caption") is not None:
                 media_caption = str(media_node.get("caption"))
             if message_type == "document" and media_node.get("filename") is not None:
                 media_filename = str(media_node.get("filename"))

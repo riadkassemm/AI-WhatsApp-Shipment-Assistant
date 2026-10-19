@@ -7,7 +7,7 @@ import QRCode from 'qrcode';
 import { BridgeError, phoneDigits, wrapId, unwrapId, validateLineManifest, UUID_PATTERN, MANIFEST_MAX_BYTES } from './config.js';
 import { FileStore, createAuth } from './storage.js';
 import { AckTracker } from './ack.js';
-import { inboundEvent, outgoingEvent, outgoingConfirmationEvent, messageTombstoneEvent, mutationEvent, textBody, millis, eventId } from './events.js';
+import { inboundEvent, outgoingEvent, outgoingConfirmationEvent, messageTombstoneEvent, mutationEvent, textBody, millis, eventId, MEDIA_TYPES } from './events.js';
 import { preserveNativeMutationMetadata } from './native-events.js';
 
 const silentLogger = pino({ level: 'silent' });
@@ -649,7 +649,7 @@ export class Bridge {
       }
       return;
     }
-    const mediaType = ['image', 'audio', 'document', 'sticker'].find(type => content[`${type}Message`]);
+    const mediaType = MEDIA_TYPES.find(type => content[`${type}Message`]);
     let mediaId = existing?.media_id;
     if (mediaType && !mediaId) {
       mediaId = `ldmedia:${line.line_id}:${crypto.randomUUID()}`;
@@ -764,13 +764,13 @@ export class Bridge {
         const emoji = payload.reaction?.emoji;
         if (typeof emoji !== 'string' || emoji.length > 32) throw new BridgeError(400, 'INVALID_REACTION', 'Provide a reaction emoji or an empty string.');
         content = { react: { key: target.message.key, text: emoji } };
-      } else if (['image', 'audio', 'document', 'sticker'].includes(payload.type)) {
+      } else if (MEDIA_TYPES.includes(payload.type)) {
         const mediaNode = payload[payload.type];
         const media = await this.downloadMedia(id, mediaNode?.id);
         content = { [payload.type]: media.content, mimetype: media.mime_type };
         if (payload.type === 'audio') content.ptt = Boolean(mediaNode.voice);
         if (payload.type === 'document') content.fileName = mediaNode.filename || 'attachment';
-        if (['image', 'document'].includes(payload.type) && mediaNode.caption) content.caption = String(mediaNode.caption).slice(0, 1024);
+        if (['image', 'document', 'video'].includes(payload.type) && mediaNode.caption) content.caption = String(mediaNode.caption).slice(0, 1024);
       } else throw new BridgeError(400, 'UNSUPPORTED_TYPE', 'This message type is not supported by the linked-device bridge.');
       const options = {};
       if (payload.context?.message_id) options.quoted = this.target(line, payload.context.message_id, phone, false).message;
@@ -791,7 +791,7 @@ export class Bridge {
         await line.store.update(data => { data.messages[nativeId] = { message, phone, timestamp: millis(message.messageTimestamp), text: textBody(message.message), notified: true, pending_send: true,
           ...(clientMessageId ? { client_message_id: clientMessageId } : {}),
           echo_seen: Boolean(data.messages[nativeId]?.echo_seen), confirmation_enqueued: Boolean(data.messages[nativeId]?.confirmation_enqueued),
-          ...(['image', 'audio', 'document', 'sticker'].includes(payload.type) ? { media_id: payload[payload.type].id } : {}) }; });
+          ...(MEDIA_TYPES.includes(payload.type) ? { media_id: payload[payload.type].id } : {}) }; });
         await waiter.promise;
         await line.store.update(data => { data.messages[nativeId].pending_send = false; data.messages[nativeId].ack_confirmed = true; });
         await this.enqueueOwnConfirmation(line, nativeId);

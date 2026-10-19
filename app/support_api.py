@@ -41,7 +41,7 @@ from app.staff_management import (
     update_staff_account,
 )
 from app.support_events import event_stream
-from app.support_media import SupportMediaError
+from app.support_media import SupportMediaError, max_media_bytes
 from app.support_repository import SupportConflictError, SupportNotFoundError, SupportSchemaError
 from app.vcf_contacts import (
     MAX_VCF_IMPORT_BYTES,
@@ -1119,22 +1119,14 @@ async def send_ticket_location(
 @router.post("/tickets/{ticket_id}/media")
 async def send_ticket_media(
     ticket_id: int,
-    media_type: Literal["image", "audio", "document", "sticker"] = Form(...),
+    media_type: Literal["image", "audio", "document", "sticker", "video"] = Form(...),
     client_message_id: str = Form(..., min_length=1, max_length=191),
     caption: str = Form(default="", max_length=1024),
     reply_to_message_id: int | None = Form(default=None, ge=1),
     file: UploadFile = File(...),
     agent: SupportAgent = Depends(require_support_csrf),
 ) -> dict:
-    limit = (
-        int(settings.support_image_max_bytes)
-        if media_type == "image"
-        else int(settings.support_sticker_max_bytes)
-        if media_type == "sticker"
-        else int(settings.support_audio_max_bytes)
-        if media_type == "audio"
-        else int(settings.support_document_max_bytes)
-    )
+    limit = max_media_bytes(media_type)
     try:
         content = await file.read(max(1, limit) + 1)
         if len(content) > limit:

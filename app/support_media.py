@@ -26,6 +26,14 @@ STICKER_MIME_EXTENSIONS: dict[str, str] = {
 DOCUMENT_MIME_EXTENSIONS: dict[str, str] = {
     "application/pdf": ".pdf",
 }
+# WhatsApp delivers and accepts MP4 (H.264/AAC) and 3GPP videos.
+VIDEO_MIME_EXTENSIONS: dict[str, str] = {
+    "video/mp4": ".mp4",
+    "video/3gpp": ".3gp",
+}
+
+# Message types whose attachment is stored and served by the support dashboard.
+SUPPORT_MEDIA_MESSAGE_TYPES: frozenset[str] = frozenset({"image", "audio", "document", "sticker", "video"})
 
 # WhatsApp Cloud API accepts these common audio formats. Browser microphone
 # recording may also arrive as WebM/Opus; that format is transcoded to Ogg/Opus
@@ -92,6 +100,8 @@ def media_kind_for_mime(value: str | None, *, allow_browser_audio: bool = False)
         return "image"
     if mime_type in DOCUMENT_MIME_EXTENSIONS:
         return "document"
+    if mime_type in VIDEO_MIME_EXTENSIONS:
+        return "video"
     audio_map = BROWSER_AUDIO_MIME_EXTENSIONS if allow_browser_audio else WHATSAPP_AUDIO_MIME_EXTENSIONS
     if mime_type in audio_map:
         return "audio"
@@ -106,6 +116,8 @@ def media_extension(value: str | None, *, allow_browser_audio: bool = False) -> 
         return IMAGE_MIME_EXTENSIONS[mime_type]
     if mime_type in DOCUMENT_MIME_EXTENSIONS:
         return DOCUMENT_MIME_EXTENSIONS[mime_type]
+    if mime_type in VIDEO_MIME_EXTENSIONS:
+        return VIDEO_MIME_EXTENSIONS[mime_type]
     audio_map = BROWSER_AUDIO_MIME_EXTENSIONS if allow_browser_audio else WHATSAPP_AUDIO_MIME_EXTENSIONS
     return audio_map.get(mime_type, ".bin")
 
@@ -119,6 +131,8 @@ def max_media_bytes(kind: str) -> int:
         return max(1, int(settings.support_audio_max_bytes))
     if kind == "document":
         return max(1, int(settings.support_document_max_bytes))
+    if kind == "video":
+        return max(1, int(settings.support_video_max_bytes))
     raise SupportMediaError("Unsupported media type.")
 
 
@@ -155,7 +169,7 @@ class SupportMediaStore:
         business_phone_number_id: str | None = None,
         filename: str | None = None,
     ) -> RemoteSupportMediaReference:
-        if message_type not in {"image", "audio", "document", "sticker"}:
+        if message_type not in SUPPORT_MEDIA_MESSAGE_TYPES:
             raise SupportMediaError("Unsupported inbound media type.")
         normalized_media_id = str(media_id or "").strip()
         if not normalized_media_id or len(normalized_media_id) > 512:
@@ -194,7 +208,7 @@ class SupportMediaStore:
             return None
         media_id = str(payload.get("media_id") or "").strip()
         message_type = str(payload.get("message_type") or "").strip()
-        if not media_id or message_type not in {"image", "audio", "document", "sticker"}:
+        if not media_id or message_type not in SUPPORT_MEDIA_MESSAGE_TYPES:
             return None
         expected_mime_type = payload.get("expected_mime_type")
         business_phone_number_id = payload.get("business_phone_number_id")

@@ -348,7 +348,8 @@ const text = (element, value) => {element.textContent = value};
 const state = {mediaZoom: 1, mediaTranslateX: 0, mediaTranslateY: 0};
 const context = {
   clearRect() {}, drawImage() {}, beginPath() {}, moveTo() {}, lineTo() {}, stroke() {},
-  fillText() {}, strokeRect() {}, setLineDash() {}, measureText(s) {return {width: s.length * 8}}
+  fillText() {}, strokeRect() {}, setLineDash() {}, measureText(s) {return {width: s.length * 8}},
+  translate() {}, rotate() {}, fillRect() {}
 };
 const document = {createElement(name) {
   assert.equal(name, 'canvas');
@@ -371,7 +372,10 @@ resetMediaZoom();
 assert.equal(state.mediaZoom, 1);
 assert.equal(state.mediaTranslateX, 0);
 
+(async () => {
 const e = new ChatImageEditor({width: 100, height: 100}, 'image/png');
+const changes = [];
+e.onChange = editor => changes.push(editor.mode);
 const pointer = (x, y) => ({pointerId: 1, clientX: x, clientY: y, preventDefault() {}});
 e.pointerDown(pointer(20, 20));
 e.pointerMove(pointer(30, 30));
@@ -388,7 +392,7 @@ e.removeSelected(); assert.equal(e.objects.length, 0);
 e.undo(); assert.equal(e.objects.length, 1);
 e.pointerDown(pointer(90, 90)); assert.equal(e.objects.length, 1);
 e.mode = 'text';
-e.pointerDown(pointer(70, 70));
+await e.pointerDown(pointer(70, 70));
 assert.equal(e.objects[1].text, 'مرحبا');
 assert.equal(e.historyIndex, 2);
 e.pointerDown(pointer(75, 75));
@@ -397,10 +401,10 @@ e.pointerUp(pointer(80, 78));
 assert.equal(e.objects[1].x, 75);
 assert.equal(e.objects[1].y, 73);
 answer = 'updated';
-e.editText(); assert.equal(e.objects[1].text, 'updated');
+await e.editText(); assert.equal(e.objects[1].text, 'updated');
 e.removeSelected(); assert.equal(e.objects.length, 1);
 e.undo(); assert.equal(e.objects.length, 2);
-e.blob().then(blob => {assert.equal(blob.type, 'image/png')}).catch(error => {throw error});
+assert.equal((await e.blob()).type, 'image/png');
 state.imageEditor = e;
 applyMediaZoom();
 assert.match(e.canvas.style.transform, /scale\(1\)/);
@@ -410,7 +414,45 @@ e.mode = 'draw';
 e.pointerDown(pointer(10, 10));
 e.cancelActiveStroke();
 assert.equal(e.pointer, null);
-assert.equal(e.objects.length, e.history[e.historyIndex].length);
+assert.equal(e.objects.length, e.history[e.historyIndex].objects.length);
+assert.ok(changes.length > 0, 'the toolbar is told about changes');
+
+// Rotate bakes the overlays into the image and swaps its size; undo restores both.
+const editor = new ChatImageEditor({width: 200, height: 100}, 'image/png');
+editor.pointerDown(pointer(10, 10)); editor.pointerMove(pointer(20, 20)); editor.pointerUp(pointer(20, 20));
+let resized = 0;
+editor.onResize = () => { resized += 1; };
+editor.rotate();
+assert.deepEqual([editor.canvas.width, editor.canvas.height], [100, 200]);
+assert.equal(editor.objects.length, 0);
+assert.equal(editor.ops[0].type, 'rotate');
+assert.equal(editor.ops[0].baked.length, 1, 'the drawing is kept by baking it into the rotated image');
+assert.equal(resized, 1);
+editor.undo();
+assert.deepEqual([editor.canvas.width, editor.canvas.height], [200, 100]);
+assert.equal(editor.objects.length, 1);
+editor.redo();
+assert.deepEqual([editor.canvas.width, editor.canvas.height], [100, 200]);
+
+// Crop: drag a rectangle (canvas is 100x100 CSS px here), then apply.
+editor.setMode('crop');
+editor.pointerDown(pointer(10, 20)); editor.pointerMove(pointer(60, 70)); editor.pointerUp(pointer(60, 70));
+const crop = editor.normalizedCrop();
+assert.deepEqual(crop, {x: 10, y: 40, w: 50, h: 100});
+assert.equal(editor.applyCrop(), true);
+assert.deepEqual([editor.canvas.width, editor.canvas.height], [50, 100]);
+assert.equal(editor.mode, 'draw');
+assert.deepEqual(editor.ops.map(op => op.type), ['rotate', 'crop']);
+editor.undo();
+assert.deepEqual([editor.canvas.width, editor.canvas.height], [100, 200]);
+editor.setMode('crop');
+editor.pointerDown(pointer(10, 10)); editor.pointerMove(pointer(12, 12)); editor.pointerUp(pointer(12, 12));
+assert.equal(editor.normalizedCrop(), null, 'a tiny drag is not a crop');
+assert.equal(editor.applyCrop(), false);
+editor.cancelCrop();
+assert.equal(editor.mode, 'draw');
+assert.equal(editor.cropRect, null);
+})().catch(error => {console.error(error); process.exitCode = 1});
 """
     result = subprocess.run(["node", "-e", script], text=True, capture_output=True, timeout=15)
     assert result.returncode == 0, result.stderr
