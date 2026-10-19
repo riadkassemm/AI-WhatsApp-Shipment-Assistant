@@ -1113,6 +1113,35 @@ body.column-resizing * { cursor: col-resize !important; }
 .message-preference-textarea { min-height: 112px !important; resize: vertical; line-height: 1.45; }
 .message-preference-hint { display: flex; justify-content: space-between; gap: 10px; }
 .message-preference-hint span:last-child { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.modal-card.quick-replies-card { width: min(620px, 100%); }
+.quick-replies-toolbar { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+.quick-replies-toolbar .search-field { flex: 1 1 auto; min-width: 0; }
+.quick-replies-toolbar .search-field input { padding-right: 10px; }
+.quick-replies-toolbar .btn { flex: 0 0 auto; }
+.quick-reply-list { max-height: min(420px, 55vh); overflow: auto; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--surface); }
+.quick-reply-list .empty-state { min-height: 180px; }
+.quick-reply-row { display: flex; align-items: stretch; gap: 2px; border-bottom: 1px solid var(--border); transition: background-color var(--transition); }
+.quick-reply-row:last-child { border-bottom: 0; }
+.quick-reply-row:hover, .quick-reply-row:focus-within { background: var(--surface-hover); }
+.quick-reply-copy { flex: 1 1 auto; min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 10px; padding: 10px 12px; border: 0; border-radius: 0; background: transparent; color: var(--text); text-align: left; cursor: pointer; }
+.quick-reply-copy:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+.quick-reply-text { min-width: 0; }
+.quick-reply-text strong { display: block; overflow: hidden; color: var(--text-strong); font-size: var(--text-md); font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.quick-reply-text.untitled span { margin-top: 0; color: var(--text-strong); font-size: var(--text-md); }
+.quick-reply-text span { display: -webkit-box; margin-top: 2px; overflow: hidden; color: var(--text-muted); font-size: var(--text-sm); line-height: 1.45; white-space: pre-line; overflow-wrap: anywhere; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.quick-reply-copy-hint { display: inline-flex; align-items: center; gap: 4px; color: var(--text-subtle); font-size: var(--text-xs); font-weight: 600; opacity: 0; transition: opacity var(--transition), color var(--transition); }
+.quick-reply-row:hover .quick-reply-copy-hint, .quick-reply-copy:focus-visible .quick-reply-copy-hint { opacity: 1; color: var(--primary); }
+.quick-reply-actions { display: flex; align-items: center; gap: 2px; padding-right: 8px; }
+.quick-reply-actions .icon-btn { width: 32px; height: 32px; }
+.quick-reply-actions .icon-btn { color: var(--text-muted); }
+.quick-reply-actions .icon-btn.danger:hover:not(:disabled), .quick-reply-actions .icon-btn.danger:focus-visible { color: var(--danger); background: var(--danger-soft); }
+.field-optional { color: var(--text-subtle); font-weight: 500; }
+@media (hover: none) { .quick-reply-copy-hint { opacity: 1; } }
+@media (max-width: 520px) {
+  .quick-replies-toolbar .btn { padding-left: 10px; padding-right: 10px; }
+  .quick-reply-copy { padding-right: 4px; }
+  .quick-reply-copy-hint { font-size: 0; gap: 0; }
+}
 .modal-card.ai-settings-card { width: min(640px, 100%); }
 .modal-card.whatsapp-card { width: min(760px, 100%); }
 .modal-card.location-card-modal { width: min(560px, 100%); }
@@ -1473,6 +1502,8 @@ body.column-resizing * { cursor: col-resize !important; }
   <symbol id="icon-shield" viewBox="0 0 24 24"><path d="M12 3 5 6v5c0 4.5 2.5 7.7 7 10 4.5-2.3 7-5.5 7-10V6z"/><path d="m9 12 2 2 4-4"/></symbol>
   <symbol id="icon-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
   <symbol id="icon-edit" viewBox="0 0 24 24"><path d="M4 20h4l11-11-4-4L4 16zM13.5 6.5l4 4"/></symbol>
+  <symbol id="icon-zap" viewBox="0 0 24 24"><path d="M13 3 5 14h6l-1 7 8-11h-6z"/></symbol>
+  <symbol id="icon-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/></symbol>
   <symbol id="icon-trash" viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13M10 11v5M14 11v5"/></symbol>
   <symbol id="icon-lock" viewBox="0 0 24 24"><rect x="5" y="10" width="14" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></symbol>
   <symbol id="icon-truck" viewBox="0 0 24 24"><path d="M3 6h11v10H3zM14 9h3l4 4v3h-7z"/><circle cx="7" cy="18" r="2"/><circle cx="17.5" cy="18" r="2"/></symbol>
@@ -1727,6 +1758,9 @@ body.column-resizing * { cursor: col-resize !important; }
               <button class="icon-btn" id="locationBtn" type="button" disabled aria-label="Share a location" data-tooltip="Share location" data-tooltip-placement="top">
                 <svg class="icon" aria-hidden="true"><use href="#icon-map-pin"></use></svg>
               </button>
+              <button class="icon-btn" id="quickRepliesBtn" type="button" aria-label="Quick replies" aria-haspopup="dialog" data-tooltip="Quick replies" data-tooltip-placement="top">
+                <svg class="icon" aria-hidden="true"><use href="#icon-zap"></use></svg>
+              </button>
             </div>
             <span class="composer-count" id="composerCount">0 / 4096</span>
             <button class="btn primary send-btn" id="sendBtn" type="button" disabled>
@@ -1848,6 +1882,41 @@ body.column-resizing * { cursor: col-resize !important; }
         </div>
         <div class="form-note">These settings belong only to your staff account. Other agents keep their own messages or the defaults.</div>
         <div class="modal-actions"><button class="btn" id="cancelMessagePreferencesBtn" type="button">Cancel</button><button class="btn primary" id="saveMessagePreferencesBtn" type="submit"><svg class="icon" aria-hidden="true"><use href="#icon-check"></use></svg>Save messages</button></div>
+      </form>
+    </div>
+  </div>
+</section>
+
+<section class="modal-backdrop hidden" id="quickRepliesModal" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="quickRepliesTitle" aria-describedby="quickRepliesSubtitle">
+  <div class="modal-card quick-replies-card" role="document" tabindex="-1">
+    <div class="modal-head">
+      <div><h2 id="quickRepliesTitle">Quick replies</h2><div class="modal-subtitle" id="quickRepliesSubtitle">Select a reply to copy it, then paste it into the chat. Only you can see your quick replies.</div></div>
+      <button class="icon-btn modal-close" id="closeQuickRepliesBtn" type="button" aria-label="Close quick replies"><svg class="icon" aria-hidden="true"><use href="#icon-x"></use></svg></button>
+    </div>
+    <div class="modal-body">
+      <div class="staff-feedback error-box" id="quickRepliesError" role="alert" aria-live="assertive"></div>
+      <div id="quickRepliesListView">
+        <div class="quick-replies-toolbar">
+          <div class="search-field">
+            <svg class="icon" aria-hidden="true"><use href="#icon-search"></use></svg>
+            <label class="sr-only" for="quickRepliesSearch">Search quick replies</label>
+            <input id="quickRepliesSearch" type="search" autocomplete="off" placeholder="Search quick replies" />
+          </div>
+          <button class="btn primary" id="addQuickReplyBtn" type="button"><svg class="icon" aria-hidden="true"><use href="#icon-plus"></use></svg>New reply</button>
+        </div>
+        <div class="quick-reply-list" id="quickRepliesList" role="list" aria-label="Your quick replies" aria-busy="false"></div>
+      </div>
+      <form class="hidden" id="quickReplyForm" novalidate>
+        <div class="field">
+          <label for="quickReplyTitle">Title <span class="field-optional">(optional)</span></label>
+          <input id="quickReplyTitle" type="text" maxlength="80" autocomplete="off" placeholder="For example: Delivery times" />
+        </div>
+        <div class="field">
+          <label for="quickReplyBody">Message</label>
+          <textarea id="quickReplyBody" class="message-preference-textarea" rows="5" maxlength="4096" dir="auto" required></textarea>
+          <div class="field-hint message-preference-hint"><span>Copied exactly as written.</span><span id="quickReplyBodyCount">0 / 4096</span></div>
+        </div>
+        <div class="modal-actions"><button class="btn" id="cancelQuickReplyBtn" type="button">Cancel</button><button class="btn primary" id="saveQuickReplyBtn" type="submit"><svg class="icon" aria-hidden="true"><use href="#icon-check"></use></svg>Save reply</button></div>
       </form>
     </div>
   </div>
@@ -2119,6 +2188,11 @@ const state = {
   pageLeaving: false,
   staffBusy: false,
   messagePreferencesBusy: false,
+  quickReplies: [],
+  quickRepliesLoaded: false,
+  quickRepliesBusy: false,
+  quickRepliesRequest: 0,
+  quickReplyEditing: null,
   aiSettingsBusy: false,
   aiSettings: null,
   whatsappBusy: false,
@@ -2936,6 +3010,12 @@ function handleGlobalKeydown(event) {
       closeMessagePreferencesModal();
       return;
     }
+    if (state.activeModal === 'quickRepliesModal') {
+      event.preventDefault();
+      if (state.quickReplyEditing) showQuickReplyList();
+      else closeQuickRepliesModal();
+      return;
+    }
     if (state.activeModal === 'aiSettingsModal') {
       event.preventDefault();
       closeAiSettingsModal();
@@ -3149,6 +3229,8 @@ function showLogin() {
   setQueueView('unassigned', {load: false, persist: false});
   $('loginPage').classList.remove('hidden');
   closeDialog('messagePreferencesModal', false);
+  closeDialog('quickRepliesModal', false);
+  resetQuickReplies();
   closeDialog('aiSettingsModal', false);
   closeDialog('whatsappModal', false);
   closeDialog('staffModal', false);
@@ -3874,14 +3956,14 @@ function messageTextForCopy(message) {
   return (message.media_url || kind === 'location') && defaultMediaLabel ? '' : body;
 }
 
-async function copyMessageText(value) {
-  if (!value) return;
+async function copyMessageText(value, copiedLabel = 'Message copied.') {
+  if (!value) return false;
   try {
     if (navigator.clipboard?.writeText) {
       try {
         await navigator.clipboard.writeText(value);
-        notify('Message copied.');
-        return;
+        notify(copiedLabel);
+        return true;
       } catch (_) {
         // Some browsers deny the Clipboard API while still allowing a user-initiated copy.
       }
@@ -3898,9 +3980,11 @@ async function copyMessageText(value) {
     } finally {
       field.remove();
     }
-    notify('Message copied.');
+    notify(copiedLabel);
+    return true;
   } catch (_) {
     notify('Could not copy the message. Try selecting its text.', 'error');
+    return false;
   }
 }
 
@@ -6402,6 +6486,246 @@ async function saveMessagePreferences(event) {
   }
 }
 
+// Quick replies are private to the signed-in staff account and stored by the API.
+// Selecting one copies it to the clipboard so staff can paste it into the chat.
+const QUICK_REPLIES_LIST_SUBTITLE = 'Select a reply to copy it, then paste it into the chat. Only you can see your quick replies.';
+
+function showQuickRepliesError(message) {
+  const element = $('quickRepliesError');
+  element.textContent = message || '';
+  element.style.display = message ? 'block' : 'none';
+}
+
+function quickReplyLabel(reply) {
+  const title = String(reply?.title || '').trim();
+  if (title) return title;
+  const firstLine = String(reply?.body || '').trim().split('\n')[0] || 'Quick reply';
+  return firstLine.length > 60 ? firstLine.slice(0, 59).trimEnd() + '…' : firstLine;
+}
+
+function resetQuickReplies() {
+  state.quickReplies = [];
+  state.quickRepliesLoaded = false;
+  state.quickRepliesBusy = false;
+  state.quickRepliesRequest += 1;
+  state.quickReplyEditing = null;
+  $('quickRepliesSearch').value = '';
+  $('quickRepliesList').replaceChildren();
+}
+
+function updateQuickReplyCount() {
+  text($('quickReplyBodyCount'), $('quickReplyBody').value.length + ' / 4096');
+}
+
+function quickReplyRow(reply) {
+  const row = document.createElement('div');
+  row.className = 'quick-reply-row';
+  row.setAttribute('role', 'listitem');
+  row.dataset.quickReplyId = String(reply.id);
+  const label = quickReplyLabel(reply);
+
+  const copy = document.createElement('button');
+  copy.type = 'button';
+  copy.className = 'quick-reply-copy';
+  copy.setAttribute('aria-label', 'Copy quick reply: ' + label);
+  const copyText = document.createElement('span');
+  copyText.className = 'quick-reply-text';
+  if (String(reply.title || '').trim()) {
+    const heading = document.createElement('strong');
+    heading.textContent = label;
+    copyText.append(heading);
+  } else {
+    copyText.classList.add('untitled');
+  }
+  const preview = document.createElement('span');
+  preview.textContent = reply.body;
+  copyText.append(preview);
+  const hint = document.createElement('span');
+  hint.className = 'quick-reply-copy-hint';
+  hint.setAttribute('aria-hidden', 'true');
+  hint.append(createIcon('copy', 'icon icon-sm'), document.createTextNode('Copy'));
+  copy.append(copyText, hint);
+  copy.addEventListener('click', () => copyQuickReply(reply));
+
+  const actions = document.createElement('div');
+  actions.className = 'quick-reply-actions';
+  const edit = document.createElement('button');
+  edit.type = 'button';
+  edit.className = 'icon-btn';
+  edit.setAttribute('aria-label', 'Edit quick reply: ' + label);
+  edit.dataset.tooltip = 'Edit';
+  edit.append(createIcon('edit', 'icon icon-sm'));
+  edit.addEventListener('click', () => showQuickReplyForm(reply));
+  const remove = document.createElement('button');
+  remove.type = 'button';
+  remove.className = 'icon-btn danger';
+  remove.setAttribute('aria-label', 'Delete quick reply: ' + label);
+  remove.dataset.tooltip = 'Delete';
+  remove.append(createIcon('trash', 'icon icon-sm'));
+  remove.addEventListener('click', () => deleteQuickReply(reply));
+  actions.append(edit, remove);
+
+  row.append(copy, actions);
+  return row;
+}
+
+function renderQuickReplies() {
+  const list = $('quickRepliesList');
+  const query = $('quickRepliesSearch').value.trim().toLocaleLowerCase();
+  const replies = state.quickReplies.filter(reply => !query
+    || String(reply.title || '').toLocaleLowerCase().includes(query)
+    || String(reply.body || '').toLocaleLowerCase().includes(query));
+  list.replaceChildren();
+  if (!state.quickRepliesLoaded) {
+    list.append(emptyMarkup('Loading quick replies…', 'Fetching your saved messages.', 'zap').outer);
+    return;
+  }
+  if (!state.quickReplies.length) {
+    list.append(emptyMarkup('No quick replies yet', 'Save messages you send often, then copy them here with one click.', 'zap').outer);
+    return;
+  }
+  if (!replies.length) {
+    list.append(emptyMarkup('No matching quick replies', 'Try a different word or clear the search.', 'search').outer);
+    return;
+  }
+  for (const reply of replies) list.append(quickReplyRow(reply));
+}
+
+async function loadQuickReplies() {
+  const request = ++state.quickRepliesRequest;
+  $('quickRepliesList').setAttribute('aria-busy', 'true');
+  try {
+    const data = await api('/api/support/quick-replies');
+    if (request !== state.quickRepliesRequest) return;
+    state.quickReplies = Array.isArray(data.items) ? data.items : [];
+    state.quickRepliesLoaded = true;
+    renderQuickReplies();
+  } finally {
+    if (request === state.quickRepliesRequest) $('quickRepliesList').setAttribute('aria-busy', 'false');
+  }
+}
+
+function showQuickReplyList() {
+  if (state.quickRepliesBusy) return;
+  const editing = state.quickReplyEditing;
+  state.quickReplyEditing = null;
+  showQuickRepliesError('');
+  $('quickReplyForm').classList.add('hidden');
+  $('quickRepliesListView').classList.remove('hidden');
+  text($('quickRepliesTitle'), 'Quick replies');
+  text($('quickRepliesSubtitle'), QUICK_REPLIES_LIST_SUBTITLE);
+  renderQuickReplies();
+  const row = editing && editing !== 'new'
+    ? document.querySelector('.quick-reply-row[data-quick-reply-id="' + CSS.escape(String(editing)) + '"] .quick-reply-copy')
+    : null;
+  (row || (editing ? $('addQuickReplyBtn') : null))?.focus();
+}
+
+function showQuickReplyForm(reply) {
+  if (state.quickRepliesBusy) return;
+  state.quickReplyEditing = reply ? reply.id : 'new';
+  showQuickRepliesError('');
+  $('quickReplyTitle').value = reply ? String(reply.title || '') : '';
+  $('quickReplyBody').value = reply ? String(reply.body || '') : '';
+  updateQuickReplyCount();
+  text($('quickRepliesTitle'), reply ? 'Edit quick reply' : 'New quick reply');
+  text($('quickRepliesSubtitle'), 'Save a message you send often. Only you can see your quick replies.');
+  $('quickRepliesListView').classList.add('hidden');
+  $('quickReplyForm').classList.remove('hidden');
+  $(reply ? 'quickReplyBody' : 'quickReplyTitle').focus();
+}
+
+async function openQuickRepliesModal() {
+  if (!state.authenticated || state.activeModal) return;
+  state.quickReplyEditing = null;
+  showQuickRepliesError('');
+  $('quickReplyForm').classList.add('hidden');
+  $('quickRepliesListView').classList.remove('hidden');
+  text($('quickRepliesTitle'), 'Quick replies');
+  text($('quickRepliesSubtitle'), QUICK_REPLIES_LIST_SUBTITLE);
+  $('quickRepliesSearch').value = '';
+  renderQuickReplies();
+  openDialog('quickRepliesModal', state.quickReplies.length ? 'quickRepliesSearch' : 'addQuickReplyBtn');
+  try {
+    // Always refresh: replies may have changed on another device.
+    await loadQuickReplies();
+  } catch (error) {
+    showQuickRepliesError(error.message);
+    if (!state.quickRepliesLoaded) {
+      $('quickRepliesList').replaceChildren(emptyMarkup('Could not load quick replies', 'Close this window and try again.', 'alert').outer);
+    }
+  }
+}
+
+function closeQuickRepliesModal() {
+  if (state.quickRepliesBusy) return;
+  state.quickReplyEditing = null;
+  showQuickRepliesError('');
+  closeDialog('quickRepliesModal');
+}
+
+async function copyQuickReply(reply) {
+  if (!await copyMessageText(String(reply.body || ''), 'Quick reply copied. Paste it into the chat.')) return;
+  closeDialog('quickRepliesModal', !state.composerEnabled);
+  if (state.composerEnabled) focusMessageComposer();
+}
+
+async function saveQuickReply(event) {
+  event.preventDefault();
+  if (!state.authenticated || state.quickRepliesBusy || !state.quickReplyEditing) return;
+  const body = $('quickReplyBody').value;
+  if (!body.trim()) {
+    showQuickRepliesError('Enter the quick reply message.');
+    $('quickReplyBody').focus();
+    return;
+  }
+  const editing = state.quickReplyEditing;
+  state.quickRepliesBusy = true;
+  setButtonBusy($('saveQuickReplyBtn'), true, 'Saving…');
+  showQuickRepliesError('');
+  try {
+    const payload = JSON.stringify({title: $('quickReplyTitle').value, body});
+    const saved = editing === 'new'
+      ? await api('/api/support/quick-replies', {method: 'POST', body: payload})
+      : await api('/api/support/quick-replies/' + encodeURIComponent(editing), {method: 'PUT', body: payload});
+    state.quickReplies = [...state.quickReplies.filter(item => String(item.id) !== String(saved.id)), saved]
+      .sort((left, right) => quickReplyLabel(left).localeCompare(quickReplyLabel(right), undefined, {sensitivity: 'base'}) || left.id - right.id);
+    state.quickReplyEditing = saved.id;
+    notify(editing === 'new' ? 'Quick reply saved.' : 'Quick reply updated.');
+  } catch (error) {
+    showQuickRepliesError(error.message);
+    return;
+  } finally {
+    state.quickRepliesBusy = false;
+    setButtonBusy($('saveQuickReplyBtn'), false);
+  }
+  showQuickReplyList();
+}
+
+async function deleteQuickReply(reply) {
+  if (state.quickRepliesBusy) return;
+  const confirmed = await confirmDialog({
+    title: 'Delete quick reply?',
+    message: '“' + quickReplyLabel(reply) + '” will be removed from your quick replies.',
+    confirmLabel: 'Delete',
+    tone: 'danger'
+  });
+  if (!confirmed) return;
+  state.quickRepliesBusy = true;
+  showQuickRepliesError('');
+  try {
+    await api('/api/support/quick-replies/' + encodeURIComponent(reply.id), {method: 'DELETE'});
+    state.quickReplies = state.quickReplies.filter(item => String(item.id) !== String(reply.id));
+    notify('Quick reply deleted.');
+  } catch (error) {
+    showQuickRepliesError(error.message);
+  } finally {
+    state.quickRepliesBusy = false;
+  }
+  renderQuickReplies();
+  $('quickRepliesSearch').focus();
+}
+
 const AI_REASON_LABELS = {
   MANUAL_ON: 'Manual control is ON',
   MANUAL_OFF: 'Manual control is OFF',
@@ -7941,6 +8265,13 @@ $('message').addEventListener('keydown', event => {
 $('closeMessagePreferencesBtn').addEventListener('click', closeMessagePreferencesModal);
 $('cancelMessagePreferencesBtn').addEventListener('click', closeMessagePreferencesModal);
 $('messagePreferencesForm').addEventListener('submit', saveMessagePreferences);
+$('quickRepliesBtn').addEventListener('click', openQuickRepliesModal);
+$('closeQuickRepliesBtn').addEventListener('click', closeQuickRepliesModal);
+$('addQuickReplyBtn').addEventListener('click', () => showQuickReplyForm(null));
+$('cancelQuickReplyBtn').addEventListener('click', showQuickReplyList);
+$('quickReplyForm').addEventListener('submit', saveQuickReply);
+$('quickRepliesSearch').addEventListener('input', renderQuickReplies);
+$('quickReplyBody').addEventListener('input', updateQuickReplyCount);
 $('customGreetingMessage').addEventListener('input', updateMessagePreferenceCounts);
 $('customResolutionMessage').addEventListener('input', updateMessagePreferenceCounts);
 
