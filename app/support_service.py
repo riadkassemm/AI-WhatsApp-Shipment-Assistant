@@ -87,6 +87,38 @@ def _normalize_staff_message_preference(value: str | None) -> str | None:
     return rendered
 
 
+QUICK_REPLY_TITLE_MAX_LENGTH = 80
+QUICK_REPLY_BODY_MAX_LENGTH = 4096
+
+
+def _normalize_quick_reply(title: str | None, body: str | None) -> tuple[str | None, str]:
+    """Validate one staff quick reply; a blank title is stored as NULL."""
+    rendered_title = " ".join(str(title or "").split())
+    rendered_body = str(body or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not rendered_body:
+        raise SupportValidationError("Enter the quick reply message.")
+    if len(rendered_title) > QUICK_REPLY_TITLE_MAX_LENGTH:
+        raise SupportValidationError(f"Quick reply titles must be {QUICK_REPLY_TITLE_MAX_LENGTH} characters or fewer.")
+    if len(rendered_body) > QUICK_REPLY_BODY_MAX_LENGTH:
+        raise SupportValidationError(f"Quick replies must be {QUICK_REPLY_BODY_MAX_LENGTH} characters or fewer.")
+    if any(ord(char) < 32 for char in rendered_title) or any(
+        ord(char) < 32 and char not in {"\n", "\t"} for char in rendered_body
+    ):
+        raise SupportValidationError("Quick replies contain unsupported control characters.")
+    return rendered_title or None, rendered_body
+
+
+def _quick_reply_payload(row: dict[str, Any] | None) -> dict[str, Any]:
+    normalized = _normalize_row(row) or {}
+    return {
+        "id": int(normalized.get("id") or 0),
+        "title": str(normalized.get("title") or ""),
+        "body": str(normalized.get("body") or ""),
+        "created_at": normalized.get("created_at"),
+        "updated_at": normalized.get("updated_at"),
+    }
+
+
 def _safe_context_value(value: Any) -> Any:
     if isinstance(value, str):
         return sanitize_support_text(value)
@@ -2288,6 +2320,34 @@ class SupportService:
             "resolution_message": str(normalized.get("custom_resolution_message") or ""),
             "updated_at": normalized.get("updated_at"),
         }
+
+    async def list_quick_replies(self, agent: SupportAgent) -> dict[str, Any]:
+        rows = await support_repository.list_quick_replies(int(agent.id))
+        return {"items": [_quick_reply_payload(row) for row in rows]}
+
+    async def create_quick_reply(
+        self, agent: SupportAgent, *, title: str | None, body: str | None
+    ) -> dict[str, Any]:
+        clean_title, clean_body = _normalize_quick_reply(title, body)
+        row = await support_repository.create_quick_reply(int(agent.id), title=clean_title, body=clean_body)
+        reply = _quick_reply_payload(row)
+        logger.info("Support quick reply created: staff_id=%s quick_reply_id=%s", agent.id, reply["id"])
+        return reply
+
+    async def update_quick_reply(
+        self, agent: SupportAgent, reply_id: int, *, title: str | None, body: str | None
+    ) -> dict[str, Any]:
+        clean_title, clean_body = _normalize_quick_reply(title, body)
+        row = await support_repository.update_quick_reply(
+            int(agent.id), int(reply_id), title=clean_title, body=clean_body
+        )
+        logger.info("Support quick reply updated: staff_id=%s quick_reply_id=%s", agent.id, reply_id)
+        return _quick_reply_payload(row)
+
+    async def delete_quick_reply(self, agent: SupportAgent, reply_id: int) -> dict[str, Any]:
+        await support_repository.delete_quick_reply(int(agent.id), int(reply_id))
+        logger.info("Support quick reply deleted: staff_id=%s quick_reply_id=%s", agent.id, reply_id)
+        return {"deleted": True, "id": int(reply_id)}
 
     async def _automatic_message_for_staff(
         self,

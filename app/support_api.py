@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from typing import Literal
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Response, Query, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Path, Request, Response, Query, UploadFile, status
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -165,6 +165,14 @@ class StaffMessagePreferencesUpdateRequest(BaseModel):
 
     greeting_message: str = Field(default="", max_length=2000)
     resolution_message: str = Field(default="", max_length=2000)
+
+
+class QuickReplyRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # Generous transport limits; support_service applies the exact rules with clear messages.
+    title: str = Field(default="", max_length=1000)
+    body: str = Field(default="", max_length=20000)
 
 
 class AIScheduleRequest(BaseModel):
@@ -381,6 +389,50 @@ async def update_message_preferences(
             greeting_message=payload.greeting_message,
             resolution_message=payload.resolution_message,
         )
+    except Exception as exc:
+        raise _translate_error(exc) from exc
+
+
+@router.get("/quick-replies")
+async def list_quick_replies(
+    agent: SupportAgent = Depends(get_current_agent),
+) -> dict:
+    try:
+        return await support_service.list_quick_replies(agent)
+    except Exception as exc:
+        raise _translate_error(exc) from exc
+
+
+@router.post("/quick-replies", status_code=status.HTTP_201_CREATED)
+async def create_quick_reply(
+    payload: QuickReplyRequest,
+    agent: SupportAgent = Depends(require_support_csrf),
+) -> dict:
+    try:
+        return await support_service.create_quick_reply(agent, title=payload.title, body=payload.body)
+    except Exception as exc:
+        raise _translate_error(exc) from exc
+
+
+@router.put("/quick-replies/{reply_id}")
+async def update_quick_reply(
+    payload: QuickReplyRequest,
+    reply_id: int = Path(gt=0),
+    agent: SupportAgent = Depends(require_support_csrf),
+) -> dict:
+    try:
+        return await support_service.update_quick_reply(agent, reply_id, title=payload.title, body=payload.body)
+    except Exception as exc:
+        raise _translate_error(exc) from exc
+
+
+@router.delete("/quick-replies/{reply_id}")
+async def delete_quick_reply(
+    reply_id: int = Path(gt=0),
+    agent: SupportAgent = Depends(require_support_csrf),
+) -> dict:
+    try:
+        return await support_service.delete_quick_reply(agent, reply_id)
     except Exception as exc:
         raise _translate_error(exc) from exc
 

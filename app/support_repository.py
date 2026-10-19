@@ -132,7 +132,13 @@ _SUPPORT_SCHEMA_MIGRATIONS: tuple[tuple[str, dict[str, set[str]]], ...] = (
         "migrations/20261017_staff_account_deletion.sql",
         {"staff": {"deleted_at"}},
     ),
+    (
+        "migrations/20261019_staff_quick_replies.sql",
+        {"support_quick_replies": {"id", "staff_id", "title", "body", "created_at", "updated_at"}},
+    ),
 )
+
+MAX_QUICK_REPLIES_PER_STAFF = 200
 
 
 def _missing_support_schema_migrations(
@@ -352,6 +358,111 @@ class SupportRepository:
                 await conn.rollback()
                 raise
         return chat
+
+    # Quick replies are private to one staff account. Every query is scoped by
+    # staff_id, so another account's reply behaves exactly like a missing one.
+    _QUICK_REPLY_COLUMNS = "id, title, body, created_at, updated_at"
+
+    async def list_quick_replies(self, staff_id: int) -> list[dict[str, Any]]:
+        if self._pool is None:
+            await self.connect()
+        assert self._pool is not None
+        async with self._pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(
+                    f"""
+                    SELECT {self._QUICK_REPLY_COLUMNS}
+                    FROM support_quick_replies
+                    WHERE staff_id = %s
+                    ORDER BY COALESCE(NULLIF(title, ''), body), id
+                    """,
+                    (int(staff_id),),
+                )
+                return list(await cur.fetchall())
+
+    async def create_quick_reply(self, staff_id: int, *, title: str | None, body: str) -> dict[str, Any]:
+        if self._pool is None:
+            await self.connect()
+        assert self._pool is not None
+        async with self._pool.acquire() as conn:
+            await conn.begin()
+            try:
+                async with conn.cursor(aiomysql.DictCursor) as cur:
+                    # Lock the staff row so concurrent saves cannot pass the limit together.
+                    await cur.execute(
+                        "SELECT id FROM staff WHERE id = %s AND deleted_at IS NULL FOR UPDATE",
+                        (int(staff_id),),
+                    )
+                    if await cur.fetchone() is None:
+                        raise SupportNotFoundError("Staff account not found.")
+                    await cur.execute(
+                        "SELECT COUNT(*) AS total FROM support_quick_replies WHERE staff_id = %s",
+                        (int(staff_id),),
+                    )
+                    total = int(((await cur.fetchone()) or {}).get("total") or 0)
+                    if total >= MAX_QUICK_REPLIES_PER_STAFF:
+                        raise SupportConflictError(
+                            f"You can save up to {MAX_QUICK_REPLIES_PER_STAFF} quick replies. Delete one to add another."
+                        )
+                    await cur.execute(
+                        """
+                        INSERT INTO support_quick_replies (staff_id, title, body, created_at, updated_at)
+                        VALUES (%s, %s, %s, UTC_TIMESTAMP(6), UTC_TIMESTAMP(6))
+                        """,
+                        (int(staff_id), title, body),
+                    )
+                    reply_id = int(cur.lastrowid)
+                    await cur.execute(
+                        f"SELECT {self._QUICK_REPLY_COLUMNS} FROM support_quick_replies WHERE id = %s AND staff_id = %s",
+                        (reply_id, int(staff_id)),
+                    )
+                    row = await cur.fetchone()
+                await conn.commit()
+            except Exception:
+                await conn.rollback()
+                raise
+        if row is None:
+            raise SupportRepositoryError("Quick reply was not saved.")
+        return row
+
+    async def update_quick_reply(
+        self, staff_id: int, reply_id: int, *, title: str | None, body: str
+    ) -> dict[str, Any]:
+        if self._pool is None:
+            await self.connect()
+        assert self._pool is not None
+        async with self._pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(
+                    """
+                    UPDATE support_quick_replies
+                    SET title = %s, body = %s, updated_at = UTC_TIMESTAMP(6)
+                    WHERE id = %s AND staff_id = %s
+                    """,
+                    (title, body, int(reply_id), int(staff_id)),
+                )
+                # rowcount is zero when nothing changed, so re-read with the same owner scope.
+                await cur.execute(
+                    f"SELECT {self._QUICK_REPLY_COLUMNS} FROM support_quick_replies WHERE id = %s AND staff_id = %s",
+                    (int(reply_id), int(staff_id)),
+                )
+                row = await cur.fetchone()
+        if row is None:
+            raise SupportNotFoundError("Quick reply not found.")
+        return row
+
+    async def delete_quick_reply(self, staff_id: int, reply_id: int) -> None:
+        if self._pool is None:
+            await self.connect()
+        assert self._pool is not None
+        async with self._pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(
+                    "DELETE FROM support_quick_replies WHERE id = %s AND staff_id = %s",
+                    (int(reply_id), int(staff_id)),
+                )
+                if cur.rowcount != 1:
+                    raise SupportNotFoundError("Quick reply not found.")
 
     async def agent_has_participated(
         self,

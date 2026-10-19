@@ -865,6 +865,19 @@ mariadb -h 127.0.0.1 -P 3307 -u whatsapp_bot -p mikexport --ssl=OFF \
 
 Claim/resolve remains fail-safe: if the preference lookup is temporarily unavailable, the existing default message is used rather than blocking the ticket lifecycle.
 
+## Quick replies
+
+The **Quick replies** button (lightning icon) in the reply composer opens the signed-in staff member's saved messages. Selecting one copies it to the clipboard so it can be pasted into the chat; the dialog can also search, add, edit, and delete replies. Quick replies are never sent automatically.
+
+Each list is private to one staff account, Supervisors and Admins included. The routes are `GET/POST /api/support/quick-replies` and `PUT/DELETE /api/support/quick-replies/{id}`. They always use the session's staff ID, and every query is filtered by `staff_id`, so another account's reply returns `404`. A reply has an optional title (up to 80 characters) and a message (up to 4096 characters). Each account can keep up to 200 replies. Replies are stored in MariaDB, so they follow the staff member across sessions and devices, and the dashboard forgets the list on sign-out.
+
+Apply the additive migration before deploying this version (the schema guard reports it as missing otherwise):
+
+```bash
+mariadb -h 127.0.0.1 -P 3307 -u whatsapp_bot -p mikexport --ssl=OFF \
+  < migrations/20261019_staff_quick_replies.sql
+```
+
 ## Staff-initiated chats and message forwarding
 
 Apply the additive migration before deploying this version:
