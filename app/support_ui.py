@@ -1888,7 +1888,7 @@ body.column-resizing * { cursor: col-resize !important; }
 <section class="modal-backdrop hidden" id="messagePreferencesModal" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="messagePreferencesTitle" aria-describedby="messagePreferencesSubtitle">
   <div class="modal-card message-preferences-card" role="document" tabindex="-1">
     <div class="modal-head">
-      <div><h2 id="messagePreferencesTitle">My automatic messages</h2><div class="modal-subtitle" id="messagePreferencesSubtitle">Customize the messages sent when you claim and resolve a customer ticket.</div></div>
+      <div><h2 id="messagePreferencesTitle">My automatic messages</h2><div class="modal-subtitle" id="messagePreferencesSubtitle">Add a message if you want one sent when you claim or resolve a ticket.</div></div>
       <button class="icon-btn modal-close" id="closeMessagePreferencesBtn" type="button" aria-label="Close automatic messages"><svg class="icon" aria-hidden="true"><use href="#icon-x"></use></svg></button>
     </div>
     <div class="modal-body">
@@ -1896,15 +1896,15 @@ body.column-resizing * { cursor: col-resize !important; }
       <form id="messagePreferencesForm" novalidate>
         <div class="field">
           <label for="customGreetingMessage">Greeting when I claim a ticket</label>
-          <textarea id="customGreetingMessage" class="message-preference-textarea" rows="4" maxlength="2000" placeholder="Leave empty to use the default greeting"></textarea>
-          <div class="field-hint message-preference-hint"><span>Sent automatically when you claim a ticket. Empty = existing language-aware default.</span><span id="customGreetingCount">0 / 2000</span></div>
+          <textarea id="customGreetingMessage" class="message-preference-textarea" rows="4" maxlength="2000" placeholder="Leave empty to send no greeting"></textarea>
+          <div class="field-hint message-preference-hint"><span>Sent when you claim a ticket only if you add a message here.</span><span id="customGreetingCount">0 / 2000</span></div>
         </div>
         <div class="field">
           <label for="customResolutionMessage">Resolution message</label>
-          <textarea id="customResolutionMessage" class="message-preference-textarea" rows="4" maxlength="2000" placeholder="Leave empty to use the default resolution message"></textarea>
-          <div class="field-hint message-preference-hint"><span>Sent automatically when you resolve a ticket and return it to AI. Empty = existing language-aware default.</span><span id="customResolutionCount">0 / 2000</span></div>
+          <textarea id="customResolutionMessage" class="message-preference-textarea" rows="4" maxlength="2000" placeholder="Leave empty to send no resolution message"></textarea>
+          <div class="field-hint message-preference-hint"><span>Sent when you resolve a ticket and return it to AI only if you add a message here.</span><span id="customResolutionCount">0 / 2000</span></div>
         </div>
-        <div class="form-note">These settings belong only to your staff account. Other agents keep their own messages or the defaults.</div>
+        <div class="form-note">These settings belong only to your staff account. Empty fields send no automatic message.</div>
         <div class="modal-actions"><button class="btn" id="cancelMessagePreferencesBtn" type="button">Cancel</button><button class="btn primary" id="saveMessagePreferencesBtn" type="submit"><svg class="icon" aria-hidden="true"><use href="#icon-check"></use></svg>Save messages</button></div>
       </form>
     </div>

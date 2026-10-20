@@ -14,7 +14,6 @@ from app.customer_directory import customer_directory, normalize_phone
 from app.client_chat_auth import redact_sensitive_text
 from app.handoff import notify_human_agents
 from app.google_contacts import google_contacts_service
-from app.language import claim_greeting, resolution_message
 from app.shipment_client import shipment_client
 from app.staff_repository import staff_repository
 from app.support_auth import SupportAgent
@@ -75,7 +74,7 @@ def sanitize_support_text(value: str | None) -> str:
 def _normalize_staff_message_preference(value: str | None) -> str | None:
     """Validate a staff-authored automatic customer message.
 
-    Blank means "use the language-aware system default". Newlines and tabs are
+    Blank means "send no automatic message". Newlines and tabs are
     allowed for normal message formatting, while other control characters are
     rejected before persistence or delivery.
     """
@@ -2362,26 +2361,18 @@ class SupportService:
         *,
         staff_id: str,
         preference_key: str,
-        default_message: str,
-    ) -> str:
-        """Return a custom staff message when configured, otherwise the default.
-
-        Preferences are a convenience layer and must never prevent a claim/resolve
-        operation from sending the existing safe default if the preference lookup is
-        temporarily unavailable or a migration was missed.
-        """
+    ) -> str | None:
+        """Return a configured message, or None to leave the customer undisturbed."""
         try:
             row = await staff_repository.get_message_preferences(int(staff_id))
-            custom = _normalize_staff_message_preference(str(row.get(preference_key) or ""))
-            if custom:
-                return custom
+            return _normalize_staff_message_preference(row.get(preference_key))
         except Exception:
             logger.exception(
-                "Could not load staff automatic message preference; using default: staff_id=%s preference=%s",
+                "Could not load staff automatic message preference; skipping message: staff_id=%s preference=%s",
                 staff_id,
                 preference_key,
             )
-        return default_message
+            return None
 
     async def claim(self, ticket_id: int, agent: SupportAgent) -> dict[str, Any]:
         existing = await support_repository.get_ticket(ticket_id)
@@ -2395,15 +2386,16 @@ class SupportService:
         greeting = await self._automatic_message_for_staff(
             staff_id=agent.id,
             preference_key="custom_greeting_message",
-            default_message=claim_greeting(ticket.get("communication_style"), agent.name),
         )
-        greeting_message, greeting_created = await self._send_system_customer_message(
-            ticket=ticket,
-            body=greeting,
-            client_message_id=f"system:claim:{ticket_id}",
-            event_type="CLAIM_GREETING_SENT",
-            require_active=True,
-        )
+        greeting_message, greeting_created = None, False
+        if greeting:
+            greeting_message, greeting_created = await self._send_system_customer_message(
+                ticket=ticket,
+                body=greeting,
+                client_message_id=f"system:claim:{ticket_id}",
+                event_type="CLAIM_GREETING_SENT",
+                require_active=True,
+            )
         logger.info(
             "Support ticket claimed: ticket_id=%s staff_id=%s changed=%s greeting_created=%s",
             ticket_id,
@@ -3232,15 +3224,16 @@ class SupportService:
         notice = await self._automatic_message_for_staff(
             staff_id=agent.id,
             preference_key="custom_resolution_message",
-            default_message=resolution_message(resolved.get("communication_style")),
         )
-        resolution_notice, notice_created = await self._send_system_customer_message(
-            ticket=resolved,
-            body=notice,
-            client_message_id=f"system:resolved:{ticket_id}",
-            event_type="RESOLUTION_NOTICE_SENT",
-            require_active=False,
-        )
+        resolution_notice, notice_created = None, False
+        if notice:
+            resolution_notice, notice_created = await self._send_system_customer_message(
+                ticket=resolved,
+                body=notice,
+                client_message_id=f"system:resolved:{ticket_id}",
+                event_type="RESOLUTION_NOTICE_SENT",
+                require_active=False,
+            )
 
         # DB was updated first. Redis is a cache; if this write fails, the next
         # inbound webhook reconciles stale human mode against the durable DB.
