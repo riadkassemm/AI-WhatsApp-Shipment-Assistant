@@ -55,8 +55,12 @@ async def test_queue_counts_refresh_every_view(monkeypatch):
     monkeypatch.setattr("app.support_service.support_repository.list_tickets", fake_list_tickets)
     monkeypatch.setattr("app.support_service.google_contacts_service.count_contacts", fake_contact_count)
 
-    counts = await service.queue_counts(SupportAgent(id="5", name="Agent", role="agent"))
+    counts = await service.queue_counts(SupportAgent(id="5", name="Supervisor", role="supervisor"))
     assert counts == {**expected, "contacts": 8}
+    # Active is a monitoring view for Supervisors and Admins only.
+    counts = await service.queue_counts(SupportAgent(id="5", name="Agent", role="agent"))
+    assert "active" not in counts
+    assert counts == {**{view: total for view, total in expected.items() if view != "active"}, "contacts": 8}
 
 
 def test_support_ui_has_contacts_sync_forward_picker_and_global_counts():

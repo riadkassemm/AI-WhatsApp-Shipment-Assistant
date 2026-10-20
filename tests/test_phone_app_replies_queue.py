@@ -215,3 +215,84 @@ def test_conversations_started_in_whatsapp_app_do_not_raise_unassigned_alert() -
     assert start < alert
     assert "return;" in _HTML[start:alert]
     assert "New unassigned WhatsApp app conversation" not in _HTML
+
+
+def test_only_supervisors_and_admins_can_list_active_tickets(monkeypatch):
+    from app.support_auth import SupportAgent
+    from app.support_service import SupportForbiddenError, support_service
+    import app.support_service as service_module
+
+    calls = []
+
+    async def fake_list_tickets(**kwargs):
+        calls.append(kwargs["view"])
+        return {"items": [], "total": 0, "page": 1, "page_size": 30}
+
+    monkeypatch.setattr(service_module.support_repository, "list_tickets", fake_list_tickets)
+    with pytest.raises(SupportForbiddenError):
+        asyncio.run(support_service.list_tickets(view="active", agent=SupportAgent(id="7", name="A", role="agent"), page=1, page_size=30))
+    assert calls == []
+    for role in ("supervisor", "admin"):
+        asyncio.run(support_service.list_tickets(view="active", agent=SupportAgent(id="1", name="S", role=role), page=1, page_size=30))
+    asyncio.run(support_service.list_tickets(view="unassigned", agent=SupportAgent(id="7", name="A", role="agent"), page=1, page_size=30))
+    assert calls == ["active", "active", "unassigned"]
+
+
+def test_dashboard_hides_active_from_agents_and_reloads_after_deploys():
+    assert "function canViewActiveQueue()" in _HTML
+    assert """$('tabs').querySelector('button[data-view="active"]')?.classList.toggle('hidden', !canViewActiveQueue());""" in _HTML
+    assert "if (view === 'active' && !canViewActiveQueue()) view = 'unassigned';" in _HTML
+    assert "response.headers.get('X-Support-UI-Version')" in _HTML
+
+
+def test_api_responses_carry_the_dashboard_version():
+    import httpx
+    from app.main import app
+    from app.support_ui import SUPPORT_UI_VERSION
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            return await client.get("/api/support/me")
+
+    response = asyncio.run(run())
+    assert response.headers["X-Support-UI-Version"] == SUPPORT_UI_VERSION
+    assert len(SUPPORT_UI_VERSION) == 16
+
+
+def test_dashboard_reloads_after_a_deploy_only_when_nothing_would_be_lost():
+    start = _HTML.index("function dashboardIsIdle(")
+    end = _HTML.index("function setAgentIdentity(")
+    script = r"""
+const assert = require('node:assert/strict');
+const timers = [];
+const window = {setTimeout: fn => timers.push(fn), location: {reloads: 0, reload() { this.reloads++; }}};
+const stored = new Map();
+const sessionStorage = {getItem: key => stored.get(key) ?? null, setItem: (key, value) => stored.set(key, value)};
+const banner = {hidden: true, classList: {remove() { banner.hidden = false; }}};
+const composer = {value: 'half-written reply'};
+const $ = id => id === 'updateBanner' ? banner : composer;
+const state = {busy: false, activeModal: null, mediaRecorder: null, pendingMedia: null, editTarget: null, imageEditor: null, localMessages: new Map()};
+let saved = 0, leaving = 0;
+const saveSupportSelection = () => saved++;
+const markPageLeaving = () => leaving++;
+const run = () => { const pending = timers.splice(0); pending.forEach(fn => fn()); };
+""" + _HTML[start:end] + r"""
+noticeDashboardUpdate('v2');
+noticeDashboardUpdate('v2');
+assert.equal(banner.hidden, false);
+run();
+assert.equal(window.location.reloads, 0, 'a draft in the composer blocks the reload');
+composer.value = '';
+run();
+assert.equal(window.location.reloads, 1);
+assert.equal(saved, 1);
+assert.equal(stored.get('shipment-support-ui-reload'), 'v2');
+
+// The same version again (for example a stale cached page) only shows the banner.
+state.uiUpdateVersion = null;
+noticeDashboardUpdate('v2');
+run();
+assert.equal(window.location.reloads, 1);
+"""
+    result = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=15)
+    assert result.returncode == 0, result.stderr
