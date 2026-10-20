@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { Readable } from 'node:stream';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm, stat, readFile } from 'node:fs/promises';
 import os from 'node:os';
@@ -1046,4 +1047,41 @@ test('received videos are captured for download and dashboard videos are sent wi
   assert.equal(Buffer.from(sent[0].video).toString(), 'mp4-bytes');
   assert.equal(sent[0].mimetype, 'video/mp4');
   assert.equal(sent[0].caption, 'Here is the return label video');
+});
+
+test('media on an unresolvable WhatsApp host is downloaded through the default media host', async t => {
+  const calls = [];
+  const notFound = Object.assign(new TypeError('fetch failed'), { cause: { code: 'ENOTFOUND' } });
+  const downloadMediaMessage = async (message, type, options) => {
+    calls.push(options.host ?? null);
+    if (options.host !== 'mmg.whatsapp.net') throw notFound;
+    return Readable.from([Buffer.from('RIFF'), Buffer.from('webp-bytes')]);
+  };
+  const warnings = [];
+  const originalWarn = console.warn;
+  console.warn = message => warnings.push(message);
+  t.after(() => { console.warn = originalWarn; });
+  const { bridge, line } = await fixture(t, 'ack', { downloadMediaMessage });
+  const sticker = { stickerMessage: { mimetype: 'image/webp', url: 'https://a.whatsapp.net/v/t62.15575-24/sticker.enc', directPath: '/v/t62.15575-24/sticker.enc' } };
+  await bridge.receive(line, { ...original('PHONE-STICKER'), message: sticker });
+  const mediaId = bridge.outbox.data.entries.at(-1).event.payload.entry[0].changes[0].value.messages[0].sticker.id;
+
+  const media = await bridge.downloadMedia(LINE, mediaId);
+  assert.equal(media.content.toString(), 'RIFFwebp-bytes');
+  assert.equal(media.mime_type, 'image/webp');
+  assert.deepEqual(calls, [null, 'mmg.whatsapp.net']);
+  assert.equal(line.store.data.media[mediaId].downloaded, true);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /host=a\.whatsapp\.net code=ENOTFOUND/);
+  assert.equal(warnings[0].includes('sticker.enc'), false, 'the media path is never logged');
+
+  // A failure already on the default host is not retried.
+  calls.length = 0;
+  const image = { imageMessage: { mimetype: 'image/jpeg', url: 'https://mmg.whatsapp.net/v/t62/image.enc', directPath: '/v/t62/image.enc' } };
+  await bridge.receive(line, { ...original('PHONE-IMAGE'), message: image });
+  const imageId = bridge.outbox.data.entries.at(-1).event.payload.entry[0].changes[0].value.messages[0].image.id;
+  const failing = async (message, type, options) => { calls.push(options.host ?? null); throw notFound; };
+  bridge.downloadMediaMessage = failing;
+  await assert.rejects(bridge.downloadMedia(LINE, imageId), /fetch failed/);
+  assert.deepEqual(calls, [null]);
 });

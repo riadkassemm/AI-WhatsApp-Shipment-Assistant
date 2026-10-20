@@ -11,6 +11,14 @@ import { inboundEvent, outgoingEvent, outgoingConfirmationEvent, messageTombston
 import { preserveNativeMutationMetadata } from './native-events.js';
 
 const silentLogger = pino({ level: 'silent' });
+const DEFAULT_MEDIA_HOST = 'mmg.whatsapp.net';
+
+// Host of the media URL stored in a WhatsApp message, if any.
+function mediaUrlHost(message) {
+  const content = normalizeMessageContent(message?.message);
+  const media = content && MEDIA_TYPES.map(type => content[`${type}Message`]).find(Boolean);
+  try { return media?.url ? new URL(media.url).host : null; } catch { return null; }
+}
 const initialLine = () => ({ bound_phone: '', messages: {}, media: {}, operations: {}, enabled: false });
 const transientConnectionError = error => ['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'ENETUNREACH', 'EHOSTUNREACH', 'EAI_AGAIN', 'ENOTFOUND']
   .includes(error?.code) || [408, 428, 500, 502, 503, 504].includes(error?.output?.statusCode);
@@ -20,6 +28,7 @@ export class Bridge {
     this.config = config;
     this.makeSocket = dependencies.makeSocket ?? makeWASocket;
     this.fetch = dependencies.fetch ?? fetch;
+    this.downloadMediaMessage = dependencies.downloadMediaMessage ?? downloadMediaMessage;
     this.lines = new Map();
     this.registrationTail = Promise.resolve();
     this.phoneReservations = new Map();
@@ -721,7 +730,20 @@ export class Bridge {
     if (!media) throw new BridgeError(404, 'UNKNOWN_MEDIA', 'Media was not captured by this linked-device line.');
     if (!media.downloaded) {
       const socket = this.connected(line);
-      const stream = await downloadMediaMessage(media.message, 'stream', { options: { signal: AbortSignal.timeout(30_000) } }, { logger: silentLogger, reuploadRequest: socket.updateMediaMessage });
+      const download = options => this.downloadMediaMessage(media.message, 'stream', { ...options, options: { signal: AbortSignal.timeout(30_000) } }, { logger: silentLogger, reuploadRequest: socket.updateMediaMessage });
+      let stream;
+      try {
+        stream = await download({});
+      } catch (error) {
+        // Some messages (seen with stickers) carry a URL on a host that does not
+        // resolve, such as a.whatsapp.net. Baileys keeps that host when it builds
+        // the URL from directPath, so the download can never succeed. Retry once
+        // through WhatsApp's default media host.
+        const host = mediaUrlHost(media.message);
+        console.warn(`Linked-device media download failed: line=${line.line_id} host=${host ?? 'none'} code=${error?.cause?.code ?? error?.code ?? error?.name ?? 'unknown'}`);
+        if (!host || host === DEFAULT_MEDIA_HOST) throw error;
+        stream = await download({ host: DEFAULT_MEDIA_HOST });
+      }
       const chunks = [];
       let size = 0;
       for await (const chunk of stream) {
