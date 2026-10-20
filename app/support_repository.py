@@ -152,9 +152,16 @@ _SUPPORT_SCHEMA_MIGRATIONS: tuple[tuple[str, dict[str, set[str]]], ...] = (
         "migrations/20261020_editable_contacts.sql",
         {"support_contacts": {"replaces_phone"}},
     ),
+    (
+        "migrations/20261020_message_delivery_status.sql",
+        {"support_ticket_messages": {"delivery_status", "delivered_at", "read_at"}},
+    ),
 )
 
 MAX_QUICK_REPLIES_PER_STAFF = 200
+
+# WhatsApp receipts only move a message forward: sent, then delivered, then read.
+DELIVERY_STATUS_RANK = {"delivered": 1, "read": 2}
 
 
 def _missing_support_schema_migrations(
@@ -1665,6 +1672,88 @@ class SupportRepository:
                 )
                 return await cur.fetchone()
 
+    async def apply_delivery_status(
+        self,
+        whatsapp_message_id: str,
+        *,
+        status: str,
+        at: datetime,
+        business_phone_number_id: str | None,
+        phone_number: str | None,
+    ) -> tuple[dict[str, Any], bool] | None:
+        """Move an outgoing message forward to delivered or read; never backward."""
+        if status not in DELIVERY_STATUS_RANK:
+            raise ValueError("Unknown delivery status.")
+        if self._pool is None:
+            await self.connect()
+        assert self._pool is not None
+        async with self._pool.acquire() as conn:
+            await conn.begin()
+            try:
+                async with conn.cursor(aiomysql.DictCursor) as cur:
+                    await cur.execute(
+                        """
+                        SELECT m.*, t.business_phone_number_id AS ticket_line_id, t.whatsapp_phone AS ticket_phone
+                        FROM support_ticket_messages m
+                        JOIN support_tickets t ON t.id = m.ticket_id
+                        WHERE m.whatsapp_message_id = %s AND m.direction = 'OUTBOUND'
+                        LIMIT 1
+                        FOR UPDATE
+                        """,
+                        (whatsapp_message_id,),
+                    )
+                    row = await cur.fetchone()
+                    if not row or (
+                        business_phone_number_id
+                        and str(row.get("ticket_line_id") or "") not in {"", business_phone_number_id}
+                    ) or (phone_number and str(row.get("ticket_phone") or "") != phone_number):
+                        await conn.rollback()
+                        return None
+                    current = DELIVERY_STATUS_RANK.get(str(row.get("delivery_status") or ""), 0)
+                    changed = DELIVERY_STATUS_RANK[status] > current
+                    if changed:
+                        await cur.execute(
+                            """
+                            UPDATE support_ticket_messages
+                            SET delivery_status = %s,
+                                delivered_at = COALESCE(delivered_at, %s),
+                                read_at = CASE WHEN %s = 'read' THEN COALESCE(read_at, %s) ELSE read_at END,
+                                -- MariaDB applies assignments left to right: clear the
+                                -- error before send_status changes.
+                                error_message = CASE WHEN send_status = 'SENT' THEN error_message ELSE NULL END,
+                                send_status = 'SENT'
+                            WHERE id = %s
+                            """,
+                            (status, at, status, at, row["id"]),
+                        )
+                    await cur.execute("SELECT * FROM support_ticket_messages WHERE id = %s", (row["id"],))
+                    updated = await cur.fetchone()
+                await conn.commit()
+                return updated, changed
+            except Exception:
+                await conn.rollback()
+                raise
+
+    async def restart_failed_send(self, message_id: int) -> bool:
+        """Claim one FAILED outgoing message for a resend. Only one caller wins."""
+        if self._pool is None:
+            await self.connect()
+        assert self._pool is not None
+        async with self._pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """
+                    UPDATE support_ticket_messages
+                    SET send_status = 'PENDING', error_message = NULL, updated_at = UTC_TIMESTAMP(6)
+                    WHERE id = %s AND direction = 'OUTBOUND' AND send_status = 'FAILED'
+                      AND deleted_for_everyone_at IS NULL
+                    """,
+                    (message_id,),
+                )
+                claimed = cur.rowcount == 1
+            await conn.commit()
+            return claimed
+
     async def get_message_by_client_id(self, client_message_id: str) -> dict[str, Any] | None:
         if self._pool is None:
             await self.connect()
@@ -2012,9 +2101,14 @@ class SupportRepository:
                             f"system:claim:{row['ticket_id']}", f"system:resolved:{row['ticket_id']}"
                         })
                         or row.get("direction") != "OUTBOUND"
-                        or (row.get("whatsapp_message_id") and row["whatsapp_message_id"] != whatsapp_message_id)
                     ):
                         raise SupportConflictError("The confirmed WhatsApp send does not match its dashboard message.")
+                    if row.get("whatsapp_message_id") and row["whatsapp_message_id"] != whatsapp_message_id:
+                        # A resent message is already confirmed by its newer
+                        # attempt. A late confirmation of the earlier attempt
+                        # changes nothing.
+                        await conn.rollback()
+                        return row, False
                     changed = (
                         row.get("send_status") != "SENT"
                         or row.get("whatsapp_message_id") != whatsapp_message_id

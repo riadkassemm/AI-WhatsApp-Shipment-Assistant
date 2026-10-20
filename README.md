@@ -910,6 +910,16 @@ The native Meta Cloud API send still creates a new outbound WhatsApp message; th
 
 Meta may reject a free-form first message when the customer-service window is closed; in that case an approved WhatsApp template is required by Meta policy. This release does not create or send template messages automatically.
 
+## Message ticks and resending
+
+Outgoing messages show WhatsApp-style ticks: a clock while sending, one grey tick once WhatsApp accepted the message, two grey ticks when it reached the customer's phone, and two blue ticks when the customer read it. Customers who turned off read receipts stay at two grey ticks. Ticks come from WhatsApp receipts (linked-device bridge `message_status` callbacks, or Meta `statuses` webhooks) and are stored in `support_ticket_messages.delivery_status`, `delivered_at` and `read_at` (migration `20261020_message_delivery_status.sql`). They only move forward. The bridge forwards receipts only for dashboard sends and phone-app messages, never for the bot's automatic replies.
+
+A message that could not be sent shows **Not sent** with a **Resend** button for the staff member who wrote it. Resend sends the same text, location or stored file again on the same timeline row and with the same client message ID, so it never appears twice. When WhatsApp did not confirm the first attempt (an acknowledgment timeout), the dashboard asks first, because the customer might already have it. If a later receipt shows the first attempt arrived after all, the message turns sent on its own.
+
+If the dashboard cannot reach the server while sending, it retries twice with the same client message ID; a request that did arrive is not sent again. After that the message shows **Not sent** with the reason and can be resent.
+
+When WhatsApp does not acknowledge a send within 20 seconds, or a WhatsApp query times out, the bridge treats the connection as stale and reconnects, so the next message goes through. It logs every failed bridge request (route, status, error code and a short error text with phone numbers masked) to the `whatsapp-bridge` journal.
+
 ## Queue scrolling
 
 Every queue (tickets, chats and contacts) is one continuous list with no page buttons. The first 50 rows load right away, and the next 50 load automatically as staff scroll toward the bottom. The footer shows how many rows are loaded ("Showing 100 of 312 · scroll for more"). Live updates and **Refresh** reload every row already loaded, so the list keeps its length and scroll position. The dashboard remembers how far the queue was scrolled when the page is reloaded. The list API accepts up to 500 rows per request.

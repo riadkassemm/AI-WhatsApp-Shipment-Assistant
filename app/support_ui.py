@@ -105,6 +105,7 @@ _HTML = r'''<!doctype html>
   --danger: #b42336;
   --danger-hover: #941b2b;
   --danger-soft: #fdecee;
+  --tick-read: #1a8fd0;
 
   --bubble-in: #ffffff;
   --bubble-out: #e4f3f1;
@@ -176,6 +177,7 @@ _HTML = r'''<!doctype html>
   --danger: #ff8a97;
   --danger-hover: #ffa9b2;
   --danger-soft: #3f1c24;
+  --tick-read: #53bdeb;
 
   --bubble-in: #172129;
   --bubble-out: #10302e;
@@ -994,6 +996,10 @@ body.column-resizing * { cursor: col-resize !important; }
 .send-state .icon { width: 13px; height: 13px; }
 .send-state.failed { padding: 1px 7px 1px 5px; border-radius: var(--radius-full); background: var(--danger-soft); color: var(--danger); }
 .send-state.pending { color: var(--warning); }
+.send-state.ticks .icon { width: 16px; height: 16px; }
+.send-state.read { color: var(--tick-read); }
+.send-retry-btn { min-height: 22px; padding: 0 8px; border-radius: var(--radius-full); font-size: var(--text-xs); font-weight: 600; color: var(--danger); border-color: var(--danger); background: transparent; }
+.send-retry-btn:hover:not(:disabled) { background: var(--danger-soft); }
 .msg-media { margin: 2px 0 6px; }
 .msg-media:last-child { margin-bottom: 0; }
 .media-open { max-width: 100%; display: block; padding: 0; border: 0; border-radius: var(--radius-md); background: transparent; cursor: zoom-in; overflow: hidden; }
@@ -1508,6 +1514,7 @@ body.column-resizing * { cursor: col-resize !important; }
   <symbol id="icon-user" viewBox="0 0 24 24"><circle cx="12" cy="8" r="3.5"/><path d="M5 20c.7-4 3-6 7-6s6.3 2 7 6"/></symbol>
   <symbol id="icon-transfer" viewBox="0 0 24 24"><path d="M4 8h12M13 5l3 3-3 3M20 16H8M11 13l-3 3 3 3"/></symbol>
   <symbol id="icon-check" viewBox="0 0 24 24"><path d="m5 12 4 4 10-10"/></symbol>
+  <symbol id="icon-check-double" viewBox="0 0 24 24"><path d="m1.5 12.5 4 4 9.5-9.5"/><path d="m10.5 15.5 1 1 9.5-9.5"/></symbol>
   <symbol id="icon-check-circle" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="m8 12 2.5 2.5L16.5 8"/></symbol>
   <symbol id="icon-alert" viewBox="0 0 24 24"><path d="M12 3 2.8 20h18.4z"/><path d="M12 9v4M12 16.5h.01"/></symbol>
   <symbol id="icon-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 10.5V17M12 7h.01"/></symbol>
@@ -2633,6 +2640,12 @@ function connectSupportEvents() {
     let payload = {};
     try { payload = JSON.parse(event.data || '{}'); } catch (_) { return; }
     const type = String(payload.type || '');
+    if (type === 'message_status') {
+      if (payload.authorized === true && payload.message && state.ticketId && String(state.ticketId) === String(payload.ticket_id || '')) {
+        upsertTimelineMessage(payload.message, payload.ticket_id);
+      }
+      return;
+    }
     if (type === 'outbound_message' || type === 'customer_message' || type === 'message_media_ready') {
       if (payload.authorized !== true) return;
       if (payload.message && state.ticketId && String(state.ticketId) === String(payload.ticket_id || '')) {
@@ -4948,7 +4961,7 @@ function addMessage(container, m, extraClass = '') {
     remove.onclick = () => openMessageDelete(m);
     actions.append(remove);
   }
-  if (!extraClass && !m.id && m.client_message_id && ['FAILED', 'UNKNOWN'].includes(m.send_status)) {
+  if (!extraClass && !m.id && m.client_message_id && m.send_status === 'FAILED') {
     const dismiss = document.createElement('button');
     dismiss.type = 'button'; dismiss.className = 'btn message-action-btn'; dismiss.textContent = 'Dismiss';
     dismiss.onclick = () => {
@@ -5009,22 +5022,34 @@ function addMessage(container, m, extraClass = '') {
   if (m.send_status === 'FAILED') {
     const failed = document.createElement('span');
     failed.className = 'send-state failed';
-    failed.append(createIcon('alert', 'icon icon-sm'), document.createTextNode('Send failed' + (m.error_message ? ': ' + m.error_message : '')));
+    failed.title = m.error_message || 'WhatsApp could not send this message.';
+    failed.append(createIcon('alert', 'icon icon-sm'), document.createTextNode('Not sent'));
     meta.append(failed);
-  } else if (m.send_status === 'UNKNOWN') {
-    const unknown = document.createElement('span');
-    unknown.className = 'send-state pending';
-    unknown.append(createIcon('alert', 'icon icon-sm'), document.createTextNode('Send status unknown. Check WhatsApp before sending again.'));
-    meta.append(unknown);
+    if (!extraClass && canResendMessage(m)) {
+      const resend = document.createElement('button');
+      resend.type = 'button';
+      resend.className = 'btn send-retry-btn';
+      resend.textContent = 'Resend';
+      resend.setAttribute('aria-label', 'Resend this message');
+      resend.onclick = () => resendMessage(m, resend);
+      meta.append(resend);
+    }
   } else if (m.send_status === 'PENDING') {
     const pending = document.createElement('span');
     pending.className = 'send-state pending';
-    pending.append(createIcon('clock', 'icon icon-sm'), document.createTextNode('Sending'));
+    pending.title = 'Sending';
+    pending.setAttribute('aria-label', 'Sending');
+    pending.append(createIcon('clock', 'icon icon-sm'));
     meta.append(pending);
   } else if (outbound && m.send_status) {
+    // WhatsApp-style ticks: one grey when sent, two grey when delivered, two blue when read.
+    const receipt = m.delivery_status === 'read' ? 'read' : m.delivery_status === 'delivered' ? 'delivered' : 'sent';
+    const label = receipt === 'read' ? 'Read' : receipt === 'delivered' ? 'Delivered' : 'Sent';
     const sent = document.createElement('span');
-    sent.className = 'send-state';
-    sent.append(createIcon('check', 'icon icon-sm'), document.createTextNode(formatStatus(m.send_status)));
+    sent.className = 'send-state ticks ' + receipt;
+    sent.title = label;
+    sent.setAttribute('aria-label', label);
+    sent.append(createIcon(receipt === 'sent' ? 'check' : 'check-double', 'icon icon-sm'));
     meta.append(sent);
   }
 
@@ -5037,6 +5062,44 @@ function addMessage(container, m, extraClass = '') {
 }
 // Compact message toolbar: the visible label stays in textContent (accessible
 // name); CSS draws the glyph from data-action and shows data-tooltip.
+function canResendMessage(m) {
+  if (m.direction !== 'OUTBOUND' || m.send_status !== 'FAILED' || m.deleted_for_everyone_at) return false;
+  if (String(m.sender_id || '') !== String(state.agent?.id || '')) return false;
+  if (!m.id) return Boolean(m.client_message_id && m.message_type === 'text');
+  return state.currentTicketData?.permissions?.can_reply !== false;
+}
+
+async function resendMessage(m, button) {
+  if (button) { button.disabled = true; button.textContent = 'Sending…'; }
+  const ticketId = m.ticket_id || state.ticketId;
+  if (!m.id) {
+    // Never reached the server: send it again with the same client ID, so a
+    // request that did arrive is not sent twice.
+    m.send_status = 'PENDING';
+    m.error_message = null;
+    upsertTimelineMessage(m, ticketId);
+    await deliverTextMessage(m, ticketId);
+    return;
+  }
+  const uncertain = /acknowledg|timed out|HTTP 50[34]/i.test(m.error_message || '');
+  if (uncertain && !(await confirmDialog({
+    title: 'Resend message?',
+    message: 'WhatsApp did not confirm this message, so the customer might already have it. Send it again anyway?',
+    confirmLabel: 'Resend'
+  }))) {
+    if (button) { button.disabled = false; button.textContent = 'Resend'; }
+    return;
+  }
+  try {
+    const result = await api('/api/support/tickets/' + ticketId + '/messages/' + m.id + '/resend', {method: 'POST'});
+    if (result.message) upsertTimelineMessage(result.message, ticketId);
+    loadQueue({silent: true}).catch(() => {});
+  } catch (error) {
+    notify(error.message || 'The message could not be sent again.', 'error');
+    if (state.ticketId && String(state.ticketId) === String(ticketId)) openTicket(state.ticketId, {silent: true}).catch(() => {});
+  }
+}
+
 function labelMessageAction(button, action, label) {
   button.dataset.action = action;
   button.dataset.tooltip = label;
@@ -5087,7 +5150,7 @@ function addDateDivider(container, value) {
 
 function timelineSignature(data) {
   const messageSignature = message => [
-    message.id, message.updated_at, message.send_status, message.error_message,
+    message.id, message.updated_at, message.send_status, message.delivery_status, message.error_message,
     message.media_available, message.body, message.version, message.edited_at,
     message.deleted_for_everyone_at, message.can_edit, message.can_delete_for_everyone,
     (message.reactions || []).map(reaction => [reaction.id, reaction.emoji, reaction.reactor_type, reaction.reactor_name, reaction.updated_at])
@@ -6752,26 +6815,53 @@ async function sendMessage() {
   updateComposerControls();
   showError('');
   focusMessageComposer();
-  const send = async () => {
-    try {
-      const result = await api('/api/support/tickets/' + ticketId + '/messages', {
-        method: 'POST',
-        body: JSON.stringify({body, client_message_id: clientMessageId, reply_to_message_id: reply?.id || null})
-      });
-      state.localMessages.delete(clientMessageId);
-      if (result.message) upsertTimelineMessage(result.message, ticketId);
-      loadQueue({silent: true}).catch(() => {});
-    } catch (error) {
-      optimistic.send_status = (!error.status || /WhatsApp accepted/i.test(error.message || '')) ? 'UNKNOWN' : 'FAILED';
-      optimistic.error_message = error.message || 'Message could not be sent.';
-      if (state.localMessages.has(clientMessageId)) {
-        upsertTimelineMessage(optimistic, ticketId);
-      }
-      if (String(state.ticketId) === String(ticketId)) showError(optimistic.error_message);
-      notify(optimistic.error_message, 'error');
-    }
-  };
+  optimistic.reply_to_message_id = reply?.id || null;
+  const send = () => deliverTextMessage(optimistic, ticketId);
   state.textSendChain = state.textSendChain.then(send, send);
+}
+
+// A request that got no answer (network drop, gateway error page) may or may not
+// have reached the server. Retrying with the same client_message_id is safe: the
+// server returns the message it already has instead of sending it twice.
+const TEXT_SEND_RETRY_DELAYS_MS = [1500, 4000];
+
+function transientSendError(error) {
+  return !error.status || ([502, 503, 504].includes(error.status) && !error.detail);
+}
+
+async function deliverTextMessage(message, ticketId) {
+  const clientMessageId = message.client_message_id;
+  state.localMessages.set(clientMessageId, {ticketId, message});
+  for (let attempt = 0; ; attempt++) {
+    let result;
+    try {
+      result = await api('/api/support/tickets/' + ticketId + '/messages', {
+        method: 'POST',
+        body: JSON.stringify({body: message.body, client_message_id: clientMessageId, reply_to_message_id: message.reply_to_message_id || null})
+      });
+    } catch (error) {
+      if (transientSendError(error) && attempt < TEXT_SEND_RETRY_DELAYS_MS.length && !state.pageLeaving) {
+        await new Promise(resolve => setTimeout(resolve, TEXT_SEND_RETRY_DELAYS_MS[attempt]));
+        continue;
+      }
+      message.send_status = 'FAILED';
+      message.error_message = transientSendError(error)
+        ? 'The dashboard could not reach the server. Check your connection, then resend.'
+        : (error.message || 'Message could not be sent.');
+      if (state.localMessages.has(clientMessageId)) upsertTimelineMessage(message, ticketId);
+      if (String(state.ticketId) === String(ticketId)) showError(message.error_message);
+      notify(message.error_message, 'error');
+      // If the server did store it, the refreshed ticket replaces this local copy.
+      if (!transientSendError(error) && String(state.ticketId) === String(ticketId)) openTicket(ticketId, {silent: true}).catch(() => {});
+      return;
+    }
+    state.localMessages.delete(clientMessageId);
+    // The send succeeded. A drawing problem must never mark it as failed;
+    // the next live update or refresh redraws the timeline.
+    try { if (result.message) upsertTimelineMessage(result.message, ticketId); } catch (_) {}
+    loadQueue({silent: true}).catch(() => {});
+    return;
+  }
 }
 
 function showMessagePreferencesError(message) {

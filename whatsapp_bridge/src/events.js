@@ -104,6 +104,23 @@ export function outgoingConfirmationEvent(line, nativeId, senderPhone, clientMes
   };
 }
 
+// WhatsApp receipt statuses shown as ticks in the dashboard.
+export const RECEIPT_STATUSES = {
+  [proto.WebMessageInfo.Status.DELIVERY_ACK]: 'delivered',
+  [proto.WebMessageInfo.Status.READ]: 'read',
+  [proto.WebMessageInfo.Status.PLAYED]: 'read',
+};
+export const RECEIPT_RANK = { delivered: 1, read: 2 };
+
+export function messageStatusEvent(line, nativeId, senderPhone, status, timestamp) {
+  return {
+    event_id: eventId('message_status', line.line_id, nativeId, 0, status),
+    type: 'message_status', line_id: line.line_id,
+    message_id: wrapId(line.line_id, nativeId), status,
+    sender_phone: senderPhone, timestamp, from_me: true,
+  };
+}
+
 export function messageTombstoneEvent(line, nativeId, senderPhone, timestamp, deletedTimestamp) {
   return {
     event_id: eventId('message_tombstone', line.line_id, nativeId, 0),

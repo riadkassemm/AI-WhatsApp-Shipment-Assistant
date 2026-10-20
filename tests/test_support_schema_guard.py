@@ -3,6 +3,7 @@ from app.support_repository import _missing_support_schema_migrations
 
 def add_linked_device_schema(columns):
     columns["support_ticket_messages"].update({"whatsapp_change_timestamp", "pending_change_operation_id"})
+    columns["support_ticket_messages"].update({"delivery_status", "delivered_at", "read_at"})
     columns["support_message_change_operations"] = {
         "operation_id", "message_id", "base_version", "user_id", "action", "content", "status", "lease_until", "provider_timestamp"
     }
@@ -191,3 +192,8 @@ def test_support_schema_guard_identifies_editable_contacts_migration():
     assert _missing_support_schema_migrations(columns) == [
         "migrations/20261020_editable_contacts.sql"
     ]
+
+
+def test_support_schema_guard_identifies_delivery_status_migration():
+    columns = {"support_ticket_messages": {"id"}}
+    assert "migrations/20261020_message_delivery_status.sql" in _missing_support_schema_migrations(columns)
