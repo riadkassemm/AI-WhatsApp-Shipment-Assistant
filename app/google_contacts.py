@@ -614,7 +614,7 @@ class GoogleContactsService:
         pool = await self._ensure_pool()
         query = str(query or "").strip()
         page = max(1, int(page))
-        page_size = max(1, min(int(page_size), 100))
+        page_size = max(1, min(int(page_size), 500))
         offset = (page - 1) * page_size
         like = f"%{query}%"
         normalized_query = normalize_phone(query)
