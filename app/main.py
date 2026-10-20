@@ -54,7 +54,7 @@ from app.support_repository import SupportConflictError
 from app.support_media import SUPPORT_MEDIA_MESSAGE_TYPES, SupportMediaError
 from app.support_models import HandoffRequest
 from app.support_service import sanitize_support_text, support_service
-from app.support_ui import router as support_ui_router
+from app.support_ui import SUPPORT_UI_VERSION, router as support_ui_router
 from app.linked_device_api import router as linked_device_api_router
 from app.whatsapp_registry import WhatsAppRegistryError, whatsapp_registry_service
 from app.whatsapp_client import (
@@ -84,6 +84,7 @@ async def _disable_support_response_caching(request: Request, call_next):
     if path == "/support" or path.startswith("/api/support/") or path == "/api/support":
         response.headers["Cache-Control"] = "no-store"
         response.headers["Pragma"] = "no-cache"
+        response.headers["X-Support-UI-Version"] = SUPPORT_UI_VERSION
     return response
 
 

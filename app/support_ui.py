@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 from fastapi import APIRouter
@@ -19,7 +20,7 @@ async def support_dashboard() -> HTMLResponse:
         "__POLL_MS__", str(max(1, settings.support_queue_poll_seconds) * 1000)
     ).replace("__CSRF_COOKIE__", settings.support_csrf_cookie_name).replace(
         "__VIDEO_MAX_BYTES__", str(max(1, settings.support_video_max_bytes))
-    )
+    ).replace("__UI_VERSION__", SUPPORT_UI_VERSION)
     return HTMLResponse(
         html,
         headers={
@@ -998,6 +999,8 @@ body.column-resizing * { cursor: col-resize !important; }
 .send-state.pending { color: var(--warning); }
 .send-state.ticks .icon { width: 16px; height: 16px; }
 .send-state.read { color: var(--tick-read); }
+.update-banner { position: fixed; top: 12px; left: 50%; transform: translateX(-50%); z-index: var(--z-toast, 1000); display: flex; align-items: center; gap: 12px; max-width: calc(100vw - 32px); padding: 8px 8px 8px 16px; border: 1px solid var(--border); border-radius: var(--radius-full); background: var(--surface); box-shadow: var(--shadow-md); font-size: var(--text-sm); }
+.update-banner.hidden { display: none; }
 .send-retry-btn { min-height: 22px; padding: 0 8px; border-radius: var(--radius-full); font-size: var(--text-xs); font-weight: 600; color: var(--danger); border-color: var(--danger); background: transparent; }
 .send-retry-btn:hover:not(:disabled) { background: var(--danger-soft); }
 .msg-media { margin: 2px 0 6px; }
@@ -1597,6 +1600,10 @@ body.column-resizing * { cursor: col-resize !important; }
   </div>
 </main>
 
+<div class="update-banner hidden" id="updateBanner" role="status">
+  <span>The dashboard was updated. Reload to get the latest version.</span>
+  <button class="btn small primary" id="updateReloadBtn" type="button">Reload</button>
+</div>
 <div class="app-shell hidden" id="dashboard">
   <aside class="global-sidebar" aria-label="Support workspace navigation">
     <div class="brand-bar">
@@ -2211,6 +2218,7 @@ const MESSAGE_ROLE_LABELS = {
 const REACTION_EMOJIS = ['👍', '❤️', '😂', '😮', '😢', '🙏'];
 // Queue rows in these views tint their time as a customer keeps waiting.
 const WAITING_AGE_VIEWS = ['unassigned', 'waiting'];
+const SUPPORT_UI_VERSION = '__UI_VERSION__';
 // Queues load this many rows per request at most (the API limit).
 const QUEUE_MAX_REQUEST_SIZE = 500;
 const WAITING_AGE_WARN_MINUTES = 5;
@@ -3181,6 +3189,8 @@ async function api(path, options = {}) {
   if (options.body && !(options.body instanceof FormData)) headers['Content-Type'] = 'application/json';
   if (options.method && options.method !== 'GET') headers['X-CSRF-Token'] = csrf();
   const response = await fetch(path, {credentials: 'same-origin', ...options, cache:'no-store', headers});
+  const serverVersion = response.headers && typeof response.headers.get === 'function' ? response.headers.get('X-Support-UI-Version') : null;
+  if (serverVersion && serverVersion !== SUPPORT_UI_VERSION) noticeDashboardUpdate(serverVersion);
   let data = {};
   try { data = await response.json(); } catch (_) {}
   if (response.status === 401 && path !== '/api/support/login') {
@@ -3198,6 +3208,32 @@ async function api(path, options = {}) {
     throw error;
   }
   return data;
+}
+
+// After a deploy, reload as soon as nothing would be lost (no draft, upload,
+// recording, unsent message or open dialog). Otherwise offer a Reload button.
+function dashboardIsIdle() {
+  return !state.busy && !state.activeModal && !state.mediaRecorder && !state.pendingMedia && !state.editTarget &&
+    !state.imageEditor && !state.localMessages.size && !String($('message').value || '').trim();
+}
+
+function noticeDashboardUpdate(version) {
+  if (state.uiUpdateVersion === version) return;
+  state.uiUpdateVersion = version;
+  $('updateBanner').classList.remove('hidden');
+  let attempted = null;
+  try { attempted = sessionStorage.getItem('shipment-support-ui-reload'); } catch (_) {}
+  // Reload by itself only once per version, so a stale cache can never loop.
+  if (attempted === version) return;
+  const tryReload = () => {
+    if (state.uiUpdateVersion !== version) return;
+    if (!dashboardIsIdle()) { window.setTimeout(tryReload, 3000); return; }
+    try { sessionStorage.setItem('shipment-support-ui-reload', version); } catch (_) {}
+    saveSupportSelection();
+    markPageLeaving();
+    window.location.reload();
+  };
+  window.setTimeout(tryReload, 1000);
 }
 
 function setAgentIdentity(agent) {
@@ -3229,7 +3265,14 @@ function canManageWhatsApp() {
   );
 }
 
+function canViewActiveQueue() {
+  return Boolean(state.agent && ['supervisor', 'admin'].includes(state.agent.role));
+}
+
 function configureStaffAccess() {
+  // Active shows every live ticket, for Supervisors and Admins to monitor.
+  $('tabs').querySelector('button[data-view="active"]')?.classList.toggle('hidden', !canViewActiveQueue());
+  if (state.view === 'active' && !canViewActiveQueue()) setQueueView('unassigned', {load: false, persist: false});
   $('manageStaffBtn').classList.toggle('hidden', !canManageStaff());
   $('manageWhatsAppBtn').classList.toggle('hidden', !canManageWhatsApp());
 }
@@ -4035,6 +4078,7 @@ async function pollUnassignedActivity() {
 }
 
 function setQueueView(view, {load = true, persist = true} = {}) {
+  if (view === 'active' && !canViewActiveQueue()) view = 'unassigned';
   if (!Object.prototype.hasOwnProperty.call(QUEUE_CONFIG, view) || state.view === view) return;
   state.view = view;
   state.page = 1;
@@ -8687,6 +8731,7 @@ $('vcfContactsInput').addEventListener('change', importSelectedVcfContacts);
 $('googleContactsSyncBtn').addEventListener('click', syncGoogleContacts);
 $('googleContactsDisconnectBtn').addEventListener('click', disconnectGoogleContacts);
 $('refreshQueueBtn').addEventListener('click', () => loadQueue());
+$('updateReloadBtn').addEventListener('click', () => { saveSupportSelection(); markPageLeaving(); window.location.reload(); });
 $('queue').addEventListener('keydown', handleQueueKeydown);
 $('queueSearch').addEventListener('input', event => {
   state.query = event.target.value;
@@ -9028,3 +9073,9 @@ setInterval(() => {
 </script>
 </body>
 </html>'''
+
+# Changes whenever the dashboard code changes. API responses carry it in
+# X-Support-UI-Version so open dashboards notice a deploy and reload.
+SUPPORT_UI_VERSION = hashlib.sha256(
+    (_HTML + Path(__file__).with_name("support_image_editor.js").read_text(encoding="utf-8")).encode("utf-8")
+).hexdigest()[:16]

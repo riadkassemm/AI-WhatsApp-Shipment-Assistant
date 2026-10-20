@@ -1821,6 +1821,8 @@ class SupportService:
 
     async def queue_counts(self, agent: SupportAgent) -> dict[str, int]:
         views = ("unassigned", "mine", "chats", "watching", "active", "waiting", "history")
+        if not agent.is_supervisor:
+            views = tuple(view for view in views if view != "active")
         results = await asyncio.gather(*(
             support_repository.list_tickets(
                 view=view,
@@ -1943,6 +1945,9 @@ class SupportService:
         page: int,
         page_size: int,
     ) -> dict[str, Any]:
+        if view == "active" and not agent.is_supervisor:
+            # Active lists every live ticket for monitoring; agents work from their own queues.
+            raise SupportForbiddenError("Only Supervisors and Admins can view all active tickets.")
         result = await support_repository.list_tickets(
             view=view,
             agent_id=agent.id,
