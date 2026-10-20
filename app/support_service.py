@@ -10,6 +10,7 @@ from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from typing import Any
 
+from app.config import settings
 from app.conversation_store import Conversation, conversation_store
 from app.customer_directory import ContactConflictError, ContactNotFoundError, customer_directory, normalize_phone
 from app.client_chat_auth import redact_sensitive_text
@@ -482,6 +483,58 @@ def _serialize_support_messages(
             "location_address": target.get("location_address"),
         }
     return safe_messages
+
+
+async def _return_conversation_to_ai(
+    resolved: dict[str, Any], *, resolved_by: str = "by an authorized agent",
+) -> None:
+    # DB was updated first. Redis is a cache; if this write fails, the next
+    # inbound webhook reconciles stale human mode against the durable DB.
+    phone = str(resolved["whatsapp_phone"])
+    try:
+        conversation = await conversation_store.get_or_create(
+            phone,
+            conversation_key=_conversation_key_for_ticket(resolved),
+            business_phone_number_id=(
+                str(resolved.get("business_phone_number_id"))
+                if resolved.get("business_phone_number_id")
+                else None
+            ),
+            business_display_phone_number=(
+                str(resolved.get("business_display_phone_number"))
+                if resolved.get("business_display_phone_number")
+                else None
+            ),
+        )
+        conversation.mode = "ai"
+        conversation.active_ticket_id = None
+
+        # Keep the historical handoff transcript, but record an explicit
+        # authoritative lifecycle boundary. Without this marker, the next
+        # AI turn can see an older transfer_to_human tool call / "agent is
+        # joining" reply and mistakenly behave as if that handoff were
+        # still active even though the durable ticket has been resolved.
+        conversation.messages.append(
+            {
+                "role": "system",
+                "content": (
+                    f"SUPPORT EVENT: Human support has been resolved {resolved_by} "
+                    "and control has explicitly returned "
+                    "to AI. Earlier handoff, transfer, waiting-for-agent, "
+                    "and agent-joining messages in the conversation are "
+                    "historical and are no longer active. Handle the next "
+                    "customer message normally. Start a new human handoff "
+                    "only if the customer's current/new request independently "
+                    "meets the escalation policy."
+                ),
+            }
+        )
+
+        await conversation_store.save(conversation)
+    except Exception:
+        logger.exception(
+            "Ticket resolved but Redis conversation cache could not be updated; it will self-heal on next inbound message"
+        )
 
 
 class SupportService:
@@ -3470,53 +3523,7 @@ class SupportService:
                 require_active=False,
             )
 
-        # DB was updated first. Redis is a cache; if this write fails, the next
-        # inbound webhook reconciles stale human mode against the durable DB.
-        phone = str(resolved["whatsapp_phone"])
-        try:
-            conversation = await conversation_store.get_or_create(
-                phone,
-                conversation_key=_conversation_key_for_ticket(resolved),
-                business_phone_number_id=(
-                    str(resolved.get("business_phone_number_id"))
-                    if resolved.get("business_phone_number_id")
-                    else None
-                ),
-                business_display_phone_number=(
-                    str(resolved.get("business_display_phone_number"))
-                    if resolved.get("business_display_phone_number")
-                    else None
-                ),
-            )
-            conversation.mode = "ai"
-            conversation.active_ticket_id = None
-
-            # Keep the historical handoff transcript, but record an explicit
-            # authoritative lifecycle boundary. Without this marker, the next
-            # AI turn can see an older transfer_to_human tool call / "agent is
-            # joining" reply and mistakenly behave as if that handoff were
-            # still active even though the durable ticket has been resolved.
-            conversation.messages.append(
-                {
-                    "role": "system",
-                    "content": (
-                        "SUPPORT EVENT: Human support has been resolved by an "
-                        "authorized agent and control has explicitly returned "
-                        "to AI. Earlier handoff, transfer, waiting-for-agent, "
-                        "and agent-joining messages in the conversation are "
-                        "historical and are no longer active. Handle the next "
-                        "customer message normally. Start a new human handoff "
-                        "only if the customer's current/new request independently "
-                        "meets the escalation policy."
-                    ),
-                }
-            )
-
-            await conversation_store.save(conversation)
-        except Exception:
-            logger.exception(
-                "Ticket resolved but Redis conversation cache could not be updated; it will self-heal on next inbound message"
-            )
+        await _return_conversation_to_ai(resolved)
 
         logger.info(
             "Support ticket resolved: ticket_id=%s staff_id=%s changed=%s notice_created=%s",
@@ -3531,6 +3538,37 @@ class SupportService:
             "resolution_message": resolution_notice,
             "conversation_mode": "ai",
         }
+
+    async def auto_resolve_idle_phone_app_tickets(self) -> int:
+        """Resolve unclaimed tickets answered in the WhatsApp app that went quiet.
+
+        No resolution message is sent: the customer was already being helped
+        from the phone. Returns how many tickets were resolved.
+        """
+        idle_minutes = settings.support_phone_app_idle_resolve_minutes
+        if idle_minutes <= 0:
+            return 0
+        resolved_count = 0
+        for ticket_id in await support_repository.list_idle_phone_app_tickets(idle_minutes=idle_minutes):
+            try:
+                resolved = await support_repository.auto_resolve_idle_phone_app_ticket(
+                    ticket_id, idle_minutes=idle_minutes,
+                )
+            except Exception:
+                logger.exception("Idle phone-app ticket could not be resolved: ticket_id=%s", ticket_id)
+                continue
+            if not resolved:
+                continue
+            resolved_count += 1
+            await _return_conversation_to_ai(
+                resolved, resolved_by="automatically after the conversation went quiet",
+            )
+            await publish_support_event("ticket_updated", ticket_id=ticket_id, status="RESOLVED")
+            logger.info(
+                "Idle phone-app ticket resolved: ticket_id=%s idle_minutes=%s",
+                ticket_id, idle_minutes,
+            )
+        return resolved_count
 
 
 support_service = SupportService()
