@@ -719,10 +719,9 @@ select { cursor: pointer; }
 .contact-picker-row.selected .contact-source { background: var(--primary); color: var(--primary-contrast); }
 .contact-picker-section { margin-top: 14px; }
 .contact-picker-section-title { margin: 0 0 6px; color: var(--text-subtle); font-size: var(--text-xs); font-weight: 600; letter-spacing: 0.02em; }
-.queue-footer { grid-row: 5; min-height: 48px; display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 8px 6px 16px; border-top: 1px solid var(--border); background: var(--surface); }
+.queue-footer { grid-row: 5; min-height: 36px; display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 8px 6px 16px; border-top: 1px solid var(--border); background: var(--surface); }
 .page-summary { min-width: 0; color: var(--text-subtle); font-size: var(--text-xs); font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.pagination-actions { display: flex; gap: 2px; flex: 0 0 auto; }
-.pagination-actions .icon-btn { width: 32px; height: 32px; }
+.queue-more { display: flex; align-items: center; justify-content: center; min-height: 48px; color: var(--text-subtle); font-size: var(--text-xs); }
 
 /* ---------- Loading / empty states ---------- */
 .loading-list { display: grid; gap: 0; }
@@ -1701,11 +1700,7 @@ body.column-resizing * { cursor: col-resize !important; }
       <div class="empty-state"><div class="empty-state-inner"><div class="empty-icon"><svg class="icon icon-lg" aria-hidden="true"><use href="#icon-inbox"></use></svg></div><h3>No tickets loaded</h3><p>Your selected queue will appear here after sign-in.</p></div></div>
     </div>
     <footer class="queue-footer" id="queueFooter">
-      <span class="page-summary" id="pageSummary">Page 1</span>
-      <div class="pagination-actions">
-        <button class="icon-btn" id="previousPageBtn" type="button" aria-label="Previous ticket page" data-tooltip="Previous page" data-tooltip-placement="top" disabled><svg class="icon" aria-hidden="true"><use href="#icon-chevron-left"></use></svg></button>
-        <button class="icon-btn" id="nextPageBtn" type="button" aria-label="Next ticket page" data-tooltip="Next page" data-tooltip-placement="top" disabled><svg class="icon" aria-hidden="true"><use href="#icon-chevron-right"></use></svg></button>
-      </div>
+      <span class="page-summary" id="pageSummary" aria-live="polite"></span>
     </footer>
     <div class="layout-resizer queue-resizer" id="queueResizer" role="separator" aria-orientation="vertical" aria-label="Resize ticket list" aria-valuemin="260" aria-valuemax="520" tabindex="0"></div>
   </section>
@@ -2209,14 +2204,19 @@ const MESSAGE_ROLE_LABELS = {
 const REACTION_EMOJIS = ['👍', '❤️', '😂', '😮', '😢', '🙏'];
 // Queue rows in these views tint their time as a customer keeps waiting.
 const WAITING_AGE_VIEWS = ['unassigned', 'waiting'];
+// Queues load this many rows per request at most (the API limit).
+const QUEUE_MAX_REQUEST_SIZE = 500;
 const WAITING_AGE_WARN_MINUTES = 5;
 const WAITING_AGE_ALERT_MINUTES = 15;
 const state = {
   view: 'unassigned',
   page: 1,
-  pageSize: 30,
+  pageSize: 50,
   total: 0,
   queueItems: [],
+  queueLoadingMore: false,
+  queueExhausted: false,
+  queueMoreObserver: null,
   queueTotals: {},
   queueCountsBusy: false,
   queueCountsPending: false,
@@ -3481,8 +3481,7 @@ function updateQueueSummary(visibleCount = null) {
   const config = QUEUE_CONFIG[state.view] || QUEUE_CONFIG.unassigned;
   text($('queueTitle'), config.label);
   const total = Number(state.total || 0);
-  const first = total ? ((state.page - 1) * state.pageSize) + 1 : 0;
-  const last = total ? Math.min(state.page * state.pageSize, total) : 0;
+  const shown = Math.min(state.queueItems.length, total);
   const searchCount = visibleCount === null ? state.queueItems.length : visibleCount;
   if (state.query) {
     text($('queueTotal'), searchCount + ' match' + (searchCount === 1 ? '' : 'es'));
@@ -3490,10 +3489,7 @@ function updateQueueSummary(visibleCount = null) {
     const noun = state.view === 'chats' ? 'chat' : state.view === 'contacts' ? 'contact' : 'ticket';
     text($('queueTotal'), total + ' ' + noun + (total === 1 ? '' : 's'));
   }
-  const pages = Math.max(1, Math.ceil(total / state.pageSize));
-  text($('pageSummary'), total ? ('Showing ' + first + '–' + last + ' of ' + total + ' · Page ' + state.page + ' of ' + pages) : 'Page 1');
-  $('previousPageBtn').disabled = state.page <= 1;
-  $('nextPageBtn').disabled = state.page >= pages || total === 0;
+  text($('pageSummary'), !total ? '' : shown < total ? ('Showing ' + shown + ' of ' + total + ' · scroll for more') : ('Showing all ' + total));
 }
 
 function queueSearchText(ticket) {
@@ -3820,6 +3816,7 @@ function renderQueue() {
       const fragment = document.createDocumentFragment();
       for (const contact of state.queueItems) fragment.append(createContactRow(contact));
       queue.append(fragment);
+      appendQueueMoreSentinel(queue);
     }
     updateQueueSummary(state.queueItems.length);
     $('clearQueueSearchBtn').classList.toggle('hidden', !state.query);
@@ -3839,8 +3836,6 @@ function renderQueue() {
     }
     text($('queueTotal'), state.globalSearchResults.length + ' message match' + (state.globalSearchResults.length === 1 ? '' : 'es'));
     text($('pageSummary'), 'Message history search');
-    $('previousPageBtn').disabled = true;
-    $('nextPageBtn').disabled = true;
     $('clearQueueSearchBtn').classList.toggle('hidden', !state.query);
     syncQueueRovingFocus(queueHadFocus);
     return;
@@ -3862,6 +3857,7 @@ function renderQueue() {
     const fragment = document.createDocumentFragment();
     for (const ticket of items) fragment.append(createTicketRow(ticket));
     queue.append(fragment);
+    appendQueueMoreSentinel(queue);
   }
 
   updateQueueSummary(items.length);
@@ -3880,6 +3876,80 @@ function renderQueueError(message) {
   $('queue').replaceChildren(empty.outer);
 }
 
+function queuePath(page, pageSize) {
+  return state.view === 'contacts'
+    ? '/api/support/contacts?page=' + page + '&page_size=' + pageSize + '&q=' + encodeURIComponent(state.query.trim())
+    : state.view === 'chats'
+      ? '/api/support/chats?page=' + page + '&page_size=' + pageSize
+      : '/api/support/tickets?view=' + encodeURIComponent(state.view) + '&page=' + page + '&page_size=' + pageSize;
+}
+
+function uniqueQueueItems(items) {
+  const seen = new Set();
+  return items.filter(item => {
+    const key = state.view === 'contacts' ? String(item?.contact_key || '') : String(item?.id || '');
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function queueHasMore() {
+  // A short local filter only searches loaded rows, so it does not page further.
+  if (state.queueExhausted || (state.view !== 'contacts' && state.query.trim())) return false;
+  return state.queueItems.length < Number(state.total || 0);
+}
+
+function appendQueueMoreSentinel(queue) {
+  if (!queueHasMore()) return;
+  const more = document.createElement('div');
+  more.className = 'queue-more';
+  more.setAttribute('role', 'presentation');
+  more.textContent = 'Loading more…';
+  queue.append(more);
+  if (typeof IntersectionObserver === 'undefined') return;
+  if (!state.queueMoreObserver) {
+    state.queueMoreObserver = new IntersectionObserver(entries => {
+      if (entries.some(entry => entry.isIntersecting)) loadMoreQueue();
+    }, {root: queue, rootMargin: '0px 0px 320px 0px'});
+  }
+  state.queueMoreObserver.disconnect();
+  state.queueMoreObserver.observe(more);
+}
+
+async function loadMoreQueue() {
+  const queue = $('queue');
+  if (!state.authenticated || state.queueLoadingMore || queue.getAttribute('aria-busy') === 'true' || !queueHasMore()) return;
+  const requestId = state.queueRequest;
+  const view = state.view;
+  state.queueLoadingMore = true;
+  try {
+    const nextPage = Math.floor(state.queueItems.length / state.pageSize) + 1;
+    const data = await api(queuePath(nextPage, state.pageSize));
+    if (requestId !== state.queueRequest || view !== state.view) return;
+    const before = state.queueItems.length;
+    state.queueItems = uniqueQueueItems([...state.queueItems, ...(Array.isArray(data.items) ? data.items : [])]);
+    state.total = Number(data.total || 0);
+    // Rows that moved while scrolling can make a page add nothing new; stop
+    // instead of requesting the same page forever. A refresh starts over.
+    if (state.queueItems.length === before) state.queueExhausted = true;
+    state.page = Math.max(1, Math.ceil(state.queueItems.length / state.pageSize));
+    saveSupportSelection();
+    updateQueueCount(view, state.total);
+    const scrollTop = queue.scrollTop;
+    renderQueue();
+    queue.scrollTop = scrollTop;
+  } catch (error) {
+    if (requestId === state.queueRequest && !state.pageLeaving) {
+      state.queueExhausted = true;
+      renderQueue();
+      notify(error.message || 'Could not load more conversations.', 'error');
+    }
+  } finally {
+    state.queueLoadingMore = false;
+  }
+}
+
 async function loadQueue({silent = false} = {}) {
   if (!state.authenticated) return;
   const requestId = ++state.queueRequest;
@@ -3889,21 +3959,18 @@ async function loadQueue({silent = false} = {}) {
   $('refreshQueueBtn').disabled = true;
   if (!silent) renderQueueSkeleton();
   try {
-    const path = state.view === 'contacts'
-      ? '/api/support/contacts?page=' + state.page + '&page_size=' + state.pageSize + '&q=' + encodeURIComponent(state.query.trim())
-      : state.view === 'chats'
-        ? '/api/support/chats?page=' + state.page + '&page_size=' + state.pageSize
-        : '/api/support/tickets?view=' + encodeURIComponent(state.view) + '&page=' + state.page + '&page_size=' + state.pageSize;
-    const data = await api(path);
+    // Reload every row already scrolled into view, so a refresh never
+    // shortens the list under the reader.
+    const wanted = Math.max(1, state.page) * state.pageSize;
+    const chunk = Math.min(wanted, QUEUE_MAX_REQUEST_SIZE);
+    const responses = await Promise.all(
+      Array.from({length: Math.ceil(wanted / chunk)}, (_, index) => api(queuePath(index + 1, chunk)))
+    );
     if (requestId !== state.queueRequest) return;
-    const total = Number(data.total || 0);
-    const pageCount = Math.max(1, Math.ceil(total / state.pageSize));
-    if (state.page > pageCount) {
-      state.page = pageCount;
-      await loadQueue({silent: false});
-      return;
-    }
-    state.queueItems = Array.isArray(data.items) ? data.items : [];
+    const total = Number(responses[0].total || 0);
+    state.queueItems = uniqueQueueItems(responses.flatMap(data => Array.isArray(data.items) ? data.items : [])).slice(0, wanted);
+    state.page = Math.max(1, Math.ceil(state.queueItems.length / state.pageSize));
+    state.queueExhausted = false;
     state.total = total;
     updateQueueCount(state.view, total);
     if (state.view === 'unassigned' && !(state.unassignedSnapshot instanceof Map)) {
@@ -3945,11 +4012,7 @@ async function pollUnassignedActivity() {
           ? (newCount === 1 ? 'New unassigned customer conversation.' : newCount + ' new unassigned customer conversations.')
           : 'New customer message in the Unassigned queue.';
         notifyNewCustomerActivity(message);
-        if (state.view === 'unassigned' && state.page === 1) {
-          state.queueItems = items;
-          state.total = Number(data.total || 0);
-          renderQueue();
-        }
+        if (state.view === 'unassigned') loadQueue({silent: true}).catch(() => {});
       }
     }
     state.unassignedSnapshot = snapshot;
@@ -3991,17 +4054,6 @@ function clearQueueSearch() {
   if (state.view === 'contacts') loadQueue({silent: true});
   else renderQueue();
   $('queueSearch').focus();
-}
-
-function changePage(direction) {
-  const nextPage = state.page + direction;
-  const pages = Math.max(1, Math.ceil(state.total / state.pageSize));
-  if (nextPage < 1 || nextPage > pages) return;
-  state.page = nextPage;
-  state.query = '';
-  $('queueSearch').value = '';
-  saveSupportSelection();
-  loadQueue().then(() => $('queue').focus({preventScroll: true}));
 }
 
 function handleQueueKeydown(event) {
@@ -8545,12 +8597,11 @@ $('vcfContactsInput').addEventListener('change', importSelectedVcfContacts);
 $('googleContactsSyncBtn').addEventListener('click', syncGoogleContacts);
 $('googleContactsDisconnectBtn').addEventListener('click', disconnectGoogleContacts);
 $('refreshQueueBtn').addEventListener('click', () => loadQueue());
-$('previousPageBtn').addEventListener('click', () => changePage(-1));
-$('nextPageBtn').addEventListener('click', () => changePage(1));
 $('queue').addEventListener('keydown', handleQueueKeydown);
 $('queueSearch').addEventListener('input', event => {
   state.query = event.target.value;
   if (state.view === 'contacts') {
+    state.page = 1;
     if (state.globalSearchTimer) clearTimeout(state.globalSearchTimer);
     state.globalSearchTimer = setTimeout(() => loadQueue({silent: true}), 220);
     return;

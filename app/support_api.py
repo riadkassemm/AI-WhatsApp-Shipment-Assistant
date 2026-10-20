@@ -629,7 +629,7 @@ async def queue_counts(
 async def list_contacts(
     q: str = Query(default="", max_length=191),
     page: int = Query(default=1, ge=1),
-    page_size: int = Query(default=50, ge=1, le=100),
+    page_size: int = Query(default=50, ge=1, le=500),
     agent: SupportAgent = Depends(get_current_agent),
 ) -> dict:
     try:
@@ -765,7 +765,7 @@ async def chat_lines(
 @router.get("/chats")
 async def list_chats(
     page: int = Query(default=1, ge=1),
-    page_size: int = Query(default=30, ge=1, le=100),
+    page_size: int = Query(default=30, ge=1, le=500),
     agent: SupportAgent = Depends(get_current_agent),
 ) -> dict:
     try:
@@ -848,7 +848,7 @@ async def list_tickets(
         pattern="^(unassigned|mine|watching|active|waiting|chats|history)$",
     ),
     page: int = Query(default=1, ge=1),
-    page_size: int = Query(default=30, ge=1, le=100),
+    page_size: int = Query(default=30, ge=1, le=500),
     agent: SupportAgent = Depends(get_current_agent),
 ) -> dict:
     try:

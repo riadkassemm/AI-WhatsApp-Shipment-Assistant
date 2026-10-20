@@ -2754,7 +2754,7 @@ class SupportRepository:
         page_size: int = 30,
     ) -> dict[str, Any]:
         page = max(page, 1)
-        page_size = max(1, min(page_size, 100))
+        page_size = max(1, min(page_size, 500))
         offset = (page - 1) * page_size
 
         where = "1=1"

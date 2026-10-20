@@ -910,6 +910,10 @@ The native Meta Cloud API send still creates a new outbound WhatsApp message; th
 
 Meta may reject a free-form first message when the customer-service window is closed; in that case an approved WhatsApp template is required by Meta policy. This release does not create or send template messages automatically.
 
+## Queue scrolling
+
+Every queue (tickets, chats and contacts) is one continuous list with no page buttons. The first 50 rows load right away, and the next 50 load automatically as staff scroll toward the bottom. The footer shows how many rows are loaded ("Showing 100 of 312 · scroll for more"). Live updates and **Refresh** reload every row already loaded, so the list keeps its length and scroll position. The dashboard remembers how far the queue was scrolled when the page is reloaded. The list API accepts up to 500 rows per request.
+
 ## Support message search
 
 The support console includes WhatsApp-style message search:
