@@ -627,17 +627,23 @@ class SupportService:
         context = _conversation_context(conversation)
 
         directory_identity = None
-        if not conversation.authenticated_name:
-            try:
-                directory_identity = await customer_directory.resolve(conversation.phone_number)
-            except Exception:
-                logger.exception("Could not resolve support customer identity from phone number")
+        try:
+            directory_identity = await customer_directory.resolve(conversation.phone_number)
+        except Exception:
+            logger.exception("Could not resolve support customer identity from phone number")
 
         ticket_customer_id = conversation.verified_customer_id
         ticket_customer_userid = conversation.authenticated_userid
         ticket_customer_name = conversation.authenticated_name
         if directory_identity is not None:
-            if not ticket_customer_name:
+            # A dashboard name given to this registered customer wins over the
+            # account name, unless the customer signed in to a different account.
+            renamed_same_customer = (
+                directory_identity.source == "registered_user"
+                and directory_identity.contact_key is not None
+                and (not ticket_customer_id or str(ticket_customer_id) == str(directory_identity.user_id))
+            )
+            if renamed_same_customer or not ticket_customer_name:
                 ticket_customer_name = directory_identity.name
             if directory_identity.source == "registered_user":
                 ticket_customer_id = ticket_customer_id or directory_identity.user_id
@@ -2068,6 +2074,7 @@ class SupportService:
                 "saved_contact": bool(identity is not None and identity.source == "saved_contact"),
                 # Set for saved, Google and VCF contacts; any of them can be edited.
                 "contact_key": getattr(identity, "contact_key", None),
+                "account_name": getattr(identity, "account_name", None),
             },
             "permissions": {
                 "can_operate": _can_operate(ticket, agent),

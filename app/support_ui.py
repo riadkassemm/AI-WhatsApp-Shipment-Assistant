@@ -5589,10 +5589,15 @@ function appendContextCard(container, title, entries, {summary = false} = {}) {
 
 async function saveCurrentContact(ticket, identity) {
   if (!ticket || !state.ticketId || state.busy) return;
-  const isContact = Boolean(identity && identity.contact_key);
+  const registered = Boolean(identity && identity.registered_user);
+  const isContact = Boolean(identity && identity.contact_key) || registered;
   const current = isContact ? (identity.name || ticket.customer_name || '') : '';
   const name = await promptDialog({
     title: isContact ? 'Edit contact name' : 'Save this guest as a contact',
+    // Registered customers keep their account name; the dashboard name only changes what staff see.
+    message: registered
+      ? 'This changes the name shown in the dashboard. The customer account' + (identity.account_name ? ' (' + identity.account_name + ')' : '') + ' is not changed.'
+      : '',
     label: 'Contact name',
     value: current,
     confirmLabel: isContact ? 'Save name' : 'Save contact'
@@ -5636,11 +5641,11 @@ function renderContext(ticket, context, shipment, identity = null, permissions =
   detail.textContent = ticket.whatsapp_phone || ticket.customer_userid || 'Customer identity unavailable';
   copy.append(name, detail);
   hero.append(avatar, copy);
-  if (identity && !identity.registered_user && permissions && permissions.can_operate) {
+  if (identity && permissions && permissions.can_operate) {
     const save = document.createElement('button');
     save.type = 'button';
     save.className = 'btn small context-contact-action';
-    save.append(createIcon('user', 'icon icon-sm'), document.createTextNode(identity.contact_key ? 'Edit contact' : 'Save contact'));
+    save.append(createIcon('user', 'icon icon-sm'), document.createTextNode(identity.contact_key || identity.registered_user ? 'Edit contact' : 'Save contact'));
     save.onclick = () => saveCurrentContact(ticket, identity);
     hero.append(save);
   }
@@ -5648,6 +5653,7 @@ function renderContext(ticket, context, shipment, identity = null, permissions =
 
   appendContextCard(container, 'Customer', [
     ['Name', ticket.customer_name],
+    ['Account name', identity?.registered_user && identity.account_name && identity.account_name !== ticket.customer_name ? identity.account_name : null],
     ['User ID', ticket.customer_userid, 'code'],
     ['WhatsApp', ticket.whatsapp_phone],
     ['Authenticated', context.authenticated],

@@ -38,6 +38,9 @@ class CustomerIdentity:
     contact_id: int | None = None
     # Contacts-list key of the contact that names this number (manual:/google:/vcf:).
     contact_key: str | None = None
+    # A registered customer's name in the customer-account system. ``name`` is the
+    # dashboard name staff gave them, when one was saved.
+    account_name: str | None = None
 
 
 class CustomerDirectory:
@@ -191,12 +194,19 @@ class CustomerDirectory:
         if isinstance(directory, BaseException):
             directory = None
         if user:
+            # Staff can rename a registered customer in the dashboard. The name is
+            # kept as a dashboard contact; the customer account is never changed.
+            account_name = str(user.get("name") or "").strip() or None
+            dashboard_name = str((contact or {}).get("display_name") or "").strip() or None
             return CustomerIdentity(
                 source="registered_user",
                 phone=normalized,
-                name=str(user.get("name") or "").strip() or None,
+                name=dashboard_name or account_name,
                 user_id=str(user.get("id")) if user.get("id") is not None else None,
                 userid=str(user.get("userid")) if user.get("userid") is not None else None,
+                contact_id=int(contact["id"]) if contact else None,
+                contact_key=f"manual:{int(contact['id'])}" if contact else None,
+                account_name=account_name,
             )
         if contact:
             return CustomerIdentity(
@@ -229,8 +239,6 @@ class CustomerDirectory:
             raise ValueError("A valid customer phone number is required.")
         if not name:
             raise ValueError("Contact name is required.")
-        if await self._registered_user(normalized):
-            raise ValueError("This phone number already belongs to a registered customer.")
         await self._execute(
             """
             INSERT INTO support_contacts (
@@ -291,8 +299,6 @@ class CustomerDirectory:
         original_phone = await self._contact_phone(source, contact_id)
         if original_phone is None:
             raise ContactNotFoundError("Contact not found.")
-        if await self._registered_user(normalized):
-            raise ContactConflictError("This phone number already belongs to a registered customer.")
 
         if source == "manual":
             other = await self._fetchone(
