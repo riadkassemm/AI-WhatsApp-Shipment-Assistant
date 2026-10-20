@@ -59,6 +59,7 @@ export function createServer(bridge, config) {
       if (parts.length === 4 && parts[3] === 'disconnect') return send(response, 200, await bridge.disconnect(id));
       if (parts.length === 4 && parts[3] === 'media') return send(response, 200, await bridge.uploadMedia(id, payload));
       if (parts.length === 4 && parts[3] === 'messages') return send(response, 200, await bridge.send(id, payload));
+      if (parts.length === 5 && parts[3] === 'contacts' && parts[4] === 'check') return send(response, 200, await bridge.checkNumber(id, payload));
       if (parts.length === 6 && parts[3] === 'messages' && ['edit', 'delete'].includes(parts[5])) return send(response, 200, await bridge.mutate(id, parts[4], parts[5], payload));
       throw new BridgeError(404, 'NOT_FOUND', 'Unknown bridge endpoint.');
     } catch (error) {

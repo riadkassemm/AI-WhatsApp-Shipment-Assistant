@@ -1085,3 +1085,17 @@ test('media on an unresolvable WhatsApp host is downloaded through the default m
   await assert.rejects(bridge.downloadMedia(LINE, imageId), /fetch failed/);
   assert.deepEqual(calls, [null]);
 });
+
+test('number lookup reports whether a phone number has WhatsApp before a chat is started', async t => {
+  const { bridge, socket } = await fixture(t);
+  const asked = [];
+  socket.onWhatsApp = async jid => {
+    asked.push(jid);
+    return jid.startsWith('96176612345@') ? [{ jid: '96176612345@s.whatsapp.net', exists: true }] : [];
+  };
+  assert.deepEqual(await bridge.checkNumber(LINE, { phone: '+961 76 612 345' }), { phone: '96176612345', exists: true, whatsapp_phone: '96176612345' });
+  assert.deepEqual(await bridge.checkNumber(LINE, { phone: '76612345' }), { phone: '76612345', exists: false, whatsapp_phone: '76612345' });
+  assert.deepEqual(asked, ['96176612345@s.whatsapp.net', '76612345@s.whatsapp.net']);
+  await assert.rejects(bridge.checkNumber(LINE, { phone: 'not a number' }), error => error.code === 'INVALID_PHONE');
+  assert.equal(socket.calls.length, 0, 'a lookup never sends a message');
+});

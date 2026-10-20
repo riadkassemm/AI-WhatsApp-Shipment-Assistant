@@ -1018,6 +1018,19 @@ mariadb -h 127.0.0.1 -P 3307 -u whatsapp_bot -p mikexport --ssl=OFF \
 
 No new Python package is required.
 
+## Editing contacts and checking chat numbers (2026-10-20)
+
+Every contact in the **Contacts** section can be edited (name and WhatsApp number): use the pencil on a row, or press **E** on a focused row. Saved contacts are updated in place. Editing a Google or VCF contact saves a dashboard contact in its place; Google and the imported VCF data are never changed, so a later sync does not undo the edit. When the number was corrected, `support_contacts.replaces_phone` keeps the old number so the outdated entry disappears from the list. Numbers must include the country code, and numbers that belong to a registered customer cannot be used. In a ticket, customers known from Google or VCF show that name with **Edit contact** instead of appearing as guests.
+
+**Start chat** and **Forward to contact** turn the entered number into international format using the WhatsApp line's country. On a Lebanese line, `03 512 345` becomes `9613512345`; on a Turkish line, `0532 123 45 67` becomes `905321234567`. Invalid numbers are refused. On linked-device lines, WhatsApp is asked whether the number has an account before the chat is created, and numbers without WhatsApp are refused. If that lookup is unavailable, sending continues. Before this change, local numbers were sent as if they were international, so those messages went to the wrong number or nowhere. Parsing uses the pinned `phonenumbers` package.
+
+Apply the additive migration before deploying this version (the schema guard reports it as missing otherwise):
+
+```bash
+mariadb -h 127.0.0.1 -P 3307 -u root -p mikexport --ssl=OFF \
+  < migrations/20261020_editable_contacts.sql
+```
+
 ## WhatsApp linked device pilot (2026-10-12)
 
 The optional [WhatsApp bridge](whatsapp_bridge/README.md) uses Baileys to connect a WhatsApp account as a linked device. It supports real text edits and message revocation in the customer's WhatsApp chat, with corresponding updates in the support dashboard. It is an unofficial integration; WhatsApp compatibility and account blocking risks remain. The installed dependency version is pinned in `whatsapp_bridge/package-lock.json`.

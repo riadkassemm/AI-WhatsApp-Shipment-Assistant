@@ -265,6 +265,18 @@ class LinkedDeviceWhatsAppClient:
         except WhatsAppSendError as exc:
             raise WhatsAppMediaError(str(exc), retryable=bool(getattr(exc, "retryable", False))) from exc
 
+    async def check_number(self, phone: str, *, phone_number_id: str | None = None) -> dict:
+        """Ask WhatsApp, through the linked device, whether ``phone`` has an account."""
+        line = self._phone_number_id(phone_number_id)
+        data = await self._json_request(
+            "POST", f"/v1/lines/{line}/contacts/check", payload={"phone": phone}, timeout_seconds=15.0
+        )
+        whatsapp_phone = str(data.get("whatsapp_phone") or "")
+        return {
+            "exists": data.get("exists") is True,
+            "whatsapp_phone": whatsapp_phone if whatsapp_phone.isdigit() else phone,
+        }
+
     async def get_status(self) -> dict:
         data = await self._json_request("GET", "/v1/status")
         _, configured = self._configuration()
