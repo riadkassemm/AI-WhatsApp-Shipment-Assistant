@@ -22,7 +22,6 @@ from app.customer_reply_guard import (
     style_repair_instruction,
     validate_customer_reply,
 )
-from app.language import handoff_confirmation
 from app.support_models import AIReplyResult, HandoffRequest
 
 
@@ -545,10 +544,9 @@ async def get_ai_reply(
                 )
 
             if handoff is not None:
-                final_text = handoff_confirmation(conversation.communication_style)
-                conversation.messages.append({"role": "assistant", "content": final_text})
+                # The customer gets no automatic message when a human takes over.
                 return AIReplyResult(
-                    reply_text=final_text,
+                    reply_text="",
                     handoff=handoff,
                     auth_required=auth_required,
                     tool_names=tuple(executed_tool_names),
