@@ -23,6 +23,32 @@ _PHONE_APP_REPLY_EXISTS = """EXISTS (
       AND phone_reply.sender_id IS NULL
 )"""
 
+# An unclaimed ticket someone answered in the WhatsApp app, with no message in
+# either direction for the idle window. Takes the idle minutes twice.
+_IDLE_PHONE_APP_TICKET = f"""
+    COALESCE(support_tickets.conversation_origin, 'CUSTOMER') <> 'STAFF'
+    AND support_tickets.status = 'NEW'
+    AND support_tickets.current_assignee_id IS NULL
+    AND support_tickets.active_key IS NOT NULL
+    AND {_PHONE_APP_REPLY_EXISTS}
+    AND support_tickets.created_at < UTC_TIMESTAMP(6) - INTERVAL %s MINUTE
+    AND NOT EXISTS (
+        SELECT 1
+        FROM support_ticket_messages recent_message
+        WHERE recent_message.ticket_id = support_tickets.id
+          AND recent_message.created_at >= UTC_TIMESTAMP(6) - INTERVAL %s MINUTE
+    )
+"""
+
+
+def auto_resolve_actor_name(idle_minutes: int) -> str:
+    hours, minutes = divmod(idle_minutes, 60)
+    if minutes:
+        window = f"{idle_minutes} minutes"
+    else:
+        window = "1 hour" if hours == 1 else f"{hours} hours"
+    return f"Automatic (no messages for {window})"
+
 
 class SupportRepositoryError(Exception):
     pass
@@ -2837,6 +2863,72 @@ class SupportRepository:
         if not ticket:
             raise SupportNotFoundError("Ticket not found after resolve.")
         return ticket, True
+
+    async def list_idle_phone_app_tickets(self, *, idle_minutes: int, limit: int = 50) -> list[int]:
+        """IDs of unclaimed tickets answered in the WhatsApp app with no recent messages."""
+        if self._pool is None:
+            await self.connect()
+        assert self._pool is not None
+        async with self._pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(
+                    f"SELECT id FROM support_tickets WHERE {_IDLE_PHONE_APP_TICKET} ORDER BY id LIMIT %s",
+                    (idle_minutes, idle_minutes, limit),
+                )
+                return [int(row["id"]) for row in await cur.fetchall()]
+
+    async def auto_resolve_idle_phone_app_ticket(
+        self, ticket_id: int, *, idle_minutes: int,
+    ) -> dict[str, Any] | None:
+        """Resolve one idle phone-app ticket without a customer notice.
+
+        The idle conditions are checked again under the row lock, so a ticket
+        that was claimed or got a message after it was listed is left alone.
+        Returns the resolved ticket, or None when nothing changed.
+        """
+        if self._pool is None:
+            await self.connect()
+        assert self._pool is not None
+        details = json.dumps({"reason": "phone_app_idle", "idle_minutes": idle_minutes})
+        async with self._pool.acquire() as conn:
+            await conn.begin()
+            try:
+                async with conn.cursor(aiomysql.DictCursor) as cur:
+                    await cur.execute(
+                        f"SELECT id FROM support_tickets WHERE id = %s AND {_IDLE_PHONE_APP_TICKET} FOR UPDATE",
+                        (ticket_id, idle_minutes, idle_minutes),
+                    )
+                    if not await cur.fetchone():
+                        await conn.rollback()
+                        return None
+                    await cur.execute(
+                        """
+                        UPDATE support_tickets
+                        SET status = 'RESOLVED',
+                            active_key = NULL,
+                            resolved_at = UTC_TIMESTAMP(6),
+                            resolved_by_staff_id = NULL,
+                            updated_at = UTC_TIMESTAMP(6),
+                            last_activity_at = UTC_TIMESTAMP(6)
+                        WHERE id = %s
+                        """,
+                        (ticket_id,),
+                    )
+                    for event_type in ("TICKET_RESOLVED", "RETURNED_TO_AI"):
+                        await cur.execute(
+                            """
+                            INSERT INTO support_ticket_events (
+                                ticket_id, event_type, actor_type, actor_name,
+                                details_json, created_at
+                            ) VALUES (%s, %s, 'SYSTEM', %s, %s, UTC_TIMESTAMP(6))
+                            """,
+                            (ticket_id, event_type, auto_resolve_actor_name(idle_minutes), details),
+                        )
+                await conn.commit()
+            except Exception:
+                await conn.rollback()
+                raise
+        return await self.get_ticket(ticket_id)
 
     async def list_tickets(
         self,

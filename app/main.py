@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import time
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, Response
 
@@ -70,7 +71,49 @@ from app.whatsapp_client import (
 logging.basicConfig(level=settings.log_level)
 logger = logging.getLogger("shipment-bot")
 
-app = FastAPI(title="AI Shipment Assistant - WhatsApp Backend")
+_idle_ticket_sweeper: asyncio.Task | None = None
+
+
+async def _sweep_idle_tickets_forever() -> None:
+    """Resolve quiet phone-app tickets in the background (see support_service)."""
+    interval = max(10, settings.support_idle_ticket_sweep_seconds)
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            await support_service.auto_resolve_idle_phone_app_tickets()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Idle phone-app ticket sweep failed")
+
+
+async def _start_idle_ticket_sweeper() -> None:
+    global _idle_ticket_sweeper
+    if settings.support_phone_app_idle_resolve_minutes > 0 and _idle_ticket_sweeper is None:
+        _idle_ticket_sweeper = asyncio.create_task(_sweep_idle_tickets_forever())
+
+
+async def _stop_idle_ticket_sweeper() -> None:
+    global _idle_ticket_sweeper
+    task, _idle_ticket_sweeper = _idle_ticket_sweeper, None
+    if task is not None:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    await _start_idle_ticket_sweeper()
+    try:
+        yield
+    finally:
+        await _stop_idle_ticket_sweeper()
+
+
+app = FastAPI(title="AI Shipment Assistant - WhatsApp Backend", lifespan=_lifespan)
 app.include_router(support_api_router)
 app.include_router(support_ui_router)
 app.include_router(linked_device_api_router)

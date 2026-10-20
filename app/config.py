@@ -104,6 +104,10 @@ class Settings(BaseSettings):
     support_ui_enabled: bool = True
     support_queue_poll_seconds: int = 2
     support_session_ttl_seconds: int = 8 * 60 * 60
+    # Unclaimed tickets answered in the WhatsApp app resolve themselves after
+    # this many minutes without a message in either direction (0 disables).
+    support_phone_app_idle_resolve_minutes: int = 120
+    support_idle_ticket_sweep_seconds: int = 60
     support_cookie_name: str = "support_session"
     support_csrf_cookie_name: str = "support_csrf"
     support_cookie_secure: bool = True

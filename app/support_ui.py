@@ -3746,7 +3746,11 @@ function createTicketRow(ticket) {
   meta.append(conversationStatusBadge(ticket));
   meta.append(createMetaChip(createSupportNumberLabel(ticket, {focusable: false}), 'message', 'channel-pill'));
   if (ticket.current_assignee_name) meta.append(createMetaChip(ticket.current_assignee_name, 'user'));
-  else if (ticket.phone_app_replied && ticket.status === 'NEW') meta.append(createMetaChip('Answered in WhatsApp app', 'phone'));
+  else if (ticket.phone_app_replied && ticket.status === 'NEW') {
+    const phoneChip = createMetaChip('Answered in WhatsApp app', 'phone');
+    phoneChip.title = 'Answered in WhatsApp app. Resolves automatically after 2 hours with no messages.';
+    meta.append(phoneChip);
+  }
   if (ticket.tracking_reference) meta.append(createMetaChip(ticket.tracking_reference, 'truck'));
 
   row.append(head, summary, meta);
