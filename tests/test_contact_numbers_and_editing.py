@@ -249,7 +249,6 @@ def test_vcf_contact_name_only_edit_overrides_by_number() -> None:
     ("manual:404", "96170000003", ContactNotFoundError),
     ("google:404", "96170000003", ContactNotFoundError),
     ("bogus:1", "96170000003", ContactNotFoundError),
-    ("vcf:9", "96170999999", ContactConflictError),       # belongs to a registered customer
 ])
 def test_contact_edit_refuses_missing_contacts_and_registered_numbers(key, phone, error) -> None:
     directory, _db = _directory()
@@ -404,5 +403,82 @@ const state = {authenticated: true, activeModal: null, view: 'contacts', contact
 
 
 def test_ticket_panel_edits_google_and_vcf_contacts_too() -> None:
-    assert "identity.contact_key ? 'Edit contact' : 'Save contact'" in _HTML
+    assert "identity.contact_key || identity.registered_user ? 'Edit contact' : 'Save contact'" in _HTML
     assert "identity?.source === 'google_contact' ? 'Google contact'" in _HTML
+
+
+# --- registered customers ---------------------------------------------------------
+
+def test_registered_customer_can_get_a_dashboard_name_without_changing_the_account() -> None:
+    directory, db = _directory()
+    db.vcf[10] = "96170999999"  # this number belongs to a registered customer
+    result = asyncio.run(directory.edit_contact(contact_key="vcf:10", display_name="Rana (VIP)", phone="96170999999", staff_id="7"))
+    assert result["display_name"] == "Rana (VIP)"
+
+    async def user(_phone):
+        return {"id": 900, "userid": "rana01", "name": "Rana Khoury"}
+
+    async def contact(_phone):
+        return {"id": 12, "display_name": "Rana (VIP)"}
+
+    async def nothing(_phone):
+        return None
+
+    resolver = CustomerDirectory()
+    resolver._registered_user = user  # type: ignore[method-assign]
+    resolver._saved_contact = contact  # type: ignore[method-assign]
+    resolver._directory_contact = nothing  # type: ignore[method-assign]
+    identity = asyncio.run(resolver.resolve("96170999999"))
+    assert identity.source == "registered_user"
+    assert (identity.name, identity.account_name, identity.contact_key) == ("Rana (VIP)", "Rana Khoury", "manual:12")
+    assert (identity.user_id, identity.userid) == ("900", "rana01"), "the account link is kept"
+
+    resolver._saved_contact = nothing  # type: ignore[method-assign]
+    plain = asyncio.run(resolver.resolve("96170999999"))
+    assert (plain.name, plain.account_name, plain.contact_key) == ("Rana Khoury", "Rana Khoury", None)
+
+
+def test_ticket_panel_lets_staff_rename_registered_customers() -> None:
+    assert "if (identity && permissions && permissions.can_operate) {" in _HTML
+    assert "identity.contact_key || identity.registered_user ? 'Edit contact' : 'Save contact'" in _HTML
+    assert "The customer account" in _HTML and "is not changed." in _HTML
+    assert "['Account name', identity?.registered_user" in _HTML
+
+
+@pytest.mark.parametrize(("verified_id", "authenticated_name", "dashboard_name", "expected"), [
+    ("900", "Rana Khoury", "Rana (VIP)", "Rana (VIP)"),     # same customer: the dashboard name wins
+    ("555", "Other Account", "Rana (VIP)", "Other Account"),  # signed in to another account from this phone
+    (None, None, "Rana (VIP)", "Rana (VIP)"),
+    ("900", "Rana Khoury", None, "Rana Khoury"),             # never renamed
+])
+def test_new_tickets_use_the_dashboard_name_for_the_same_registered_customer(monkeypatch, verified_id, authenticated_name, dashboard_name, expected) -> None:
+    from app.conversation_store import Conversation
+    from app.customer_directory import CustomerIdentity
+    from app.support_models import HandoffRequest
+
+    class Stop(Exception):
+        pass
+
+    created = {}
+
+    async def resolve(_phone):
+        return CustomerIdentity(
+            source="registered_user", phone="96170999999", name=dashboard_name or "Rana Khoury",
+            user_id="900", userid="rana01", account_name="Rana Khoury",
+            contact_key="manual:12" if dashboard_name else None,
+        )
+
+    async def create_ticket(**kwargs):
+        created.update(kwargs)
+        raise Stop()
+
+    monkeypatch.setattr(support_service_module.customer_directory, "resolve", resolve)
+    monkeypatch.setattr(support_service_module.support_repository, "create_ticket", create_ticket)
+    monkeypatch.setattr(support_service_module, "get_transport", lambda _line: "cloud")
+    conversation = Conversation(phone_number="96170999999", authenticated_name=authenticated_name, verified_customer_id=verified_id)
+    with pytest.raises(Stop):
+        asyncio.run(SupportService().finalize_handoff(
+            conversation=conversation, handoff=HandoffRequest(reason="Help"),
+            source_whatsapp_message_id=None, source_message_text=None,
+        ))
+    assert created["customer_name"] == expected
