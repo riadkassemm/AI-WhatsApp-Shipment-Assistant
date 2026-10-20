@@ -2708,11 +2708,15 @@ function connectSupportEvents() {
     // authorizer approved them. This prevents future event types from accidentally
     // reintroducing client-side-only notification filtering.
     if (payload.authorized !== true) return;
+    if (type === 'ticket_created' && payload.phone_initiated === true) {
+      // Started in the WhatsApp app, so someone is already talking to the
+      // customer. It goes to Active without an unassigned alert.
+      if (state.view !== 'contacts') loadQueue({silent: true}).catch(() => {});
+      return;
+    }
     const customer = payload.customer_name || payload.customer_phone || 'customer';
     const notificationText = type === 'ticket_created'
-      ? (payload.phone_initiated === true
-          ? 'New unassigned WhatsApp app conversation with ' + customer + '.'
-          : 'New unassigned conversation from ' + customer + '.')
+      ? 'New unassigned conversation from ' + customer + '.'
       : type === 'message_reaction'
         ? 'New WhatsApp reaction from ' + customer + '.'
         : 'New customer message from ' + customer + '.';
@@ -3690,6 +3694,7 @@ function createTicketRow(ticket) {
   meta.append(conversationStatusBadge(ticket));
   meta.append(createMetaChip(createSupportNumberLabel(ticket, {focusable: false}), 'message', 'channel-pill'));
   if (ticket.current_assignee_name) meta.append(createMetaChip(ticket.current_assignee_name, 'user'));
+  else if (ticket.phone_app_replied && ticket.status === 'NEW') meta.append(createMetaChip('Answered in WhatsApp app', 'phone'));
   if (ticket.tracking_reference) meta.append(createMetaChip(ticket.tracking_reference, 'truck'));
 
   row.append(head, summary, meta);

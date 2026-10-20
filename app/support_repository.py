@@ -12,6 +12,18 @@ from app.support_models import ACTIVE_TICKET_STATUSES, ALLOWED_TRANSITIONS
 from app.whatsapp_client import get_transport
 
 
+# Messages mirrored from the linked WhatsApp app are the only outbound staff
+# messages without a dashboard sender (see sync_linked_device_outbound).
+_PHONE_APP_REPLY_EXISTS = """EXISTS (
+    SELECT 1
+    FROM support_ticket_messages phone_reply
+    WHERE phone_reply.ticket_id = support_tickets.id
+      AND phone_reply.direction = 'OUTBOUND'
+      AND phone_reply.sender_type = 'AGENT'
+      AND phone_reply.sender_id IS NULL
+)"""
+
+
 class SupportRepositoryError(Exception):
     pass
 
@@ -2789,7 +2801,12 @@ class SupportRepository:
         staff_origin = "conversation_origin = 'STAFF'"
 
         if view == "unassigned":
-            where = f"{regular_origin} AND status = 'NEW' AND current_assignee_id IS NULL AND active_key IS NOT NULL"
+            # A reply sent from the linked WhatsApp app means someone is already
+            # talking to the customer, so the ticket leaves Unassigned for Active.
+            where = (
+                f"{regular_origin} AND status = 'NEW' AND current_assignee_id IS NULL AND active_key IS NOT NULL"
+                f" AND NOT {_PHONE_APP_REPLY_EXISTS}"
+            )
         elif view == "mine":
             where = f"{regular_origin} AND current_assignee_id = %s AND active_key IS NOT NULL"
             params.append(agent_id)
@@ -2815,14 +2832,16 @@ class SupportRepository:
             params.extend([agent_id, agent_id, agent_id])
         elif view == "active":
             placeholders = ",".join(["%s"] * len(ACTIVE_TICKET_STATUSES))
-            # Unclaimed tickets belong to Unassigned, so Active only lists assigned work.
+            # Unclaimed tickets belong to Unassigned, so Active lists assigned work
+            # plus unclaimed tickets someone already answered in the WhatsApp app.
             where = (
                 f"{regular_origin} AND status IN ({placeholders}) AND active_key IS NOT NULL"
-                " AND current_assignee_id IS NOT NULL"
+                f" AND (current_assignee_id IS NOT NULL OR (status = 'NEW' AND {_PHONE_APP_REPLY_EXISTS}))"
             )
             params.extend(ACTIVE_TICKET_STATUSES)
             if not can_view_all:
-                where = f"({where}) AND {participation_where}"
+                # Unclaimed NEW tickets stay visible to every agent so they can be claimed.
+                where = f"({where}) AND ((status = 'NEW' AND current_assignee_id IS NULL) OR {participation_where})"
                 params.extend([agent_id, agent_id, agent_id, agent_id, agent_id])
         elif view == "waiting":
             where = f"{regular_origin} AND status IN ('WAITING_CUSTOMER', 'WAITING_INTERNAL') AND active_key IS NOT NULL"
@@ -2866,7 +2885,8 @@ class SupportRepository:
                         communication_style, status,
                         current_assignee_id, current_assignee_name,
                         support_tickets.created_at, support_tickets.updated_at,
-                        last_activity_at, assigned_at, resolved_at, closed_at
+                        last_activity_at, assigned_at, resolved_at, closed_at,
+                        {_PHONE_APP_REPLY_EXISTS} AS phone_app_replied
                     FROM support_tickets
                     LEFT JOIN whatsapp_phone_numbers n
                       ON n.phone_number_id = support_tickets.business_phone_number_id
