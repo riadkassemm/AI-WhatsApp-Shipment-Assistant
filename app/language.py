@@ -211,20 +211,6 @@ def resolution_message(style: str | None) -> str:
     return "Thanks for chatting with our support team. This support request has been resolved, and automated assistance is available again if you need anything else."
 
 
-def handoff_confirmation(style: str | None) -> str:
-    if style == "fr":
-        return "Je vous mets en contact avec un agent du service client maintenant."
-    if style == "ar":
-        return "سأحوّلك الآن إلى أحد موظفي خدمة العملاء."
-    if style == "leb_ar":
-        return "رح وصّلك هلّق مع حدا من فريق خدمة الزباين."
-    if style == "leb_arabizi":
-        return "Rah wasslak halla2 ma3 hada men customer support."
-    if style == "mixed":
-        return "Rah wasslak halla2 ma3 a customer-support agent."
-    return "I'm connecting you to a customer-support agent now."
-
-
 def auth_prompt(style: str | None) -> str:
     """Step 1 of the strict two-step login flow: ask for the User ID only.
 

@@ -427,6 +427,7 @@ def test_manual_ai_off_text_handoffs_before_any_ai_backed_path(monkeypatch) -> N
         assert observed["shipping_calls"] == []
         assert observed["quota_calls"] == 0
         assert observed["provider_calls"] == 0
+        assert observed["sent"] == [], "a handoff sends no message to the customer"
 
     asyncio.run(run())
 
@@ -556,6 +557,7 @@ def test_human_supported_media_handoffs_and_is_never_sent_to_ai(
         assert observed["handoffs"] == [expected_reason]
         assert observed["human_routes"] == 1
         assert observed["media_captures"] == 1
+        assert observed["sent"] == []
         assert observed["ai_calls"] == 0
         assert observed["shipping_calls"] == []
         assert observed["quota_calls"] == 0
@@ -1131,5 +1133,41 @@ def test_assigned_staff_can_send_pdf_with_reply_context(monkeypatch) -> None:
         assert sent["send"]["media_type"] == "document"
         assert sent["send"]["filename"] == "invoice.pdf"
         assert sent["send"]["context_message_id"] == "wamid.customer.pdf"
+
+    asyncio.run(run())
+
+
+def test_ai_handoff_sends_no_message_to_customer(monkeypatch) -> None:
+    from app.support_models import AIReplyResult, HandoffRequest
+
+    async def run() -> None:
+        store = InMemoryConversationStore()
+        conversation = Conversation(phone_number="96170123456", business_phone_number_id="123")
+        sent: list[str] = []
+        handoffs: list[str] = []
+
+        async def ai_reply(*_args, **_kwargs):
+            return AIReplyResult(reply_text="", handoff=HandoffRequest(reason="CUSTOMER_REQUEST"))
+
+        async def finalize_handoff(*, handoff, **_kwargs):
+            handoffs.append(handoff.reason)
+            return {"id": 61}, True
+
+        async def send_text_once(*, body: str, **_kwargs):
+            sent.append(body)
+
+        monkeypatch.setattr(main, "conversation_store", store)
+        monkeypatch.setattr(main, "_get_ai_reply_with_deadline", ai_reply)
+        monkeypatch.setattr(main.support_service, "finalize_handoff", finalize_handoff)
+        monkeypatch.setattr(main, "_send_text_once", send_text_once)
+
+        handled, status = await main._handle_ai_result(
+            conversation=conversation,
+            incoming=IncomingWhatsAppMessage("96170123456", "wamid.human", "text", "Agent please", str(int(time.time()))),
+            user_message_for_ticket="Agent please",
+        )
+        assert (handled, status) == (True, "handed_off")
+        assert handoffs == ["CUSTOMER_REQUEST"]
+        assert sent == []
 
     asyncio.run(run())

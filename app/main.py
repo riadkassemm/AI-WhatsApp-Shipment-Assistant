@@ -37,7 +37,6 @@ from app.language import (
     ai_rate_limited,
     auth_unavailable,
     detect_communication_style,
-    handoff_confirmation,
     login_confirmation,
     logout_confirmation,
     pending_request_unavailable,
@@ -1212,15 +1211,13 @@ async def _handle_ai_result(
             )
             return True, "handoff_failed_notified"
 
-        handoff_text = guarded_reply or handoff_confirmation(
-            conversation.communication_style
-        )
-        await _send_text_once(
-            to=conversation.phone_number,
-            body=handoff_text,
-            source_message_id=source_message_id,
-            phone_number_id=conversation.business_phone_number_id,
-        )
+        if guarded_reply:
+            await _send_text_once(
+                to=conversation.phone_number,
+                body=guarded_reply,
+                source_message_id=source_message_id,
+                phone_number_id=conversation.business_phone_number_id,
+            )
         logger.info(
             "Conversation handed to support: customer_ref=%s ticket_id=%s",
             safe_log_identifier(conversation.phone_number, "wa"),
@@ -1460,15 +1457,13 @@ async def _resume_after_auth(
         conversation.pending_tool_name = None
         conversation.pending_tool_arguments = None
         await conversation_store.save(conversation)
-        await _send_text_once(
-            to=conversation.phone_number,
-            body=(
-                guarded_reply
-                or handoff_confirmation(conversation.communication_style)
-            ),
-            source_message_id=source_message_id,
-            phone_number_id=conversation.business_phone_number_id,
-        )
+        if guarded_reply:
+            await _send_text_once(
+                to=conversation.phone_number,
+                body=guarded_reply,
+                source_message_id=source_message_id,
+                phone_number_id=conversation.business_phone_number_id,
+            )
         logger.info(
             "Authenticated conversation handed to support: customer_ref=%s ticket_id=%s",
             safe_log_identifier(conversation.phone_number, "wa"),
@@ -1665,24 +1660,6 @@ async def _handoff_incoming_without_ai(
                 reason,
             )
             return _json_response(503, {"status": "human_message_persist_failed"})
-
-    try:
-        await _send_text_once(
-            to=conversation.phone_number,
-            body=handoff_confirmation(conversation.communication_style),
-            source_message_id=incoming.message_id,
-            phone_number_id=conversation.business_phone_number_id,
-        )
-    except Exception:
-        # Human ownership is already durable. Do not undo it or fall back to AI if
-        # the optional customer-facing transfer confirmation cannot be sent.
-        logger.exception(
-            "Human handoff persisted but transfer confirmation failed: customer_ref=%s "
-            "message_id=%s reason=%s",
-            safe_log_identifier(conversation.phone_number, "wa"),
-            incoming.message_id,
-            reason,
-        )
 
     logger.info(
         "Inbound routed to human without AI: customer_ref=%s message_id=%s "
