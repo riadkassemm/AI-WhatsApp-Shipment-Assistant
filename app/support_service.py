@@ -31,6 +31,7 @@ from app.support_media import (
 )
 from app.support_events import publish_support_event
 from app.support_repository import (
+    DELIVERY_STATUS_RANK,
     SupportConflictError,
     SupportNotFoundError,
     support_repository,
@@ -523,7 +524,7 @@ class SupportService:
                 return False
         if event.get("type") in {
             "outbound_message", "message_media_ready", "message_updated",
-            "message_deleted_for_everyone", "message_reaction",
+            "message_deleted_for_everyone", "message_reaction", "message_status",
         } and event.get("message_id") is not None:
             try:
                 message_id = int(event["message_id"])
@@ -1049,6 +1050,158 @@ class SupportService:
                 message=_serialize_support_messages(ticket_id, [message])[0],
             )
         return True
+
+    async def apply_delivery_status(
+        self,
+        *,
+        whatsapp_message_id: str,
+        status: str,
+        timestamp_ms: int | None,
+        business_phone_number_id: str | None,
+        phone_number: str | None,
+    ) -> bool:
+        """Record a WhatsApp delivered/read receipt. False when no support row matches."""
+        status = str(status or "").lower()
+        if status not in DELIVERY_STATUS_RANK:
+            raise SupportValidationError("Unknown WhatsApp delivery status.")
+        try:
+            at = datetime.fromtimestamp(int(timestamp_ms) / 1000, tz=timezone.utc).replace(tzinfo=None) if timestamp_ms else datetime.now(timezone.utc).replace(tzinfo=None)
+        except (TypeError, ValueError, OverflowError, OSError) as exc:
+            raise SupportValidationError("Invalid WhatsApp delivery status timestamp.") from exc
+        result = await support_repository.apply_delivery_status(
+            str(whatsapp_message_id), status=status, at=at,
+            business_phone_number_id=business_phone_number_id or None,
+            phone_number=normalize_phone(phone_number) if phone_number else None,
+        )
+        if not result:
+            return False
+        message, changed = result
+        if changed:
+            ticket_id = int(message["ticket_id"])
+            await publish_support_event(
+                "message_status", ticket_id=ticket_id,
+                message_id=int(message["id"]),
+                message=_serialize_support_messages(ticket_id, [message])[0],
+            )
+        return True
+
+    async def resend_failed_message(
+        self,
+        ticket_id: int,
+        message_id: int,
+        *,
+        agent: SupportAgent,
+    ) -> dict[str, Any]:
+        """Send a FAILED outgoing message again, on the same timeline row.
+
+        The row keeps its client message ID. If an earlier attempt reached
+        WhatsApp after all, its late confirmation is ignored once this attempt
+        is confirmed, so the dashboard never shows the message twice.
+        """
+        ticket = await self._prepare_agent_outbound_ticket(ticket_id, agent)
+        message = await support_repository.get_message(message_id)
+        if (
+            not message or int(message.get("ticket_id") or 0) != int(ticket_id)
+            or message.get("direction") != "OUTBOUND"
+            or str(message.get("sender_type") or "").upper() != "AGENT"
+            or str(message.get("sender_id") or "") != agent.id
+            or not message.get("client_message_id")
+            or message.get("deleted_for_everyone_at")
+        ):
+            raise SupportNotFoundError("This failed message is not available to resend.")
+        if message.get("send_status") != "FAILED":
+            raise SupportConflictError("Only messages that failed to send can be resent.")
+        message_type = str(message.get("message_type") or "text")
+        if message_type not in {"text", "location"} | SUPPORT_MEDIA_MESSAGE_TYPES:
+            raise SupportValidationError("This message type cannot be resent.")
+        asset = None
+        if message_type in SUPPORT_MEDIA_MESSAGE_TYPES:
+            asset = support_media_store.get(int(ticket_id), int(message_id))
+            if asset is None:
+                raise SupportConflictError("The file for this message is no longer stored. Send it again from your device.")
+        if not await support_repository.restart_failed_send(int(message_id)):
+            raise SupportConflictError("This message is already being resent.")
+
+        pending = await support_repository.get_message(int(message_id))
+        if pending:
+            await publish_support_event(
+                "outbound_message", ticket_id=ticket_id, message_id=int(message_id),
+                message=_serialize_support_messages(ticket_id, [pending])[0],
+            )
+        line_id = str(ticket.get("business_phone_number_id")) if ticket.get("business_phone_number_id") else None
+        client_message_id = str(message["client_message_id"])
+        reply_whatsapp_id = message.get("reply_to_whatsapp_message_id") or None
+        body = str(message.get("body") or "")
+        try:
+            if message_type == "text":
+                response = await whatsapp_client.send_text(
+                    to=str(ticket["whatsapp_phone"]), body=body, client_message_id=client_message_id,
+                    phone_number_id=line_id, context_message_id=reply_whatsapp_id,
+                )
+            elif message_type == "location":
+                response = await whatsapp_client.send_location(
+                    to=str(ticket["whatsapp_phone"]),
+                    latitude=float(message["location_latitude"]), longitude=float(message["location_longitude"]),
+                    name=message.get("location_name"), address=message.get("location_address"),
+                    client_message_id=client_message_id, phone_number_id=line_id,
+                    context_message_id=reply_whatsapp_id,
+                )
+            else:
+                assert asset is not None
+                content = asset.path.read_bytes()
+                default_bodies = {"image": {"Image"}, "video": {"Video"}, "document": {asset.filename, "Document"}}
+                caption = body if message_type in default_bodies and body not in default_bodies[message_type] else None
+                media_id = await whatsapp_client.upload_media(
+                    content=content, mime_type=asset.mime_type, filename=asset.filename, phone_number_id=line_id,
+                )
+                response = await whatsapp_client.send_media(
+                    to=str(ticket["whatsapp_phone"]), media_type=message_type, media_id=media_id,
+                    client_message_id=client_message_id, caption=caption,
+                    voice=(message_type == "audio" and body == "Voice note"),
+                    filename=(asset.filename if message_type == "document" else None),
+                    context_message_id=reply_whatsapp_id, phone_number_id=line_id,
+                )
+        except Exception as exc:
+            await support_repository.update_message_send_state(
+                int(message_id), send_status="FAILED",
+                error_message=sanitize_support_text(str(exc))[:500] or "WhatsApp send failed.",
+            )
+            failed = await support_repository.get_message(int(message_id))
+            if failed and failed.get("send_status") == "SENT":
+                return _serialize_support_messages(ticket_id, [failed])[0] or {}
+            if failed:
+                await publish_support_event(
+                    "outbound_message", ticket_id=ticket_id, message_id=int(message_id),
+                    message=_serialize_support_messages(ticket_id, [failed])[0],
+                )
+            logger.warning("Agent WhatsApp resend failed for ticket_id=%s type=%s", ticket_id, message_type)
+            raise SupportSendError("WhatsApp could not send the message again.") from exc
+
+        whatsapp_message_id = None
+        messages = response.get("messages") if isinstance(response, dict) else None
+        if isinstance(messages, list) and messages and isinstance(messages[0], dict):
+            whatsapp_message_id = messages[0].get("id")
+        try:
+            await support_repository.update_message_send_state(
+                int(message_id), send_status="SENT",
+                whatsapp_message_id=str(whatsapp_message_id) if whatsapp_message_id else None,
+                error_message=None,
+            )
+        except SupportConflictError:
+            # The earlier attempt was confirmed meanwhile; the message is sent.
+            logger.info("Resent message was already confirmed by an earlier attempt: ticket_id=%s", ticket_id)
+        if ticket.get("status") == "ASSIGNED":
+            try:
+                await support_repository.mark_agent_reply_started(ticket_id, agent_id=agent.id, agent_name=agent.name)
+            except Exception:
+                logger.exception("Message resent but automatic IN_PROGRESS transition failed: ticket_id=%s", ticket_id)
+        updated = await support_repository.get_message(int(message_id))
+        serialized = _serialize_support_messages(ticket_id, [updated])[0] if updated else {}
+        if updated:
+            await publish_support_event(
+                "outbound_message", ticket_id=ticket_id, message_id=int(message_id), message=serialized,
+            )
+        return serialized or {}
 
     async def route_whatsapp_reaction(
         self,

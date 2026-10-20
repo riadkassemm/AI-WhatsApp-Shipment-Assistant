@@ -1069,6 +1069,18 @@ async def send_ticket_message(
         raise _translate_error(exc) from exc
 
 
+@router.post("/tickets/{ticket_id}/messages/{message_id}/resend")
+async def resend_ticket_message(
+    ticket_id: int,
+    message_id: int,
+    agent: SupportAgent = Depends(require_support_csrf),
+) -> dict:
+    try:
+        return {"message": await support_service.resend_failed_message(ticket_id, message_id, agent=agent)}
+    except Exception as exc:
+        raise _translate_error(exc) from exc
+
+
 @router.patch("/tickets/{ticket_id}/messages/{message_id}")
 async def edit_ticket_message(
     ticket_id: int, message_id: int, request: EditMessageRequest,

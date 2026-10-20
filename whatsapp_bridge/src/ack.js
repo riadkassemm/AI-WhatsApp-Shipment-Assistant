@@ -14,16 +14,23 @@ export class AckTracker {
     };
     socket.ws.on('CB:ack,class:message', this.onAck);
   }
-  expect(id) {
+  // With deferred, the timeout starts only when startTimer() is called, so a
+  // slow media upload before the relay is not mistaken for a missing ACK.
+  expect(id, { deferred = false } = {}) {
     let timer;
-    const promise = new Promise((resolve, reject) => {
-      const settle = fn => value => { clearTimeout(timer); this.waiting.delete(id); fn(value); };
-      this.waiting.set(id, { resolve: settle(resolve), reject: settle(reject) });
+    let settled = false;
+    const startTimer = () => {
+      if (timer || settled) return;
       timer = setTimeout(() => this.waiting.get(id)?.reject(new BridgeError(504, 'CONFIRMATION_UNKNOWN', 'WhatsApp acknowledgment timed out. Retry the same operation to check it.')), this.timeoutMs);
+    };
+    const promise = new Promise((resolve, reject) => {
+      const settle = fn => value => { settled = true; clearTimeout(timer); this.waiting.delete(id); fn(value); };
+      this.waiting.set(id, { resolve: settle(resolve), reject: settle(reject) });
     });
+    if (!deferred) startTimer();
     // sendMessage can fail before this promise is awaited.
     promise.catch(() => {});
-    return { promise, cancel: () => this.waiting.get(id)?.reject(new BridgeError(503, 'SEND_FAILED', 'Message relay failed.')) };
+    return { promise, startTimer, cancel: () => this.waiting.get(id)?.reject(new BridgeError(503, 'SEND_FAILED', 'Message relay failed.')) };
   }
   close() {
     this.socket.ws.off('CB:ack,class:message', this.onAck);

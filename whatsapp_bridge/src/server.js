@@ -65,9 +65,15 @@ export function createServer(bridge, config) {
     } catch (error) {
       if (response.headersSent) return response.destroy();
       const isKnown = error instanceof BridgeError;
+      const status = isKnown ? error.status : 500;
+      if (status >= 500) {
+        // Phone numbers in provider errors are masked; message content is never part of them.
+        const detail = String(error?.message ?? '').replace(/\d{6,}/g, '#').slice(0, 160);
+        console.warn(`Linked-device request failed: route=${request.method} ${String(request.url ?? '').split('?')[0].replace(/\/(messages|media)\/[^/]+/, '/$1/:id')} status=${status} code=${error?.code ?? error?.output?.statusCode ?? error?.name ?? 'unknown'} error=${detail}`);
+      }
       const uncertainCodes = ['CONFIRMATION_UNKNOWN', 'DISCONNECTED', 'SEND_FAILED', 'INVALID_PROVIDER_RESPONSE'];
       const deliveryUncertain = error.delivery_uncertain ?? (!isKnown || uncertainCodes.includes(error.code));
-      send(response, isKnown ? error.status : 500, { delivery_uncertain: deliveryUncertain,
+      send(response, status, { delivery_uncertain: deliveryUncertain,
         error: { code: isKnown ? error.code : 'BRIDGE_ERROR', message: isKnown ? error.message : 'The bridge could not complete this operation.' } });
     }
   });

@@ -621,3 +621,40 @@ def test_remove_enforces_actual_csrf_dependency(removal_bridge):
             assert removal_bridge["calls"] == []
             assert (await client.request("DELETE", path, json=body, headers={"X-CSRF-Token": "correct-csrf"})).status_code == 200
     asyncio.run(run())
+
+
+def test_linked_message_status_updates_ticks_and_drops_unknown_receipts(linked_config, monkeypatch):
+    import time as time_module
+
+    now_ms = int(time_module.time() * 1000)
+    event = {
+        "event_id": "status-1", "type": "message_status", "line_id": "90001", "from_me": True,
+        "message_id": "ld:90001:SENT1", "status": "read",
+        "sender_phone": "96171111111", "timestamp": now_ms,
+    }
+    seen = []
+    found = True
+
+    async def apply(**kwargs):
+        seen.append(kwargs)
+        return found
+
+    monkeypatch.setattr(api_module.support_service, "apply_delivery_status", apply)
+    endpoint = "/api/whatsapp/linked-device/events"
+    response = request("POST", endpoint, payload=event)
+    assert response.status_code == 200 and response.json() == {"status": "applied"}
+    assert seen[0] == {
+        "whatsapp_message_id": "ld:90001:SENT1", "status": "read", "timestamp_ms": now_ms,
+        "business_phone_number_id": "90001", "phone_number": "96171111111",
+    }
+
+    found = False
+    # A fresh receipt for a message that is not saved yet is retried by the bridge.
+    assert request("POST", endpoint, payload=event).status_code == 503
+    # An old one is dropped, so receipts for messages support never stored stop retrying.
+    stale = dict(event, timestamp=now_ms - 10 * 60_000)
+    response = request("POST", endpoint, payload=stale)
+    assert response.status_code == 200 and response.json()["status"] == "ignored"
+
+    for invalid in (dict(event, status="played"), dict(event, from_me=False), dict(event, message_id="wamid.cloud")):
+        assert request("POST", endpoint, payload=invalid).status_code == 400

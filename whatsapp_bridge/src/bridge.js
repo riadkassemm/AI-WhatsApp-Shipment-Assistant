@@ -7,7 +7,7 @@ import QRCode from 'qrcode';
 import { BridgeError, phoneDigits, wrapId, unwrapId, validateLineManifest, UUID_PATTERN, MANIFEST_MAX_BYTES } from './config.js';
 import { FileStore, createAuth } from './storage.js';
 import { AckTracker } from './ack.js';
-import { inboundEvent, outgoingEvent, outgoingConfirmationEvent, messageTombstoneEvent, mutationEvent, textBody, millis, eventId, MEDIA_TYPES } from './events.js';
+import { inboundEvent, outgoingEvent, outgoingConfirmationEvent, messageTombstoneEvent, messageStatusEvent, mutationEvent, textBody, millis, eventId, MEDIA_TYPES, RECEIPT_STATUSES, RECEIPT_RANK } from './events.js';
 import { preserveNativeMutationMetadata } from './native-events.js';
 
 const silentLogger = pino({ level: 'silent' });
@@ -20,6 +20,10 @@ function mediaUrlHost(message) {
   try { return media?.url ? new URL(media.url).host : null; } catch { return null; }
 }
 const initialLine = () => ({ bound_phone: '', messages: {}, media: {}, operations: {}, enabled: false });
+// A missing ACK or a timed-out/closed query usually means the WhatsApp
+// connection died without notice. Reconnecting lets the next send work.
+const staleConnectionError = error => error?.code === 'CONFIRMATION_UNKNOWN' ||
+  [408, 428].includes(error?.output?.statusCode) || /timed out|connection closed/i.test(String(error?.message ?? ''));
 const transientConnectionError = error => ['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'ENETUNREACH', 'EHOSTUNREACH', 'EAI_AGAIN', 'ENOTFOUND']
   .includes(error?.code) || [408, 428, 500, 502, 503, 504].includes(error?.output?.statusCode);
 
@@ -514,6 +518,22 @@ export class Bridge {
       if (!data.entries.some(entry => entry.event.event_id === event.event_id)) data.entries.push({ event, attempts: 0, next_try: 0, created_at: Date.now() });
     });
   }
+  // Delivered/read receipts become dashboard ticks. Only messages the
+  // dashboard knows about are forwarded (its own sends and phone-app messages),
+  // never the bot's automatic replies.
+  async receiveReceipt(line, key, status) {
+    const record = line.store.data.messages[key.id];
+    if (!record?.message?.key?.fromMe || !record.phone || record.deleted) return;
+    if (!record.client_message_id && !record.mirrored_outgoing) return;
+    if ((RECEIPT_RANK[record.receipt] ?? 0) >= RECEIPT_RANK[status]) return;
+    if (record.client_message_id && !record.confirmation_enqueued && !record.pending_send) {
+      // A receipt proves WhatsApp accepted a send whose ACK was lost.
+      await line.store.update(data => { data.messages[key.id].ack_confirmed = true; });
+      await this.enqueueOwnConfirmation(line, key.id);
+    }
+    await this.enqueue(messageStatusEvent(line, key.id, record.phone, status, Date.now()));
+    await line.store.update(data => { if (data.messages[key.id]) data.messages[key.id].receipt = status; });
+  }
   async enqueueOwnConfirmation(line, nativeId) {
     const record = line.store.data.messages[nativeId];
     if (!record?.client_message_id || record.confirmation_enqueued || (!record.ack_confirmed && !record.echo_seen)) return;
@@ -684,11 +704,12 @@ export class Bridge {
     await line.store.update(data => {
       data.messages[key.id] = { ...(data.messages[key.id] ?? {}), message, phone, media_id: mediaId,
         timestamp: existing?.timestamp ?? millis(message.messageTimestamp), text: textBody(content), notified: Boolean(event),
-        pending_normalization: !phone };
+        pending_normalization: !phone, ...(key.fromMe && event ? { mirrored_outgoing: true } : {}) };
     });
   }
   async receiveUpdate(line, { key, update }) {
     if (!key?.id || !update) return;
+    if (RECEIPT_STATUSES[update.status]) await this.receiveReceipt(line, key, RECEIPT_STATUSES[update.status]);
     // messages.delete is a local chat deletion event and is intentionally never relayed.
     const deleted = update.messageStubType === proto.WebMessageInfo.StubType.REVOKE;
     const edited = Boolean(update.message?.editedMessage);
@@ -812,7 +833,7 @@ export class Bridge {
       const options = {};
       if (payload.context?.message_id) options.quoted = this.target(line, payload.context.message_id, phone, false).message;
       const nativeId = generateMessageIDV2(socket.user?.id);
-      const waiter = line.ack.expect(nativeId);
+      const waiter = line.ack.expect(nativeId, { deferred: true });
       try {
         // Reserve the native ID durably before the socket can emit a fromMe
         // upsert. A fast echo or crash must not mirror this dashboard send as
@@ -823,6 +844,7 @@ export class Bridge {
           ...(clientMessageId ? { client_message_id: clientMessageId } : {}),
         }; });
         const message = await socket.sendMessage(jid, content, { ...options, messageId: nativeId });
+        waiter.startTimer();
         if (!message?.key?.id || message.key.id !== nativeId) throw new BridgeError(502, 'INVALID_PROVIDER_RESPONSE', 'WhatsApp did not return the expected message ID.');
         // Keep retry keys even if ACK is lost; no success is returned until confirmed.
         await line.store.update(data => { data.messages[nativeId] = { message, phone, timestamp: millis(message.messageTimestamp), text: textBody(message.message), notified: true, pending_send: true,
@@ -835,6 +857,7 @@ export class Bridge {
         return { messages: [{ id: wrapId(id, nativeId) }] };
       } catch (error) {
         waiter.cancel();
+        if (staleConnectionError(error)) this.restartStaleSocket(line, socket);
         // A send failure may follow provider delivery. Retain the native ID
         // and source correlation, then await a real WhatsApp echo or callback.
         if (line.store.data.messages[nativeId]) {
@@ -851,6 +874,11 @@ export class Bridge {
     });
   }
 
+  restartStaleSocket(line, socket) {
+    if (line.socket !== socket || line.removing || this.stopping) return;
+    console.warn(`Linked-device connection looks stale; reconnecting: line=${line.line_id}`);
+    socket.end(new Error('WhatsApp connection stopped responding'));
+  }
   serialSend(line, action) {
     const task = line.sendTail.then(action);
     line.sendTail = task.catch(() => {});

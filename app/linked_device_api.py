@@ -5,6 +5,7 @@ import asyncio
 import json
 import logging
 import re
+import time
 from typing import Literal
 from uuid import UUID
 
@@ -32,6 +33,8 @@ router = APIRouter(tags=["whatsapp-linked-device"])
 logger = logging.getLogger("shipment-bot")
 _MAX_EVENT_BYTES = 128 * 1024
 _PHONE = re.compile(r"^[0-9]{5,20}$")
+# How long a receipt for a not-yet-saved message is retried before it is dropped.
+_STATUS_RETRY_WINDOW_MS = 120_000
 _line_addition_lock = asyncio.Lock()
 
 
@@ -62,7 +65,7 @@ class RemoveLinkedDeviceLineRequest(BaseModel):
 
 class LinkedDeviceEvent(BaseModel):
     event_id: str = Field(min_length=1, max_length=128)
-    type: Literal["message", "message_tombstone", "outgoing_message", "outgoing_confirmation", "message_updated", "message_deleted_for_everyone"]
+    type: Literal["message", "message_tombstone", "outgoing_message", "outgoing_confirmation", "message_status", "message_updated", "message_deleted_for_everyone"]
     line_id: str = Field(pattern=r"^[0-9]{5,32}$")
     display_phone_number: str | None = Field(default=None, max_length=64)
     payload: dict | None = None
@@ -74,6 +77,7 @@ class LinkedDeviceEvent(BaseModel):
     deleted_timestamp: int | None = Field(default=None, gt=0)
     from_me: bool | None = None
     sender_phone: str | None = Field(default=None, pattern=r"^[0-9]{5,20}$")
+    status: Literal["delivered", "read"] | None = None
 
 
 def _require_manager(agent: SupportAgent) -> None:
@@ -364,6 +368,29 @@ async def receive_linked_device_event(request: Request):
         if not applied:
             raise HTTPException(503, "The dashboard message is not available yet. Retry this event.")
         return {"status": "applied"}
+
+    if event.type == "message_status":
+        if (
+            event.from_me is not True or event.status is None or not event.timestamp
+            or not event.sender_phone or not _PHONE.fullmatch(event.sender_phone)
+            or not is_linked_device_message(event.message_id, event.line_id)
+        ):
+            raise HTTPException(400, "Invalid linked device message status.")
+        try:
+            applied = await support_service.apply_delivery_status(
+                whatsapp_message_id=str(event.message_id), status=event.status,
+                timestamp_ms=event.timestamp, business_phone_number_id=event.line_id,
+                phone_number=event.sender_phone,
+            )
+        except SupportValidationError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        if applied:
+            return {"status": "applied"}
+        # The message may still be finishing its send, or its mirror callback
+        # may still be queued. Retry briefly, then drop the receipt.
+        if abs(time.time() * 1000 - event.timestamp) < _STATUS_RETRY_WINDOW_MS:
+            raise HTTPException(503, "The message is not available yet. Retry this event.")
+        return {"status": "ignored", "reason": "message_not_in_support"}
 
     if (
         not is_linked_device_message(event.message_id, event.line_id)

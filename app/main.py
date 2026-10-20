@@ -2366,6 +2366,24 @@ async def receive_message(
     return await process_whatsapp_payload(payload, source="cloud")
 
 
+async def _apply_cloud_delivery_statuses(change: dict, statuses: list) -> None:
+    """Show Meta delivered/read receipts as ticks on support messages."""
+    line_id = str((change.get("metadata") or {}).get("phone_number_id") or "") or None
+    for item in statuses[:100]:
+        if not isinstance(item, dict) or item.get("status") not in {"delivered", "read"} or not item.get("id"):
+            continue
+        try:
+            timestamp_ms = int(item.get("timestamp") or 0) * 1000 or None
+            await support_service.apply_delivery_status(
+                whatsapp_message_id=str(item["id"]), status=str(item["status"]),
+                timestamp_ms=timestamp_ms, business_phone_number_id=line_id,
+                phone_number=str(item.get("recipient_id") or "") or None,
+            )
+        except Exception:
+            # Receipts are cosmetic. Never fail the webhook because of one.
+            logger.warning("WhatsApp delivery status could not be recorded: status=%s", item.get("status"))
+
+
 async def process_whatsapp_payload(payload: dict, *, source: str = "cloud") -> Response:
     """Use the same durable inbound pipeline for both WhatsApp connections."""
 
@@ -2390,6 +2408,8 @@ async def process_whatsapp_payload(payload: dict, *, source: str = "cloud") -> R
                 "received: count=%d",
                 len(statuses),
             )
+            if source == "cloud" and isinstance(statuses, list):
+                await _apply_cloud_delivery_statuses(change, statuses)
 
     except (
         KeyError,

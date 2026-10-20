@@ -1099,3 +1099,62 @@ test('number lookup reports whether a phone number has WhatsApp before a chat is
   await assert.rejects(bridge.checkNumber(LINE, { phone: 'not a number' }), error => error.code === 'INVALID_PHONE');
   assert.equal(socket.calls.length, 0, 'a lookup never sends a message');
 });
+
+test('delivered and read receipts become dashboard status events, only moving forward', async t => {
+  const { bridge, line } = await fixture(t);
+  const sent = await bridge.send(LINE, { to: PHONE, type: 'text', text: { body: 'Ticked reply' }, client_message_id: 'tick-1' });
+  const nativeId = unwrapId(LINE, sent.messages[0].id);
+  const key = { id: nativeId, remoteJid: `${PHONE}@s.whatsapp.net`, fromMe: true };
+  await bridge.outbox.update(data => { data.entries = []; });
+  await bridge.receiveUpdate(line, { key, update: { status: proto.WebMessageInfo.Status.DELIVERY_ACK } });
+  await bridge.receiveUpdate(line, { key, update: { status: proto.WebMessageInfo.Status.DELIVERY_ACK } });
+  await bridge.receiveUpdate(line, { key, update: { status: proto.WebMessageInfo.Status.READ } });
+  await bridge.receiveUpdate(line, { key, update: { status: proto.WebMessageInfo.Status.DELIVERY_ACK } });
+  const events = bridge.outbox.data.entries.map(item => item.event);
+  assert.deepEqual(events.map(event => [event.type, event.status]), [['message_status', 'delivered'], ['message_status', 'read']]);
+  assert.equal(events[0].message_id, sent.messages[0].id);
+  assert.equal(events[0].sender_phone, PHONE);
+  assert.equal(events[0].from_me, true);
+  assert.notEqual(events[0].event_id, events[1].event_id);
+});
+
+test('a receipt confirms a send whose ACK was lost, before its status event', async t => {
+  const { bridge, line } = await fixture(t, 'timeout');
+  await assert.rejects(bridge.send(LINE, { to: PHONE, type: 'text', text: { body: 'Late ack' }, client_message_id: 'late-ack-1' }),
+    error => error.code === 'CONFIRMATION_UNKNOWN');
+  const [nativeId] = Object.entries(line.store.data.messages).find(([, item]) => item.client_message_id === 'late-ack-1');
+  await bridge.receiveUpdate(line, { key: { id: nativeId, remoteJid: `${PHONE}@s.whatsapp.net`, fromMe: true },
+    update: { status: proto.WebMessageInfo.Status.DELIVERY_ACK } });
+  assert.deepEqual(bridge.outbox.data.entries.map(item => item.event.type), ['outgoing_confirmation', 'message_status']);
+  assert.equal(bridge.outbox.data.entries[0].event.client_message_id, 'late-ack-1');
+  assert.equal(bridge.lineStatus(line).uncertain_sends, 0);
+});
+
+test('receipts for bot replies and incoming messages are not forwarded', async t => {
+  const { bridge, line } = await fixture(t);
+  const bot = await bridge.send(LINE, { to: PHONE, type: 'text', text: { body: 'Automatic reply' } });
+  await bridge.outbox.update(data => { data.entries = []; });
+  await bridge.receiveUpdate(line, { key: { id: unwrapId(LINE, bot.messages[0].id), remoteJid: `${PHONE}@s.whatsapp.net`, fromMe: true },
+    update: { status: proto.WebMessageInfo.Status.READ } });
+  await line.store.update(data => { data.messages.INCOMING = { message: original('INCOMING', false), phone: PHONE, timestamp: Date.now(), notified: true }; });
+  await bridge.receiveUpdate(line, { key: { id: 'INCOMING', remoteJid: `${PHONE}@s.whatsapp.net`, fromMe: false },
+    update: { status: proto.WebMessageInfo.Status.READ } });
+  assert.equal(bridge.outbox.data.entries.length, 0);
+});
+
+test('a missing WhatsApp ACK restarts the stale connection', async t => {
+  const { bridge, socket } = await fixture(t, 'timeout');
+  let ended = 0;
+  socket.end = () => { ended++; };
+  await assert.rejects(bridge.send(LINE, { to: PHONE, type: 'text', text: { body: 'No ack' }, client_message_id: 'stale-1' }),
+    error => error.code === 'CONFIRMATION_UNKNOWN');
+  assert.equal(ended, 1);
+});
+
+test('the ACK timeout starts after a slow relay, not before it', async t => {
+  const { bridge, socket } = await fixture(t);
+  const sendMessage = socket.sendMessage;
+  socket.sendMessage = async (...args) => { await new Promise(resolve => setTimeout(resolve, 60)); return sendMessage(...args); };
+  const sent = await bridge.send(LINE, { to: PHONE, type: 'text', text: { body: 'Slow upload' }, client_message_id: 'slow-1' });
+  assert.ok(sent.messages[0].id.startsWith(`ld:${LINE}:`));
+});
