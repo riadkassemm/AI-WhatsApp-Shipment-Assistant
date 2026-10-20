@@ -136,6 +136,10 @@ _SUPPORT_SCHEMA_MIGRATIONS: tuple[tuple[str, dict[str, set[str]]], ...] = (
         "migrations/20261019_staff_quick_replies.sql",
         {"support_quick_replies": {"id", "staff_id", "title", "body", "created_at", "updated_at"}},
     ),
+    (
+        "migrations/20261020_editable_contacts.sql",
+        {"support_contacts": {"replaces_phone"}},
+    ),
 )
 
 MAX_QUICK_REPLIES_PER_STAFF = 200

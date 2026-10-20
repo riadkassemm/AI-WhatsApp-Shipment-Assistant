@@ -13,6 +13,14 @@ from app.config import settings
 _PHONE_NON_DIGIT = re.compile(r"\D+")
 
 
+class ContactNotFoundError(LookupError):
+    pass
+
+
+class ContactConflictError(ValueError):
+    pass
+
+
 def normalize_phone(value: str | None) -> str:
     digits = _PHONE_NON_DIGIT.sub("", str(value or ""))
     if digits.startswith("00"):
@@ -28,6 +36,8 @@ class CustomerIdentity:
     user_id: str | None = None
     userid: str | None = None
     contact_id: int | None = None
+    # Contacts-list key of the contact that names this number (manual:/google:/vcf:).
+    contact_key: str | None = None
 
 
 class CustomerDirectory:
@@ -143,14 +153,43 @@ class CustomerDirectory:
             (normalized,),
         )
 
+    async def _directory_contact(self, phone: str) -> dict[str, Any] | None:
+        """A Google or VCF contact for this number, when no dashboard contact exists."""
+        normalized = normalize_phone(phone)
+        if not normalized:
+            return None
+        return await self._fetchone(
+            """
+            SELECT 'google' AS source, gc.id, gc.display_name
+            FROM support_google_contacts gc
+            JOIN support_google_accounts ga ON ga.id = gc.account_id
+            WHERE ga.id = 1 AND gc.normalized_phone = %s
+            UNION ALL
+            SELECT 'vcf' AS source, vc.id, vc.display_name
+            FROM support_vcf_contacts vc
+            WHERE vc.normalized_phone = %s
+            LIMIT 1
+            """,
+            (normalized, normalized),
+        )
+
     async def resolve(self, phone: str) -> CustomerIdentity:
         normalized = normalize_phone(phone)
-        # A registered user wins over a saved contact; look both up at once so
-        # opening a conversation waits for one lookup instead of two in a row.
-        user, contact = await asyncio.gather(
+        # A registered user wins over a saved contact, which wins over a Google
+        # or VCF contact. Look them up at once so opening a conversation waits
+        # for one round trip instead of several in a row.
+        user, contact, directory = await asyncio.gather(
             self._registered_user(normalized),
             self._saved_contact(normalized),
+            self._directory_contact(normalized),
+            return_exceptions=True,
         )
+        for result in (user, contact):
+            if isinstance(result, BaseException):
+                raise result
+        # Google/VCF naming is optional; a lookup failure must not block a conversation.
+        if isinstance(directory, BaseException):
+            directory = None
         if user:
             return CustomerIdentity(
                 source="registered_user",
@@ -165,6 +204,15 @@ class CustomerDirectory:
                 phone=normalized,
                 name=str(contact.get("display_name") or "").strip() or None,
                 contact_id=int(contact["id"]),
+                contact_key=f"manual:{int(contact['id'])}",
+            )
+        if directory:
+            source = str(directory.get("source") or "")
+            return CustomerIdentity(
+                source=f"{source}_contact",
+                phone=normalized,
+                name=str(directory.get("display_name") or "").strip() or None,
+                contact_key=f"{source}:{int(directory['id'])}",
             )
         return CustomerIdentity(source="guest", phone=normalized)
 
@@ -197,6 +245,98 @@ class CustomerDirectory:
             (normalized, name[:191], staff_id, staff_id),
         )
         return await self.resolve(normalized)
+
+    async def _contact_phone(self, source: str, contact_id: int) -> str | None:
+        if source == "manual":
+            row = await self._fetchone("SELECT normalized_phone FROM support_contacts WHERE id = %s", (contact_id,))
+        elif source == "google":
+            row = await self._fetchone(
+                """
+                SELECT gc.normalized_phone
+                FROM support_google_contacts gc
+                JOIN support_google_accounts ga ON ga.id = gc.account_id
+                WHERE ga.id = 1 AND gc.id = %s
+                """,
+                (contact_id,),
+            )
+        else:
+            row = await self._fetchone("SELECT normalized_phone FROM support_vcf_contacts WHERE id = %s", (contact_id,))
+        return str(row["normalized_phone"]) if row else None
+
+    async def edit_contact(
+        self,
+        *,
+        contact_key: str,
+        display_name: str,
+        phone: str,
+        staff_id: str,
+    ) -> dict[str, Any]:
+        """Edit any contact in the Contacts list.
+
+        Dashboard contacts are updated in place. Google and VCF contacts are
+        never changed at their source: the edit is saved as a dashboard contact
+        that takes their place in the list (``replaces_phone`` hides the
+        original entry when the number was corrected).
+        """
+        source, _, raw_id = str(contact_key or "").partition(":")
+        if source not in {"manual", "google", "vcf"} or not raw_id.isdigit():
+            raise ContactNotFoundError("Contact not found.")
+        contact_id = int(raw_id)
+        name = " ".join(str(display_name or "").split())[:191]
+        normalized = normalize_phone(phone)
+        if not name:
+            raise ValueError("Contact name is required.")
+        if not normalized:
+            raise ValueError("A valid phone number is required.")
+        original_phone = await self._contact_phone(source, contact_id)
+        if original_phone is None:
+            raise ContactNotFoundError("Contact not found.")
+        if await self._registered_user(normalized):
+            raise ContactConflictError("This phone number already belongs to a registered customer.")
+
+        if source == "manual":
+            other = await self._fetchone(
+                "SELECT id FROM support_contacts WHERE normalized_phone = %s AND id <> %s",
+                (normalized, contact_id),
+            )
+            if other:
+                raise ContactConflictError("Another saved contact already uses this number.")
+            await self._execute(
+                """
+                UPDATE support_contacts
+                SET display_name = %s, normalized_phone = %s,
+                    updated_by_staff_id = %s, updated_at = UTC_TIMESTAMP(6)
+                WHERE id = %s
+                """,
+                (name, normalized, staff_id, contact_id),
+            )
+            saved_id = contact_id
+        else:
+            replaces = original_phone if original_phone != normalized else None
+            await self._execute(
+                """
+                INSERT INTO support_contacts (
+                    normalized_phone, display_name, replaces_phone, created_by_staff_id,
+                    updated_by_staff_id, created_at, updated_at
+                ) VALUES (%s, %s, %s, %s, %s, UTC_TIMESTAMP(6), UTC_TIMESTAMP(6))
+                ON DUPLICATE KEY UPDATE
+                    display_name = VALUES(display_name),
+                    replaces_phone = COALESCE(VALUES(replaces_phone), replaces_phone),
+                    updated_by_staff_id = VALUES(updated_by_staff_id),
+                    updated_at = UTC_TIMESTAMP(6)
+                """,
+                (normalized, name, replaces, staff_id, staff_id),
+            )
+            row = await self._fetchone("SELECT id FROM support_contacts WHERE normalized_phone = %s", (normalized,))
+            if not row:
+                raise ContactNotFoundError("Contact could not be saved.")
+            saved_id = int(row["id"])
+        return {
+            "contact_key": f"manual:{saved_id}",
+            "source": "manual",
+            "display_name": name,
+            "normalized_phone": normalized,
+        }
 
 
 customer_directory = CustomerDirectory()

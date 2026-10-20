@@ -46,6 +46,7 @@ def test_support_schema_guard_accepts_current_schema():
         "whatsapp_phone_numbers": {"display_name"},
         "staff": {"deleted_at"},
         "support_quick_replies": {"id", "staff_id", "title", "body", "created_at", "updated_at"},
+        "support_contacts": {"replaces_phone"},
     }
     columns["support_ticket_messages"].update({"edited_at", "deleted_for_everyone_at", "deleted_by", "version"})
     add_linked_device_schema(columns)
@@ -83,6 +84,7 @@ def test_support_schema_guard_identifies_whatsapp_features_migration():
         "whatsapp_phone_numbers": {"display_name"},
         "staff": {"deleted_at"},
         "support_quick_replies": {"id", "staff_id", "title", "body", "created_at", "updated_at"},
+        "support_contacts": {"replaces_phone"},
     }
     columns["support_ticket_messages"].update({"edited_at", "deleted_for_everyone_at", "deleted_by", "version"})
     add_linked_device_schema(columns)
@@ -117,6 +119,7 @@ def test_support_schema_guard_identifies_reaction_migration():
         "whatsapp_phone_numbers": {"display_name"},
         "staff": {"deleted_at"},
         "support_quick_replies": {"id", "staff_id", "title", "body", "created_at", "updated_at"},
+        "support_contacts": {"replaces_phone"},
     }
     columns["support_ticket_messages"].update({"edited_at", "deleted_for_everyone_at", "deleted_by", "version"})
     add_linked_device_schema(columns)
@@ -174,4 +177,17 @@ def test_support_schema_guard_identifies_quick_replies_migration():
                 columns.setdefault(table, set()).update(required)
     assert _missing_support_schema_migrations(columns) == [
         "migrations/20261019_staff_quick_replies.sql"
+    ]
+
+
+def test_support_schema_guard_identifies_editable_contacts_migration():
+    from app.support_repository import _SUPPORT_SCHEMA_MIGRATIONS
+
+    columns = {}
+    for path, requirements in _SUPPORT_SCHEMA_MIGRATIONS:
+        if "20261020_editable_contacts" not in path:
+            for table, required in requirements.items():
+                columns.setdefault(table, set()).update(required)
+    assert _missing_support_schema_migrations(columns) == [
+        "migrations/20261020_editable_contacts.sql"
     ]

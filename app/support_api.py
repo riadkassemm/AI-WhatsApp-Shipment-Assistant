@@ -167,6 +167,14 @@ class StaffMessagePreferencesUpdateRequest(BaseModel):
     resolution_message: str = Field(default="", max_length=2000)
 
 
+class ContactEditRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    contact_key: str = Field(min_length=3, max_length=64)
+    display_name: str = Field(default="", max_length=1000)
+    phone: str = Field(default="", max_length=64)
+
+
 class QuickReplyRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -627,6 +635,22 @@ async def list_contacts(
     try:
         return await google_contacts_service.list_contacts(
             query=q, page=page, page_size=page_size
+        )
+    except Exception as exc:
+        raise _translate_error(exc) from exc
+
+
+@router.put("/contacts")
+async def edit_contact(
+    payload: ContactEditRequest,
+    agent: SupportAgent = Depends(require_support_csrf),
+) -> dict:
+    try:
+        return await support_service.edit_contact(
+            agent=agent,
+            contact_key=payload.contact_key,
+            display_name=payload.display_name,
+            phone=payload.phone,
         )
     except Exception as exc:
         raise _translate_error(exc) from exc

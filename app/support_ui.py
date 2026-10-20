@@ -690,6 +690,12 @@ select { cursor: pointer; }
 .ticket-row-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-left: 42px; }
 .contact-row { width: 100%; display: grid; grid-template-columns: 34px minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 10px 14px 10px 16px; border: 0; border-bottom: 1px solid var(--border); background: transparent; color: var(--text); text-align: left; cursor: pointer; transition: background-color var(--transition); }
 .contact-row:hover { background: var(--surface-hover); }
+.contact-item { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; border-bottom: 1px solid var(--border); }
+.contact-item:hover { background: var(--surface-hover); }
+.contact-item .contact-row { border-bottom: 0; background: transparent; }
+.contact-edit-btn { width: 32px; height: 32px; margin-right: 10px; color: var(--text-muted); }
+.contact-edit-btn:hover { color: var(--primary-text); }
+.modal-card.contact-edit-card { width: min(480px, 100%); }
 .contact-row:focus-visible { outline-offset: -2px; box-shadow: none; }
 .contact-row-copy { min-width: 0; }
 .contact-row-name { color: var(--text-strong); font-size: var(--text-md); font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -1946,6 +1952,28 @@ body.column-resizing * { cursor: col-resize !important; }
   </div>
 </section>
 
+<section class="modal-backdrop hidden" id="contactEditModal" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="contactEditTitle" aria-describedby="contactEditNote">
+  <div class="modal-card contact-edit-card" role="document" tabindex="-1">
+    <div class="modal-head">
+      <div><h2 id="contactEditTitle">Edit contact</h2><div class="modal-subtitle" id="contactEditSubtitle">Contact</div></div>
+      <button class="icon-btn modal-close" id="closeContactEditBtn" type="button" aria-label="Close contact editor"><svg class="icon" aria-hidden="true"><use href="#icon-x"></use></svg></button>
+    </div>
+    <div class="modal-body">
+      <div class="staff-feedback error-box" id="contactEditError" role="alert" aria-live="assertive"></div>
+      <form id="contactEditForm" novalidate>
+        <div class="field"><label for="contactEditName">Name</label><input id="contactEditName" type="text" maxlength="191" autocomplete="off" dir="auto" required /></div>
+        <div class="field">
+          <label for="contactEditPhone">WhatsApp number</label>
+          <input id="contactEditPhone" type="tel" inputmode="tel" maxlength="40" autocomplete="off" placeholder="+961 3 123 456" required />
+          <div class="field-hint">Include the country code, for example +961 for Lebanon or +90 for Turkey.</div>
+        </div>
+        <div class="form-note" id="contactEditNote"></div>
+        <div class="modal-actions"><button class="btn" id="cancelContactEditBtn" type="button">Cancel</button><button class="btn primary" id="saveContactEditBtn" type="submit"><svg class="icon" aria-hidden="true"><use href="#icon-check"></use></svg>Save contact</button></div>
+      </form>
+    </div>
+  </div>
+</section>
+
 <section class="modal-backdrop hidden" id="mediaViewerModal" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="mediaViewerTitle">
   <div class="modal-card media-viewer-card" role="document" tabindex="-1">
     <div class="modal-head">
@@ -2236,6 +2264,8 @@ const state = {
   quickRepliesBusy: false,
   quickRepliesRequest: 0,
   quickReplyEditing: null,
+  contactEditTarget: null,
+  contactEditBusy: false,
   aiSettingsBusy: false,
   aiSettings: null,
   whatsappBusy: false,
@@ -3070,6 +3100,11 @@ function handleGlobalKeydown(event) {
       closeMessagePreferencesModal();
       return;
     }
+    if (state.activeModal === 'contactEditModal') {
+      event.preventDefault();
+      closeContactEditModal();
+      return;
+    }
     if (state.activeModal === 'quickRepliesModal') {
       event.preventDefault();
       if (state.quickReplyEditing) showQuickReplyList();
@@ -3292,6 +3327,8 @@ function showLogin() {
   closeDialog('messagePreferencesModal', false);
   closeDialog('quickRepliesModal', false);
   resetQuickReplies();
+  closeDialog('contactEditModal', false);
+  state.contactEditTarget = null;
   closeDialog('aiSettingsModal', false);
   closeDialog('whatsappModal', false);
   closeDialog('staffModal', false);
@@ -3546,6 +3583,8 @@ function createMetaChip(label, iconName, className = 'meta-chip') {
 }
 
 function createContactRow(contact) {
+  const item = document.createElement('div');
+  item.className = 'contact-item';
   const row = document.createElement('button');
   row.type = 'button';
   row.className = 'contact-row';
@@ -3562,7 +3601,10 @@ function createContactRow(contact) {
   name.textContent = contact.display_name || contact.normalized_phone || 'Unnamed contact';
   const phone = document.createElement('div');
   phone.className = 'contact-row-phone';
-  phone.textContent = '+' + String(contact.normalized_phone || '').replace(/^\+/, '');
+  // A number stored without a country code (common in Google/VCF imports) is not
+  // shown with a '+', so it does not look like a valid international number.
+  const phoneDigits = String(contact.normalized_phone || '').replace(/^\+/, '');
+  phone.textContent = phoneDigits.startsWith('0') ? phoneDigits : '+' + phoneDigits;
   const meta = document.createElement('div');
   meta.className = 'contact-row-meta';
   const source = document.createElement('span');
@@ -3576,10 +3618,22 @@ function createContactRow(contact) {
   chat.setAttribute('aria-hidden', 'true');
   chat.append(createIcon('message', 'icon icon-sm'), document.createTextNode('Chat'));
   row.setAttribute('aria-label', 'Start chat with ' + name.textContent);
+  row.setAttribute('aria-keyshortcuts', 'E');
   row.tabIndex = -1;
   row.append(avatar, copy, chat);
   row.onclick = () => openStartChatModal(contact);
-  return row;
+  row.contact = contact;
+  // Every contact can be edited: saved, Google, and VCF. Keyboard users press E on a row.
+  const edit = document.createElement('button');
+  edit.type = 'button';
+  edit.className = 'icon-btn contact-edit-btn';
+  edit.tabIndex = -1;
+  edit.setAttribute('aria-label', 'Edit contact ' + name.textContent);
+  edit.dataset.tooltip = 'Edit contact';
+  edit.append(createIcon('edit', 'icon icon-sm'));
+  edit.onclick = event => { event.stopPropagation(); openContactEditModal(contact); };
+  item.append(row, edit);
+  return item;
 }
 
 function createTicketRow(ticket) {
@@ -3947,6 +4001,11 @@ function changePage(direction) {
 
 function handleQueueKeydown(event) {
   const current = event.target.closest('.ticket-row, .contact-row, .search-result-row');
+  if (current?.contact && event.key.toLowerCase() === 'e' && !event.ctrlKey && !event.metaKey && !event.altKey) {
+    event.preventDefault();
+    openContactEditModal(current.contact);
+    return;
+  }
   if (!current || !['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
   const rows = [...$('queue').querySelectorAll('.ticket-row, .contact-row, .search-result-row')];
   const index = rows.indexOf(current);
@@ -5530,12 +5589,13 @@ function appendContextCard(container, title, entries, {summary = false} = {}) {
 
 async function saveCurrentContact(ticket, identity) {
   if (!ticket || !state.ticketId || state.busy) return;
-  const current = identity && identity.saved_contact ? (identity.name || ticket.customer_name || '') : '';
+  const isContact = Boolean(identity && identity.contact_key);
+  const current = isContact ? (identity.name || ticket.customer_name || '') : '';
   const name = await promptDialog({
-    title: identity && identity.saved_contact ? 'Edit contact name' : 'Save this guest as a contact',
+    title: isContact ? 'Edit contact name' : 'Save this guest as a contact',
     label: 'Contact name',
     value: current,
-    confirmLabel: identity && identity.saved_contact ? 'Save name' : 'Save contact'
+    confirmLabel: isContact ? 'Save name' : 'Save contact'
   });
   if (name === null) return;
   const trimmed = name.trim();
@@ -5580,7 +5640,7 @@ function renderContext(ticket, context, shipment, identity = null, permissions =
     const save = document.createElement('button');
     save.type = 'button';
     save.className = 'btn small context-contact-action';
-    save.append(createIcon('user', 'icon icon-sm'), document.createTextNode(identity.saved_contact ? 'Edit contact' : 'Save contact'));
+    save.append(createIcon('user', 'icon icon-sm'), document.createTextNode(identity.contact_key ? 'Edit contact' : 'Save contact'));
     save.onclick = () => saveCurrentContact(ticket, identity);
     hero.append(save);
   }
@@ -5591,7 +5651,7 @@ function renderContext(ticket, context, shipment, identity = null, permissions =
     ['User ID', ticket.customer_userid, 'code'],
     ['WhatsApp', ticket.whatsapp_phone],
     ['Authenticated', context.authenticated],
-    ['Identity', identity?.registered_user ? 'Registered customer' : identity?.saved_contact ? 'Saved contact' : 'Guest']
+    ['Identity', identity?.registered_user ? 'Registered customer' : identity?.saved_contact ? 'Saved contact' : identity?.source === 'google_contact' ? 'Google contact' : identity?.source === 'vcf_contact' ? 'Imported contact (VCF)' : 'Guest']
   ]);
 
   if (!isStaffChat(ticket)) {
@@ -8028,6 +8088,64 @@ async function openStartChatModal(contact = null) {
   }
 }
 
+const CONTACT_SOURCE_NOTES = {
+  manual: 'This contact is saved in the dashboard.',
+  google: 'From Google Contacts. Your changes are saved in the dashboard; Google Contacts is not changed.',
+  vcf: 'Imported from a VCF file. Your changes are saved in the dashboard.'
+};
+
+function showContactEditError(message) {
+  const element = $('contactEditError');
+  element.textContent = message || '';
+  element.style.display = message ? 'block' : 'none';
+}
+
+function openContactEditModal(contact) {
+  if (!state.authenticated || !contact?.contact_key || state.activeModal) return;
+  state.contactEditTarget = contact;
+  showContactEditError('');
+  $('contactEditName').value = contact.display_name || '';
+  // Numbers stored without a country code are shown as-is so staff can add it.
+  const digits = String(contact.normalized_phone || '').replace(/\D/g, '');
+  $('contactEditPhone').value = digits ? (digits.startsWith('0') ? digits : '+' + digits) : '';
+  text($('contactEditSubtitle'), contact.display_name || $('contactEditPhone').value || 'Contact');
+  const source = String(contact.contact_key).split(':')[0];
+  text($('contactEditNote'), CONTACT_SOURCE_NOTES[source] || CONTACT_SOURCE_NOTES.manual);
+  openDialog('contactEditModal', 'contactEditName');
+}
+
+function closeContactEditModal() {
+  if (state.contactEditBusy) return;
+  state.contactEditTarget = null;
+  showContactEditError('');
+  closeDialog('contactEditModal');
+}
+
+async function saveContactEdit(event) {
+  event.preventDefault();
+  const contact = state.contactEditTarget;
+  if (!contact || state.contactEditBusy) return;
+  const name = $('contactEditName').value.trim();
+  const phone = $('contactEditPhone').value.trim();
+  if (!name) { showContactEditError('Enter the contact name.'); $('contactEditName').focus(); return; }
+  if (!phone) { showContactEditError('Enter the WhatsApp number.'); $('contactEditPhone').focus(); return; }
+  state.contactEditBusy = true;
+  setButtonBusy($('saveContactEditBtn'), true, 'Saving…');
+  showContactEditError('');
+  try {
+    await api('/api/support/contacts', {method: 'PUT', body: JSON.stringify({contact_key: contact.contact_key, display_name: name, phone})});
+    state.contactEditBusy = false;
+    closeContactEditModal();
+    notify('Contact saved.');
+    if (state.view === 'contacts') await loadQueue();
+  } catch (error) {
+    showContactEditError(error.message);
+  } finally {
+    state.contactEditBusy = false;
+    setButtonBusy($('saveContactEditBtn'), false);
+  }
+}
+
 function renderStartChatLinePreview() {
   const select = $('startChatLine');
   const preview = $('startChatLinePreview');
@@ -8501,6 +8619,9 @@ $('closeMessagePreferencesBtn').addEventListener('click', closeMessagePreference
 $('cancelMessagePreferencesBtn').addEventListener('click', closeMessagePreferencesModal);
 $('messagePreferencesForm').addEventListener('submit', saveMessagePreferences);
 $('quickRepliesBtn').addEventListener('click', openQuickRepliesModal);
+$('closeContactEditBtn').addEventListener('click', closeContactEditModal);
+$('cancelContactEditBtn').addEventListener('click', closeContactEditModal);
+$('contactEditForm').addEventListener('submit', saveContactEdit);
 $('closeQuickRepliesBtn').addEventListener('click', closeQuickRepliesModal);
 $('addQuickReplyBtn').addEventListener('click', () => showQuickReplyForm(null));
 $('cancelQuickReplyBtn').addEventListener('click', showQuickReplyList);

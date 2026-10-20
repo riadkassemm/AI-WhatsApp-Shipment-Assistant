@@ -662,7 +662,7 @@ class GoogleContactsService:
                 WHERE ga.id = 1
                   AND NOT EXISTS (
                       SELECT 1 FROM support_contacts sc2
-                      WHERE sc2.normalized_phone = gc.normalized_phone
+                      WHERE (sc2.normalized_phone = gc.normalized_phone OR sc2.replaces_phone = gc.normalized_phone)
                   )
                 {where_google}
                 UNION ALL
@@ -677,7 +677,7 @@ class GoogleContactsService:
                 FROM support_vcf_contacts vc
                 WHERE NOT EXISTS (
                           SELECT 1 FROM support_contacts sc3
-                          WHERE sc3.normalized_phone = vc.normalized_phone
+                          WHERE (sc3.normalized_phone = vc.normalized_phone OR sc3.replaces_phone = vc.normalized_phone)
                       )
                   AND NOT EXISTS (
                           SELECT 1
@@ -717,14 +717,14 @@ class GoogleContactsService:
                          WHERE ga.id = 1
                            AND NOT EXISTS (
                                SELECT 1 FROM support_contacts sc2
-                               WHERE sc2.normalized_phone = gc.normalized_phone
+                               WHERE (sc2.normalized_phone = gc.normalized_phone OR sc2.replaces_phone = gc.normalized_phone)
                            ))
                         +
                         (SELECT COUNT(*)
                          FROM support_vcf_contacts vc
                          WHERE NOT EXISTS (
                                    SELECT 1 FROM support_contacts sc3
-                                   WHERE sc3.normalized_phone = vc.normalized_phone
+                                   WHERE (sc3.normalized_phone = vc.normalized_phone OR sc3.replaces_phone = vc.normalized_phone)
                                )
                            AND NOT EXISTS (
                                    SELECT 1

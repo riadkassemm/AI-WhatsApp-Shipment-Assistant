@@ -478,6 +478,21 @@ export class Bridge {
     return this.lineStatus(line);
   }
 
+  // Asks WhatsApp whether a number has an account, so staff cannot start a chat
+  // with a number that is missing its country code or is not on WhatsApp.
+  async checkNumber(id, payload) {
+    const line = this.getLine(id);
+    const socket = this.connected(line);
+    const phone = phoneDigits(payload?.phone);
+    const lookup = socket.onWhatsApp(`${phone}@s.whatsapp.net`);
+    let timer;
+    const timeout = new Promise((_, reject) => { timer = setTimeout(() => reject(new BridgeError(504, 'LOOKUP_TIMEOUT', 'WhatsApp did not answer the number lookup in time.')), 10_000); });
+    let results;
+    try { results = await Promise.race([lookup, timeout]); } finally { clearTimeout(timer); }
+    const match = (results ?? []).find(item => item?.exists);
+    const jidPhone = match ? String(match.jid ?? '').split('@')[0].split(':')[0] : '';
+    return { phone, exists: Boolean(match), whatsapp_phone: /^\d{5,15}$/.test(jidPhone) ? jidPhone : phone };
+  }
   connected(line) {
     if (line.removing) throw new BridgeError(503, 'LINE_REMOVING', 'This WhatsApp number is being removed.');
     if (line.status !== 'connected' || !line.socket) throw new BridgeError(503, 'NOT_CONNECTED', 'Connect this WhatsApp line before sending or changing messages.');

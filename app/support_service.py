@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import re
@@ -10,7 +11,7 @@ from decimal import Decimal
 from typing import Any
 
 from app.conversation_store import Conversation, conversation_store
-from app.customer_directory import customer_directory, normalize_phone
+from app.customer_directory import ContactConflictError, ContactNotFoundError, customer_directory, normalize_phone
 from app.client_chat_auth import redact_sensitive_text
 from app.handoff import notify_human_agents
 from app.google_contacts import google_contacts_service
@@ -34,7 +35,8 @@ from app.support_repository import (
     SupportNotFoundError,
     support_repository,
 )
-from app.whatsapp_client import IncomingWhatsAppMessage, WhatsAppMediaError, get_transport, is_linked_device_message, whatsapp_client
+from app.phone_numbers import PhoneNumberError, region_for_number, to_whatsapp_digits
+from app.whatsapp_client import IncomingWhatsAppMessage, WhatsAppMediaError, get_transport, is_linked_device_message, linked_device_client, whatsapp_client
 from app.whatsapp_registry import whatsapp_registry_service
 
 
@@ -1332,8 +1334,75 @@ class SupportService:
             "phone": identity.phone,
         }
 
+    async def edit_contact(
+        self,
+        *,
+        agent: SupportAgent,
+        contact_key: str,
+        display_name: str,
+        phone: str,
+    ) -> dict[str, Any]:
+        """Edit any contact from the Contacts list (saved, Google, or VCF)."""
+        name = sanitize_support_text(display_name).strip()
+        if not name:
+            raise SupportValidationError("Contact name is required.")
+        if len(name) > 191:
+            raise SupportValidationError("Contact name is too long.")
+        try:
+            normalized = to_whatsapp_digits(phone)
+        except PhoneNumberError as exc:
+            raise SupportValidationError(str(exc)) from exc
+        try:
+            contact = await customer_directory.edit_contact(
+                contact_key=contact_key, display_name=name, phone=normalized, staff_id=agent.id,
+            )
+        except ContactNotFoundError as exc:
+            raise SupportNotFoundError(str(exc)) from exc
+        except ContactConflictError as exc:
+            raise SupportConflictError(str(exc)) from exc
+        except ValueError as exc:
+            raise SupportValidationError(str(exc)) from exc
+        await support_repository.update_customer_name_for_phone(contact["normalized_phone"], contact["display_name"])
+        logger.info(
+            "Support contact edited: staff_id=%s source=%s phone_ref=%s",
+            agent.id, str(contact_key).partition(":")[0], hashlib.sha256(normalized.encode()).hexdigest()[:12],
+        )
+        await publish_support_event(
+            "contact_saved", staff_id=agent.id, customer_phone=contact["normalized_phone"], customer_name=contact["display_name"]
+        )
+        return contact
+
     async def list_chat_lines(self, agent: SupportAgent) -> list[dict[str, Any]]:
         return await whatsapp_registry_service.list_enabled_numbers(agent)
+
+    async def _whatsapp_number_for_line(
+        self, raw_phone: str, *, line_id: str, line_display_phone: str | None
+    ) -> str:
+        """International digits for a staff-entered number on one WhatsApp line.
+
+        Local numbers are read in the line's country. On linked-device lines,
+        WhatsApp is asked whether the number has an account, so a chat is never
+        started with a number that cannot receive it.
+        """
+        try:
+            phone = to_whatsapp_digits(raw_phone, default_region=region_for_number(line_display_phone))
+        except PhoneNumberError as exc:
+            raise SupportValidationError(str(exc)) from exc
+        if get_transport(line_id) != "linked_device":
+            return phone
+        try:
+            result = await linked_device_client.check_number(phone, phone_number_id=line_id)
+        except Exception as exc:
+            # The lookup is a safety check; an unavailable lookup must not block sending.
+            logger.warning(
+                "WhatsApp number lookup unavailable: line_id=%s exception_type=%s", line_id, type(exc).__name__
+            )
+            return phone
+        if not result["exists"]:
+            raise SupportValidationError(
+                "This number is not on WhatsApp. Check the number and its country code."
+            )
+        return result["whatsapp_phone"]
 
     async def start_chat(
         self,
@@ -1351,9 +1420,6 @@ class SupportService:
         latest chat thread. Shared customer history remains visible to staff
         even when a different agent handled an earlier conversation.
         """
-        phone = normalize_phone(phone_number)
-        if len(phone) < 8 or len(phone) > 15:
-            raise SupportValidationError("Enter a valid international WhatsApp phone number.")
         line_id = str(business_phone_number_id or "").strip()
         if not line_id or not await whatsapp_registry_service.is_number_enabled(line_id):
             raise SupportValidationError("Choose an enabled WhatsApp line.")
@@ -1362,12 +1428,13 @@ class SupportService:
             raise SupportValidationError("Enter the first message for this chat.")
         if len(message_body) > 4096:
             raise SupportValidationError("WhatsApp messages must be 4096 characters or fewer.")
-
-        identity = await customer_directory.resolve(phone)
-        name = str(customer_name or "").strip() or identity.name
         line_rows = await whatsapp_registry_service.list_enabled_numbers(agent)
         line = next((item for item in line_rows if str(item.get("phone_number_id")) == line_id), None)
         display = (line or {}).get("display_phone_number")
+        phone = await self._whatsapp_number_for_line(phone_number, line_id=line_id, line_display_phone=display)
+
+        identity = await customer_directory.resolve(phone)
+        name = str(customer_name or "").strip() or identity.name
 
         reopened = False
         existing_active = await support_repository.find_active_ticket_by_phone(phone, line_id)
@@ -1635,14 +1702,15 @@ class SupportService:
         if not source or int(source.get("ticket_id") or 0) != int(source_ticket_id) or source.get("deleted_for_everyone_at") or await support_repository.message_hidden_for_user(source_message_id, agent.id):
             raise SupportNotFoundError("Message not found.")
 
-        phone = normalize_phone(phone_number)
-        if len(phone) < 8 or len(phone) > 15:
-            raise SupportValidationError("Choose a contact with a valid international WhatsApp number.")
         line_id = str(source_ticket.get("business_phone_number_id") or "").strip()
         if not line_id:
             raise SupportValidationError("The source conversation does not have a WhatsApp business line.")
         if not await whatsapp_registry_service.is_number_enabled(line_id):
             raise SupportConflictError("The source WhatsApp business line is disabled.")
+        phone = await self._whatsapp_number_for_line(
+            phone_number, line_id=line_id,
+            line_display_phone=str(source_ticket.get("business_display_phone_number") or "") or None,
+        )
         if phone == normalize_phone(str(source_ticket.get("whatsapp_phone") or "")):
             raise SupportValidationError("Choose a different contact to forward this message to.")
 
@@ -1998,6 +2066,8 @@ class SupportService:
                 "name": identity.name if identity is not None else ticket.get("customer_name"),
                 "registered_user": bool(identity is not None and identity.source == "registered_user"),
                 "saved_contact": bool(identity is not None and identity.source == "saved_contact"),
+                # Set for saved, Google and VCF contacts; any of them can be edited.
+                "contact_key": getattr(identity, "contact_key", None),
             },
             "permissions": {
                 "can_operate": _can_operate(ticket, agent),
