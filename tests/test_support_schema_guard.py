@@ -1,4 +1,12 @@
-from app.support_repository import _missing_support_schema_migrations
+from pathlib import Path
+import re
+
+from app.support_repository import _SUPPORT_SCHEMA_MIGRATIONS, _missing_support_schema_migrations
+
+
+def add_base_schema(columns):
+    for table, required in _SUPPORT_SCHEMA_MIGRATIONS[0][1].items():
+        columns.setdefault(table, set()).update(required)
 
 
 def add_linked_device_schema(columns):
@@ -51,6 +59,7 @@ def test_support_schema_guard_accepts_current_schema():
     }
     columns["support_ticket_messages"].update({"edited_at", "deleted_for_everyone_at", "deleted_by", "version"})
     add_linked_device_schema(columns)
+    add_base_schema(columns)
     assert _missing_support_schema_migrations(columns) == []
 
 
@@ -89,6 +98,7 @@ def test_support_schema_guard_identifies_whatsapp_features_migration():
     }
     columns["support_ticket_messages"].update({"edited_at", "deleted_for_everyone_at", "deleted_by", "version"})
     add_linked_device_schema(columns)
+    add_base_schema(columns)
     assert _missing_support_schema_migrations(columns) == [
         "migrations/20260917_whatsapp_message_features.sql"
     ]
@@ -124,9 +134,44 @@ def test_support_schema_guard_identifies_reaction_migration():
     }
     columns["support_ticket_messages"].update({"edited_at", "deleted_for_everyone_at", "deleted_by", "version"})
     add_linked_device_schema(columns)
+    add_base_schema(columns)
     assert _missing_support_schema_migrations(columns) == [
         "migrations/20260926_whatsapp_stickers_and_reactions.sql"
     ]
+
+
+def test_support_schema_guard_identifies_missing_base_tables():
+    columns = {}
+    for path, requirements in _SUPPORT_SCHEMA_MIGRATIONS:
+        if "20260825" not in path:
+            for table, required in requirements.items():
+                columns.setdefault(table, set()).update(required)
+    assert _missing_support_schema_migrations(columns) == [
+        "migrations/20260825_support_base_schema.sql"
+    ]
+
+
+def test_every_support_schema_guard_migration_file_exists():
+    for path, _requirements in _SUPPORT_SCHEMA_MIGRATIONS:
+        assert Path(path).is_file(), path
+
+
+def test_every_documented_migration_file_exists():
+    root = Path(__file__).resolve().parents[1]
+    sources = [root / "README.md"]
+    for directory, suffix in (("app", "*.py"), ("scripts", "*.py"), ("docs", "*.md")):
+        sources.extend((root / directory).glob(suffix))
+    references = {
+        match
+        for source in sources
+        for match in re.findall(
+            r"migrations/\d{8}_[a-z0-9_]+\.sql",
+            source.read_text(encoding="utf-8"),
+        )
+    }
+    assert references
+    for path in sorted(references):
+        assert (root / path).is_file(), path
 
 
 def test_support_schema_guard_identifies_linked_device_migration():

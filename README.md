@@ -359,6 +359,23 @@ The update route uses the existing authenticated support session and CSRF protec
 
 ## Database setup
 
+### Core support tables
+
+For a new database, create the original staff and support ticket tables before
+running the dated additive migrations:
+
+```bash
+mariadb -u <db-user> -p <database-name> \
+  < migrations/20260825_support_base_schema.sql
+```
+
+This baseline creates `staff`, `staff_sessions`, `support_tickets`,
+`support_ticket_messages`, and `support_ticket_events` only when absent. The
+existing customer and shipping tables belong to the business database. Apply
+`20260826_staff_email_uniqueness.sql` (or its Python helper) and the remaining
+support migrations in date order before starting the app. Existing populated
+support databases already containing these tables need no baseline change.
+
 ### Global AI control settings
 
 Apply the AI-control migration **before restarting code that contains the new inbound routing gate**:
@@ -726,6 +743,7 @@ Install `ffmpeg` on the application host or set `SUPPORT_MEDIA_FFMPEG_PATH` to t
 | `app/support_ui.py` | `/support` dashboard behavior. |
 | `app/support_image_editor.js` | Canvas overlay editor, text selection, undo/redo, and image export used by the support viewer. |
 | `tests/test_canonical_shipping_pipeline.py` | Canonical shipping-pipeline coverage. |
+| `migrations/20260825_support_base_schema.sql` | Recreates the original staff and support tables for a new database before additive migrations. |
 | `migrations/20260826_staff_email_uniqueness.sql` | Reference unique-email migration. |
 | `migrations/20260829_support_ticket_channels_and_transfers.sql` | Adds receiving WhatsApp business-number metadata/indexes used by multi-number ticket routing. |
 | `migrations/20260912_ai_control_settings.sql` | Creates persistent global AI controls and their audit history with backward-compatible AI-ON defaults. |

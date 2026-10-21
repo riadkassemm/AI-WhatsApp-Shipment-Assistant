@@ -81,6 +81,41 @@ def _ticket_active_key(phone_number: str, business_phone_number_id: str | None) 
 
 _SUPPORT_SCHEMA_MIGRATIONS: tuple[tuple[str, dict[str, set[str]]], ...] = (
     (
+        "migrations/20260825_support_base_schema.sql",
+        {
+            "staff": {
+                "id", "name", "email", "email_normalized", "password_hash",
+                "role", "is_active", "last_login_at", "failed_login_count",
+                "locked_until", "created_at", "updated_at",
+            },
+            "staff_sessions": {
+                "id", "staff_id", "token_hash", "csrf_hash", "expires_at",
+                "revoked_at", "created_at", "last_seen_at",
+            },
+            "support_tickets": {
+                "id", "ticket_reference", "active_key", "whatsapp_phone",
+                "customer_id", "customer_userid", "customer_name", "reason",
+                "ai_summary", "tracking_reference", "requested_action",
+                "current_language", "communication_style", "context_json",
+                "source_whatsapp_message_id", "status", "current_assignee_id",
+                "current_assignee_name", "created_at", "updated_at",
+                "last_activity_at", "assigned_at", "resolved_at",
+                "resolved_by_staff_id", "closed_at", "deleted_at",
+                "deleted_by_staff_id", "deleted_by_staff_name",
+            },
+            "support_ticket_messages": {
+                "id", "ticket_id", "sender_type", "sender_id", "sender_name",
+                "direction", "message_type", "body", "whatsapp_message_id",
+                "client_message_id", "whatsapp_timestamp", "send_status",
+                "error_message", "created_at", "updated_at",
+            },
+            "support_ticket_events": {
+                "id", "ticket_id", "event_type", "actor_type", "actor_id",
+                "actor_name", "details_json", "created_at",
+            },
+        },
+    ),
+    (
         "migrations/20260829_support_ticket_channels_and_transfers.sql",
         {
             "support_tickets": {
