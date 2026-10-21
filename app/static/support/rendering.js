@@ -2656,6 +2656,9 @@ function renderActions(data) {
   }
 
   if (permissions.can_claim) container.append(actionButton('Claim ticket', () => doAction('/claim', 'Ticket claimed.'), 'primary', 'user-check'));
+  if (permissions.can_reopen && ticket.status === 'RESOLVED' && !ticket.active_key) {
+    container.append(actionButton('Reopen ticket', reopenTicket, 'primary', 'refresh'));
+  }
   if (permissions.can_transfer && ticket.active_key) container.append(actionButton('Transfer', openTransferModal, '', 'transfer'));
   if (permissions.can_operate && ticket.active_key) {
     const availableStatuses = ['IN_PROGRESS', 'WAITING_CUSTOMER', 'WAITING_INTERNAL'].filter(status => status !== ticket.status);
@@ -3065,6 +3068,32 @@ async function setStatus(status) {
 async function resolveTicket() {
   if (!(await confirmDialog({title: 'Resolve ticket?', message: 'Resolve this ticket and return the WhatsApp conversation to AI?', confirmLabel: 'Resolve & return to AI', tone: 'success'}))) return;
   await doAction('/resolve', 'Ticket resolved and returned to AI.');
+}
+
+async function reopenTicket() {
+  const data = state.currentTicketData;
+  if (state.busy || !state.ticketId || !data?.permissions?.can_reopen) return;
+  const ticketId = state.ticketId;
+  state.busy = true;
+  setWorkspaceBusy(true);
+  showError('');
+  let reopened = null;
+  try {
+    reopened = await api('/api/support/tickets/' + ticketId + '/reopen', {
+      method: 'POST', body: JSON.stringify({resolved_at: data.ticket.resolved_at || null})
+    });
+    notify('Ticket reopened. Its assignee and conversation history are preserved.');
+  } catch (error) {
+    showError(error.message);
+    notify(error.message, 'error');
+  } finally {
+    state.busy = false;
+    setWorkspaceBusy(false);
+  }
+  if (!reopened || String(state.ticketId) !== String(ticketId)) return;
+  setQueueView(String(reopened.ticket.current_assignee_id) === String(state.agent?.id) ? 'mine' : 'active', {load: false});
+  // Composer permissions come from the refreshed backend detail only.
+  await openTicket(ticketId, {silent: true, refreshQueue: true});
 }
 
 async function closeStaffChat() {

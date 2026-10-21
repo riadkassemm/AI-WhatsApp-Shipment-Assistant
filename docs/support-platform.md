@@ -39,6 +39,35 @@ normally happens within the 15-second heartbeat interval. Redis is an internal
 notification bus, not a source of authorization. There is no durable SSE replay;
 the dashboard's normal polling refreshes state after missed events.
 
+## Reopening resolved customer tickets
+
+The resolved ticket's **Reopen ticket** button is available to its last assignee
+only when that same agent resolved it. Admins/Supervisors can reopen within their
+existing visibility scope. These rules are checked again under the database
+ticket lock; shared-history access does not grant reopening or sending rights.
+
+The existing `current_assignee_id` remains the last assignee after resolution;
+`resolved_by_staff_id` records the resolver. Missing legacy IDs never grant agent
+permission. No migration or ownership backfill is needed. Reopening requires a
+known, active last assignee and retains that assignee. Managers must use the
+existing Transfer action to change ownership; sending remains assignee-only.
+
+Reopening restores the pre-resolution status recorded in new resolution audit
+events. Older records without that status reopen as `ASSIGNED`. All messages,
+resolution timestamps, resolver records, and audit events are retained. Each
+successful transition adds a `TICKET_REOPENED` event with its actor and time;
+repeated requests for the same resolution do not add another event. The API
+requires the observed `resolved_at` value, including explicit `null` for legacy
+records, to reject stale requests after a newer resolution cycle.
+
+Only `RESOLVED` customer tickets qualify; staff chats retain their existing
+workflow. Removed numbers, unavailable assignees, conflicting active conversations,
+and active outbound attempts produce explicit conflicts. The existing unique
+active-conversation key and delivery guard remain authoritative. Real-time
+invalidation reloads queues, history, and permissions; the composer becomes
+available only after backend confirmation. Redis mode is refreshed to human
+support, with the durable database remaining authoritative if Redis is unavailable.
+
 ## Outbound delivery contract
 
 The database is authoritative for staff text, location, media, and automatic

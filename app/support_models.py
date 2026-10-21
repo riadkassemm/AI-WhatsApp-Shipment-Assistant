@@ -33,6 +33,20 @@ ALLOWED_TRANSITIONS: dict[str, set[str]] = {
 }
 
 
+def may_reopen_customer_ticket(ticket: dict[str, Any], staff_id: str, *, supervisor: bool) -> bool:
+    """Permission only; lifecycle, line availability, and uniqueness are separate guards.
+
+    Resolution preserves current_assignee_id as the last assignee. Missing
+    legacy resolver/assignment IDs never confer regular-agent permission.
+    """
+    return str(ticket.get("conversation_origin") or "CUSTOMER") != "STAFF" and (
+        supervisor or (
+            str(ticket.get("current_assignee_id") or "") == str(staff_id)
+            and str(ticket.get("resolved_by_staff_id") or "") == str(staff_id)
+        )
+    )
+
+
 @dataclass(frozen=True)
 class HandoffRequest:
     reason: str
