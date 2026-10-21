@@ -19,7 +19,7 @@ from app.google_contacts import google_contacts_service
 from app.shipment_client import shipment_client
 from app.staff_repository import staff_repository
 from app.support_auth import SupportAgent
-from app.support_models import ALLOWED_TRANSITIONS, ACTIVE_TICKET_STATUSES, HandoffRequest
+from app.support_models import ALLOWED_TRANSITIONS, ACTIVE_TICKET_STATUSES, HandoffRequest, may_reopen_customer_ticket
 from app.support_media import (
     SUPPORT_MEDIA_MESSAGE_TYPES,
     SupportMediaError,
@@ -2218,6 +2218,11 @@ class SupportService:
             },
             "permissions": {
                 "can_operate": _can_operate(ticket, agent),
+                "can_reopen": (
+                    ticket.get("status") == "RESOLVED" and ticket.get("active_key") is None
+                    and may_reopen_customer_ticket(ticket, agent.id, supervisor=agent.is_supervisor)
+                    and get_transport(str(ticket.get("business_phone_number_id") or "") or None) != "removed"
+                ),
                 # Viewing a ticket is the source authorization for forwarding.
                 # Unlike replying, forwarding remains available for resolved/closed
                 # history so staff can reuse prior messages as evidence.
@@ -3138,6 +3143,41 @@ class SupportService:
             provider_timestamp=int(datetime.now(timezone.utc).timestamp()),
         )
         return _normalize_row(reaction) or {}
+
+    async def reopen_ticket(
+        self, ticket_id: int, *, agent: SupportAgent, resolved_at: datetime | None,
+    ) -> dict[str, Any]:
+        ticket = await support_repository.get_ticket(ticket_id)
+        if not ticket:
+            raise SupportNotFoundError("Ticket not found.")
+        if not await _can_view_ticket(ticket, agent) or not may_reopen_customer_ticket(
+            ticket, agent.id, supervisor=agent.is_supervisor,
+        ):
+            raise SupportForbiddenError("Only the last assignee who resolved this ticket, or a supervisor, may reopen it.")
+        if get_transport(str(ticket.get("business_phone_number_id") or "") or None) == "removed":
+            raise SupportConflictError("This WhatsApp number has been removed. Its history is read-only.")
+        if resolved_at is not None and resolved_at.tzinfo is not None:
+            resolved_at = resolved_at.astimezone(timezone.utc).replace(tzinfo=None)
+        reopened, changed = await support_repository.reopen_customer_ticket(
+            ticket_id, agent_id=agent.id, agent_name=agent.name,
+            supervisor=agent.is_supervisor, expected_resolved_at=resolved_at,
+        )
+        try:
+            conversation = await conversation_store.get_or_create(
+                str(reopened['whatsapp_phone']), conversation_key=_conversation_key_for_ticket(reopened),
+                business_phone_number_id=str(reopened.get('business_phone_number_id') or '') or None,
+            )
+            active = await support_repository.find_active_ticket_by_phone(
+                str(reopened['whatsapp_phone']), str(reopened.get('business_phone_number_id') or '') or None,
+            )
+            await self.reconcile_conversation_mode(conversation, active)
+        except Exception:
+            # Durable DB state remains authoritative on the next inbound message.
+            logger.exception("Could not refresh conversation mode after reopening: ticket_id=%s", ticket_id)
+        # No ticket/customer data: even viewers losing shared-history access must
+        # invalidate their queue and reload current permissions through the API.
+        await publish_support_event("ticket_queues_changed")
+        return {"ticket": _safe_ticket_row(reopened), "changed": changed}
 
     async def resolve_and_return_to_ai(
         self,

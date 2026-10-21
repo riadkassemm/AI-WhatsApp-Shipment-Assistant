@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from typing import Literal
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Path, Request, Response, Query, UploadFile, status
@@ -80,6 +81,13 @@ class LoginRequest(BaseModel):
 
 class StatusUpdateRequest(BaseModel):
     status: str
+
+
+class ReopenTicketRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    # Required, nullable for legacy records. Guards against replaying an old
+    # reopen request after a newer resolve/reopen cycle.
+    resolved_at: datetime | None
 
 
 class SendMessageRequest(BaseModel):
@@ -1229,5 +1237,17 @@ async def resolve_ticket(
 ) -> dict:
     try:
         return await support_service.resolve_and_return_to_ai(ticket_id, agent=agent)
+    except Exception as exc:
+        raise _translate_error(exc) from exc
+
+
+@router.post("/tickets/{ticket_id}/reopen")
+async def reopen_ticket(
+    ticket_id: int,
+    payload: ReopenTicketRequest,
+    agent: SupportAgent = Depends(require_support_csrf),
+) -> dict:
+    try:
+        return await support_service.reopen_ticket(ticket_id, agent=agent, resolved_at=payload.resolved_at)
     except Exception as exc:
         raise _translate_error(exc) from exc

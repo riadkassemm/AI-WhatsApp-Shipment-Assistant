@@ -14,6 +14,18 @@ function connectSupportEvents() {
     let payload = {};
     try { payload = JSON.parse(event.data || '{}'); } catch (_) { return; }
     const type = String(payload.type || '');
+    if (type === 'ticket_queues_changed') {
+      if (payload.authorized !== true) return;
+      state.ticketPrefetch.clear();
+      state.previousTicketHistory = [];
+      state.previousHistoryExpanded = false;
+      state.previousHistoryLoaded = false;
+      refreshAllQueueCounts().catch(() => {});
+      loadQueue({silent: true}).catch(() => {});
+      if (state.query.trim().length >= 2) runGlobalMessageSearch().catch(() => {});
+      if (state.ticketId) openTicket(state.ticketId, {silent: true, refreshHistory: true}).catch(() => {});
+      return;
+    }
     if (type === 'message_status') {
       if (payload.authorized === true && payload.message && state.ticketId && String(state.ticketId) === String(payload.ticket_id || '')) {
         upsertTimelineMessage(payload.message, payload.ticket_id);

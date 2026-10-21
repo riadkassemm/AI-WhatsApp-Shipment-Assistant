@@ -10,7 +10,7 @@ import aiomysql
 
 from app.config import settings
 from app.support_delivery_repository import DeliveryRepositoryMixin
-from app.support_models import ACTIVE_TICKET_STATUSES, ALLOWED_TRANSITIONS
+from app.support_models import ACTIVE_TICKET_STATUSES, ALLOWED_TRANSITIONS, may_reopen_customer_ticket
 from app.whatsapp_client import get_transport
 
 
@@ -715,8 +715,8 @@ class SupportRepository(DeliveryRepositoryMixin):
     ) -> dict[str, Any] | None:
         """Find the conversation open when a delayed provider message was sent.
 
-        Staff chats can reopen in place, so their lifecycle events determine
-        which intervals were active. Customer tickets have one active interval.
+        Reopened chats and customer tickets can have multiple active intervals;
+        lifecycle events identify which conversation owned a delayed message.
         """
         if self._pool is None:
             await self.connect()
@@ -751,6 +751,20 @@ class SupportRepository(DeliveryRepositoryMixin):
                         if lifecycle and lifecycle.get("event_type") in {"CHAT_STARTED", "CHAT_REOPENED"}:
                             return ticket
                     else:
+                        await cur.execute(
+                            """SELECT event_type FROM support_ticket_events
+                               WHERE ticket_id=%s AND (event_type IN ('TICKET_REOPENED', 'TICKET_RESOLVED') OR
+                                   (event_type='STATUS_CHANGED' AND JSON_VALID(details_json)
+                                    AND JSON_UNQUOTE(JSON_EXTRACT(details_json, '$.to'))='CLOSED'))
+                                 AND created_at < %s
+                               ORDER BY created_at DESC, id DESC LIMIT 1""",
+                            (ticket['id'], start_cutoff),
+                        )
+                        lifecycle = await cur.fetchone()
+                        if lifecycle and lifecycle['event_type'] == 'TICKET_REOPENED':
+                            return ticket
+                        if lifecycle and lifecycle['event_type'] in {'TICKET_RESOLVED', 'STATUS_CHANGED'}:
+                            continue
                         resolved_at = ticket.get("resolved_at")
                         closed_at = ticket.get("closed_at")
                         if (resolved_at is None or resolved_at >= sent_at) and (closed_at is None or closed_at >= sent_at):
@@ -2887,9 +2901,12 @@ class SupportRepository(DeliveryRepositoryMixin):
                         INSERT INTO support_ticket_events (
                             ticket_id, event_type, actor_type, actor_id, actor_name,
                             details_json, created_at
-                        ) VALUES (%s, 'TICKET_RESOLVED', 'AGENT', %s, %s, '{}', UTC_TIMESTAMP(6))
+                        ) VALUES (%s, 'TICKET_RESOLVED', 'AGENT', %s, %s, %s, UTC_TIMESTAMP(6))
                         """,
-                        (ticket_id, agent_id, agent_name),
+                        (ticket_id, agent_id, agent_name, json.dumps({
+                            'previous_status': row['status'],
+                            'last_assignee_id': row.get('current_assignee_id'),
+                        })),
                     )
                     await cur.execute(
                         """
@@ -2909,6 +2926,99 @@ class SupportRepository(DeliveryRepositoryMixin):
         if not ticket:
             raise SupportNotFoundError("Ticket not found after resolve.")
         return ticket, True
+
+    async def reopen_customer_ticket(
+        self, ticket_id: int, *, agent_id: str, agent_name: str,
+        supervisor: bool, expected_resolved_at: datetime | None,
+    ) -> tuple[dict[str, Any], bool]:
+        """Reopen in place without assigning the actor or erasing resolution history."""
+        if self._pool is None:
+            await self.connect()
+        async with self._pool.acquire() as conn:
+            try:
+                async with conn.cursor(aiomysql.DictCursor) as cur:
+                    # Locate immutable channel before the transaction's read view.
+                    # Match removal/create lock order: line, ticket, messages.
+                    await cur.execute("SELECT business_phone_number_id FROM support_tickets WHERE id=%s", (ticket_id,))
+                    channel = await cur.fetchone()
+                    if not channel:
+                        raise SupportNotFoundError("Ticket not found.")
+                    line_id = str(channel.get("business_phone_number_id") or "")
+                    await conn.begin()
+                    await self._lock_active_linked_device_line(conn, line_id)
+                    await cur.execute("SELECT * FROM support_tickets WHERE id=%s FOR UPDATE", (ticket_id,))
+                    row = await cur.fetchone()
+                    if not row:
+                        raise SupportNotFoundError("Ticket not found.")
+                    if str(row.get("business_phone_number_id") or "") != line_id:
+                        raise SupportConflictError("The ticket's WhatsApp line changed. Refresh before reopening.")
+                    if not may_reopen_customer_ticket(row, agent_id, supervisor=supervisor):
+                        raise SupportConflictError("Reopening permission changed. Refresh the ticket.")
+                    if row.get("resolved_at") != expected_resolved_at:
+                        raise SupportConflictError("The ticket's resolution changed. Refresh before reopening.")
+                    if row.get("active_key") is not None and row.get("status") in ACTIVE_TICKET_STATUSES:
+                        # Only a completed reopen of this resolution is idempotent.
+                        await cur.execute("SELECT id FROM support_ticket_events WHERE ticket_id=%s AND event_type='TICKET_REOPENED' LIMIT 1", (ticket_id,))
+                        if not await cur.fetchone():
+                            raise SupportConflictError("This ticket is already active and was not reopened.")
+                        await conn.commit()
+                        return row, False
+                    if row.get("status") != 'RESOLVED' or row.get("active_key") is not None:
+                        raise SupportConflictError("Only resolved customer tickets can be reopened.")
+                    assignee = str(row.get("current_assignee_id") or "")
+                    if not assignee:
+                        raise SupportConflictError("The last assignee is unknown. Ownership cannot be inferred for this ticket.")
+                    await cur.execute("SELECT id FROM staff WHERE id=%s AND is_active=1 FOR UPDATE", (assignee,))
+                    if not await cur.fetchone():
+                        raise SupportConflictError("The last assigned staff member is unavailable. Reactivate that account before reopening.")
+                    if not await self._fence_deliveries_for_lifecycle(cur, ticket_id):
+                        raise SupportConflictError("An outbound WhatsApp message is still being sent. Reopen after it finishes.")
+                    active_key = _ticket_active_key(str(row['whatsapp_phone']), line_id)
+                    # The unique active_key is the final arbiter against a new
+                    # inbound ticket or another historical ticket reopening.
+                    await cur.execute("SELECT id FROM support_tickets WHERE active_key=%s AND id<>%s LIMIT 1", (active_key, ticket_id))
+                    if await cur.fetchone():
+                        raise SupportConflictError("This customer already has an active conversation on that WhatsApp line.")
+                    await cur.execute("SELECT details_json FROM support_ticket_events WHERE ticket_id=%s AND event_type='TICKET_RESOLVED' ORDER BY id DESC LIMIT 1", (ticket_id,))
+                    resolution = await cur.fetchone()
+                    try:
+                        details = json.loads((resolution or {}).get('details_json') or '{}')
+                    except (TypeError, ValueError):
+                        details = {}
+                    previous = details.get('previous_status') if isinstance(details, dict) else None
+                    restored_status = previous if previous in ACTIVE_TICKET_STATUSES and previous != 'NEW' else 'ASSIGNED'
+                    await cur.execute("""
+                        UPDATE support_tickets SET status=%s, active_key=%s,
+                            updated_at=UTC_TIMESTAMP(6), last_activity_at=UTC_TIMESTAMP(6)
+                        WHERE id=%s
+                    """, (restored_status, active_key, ticket_id))
+                    await cur.execute("""
+                        INSERT INTO support_ticket_events
+                            (ticket_id,event_type,actor_type,actor_id,actor_name,details_json,created_at)
+                        VALUES (%s,'TICKET_REOPENED','AGENT',%s,%s,%s,UTC_TIMESTAMP(6))
+                    """, (ticket_id, agent_id, agent_name, json.dumps({
+                        'restored_status': restored_status, 'last_assignee_id': assignee,
+                        'resolved_by_staff_id': row.get('resolved_by_staff_id'),
+                        'resolved_at': row['resolved_at'].isoformat() if row.get('resolved_at') else None,
+                    })))
+                await conn.commit()
+            except aiomysql.IntegrityError as exc:
+                await conn.rollback()
+                if exc.args and exc.args[0] == 1062:
+                    raise SupportConflictError("This customer already has an active conversation on that WhatsApp line.") from exc
+                raise
+            except aiomysql.OperationalError as exc:
+                await conn.rollback()
+                if exc.args and exc.args[0] in {1020, 1205, 1213}:
+                    raise SupportConflictError("Another conversation change is in progress. Refresh and retry reopening.") from exc
+                raise
+            except BaseException:
+                await conn.rollback()
+                raise
+        reopened = await self.get_ticket(ticket_id)
+        if not reopened:
+            raise SupportNotFoundError("Ticket not found after reopening.")
+        return reopened, True
 
     async def list_idle_phone_app_tickets(self, *, idle_minutes: int, limit: int = 50) -> list[int]:
         """IDs of unclaimed tickets answered in the WhatsApp app with no recent messages."""
