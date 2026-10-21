@@ -484,6 +484,7 @@ function createSearchResultRow(item) {
   customer.className = 'search-result-customer';
   customer.dir = 'auto';
   customer.textContent = item.customer_name || item.customer_userid || item.whatsapp_phone || 'Unknown customer';
+  highlightSearchTerm(customer, state.query);
   const time = document.createElement('time');
   time.className = 'search-result-time';
   time.dateTime = item.created_at || '';
@@ -495,7 +496,9 @@ function createSearchResultRow(item) {
   const preview = document.createElement('div');
   preview.className = 'search-result-preview';
   preview.dir = 'auto';
-  preview.textContent = item.preview || item.message_type || 'Message';
+  preview.textContent = item.result_type === 'conversation'
+    ? [item.whatsapp_phone, item.status].filter(Boolean).join(' · ')
+    : item.preview || item.message_type || 'Message';
   highlightSearchTerm(preview, state.query);
   row.append(head, ref, preview);
   row.onclick = () => openSearchResult(item, state.query);
@@ -513,7 +516,7 @@ async function runGlobalMessageSearch() {
   }
   state.globalSearchBusy = true;
   $('queue').setAttribute('aria-busy', 'true');
-  text($('searchScope'), 'Searching accessible ticket and chat message history…');
+  text($('searchScope'), 'Searching customer names, phone numbers, and messages…');
   try {
     const data = await api('/api/support/search/messages?q=' + encodeURIComponent(query) + '&limit=80');
     if (requestId !== state.globalSearchRequest || query !== state.query.trim()) return;
@@ -527,7 +530,7 @@ async function runGlobalMessageSearch() {
     if (requestId === state.globalSearchRequest) {
       state.globalSearchBusy = false;
       $('queue').setAttribute('aria-busy', 'false');
-      text($('searchScope'), query.length >= 2 ? 'Searches message history you are allowed to access.' : 'Searches the loaded page by customer, conversation, shipment, status, or support line.');
+      text($('searchScope'), query.length >= 2 ? 'Searches customer names, phone numbers, ticket references, and messages you are allowed to access.' : 'Searches the loaded page by customer, conversation, shipment, status, or support line.');
     }
   }
 }
@@ -545,7 +548,13 @@ function scheduleGlobalMessageSearch() {
 }
 
 async function openSearchResult(item, query) {
-  if (!item || !item.ticket_id || !item.message_id) return;
+  if (!item || !item.ticket_id) return;
+  if (item.result_type === 'conversation') {
+    closeConversationSearch(false);
+    await openTicket(Number(item.ticket_id), {silent: false, conversationOrigin: item.conversation_origin});
+    return;
+  }
+  if (!item.message_id) return;
   state.conversationSearchOpen = true;
   state.conversationSearchQuery = query || '';
   $('conversationSearchInput').value = state.conversationSearchQuery;
@@ -592,14 +601,14 @@ function renderQueue() {
     if (state.globalSearchBusy) {
       renderQueueSkeleton();
     } else if (!state.globalSearchResults.length) {
-      queue.append(emptyMarkup('No message matches', 'No accessible ticket or chat contains this search text.', 'search').outer);
+      queue.append(emptyMarkup('No matches', 'No accessible customer, ticket, chat, or message matches this search.', 'search').outer);
     } else {
       const fragment = document.createDocumentFragment();
       for (const item of state.globalSearchResults) fragment.append(createSearchResultRow(item));
       queue.append(fragment);
     }
-    text($('queueTotal'), state.globalSearchResults.length + ' message match' + (state.globalSearchResults.length === 1 ? '' : 'es'));
-    text($('pageSummary'), 'Message history search');
+    text($('queueTotal'), state.globalSearchResults.length + ' match' + (state.globalSearchResults.length === 1 ? '' : 'es'));
+    text($('pageSummary'), 'Conversation and message search');
     $('clearQueueSearchBtn').classList.toggle('hidden', !state.query);
     syncQueueRovingFocus(queueHadFocus);
     return;

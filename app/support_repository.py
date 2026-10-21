@@ -2372,16 +2372,54 @@ class SupportRepository(DeliveryRepositoryMixin):
                 WHERE d.message_id = m.id AND d.user_id = %s
             )
         """
-        params.extend([like, like, like, like, agent_id, limit])
+        access_params = tuple(params)
 
         if self._pool is None:
             await self.connect()
         assert self._pool is not None
         async with self._pool.acquire() as conn:
             async with conn.cursor(aiomysql.DictCursor) as cur:
+                conversations: list[dict[str, Any]] = []
+                # Global search also finds conversations independently of their
+                # messages, including empty conversations. Keep the same access
+                # predicate for both result types; never preview hidden messages.
+                if ticket_id is None:
+                    customer_where = """(
+                        COALESCE(t.customer_name, '') LIKE %s ESCAPE '!'
+                        OR COALESCE(t.customer_userid, '') LIKE %s ESCAPE '!'
+                        OR t.whatsapp_phone LIKE %s ESCAPE '!'
+                        OR t.ticket_reference LIKE %s ESCAPE '!'
+                    )"""
+                    customer_params: list[Any] = [like] * 4
+                    phone_digits = re.sub(r"[^0-9]", "", query)
+                    if len(phone_digits) >= 2 and re.fullmatch(r"[+0-9\s().-]+", query):
+                        customer_where = f"""({customer_where} OR
+                            REGEXP_REPLACE(t.whatsapp_phone, '[^0-9]', '') LIKE %s)"""
+                        customer_params.append(f"%{phone_digits}%")
+                    await cur.execute(
+                        f"""
+                        SELECT 'conversation' AS result_type, NULL AS message_id,
+                            t.id AS ticket_id, t.ticket_reference, t.customer_name,
+                            t.customer_userid, t.whatsapp_phone, t.status,
+                            t.conversation_origin, t.business_display_phone_number,
+                            t.business_phone_number_id, n.display_name,
+                            t.last_activity_at AS created_at
+                        FROM support_tickets t
+                        LEFT JOIN whatsapp_phone_numbers n
+                          ON n.phone_number_id = t.business_phone_number_id
+                        WHERE {access_where} AND {customer_where}
+                        ORDER BY t.last_activity_at DESC, t.id DESC
+                        LIMIT %s
+                        """,
+                        (*access_params, *customer_params, limit),
+                    )
+                    conversations = list(await cur.fetchall())
+                    if len(conversations) >= limit:
+                        return conversations
                 await cur.execute(
                     f"""
                     SELECT
+                        'message' AS result_type,
                         m.id AS message_id, m.ticket_id, m.sender_type, m.sender_name,
                         m.direction, m.message_type, m.body, m.location_name,
                         m.location_address, m.provider_media_filename, m.created_at,
@@ -2397,9 +2435,9 @@ class SupportRepository(DeliveryRepositoryMixin):
                     ORDER BY m.created_at DESC, m.id DESC
                     LIMIT %s
                     """,
-                    tuple(params),
+                    (*access_params, like, like, like, like, agent_id, limit - len(conversations)),
                 )
-                return list(await cur.fetchall())
+                return conversations + list(await cur.fetchall())
 
     async def list_events(self, ticket_id: int, limit: int = 100) -> list[dict[str, Any]]:
         limit = max(1, min(limit, 200))

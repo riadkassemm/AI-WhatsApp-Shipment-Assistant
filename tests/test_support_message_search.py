@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
+import subprocess
 import sys
 import types
 from typing import Any
@@ -34,6 +36,33 @@ from app.support_auth import SupportAgent
 from app.support_service import SupportForbiddenError, SupportService
 from app.support_ui import _HTML
 import app.support_service as support_service_module
+
+
+@pytest.mark.skipif(shutil.which('node') is None, reason='Node.js is unavailable')
+def test_customer_search_opens_conversation_and_message_search_jumps_to_message():
+    helper = _HTML[_HTML.index('async function openSearchResult('):_HTML.index('// Only one queue row')]
+    script = r"""
+const assert = require('node:assert/strict');
+const state = {};
+const opened = [], searched = [], closed = [];
+const closeConversationSearch = render => closed.push(render);
+const openTicket = async (...args) => opened.push(args);
+const searchCurrentConversation = async options => searched.push(options);
+const $ = () => ({value: '', classList: {remove() {}}});
+""" + helper + r"""
+(async () => {
+  await openSearchResult({ticket_id: 42, result_type: 'conversation', message_id: null, conversation_origin: 'STAFF'}, 'Maya');
+  assert.deepEqual(opened[0], [42, {silent: false, conversationOrigin: 'STAFF'}]);
+  assert.equal(searched.length, 0);
+  assert.deepEqual(closed, [false]);
+  await openSearchResult({ticket_id: 42, result_type: 'message', message_id: 99}, 'parcel');
+  assert.equal(opened[1][1].aroundMessageId, 99);
+  assert.equal(state.conversationSearchQuery, 'parcel');
+  assert.deepEqual(searched, [{focusMessageId: 99, preserveQuery: true}]);
+})().catch(error => {console.error(error); process.exitCode = 1});
+"""
+    result = subprocess.run(['node', '-e', script], capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
 
 
 def _ticket(*, assignee: str | None = "7") -> dict[str, Any]:
