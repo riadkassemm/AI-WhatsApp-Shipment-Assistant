@@ -32,6 +32,8 @@ jobs:
       TEST_DB_USER: root
       TEST_DB_PASSWORD: disposable-test-password
       TEST_REDIS_URL: redis://127.0.0.1:6379/15
+      # Use the runner's native Chrome, not the Chromium snap launcher.
+      SUPPORT_TEST_BROWSER: google-chrome
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -46,6 +48,8 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y ffmpeg
       - run: python -m pip install -r requirements-dev.txt
       - run: npm ci --prefix whatsapp_bridge
+      - name: Verify browser dependency
+        run: '"$SUPPORT_TEST_BROWSER" --version'
       - name: Syntax and whitespace checks
         run: |
           python -m compileall -q app scripts tests

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -628,8 +629,16 @@ const notify = () => {};
     assert result.returncode == 0, result.stderr
 
 
-@pytest.mark.skipif(shutil.which("chromium") is None, reason="Chromium is unavailable")
 def test_voice_note_survives_ticket_and_message_updates(tmp_path: Path) -> None:
+    configured_browser = os.environ.get("SUPPORT_TEST_BROWSER")
+    browser = shutil.which(configured_browser) if configured_browser else next(
+        (path for name in ("google-chrome", "google-chrome-stable", "chromium")
+         if (path := shutil.which(name))), None,
+    )
+    if configured_browser:
+        assert browser, f"Configured SUPPORT_TEST_BROWSER is unavailable: {configured_browser}"
+    if not browser:
+        pytest.skip("Chrome/Chromium is unavailable")
     player = _HTML[_HTML.index("function createVoiceNotePlayer("): _HTML.index("function addMessage(")]
     reconciliation = _HTML[_HTML.index("function updateAudioMessageRow("): _HTML.index("function renderConversation(")]
     script = r"""
@@ -716,12 +725,13 @@ try {
     page = tmp_path / "voice-note-test.html"
     page.write_text("<body><div id='conversation'></div><script>" + player + reconciliation + script + "</script></body>")
     result = subprocess.run(
-        ["chromium", "--headless", "--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage",
+        [browser, "--headless", "--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage",
+         "--no-first-run", "--no-default-browser-check", "--disable-background-networking",
          "--user-data-dir=" + str(tmp_path / "chrome-profile"),
          "--virtual-time-budget=1000", "--dump-dom", page.as_uri()],
         text=True, capture_output=True, timeout=20,
     )
-    if result.returncode != 0 and ("setsockopt: Operation not permitted" in result.stderr or "Failed to create headless user data directory container" in result.stderr):
+    if not configured_browser and result.returncode != 0 and ("setsockopt: Operation not permitted" in result.stderr or "Failed to create headless user data directory container" in result.stderr):
         pytest.skip("Chromium cannot start in this sandbox")
     assert result.returncode == 0, result.stderr
     assert '<body data-result="passed">' in result.stdout, result.stdout[-2000:]
