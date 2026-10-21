@@ -599,13 +599,19 @@ async def delete_support_staff(
 async def support_events(
     agent: SupportAgent = Depends(get_current_agent),
 ) -> StreamingResponse:
-    # Authentication is intentionally resolved before opening the stream. The
-    # browser EventSource sends the same-origin support session cookie.
+    from app.support_auth import revalidate_support_agent
+
+    current_agent = agent
+
+    async def validate() -> None:
+        nonlocal current_agent
+        current_agent = await revalidate_support_agent(agent)
+
     async def authorize(event: dict) -> bool:
-        return await support_service.can_receive_support_event(event, agent)
+        return await support_service.can_receive_support_event(event, current_agent)
 
     return StreamingResponse(
-        event_stream(authorize),
+        event_stream(authorize, validate=validate),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-store",

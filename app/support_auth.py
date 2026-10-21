@@ -206,3 +206,12 @@ async def revoke_current_session(request: Request) -> None:
     raw_token = request.cookies.get(settings.support_cookie_name, "")
     if raw_token:
         await staff_repository.revoke_session(_sha256(raw_token))
+
+
+async def revalidate_support_agent(agent: SupportAgent) -> SupportAgent:
+    """Refresh a long-lived connection using the same session/account query as HTTP."""
+    session = await staff_repository.get_active_session_by_id(agent.session_id) if agent.session_id else None
+    if not session or str(session['staff_id']) != agent.id or session.get('role') not in _ALLOWED_ROLES:
+        raise HTTPException(status_code=401, detail='Authentication required.')
+    return SupportAgent(id=str(session['staff_id']), name=str(session['name']), role=str(session['role']),
+                        session_id=int(session['session_id']), csrf_hash=str(session.get('csrf_hash') or ''))

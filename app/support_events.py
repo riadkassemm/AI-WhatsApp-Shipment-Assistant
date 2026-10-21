@@ -41,6 +41,7 @@ EventAuthorizer = Callable[[dict[str, Any]], Awaitable[bool]]
 
 async def event_stream(
     authorize: EventAuthorizer | None = None,
+    *, validate: Callable[[], Awaitable[None]] | None = None,
 ) -> AsyncIterator[str]:
     """Stream support events after applying per-session authorization.
 
@@ -52,11 +53,19 @@ async def event_stream(
 
     client = redis.from_url(settings.redis_url, decode_responses=True)
     pubsub = client.pubsub()
-    await pubsub.subscribe(CHANNEL)
     try:
+        await pubsub.subscribe(CHANNEL)
+        if validate is not None:
+            await validate()
         yield "retry: 3000\n\n"
         while True:
             message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=15.0)
+            if validate is not None:
+                try:
+                    await validate()
+                except Exception:
+                    logger.info("Closing support stream after session validation failed")
+                    return
             if message and message.get("type") == "message":
                 try:
                     payload = json.loads(str(message.get("data") or "{}"))
@@ -75,7 +84,7 @@ async def event_stream(
                             "Support realtime event authorization failed: type=%s",
                             payload.get("type"),
                         )
-                        continue
+                        return
                     if not allowed:
                         continue
                     # The browser only plays ticket notification sounds for events
@@ -89,5 +98,7 @@ async def event_stream(
         try:
             await pubsub.unsubscribe(CHANNEL)
         finally:
-            await pubsub.aclose()
-            await client.aclose()
+            try:
+                await pubsub.aclose()
+            finally:
+                await client.aclose()
