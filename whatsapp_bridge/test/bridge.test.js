@@ -427,8 +427,8 @@ test('messages sent from another WhatsApp device carry the peer, source and mess
   const reaction = outgoingEvent(line, { ...original('PHONE-REACTION'), message: { reactionMessage: { key: { id: 'CUSTOMER' }, text: '👍' } } }, PHONE);
   assert.equal(reaction.payload.entry[0].changes[0].value.messages[0].reaction.message_id, `ld:${LINE}:CUSTOMER`);
   const contact = outgoingEvent(line, { ...original('PHONE-CONTACT'), message: { contactMessage: { displayName: 'Example', vcard: 'private contact data' } } }, PHONE);
-  assert.equal(contact.payload.entry[0].changes[0].value.messages[0].type, 'unsupported');
-  assert.deepEqual(contact.payload.entry[0].changes[0].value.messages[0].unsupported, { kind: 'contactMessage' });
+  assert.equal(contact.payload.entry[0].changes[0].value.messages[0].type, 'contacts');
+  assert.equal(contact.payload.entry[0].changes[0].value.messages[0].contacts[0].name.formatted_name, 'Example');
   assert.equal(JSON.stringify(contact).includes('private contact data'), false);
   assert.equal(outgoingEvent(line, original('CUSTOMER', false), PHONE), null);
 });
@@ -1183,7 +1183,7 @@ test('durable uncertain reservation blocks dispatch after restart', async t => {
   assert.equal(socket.calls.length, 0);
 });
 
-test('unsupported inbound contact cards become visible snapshots; internal envelopes do not', async t => {
+test('inbound contact cards become visible snapshots; internal envelopes do not', async t => {
   const { bridge, line } = await fixture(t);
   const contact = { ...original('INBOUND-CONTACT', false), message: { contactMessage: { displayName: 'Example', vcard: 'private contact data' } } };
   await bridge.receive(line, contact);
@@ -1192,7 +1192,7 @@ test('unsupported inbound contact cards become visible snapshots; internal envel
   const event = bridge.outbox.data.entries[0].event;
   assert.equal(event.type, 'message_snapshot');
   assert.equal(event.from_me, false);
-  assert.equal(event.payload.entry[0].changes[0].value.messages[0].type, 'unsupported');
+  assert.equal(event.payload.entry[0].changes[0].value.messages[0].type, 'contacts');
   assert.equal(JSON.stringify(event).includes('private contact data'), false);
   for (const kind of ['albumMessage', 'placeholderMessage', 'secretEncryptedMessage', 'senderKeyDistributionMessage']) {
     await bridge.receive(line, { ...original(kind, false), message: { messageContextInfo: {}, [kind]: {} } });
@@ -1291,4 +1291,44 @@ test('native event buffering preserves recovery provenance and rejects unsolicit
   assert.equal(bridge.outbox.data.entries.length, 1);
   assert.equal(bridge.outbox.data.entries[0].event.message_id, `ld:${LINE}:BUFFERED`);
   assert.equal(line.store.data.messages.UNSOLICITED, undefined);
+});
+
+test('shared vCards preserve names, multiple phones and folded international details', async t => {
+  const { bridge, line } = await fixture(t);
+  const card = { ...original('CONTACT-DETAILS', false), message: { contactsArrayMessage: { contacts: [
+    { displayName: 'Fallback', vcard: 'BEGIN:VCARD\r\nVERSION:3.0\r\nFN:Maya Example\r\nTEL;waid=96170123456:+961 70\r\n 123456\r\nTEL;TYPE=WORK:tel:+90 555 1234567\r\nEMAIL:maya@example.test\r\nORG:Example Co;Support\r\nEND:VCARD' },
+    { vcard: 'BEGIN:VCARD\nFN;CHARSET=UTF-8;ENCODING=QUOTED-PRINTABLE:=D9=85=D8=A7=D9=8A=D8=A7\nTEL:+96171123456\nEND:VCARD' },
+  ] } } };
+  await bridge.receive(line, card);
+  const event = bridge.outbox.data.entries[0].event;
+  const contacts = event.payload.entry[0].changes[0].value.messages[0].contacts;
+  assert.equal(contacts[0].name.formatted_name, 'Maya Example');
+  assert.equal(contacts[0].phones[0].phone, '+961 70123456');
+  assert.equal(contacts[0].phones[0].wa_id, '96170123456');
+  assert.equal(contacts[0].phones[1].phone, '+90 555 1234567');
+  assert.equal(contacts[1].name.formatted_name, 'مايا');
+  assert.equal(contacts[0].emails[0].email, 'maya@example.test');
+  assert.equal(contacts[0].org.company, 'Example Co');
+  assert.equal(line.store.data.messages['CONTACT-DETAILS'].contacts_normalized, true);
+});
+
+test('previously notified unsupported contact markers are re-enqueued once with details', async t => {
+  const { bridge, line } = await fixture(t);
+  const message = { ...original('OLD-CARD', false), message: { ephemeralMessage: { message: { contactMessage: { displayName: 'Example', vcard: 'FN:Example\nTEL:+96170123456' } } } } };
+  await line.store.update(data => { data.messages['OLD-CARD'] = { message, phone: PHONE, notified: true }; });
+  await bridge.recoverPending();
+  await bridge.recoverPending();
+  assert.equal(bridge.outbox.data.entries.length, 1);
+  const event = bridge.outbox.data.entries[0].event;
+  assert.equal(event.payload.entry[0].changes[0].value.messages[0].type, 'contacts');
+  assert.equal(event.message_id, `ld:${LINE}:OLD-CARD`);
+  assert.equal(line.store.data.messages['OLD-CARD'].contacts_normalized, true);
+});
+
+test('large contact bundles stay within callback limits with a visible truncation notice', () => {
+  const cards = Array.from({ length: 100 }, () => ({ displayName: '界'.repeat(512),
+    vcard: Array.from({ length: 20 }, () => 'TEL:' + '1'.repeat(512)).join('\n') }));
+  const event = inboundEvent({ line_id: LINE }, { ...original('BUNDLE', false), message: { contactsArrayMessage: { contacts: cards } } }, PHONE);
+  assert.ok(Buffer.byteLength(JSON.stringify(event)) < 128 * 1024);
+  assert.equal(event.payload.entry[0].changes[0].value.messages[0].contacts.at(-1).name.formatted_name, '[Additional contact details omitted]');
 });

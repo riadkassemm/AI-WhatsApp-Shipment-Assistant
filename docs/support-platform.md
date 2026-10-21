@@ -291,9 +291,12 @@ has its own callback worker, so a slow office line does not stall other lines.
 Retries remain durable and idempotent; permanent HTTP failures remain visible as
 failed updates rather than being silently discarded.
 
-Incoming content the dashboard cannot render (such as a shared contact card) is
-saved as a visible **unsupported WhatsApp message** marker. Staff can open the
-phone's WhatsApp to view its content. Album envelopes, encryption controls and
+Shared contact cards display their names, phone numbers, and available email/company
+details in the conversation. Single contacts and contact bundles work for linked
+devices and Cloud API inbound messages. Stored linked-device contact markers are
+upgraded automatically without duplicating messages or restoring deleted content.
+Other content the dashboard cannot render is saved as a visible **unsupported
+WhatsApp message** marker; its content remains available in WhatsApp. Album envelopes, encryption controls and
 incomplete placeholders are not presented as standalone customer messages.
 Previously stored, unnotified unsupported content is recovered automatically:
 it is attached to the historical conversation when its timestamp matches, otherwise
@@ -312,3 +315,20 @@ is not expired by this reaction-only rule.
 Deploy the API before the bridge: older APIs do not recognize `message_snapshot`
 callbacks. No SQL migration or re-pairing is required. Keep the API upgrade when
 rolling back only the bridge, so already queued snapshots remain deliverable.
+
+
+## Staff-authored text
+
+Staff-authored message bodies and captions retain their entered text, including
+explicit passwords, in delivery, chat history, reply previews, copying, and search.
+The first message of a staff-started chat follows the same rule. This also applies
+to staff messages mirrored from the linked phone. Authorization and deletion rules
+are unchanged. Authentication input, diagnostic context, and error details retain
+their existing redaction. Previously persisted `[REDACTED]` values cannot be
+reconstructed; staff must edit or resend those intentionally if needed.
+
+Contact details are stored as bounded, searchable text under message type
+`contacts`; no database migration is needed. Replayed cards upgrade only existing
+unsupported markers with the same provider ID. Deploy the API before the bridge
+so new contact callbacks can be accepted. This adds display for shared cards, not
+a new contact-sharing composer.

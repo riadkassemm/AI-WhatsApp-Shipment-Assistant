@@ -697,7 +697,8 @@ export class Bridge {
       return;
     }
     if (content.protocolMessage) return;
-    if (existing?.notified) {
+    const isContact = Boolean(content.contactMessage || content.contactsArrayMessage);
+    if (existing?.notified && !(isContact && !existing.contacts_normalized)) {
       // A real fromMe upsert can confirm a dashboard send whose ACK or HTTP
       // response was lost. Keep its original client ID and reconcile the
       // existing database row instead of mirroring it as a second message.
@@ -725,7 +726,7 @@ export class Bridge {
     await line.store.update(data => {
       data.messages[key.id] = { ...(data.messages[key.id] ?? {}), message, phone, media_id: mediaId,
         timestamp: existing?.timestamp ?? millis(message.messageTimestamp), text: textBody(content), notified: Boolean(event),
-        pending_normalization: !phone, pending_placeholder: false,
+        pending_normalization: !phone, pending_placeholder: false, contacts_normalized: isContact && Boolean(event),
         ...(key.fromMe && event ? { mirrored_outgoing: true } : {}) };
     });
   }
@@ -1032,8 +1033,11 @@ export class Bridge {
         if (line.status === 'connected') for (const record of Object.values(line.store.data.messages)) {
           // Retry unsupported content retained by older builds as well as LID
           // resolution. Never replay notified messages or incomplete placeholders.
-          if (!record.notified && !record.deleted && !record.pending_placeholder &&
-              (record.pending_normalization || inboundEvent(line, record.message, record.phone, record.media_id))) {
+          const content = normalizeMessageContent(record.message?.message);
+          if ((!record.notified || (!record.contacts_normalized &&
+                (content?.contactMessage || content?.contactsArrayMessage))) &&
+              !record.deleted && !record.pending_placeholder &&
+              (record.pending_normalization || (record.message?.key?.fromMe ? outgoingEvent : inboundEvent)(line, record.message, record.phone, record.media_id))) {
             await this.receive(line, record.message);
           }
         }

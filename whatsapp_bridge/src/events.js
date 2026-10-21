@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import { normalizeMessageContent, proto } from '@whiskeysockets/baileys';
 import { wrapId } from './config.js';
+import { sharedContacts } from './contacts.js';
 
 export const millis = value => {
   const numeric = Number(value?.toNumber ? value.toNumber() : value);
@@ -47,7 +48,10 @@ function chatMessageEvent(line, message, senderPhone, mediaId, type) {
   const body = textBody(content);
   let context;
   if (body !== null) { node.type = 'text'; node.text = { body }; context = content.extendedTextMessage?.contextInfo; }
-  else if (content.reactionMessage?.key?.id) {
+  else if (content.contactMessage || content.contactsArrayMessage) {
+    node.type = 'contacts'; node.contacts = sharedContacts(content);
+    context = (content.contactMessage || content.contactsArrayMessage)?.contextInfo;
+  } else if (content.reactionMessage?.key?.id) {
     node.type = 'reaction'; node.reaction = { message_id: wrapId(line.line_id, content.reactionMessage.key.id), emoji: content.reactionMessage.text ?? '' };
   } else if (content.locationMessage) {
     const location = content.locationMessage;
@@ -84,9 +88,9 @@ function chatMessageEvent(line, message, senderPhone, mediaId, type) {
   };
   // Unknown inbound content must remain visible to staff, without entering AI
   // or sending an automatic response during recovery of previously missed rows.
-  const eventType = type === 'message' && node.type === 'unsupported' ? 'message_snapshot' : type;
+  const eventType = type === 'message' && ['unsupported', 'contacts'].includes(node.type) ? 'message_snapshot' : type;
   return {
-    event_id: eventId(eventType, line.line_id, message.key.id, 0), type: eventType, line_id: line.line_id,
+    event_id: eventId(eventType, line.line_id, message.key.id, 0, node.type === 'contacts' ? 'contacts-v1' : ''), type: eventType, line_id: line.line_id,
     display_phone_number: line.display_phone_number, message_id: node.id,
     timestamp, from_me: type === 'outgoing_message', sender_phone: senderPhone,
     payload: { object: 'whatsapp_business_account', entry: [{ id: line.line_id, changes: [{ field: 'messages', value }] }] },
