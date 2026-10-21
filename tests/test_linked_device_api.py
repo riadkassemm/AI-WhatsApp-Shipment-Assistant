@@ -658,3 +658,46 @@ def test_linked_message_status_updates_ticks_and_drops_unknown_receipts(linked_c
 
     for invalid in (dict(event, status="played"), dict(event, from_me=False), dict(event, message_id="wamid.cloud")):
         assert request("POST", endpoint, payload=invalid).status_code == 400
+
+
+def test_inbound_snapshot_uses_transcript_sync_and_never_customer_ai(linked_config, monkeypatch):
+    from unittest.mock import AsyncMock
+    import app.main as main_module
+    event = message_event()
+    event.update(type='message_snapshot', from_me=False, sender_phone='96171111111',
+                 message_id='ld:90001:MESSAGE1', timestamp=1_700_000_000_000)
+    node = event['payload']['entry'][0]['changes'][0]['value']['messages'][0]
+    node.update(type='unsupported', timestamp='1700000000')
+    sync = AsyncMock(return_value=True)
+    process = AsyncMock(side_effect=AssertionError('Snapshots must never send automatic replies'))
+    monkeypatch.setattr(api_module.whatsapp_registry_service, 'observe_inbound', AsyncMock(return_value=True))
+    monkeypatch.setattr(api_module.support_service, 'sync_linked_device_snapshot', sync)
+    monkeypatch.setattr(main_module, 'process_whatsapp_payload', process)
+    assert request('POST', '/api/whatsapp/linked-device/events', payload=event).status_code == 200
+    sync.assert_awaited_once()
+    process.assert_not_awaited()
+    event['from_me'] = True
+    assert request('POST', '/api/whatsapp/linked-device/events', payload=event).status_code == 400
+    assert sync.await_count == 1
+
+
+def test_missing_phone_reaction_retries_for_target_recovery_then_acknowledges_absence(linked_config, monkeypatch):
+    from unittest.mock import AsyncMock
+    now = 1_800_000_000
+    monkeypatch.setattr(api_module.time, 'time', lambda: now)
+    monkeypatch.setattr(api_module.whatsapp_registry_service, 'observe_inbound', AsyncMock(return_value=True))
+    sync = AsyncMock(return_value=False)
+    monkeypatch.setattr(api_module.support_service, 'sync_linked_device_outbound', sync)
+    event = message_event()
+    event.update(type='outgoing_message', from_me=True, sender_phone='96171111111', message_id='ld:90001:MESSAGE1')
+    node = event['payload']['entry'][0]['changes'][0]['value']['messages'][0]
+    node.update(type='reaction', reaction={'message_id': 'ld:90001:MISSING', 'emoji': '👍'})
+    for age, expected in [(60, 503), (86_400, 200)]:
+        event['timestamp'] = (now-age)*1000
+        node['timestamp'] = str(now-age)
+        response = request('POST', '/api/whatsapp/linked-device/events', payload=event)
+        assert response.status_code == expected
+    assert response.json()['reason'] == 'reaction_target_not_in_support'
+    # Actual message content is never discarded just because it is old.
+    node['type'] = 'text'
+    assert request('POST', '/api/whatsapp/linked-device/events', payload=event).status_code == 503

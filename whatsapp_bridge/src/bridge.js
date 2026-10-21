@@ -37,7 +37,7 @@ export class Bridge {
     this.registrationTail = Promise.resolve();
     this.phoneReservations = new Map();
     this.stopping = false;
-    this.callbackRunning = false;
+    this.callbackTasks = new Map();
     this.onError = dependencies.onError ?? (() => console.error('Bridge operation failed; check the connection status.'));
   }
 
@@ -343,8 +343,19 @@ export class Bridge {
         if (events['connection.update']) await this.connectionUpdate(line, socket, events['connection.update']);
         if (line.removing) return;
         const upsert = events['messages.upsert'];
-        // Drop placeholder resend payloads. They may not represent authenticated live input.
-        if (upsert && !upsert.requestId) for (const message of upsert.messages ?? []) await this.receive(line, message);
+        if (upsert) for (const message of upsert.messages ?? []) {
+          const requestId = message.bridgeRecoveryRequestId ?? upsert.requestId;
+          if (requestId) {
+            // Accept phone recovery only for an observed unavailable message,
+            // preserving its authenticated routing metadata. Unsolicited PDOs
+            // must not create customer messages or spoof another conversation.
+            const pending = line.store.data.messages[message.key?.id] ?? message.bridgeRecoveryOriginal;
+            if (!pending?.pending_placeholder || pending.message.key.remoteJid !== message.key?.remoteJid ||
+                Boolean(pending.message.key.fromMe) !== Boolean(message.key?.fromMe) ||
+                (pending.placeholder_request_id && pending.placeholder_request_id !== requestId)) continue;
+            await this.receive(line, { ...pending.message, message: message.message });
+          } else await this.receive(line, message);
+        }
         for (const update of events['messages.update'] ?? []) await this.receiveUpdate(line, update);
       }).catch(error => {
         line.status = 'error';
@@ -603,7 +614,7 @@ export class Bridge {
       const keep = (item, wasDeadLetter = false) => {
         if (!targetsMessage(item.event)) return true;
         if (['message_deleted_for_everyone', 'outgoing_confirmation', 'message_tombstone'].includes(item.event.type)) return true;
-        if (item.event.type === 'message' && item.event.from_me === false) {
+        if (['message', 'message_snapshot'].includes(item.event.type) && item.event.from_me === false) {
           // Never route the revoked original through the normal customer/AI
           // webhook. A separate content-free callback creates its database
           // placeholder before the following delete event is delivered.
@@ -675,7 +686,17 @@ export class Bridge {
       return;
     }
     const content = normalizeMessageContent(message.message);
-    if (!content || content.protocolMessage) return;
+    if (!content || content.placeholderMessage) {
+      if ((content?.placeholderMessage || message.messageStubType === proto.WebMessageInfo.StubType.CIPHERTEXT) && !existing?.notified) {
+        await line.store.update(data => {
+          data.messages[key.id] = { ...existing, message, phone, notified: false,
+            pending_placeholder: true, placeholder_request_id: message.messageStubParameters?.[1] ?? existing?.placeholder_request_id,
+            timestamp: millis(message.messageTimestamp) };
+        });
+      }
+      return;
+    }
+    if (content.protocolMessage) return;
     if (existing?.notified) {
       // A real fromMe upsert can confirm a dashboard send whose ACK or HTTP
       // response was lost. Keep its original client ID and reconcile the
@@ -704,11 +725,15 @@ export class Bridge {
     await line.store.update(data => {
       data.messages[key.id] = { ...(data.messages[key.id] ?? {}), message, phone, media_id: mediaId,
         timestamp: existing?.timestamp ?? millis(message.messageTimestamp), text: textBody(content), notified: Boolean(event),
-        pending_normalization: !phone, ...(key.fromMe && event ? { mirrored_outgoing: true } : {}) };
+        pending_normalization: !phone, pending_placeholder: false,
+        ...(key.fromMe && event ? { mirrored_outgoing: true } : {}) };
     });
   }
   async receiveUpdate(line, { key, update }) {
     if (!key?.id || !update) return;
+    if (update.messageStubParameters?.[1] && line.store.data.messages[key.id]?.pending_placeholder) {
+      await line.store.update(data => { data.messages[key.id].placeholder_request_id = update.messageStubParameters[1]; });
+    }
     if (RECEIPT_STATUSES[update.status]) await this.receiveReceipt(line, key, RECEIPT_STATUSES[update.status]);
     // messages.delete is a local chat deletion event and is intentionally never relayed.
     const deleted = update.messageStubType === proto.WebMessageInfo.StubType.REVOKE;
@@ -1004,7 +1029,14 @@ export class Bridge {
             await this.enqueueOwnConfirmation(line, nativeId);
           }
         }
-        if (line.status === 'connected') for (const record of Object.values(line.store.data.messages)) if (record.pending_normalization) await this.receive(line, record.message);
+        if (line.status === 'connected') for (const record of Object.values(line.store.data.messages)) {
+          // Retry unsupported content retained by older builds as well as LID
+          // resolution. Never replay notified messages or incomplete placeholders.
+          if (!record.notified && !record.deleted && !record.pending_placeholder &&
+              (record.pending_normalization || inboundEvent(line, record.message, record.phone, record.media_id))) {
+            await this.receive(line, record.message);
+          }
+        }
       } catch (error) {
         // A failed line's recovery must not block other independent numbers.
         this.onError(error);
@@ -1012,39 +1044,49 @@ export class Bridge {
     }
   }
   async deliverCallbacks() {
-    if (this.callbackRunning || this.stopping) return;
-    this.callbackRunning = true;
-    try {
-      for (let count = 0; count < 100 && !this.stopping; count++) {
-        const entry = this.outbox.data.entries.find(item => item.next_try <= Date.now() && !this.lines.get(item.event.line_id)?.removing &&
-          !(this.manifest.data.removed_line_ids ?? []).includes(item.event.line_id));
-        if (!entry) return;
-        try {
-          const response = await this.fetch(this.config.callbackUrl, { method: 'POST', redirect: 'error',
-            headers: { Authorization: `Bearer ${this.config.secret}`, 'Content-Type': 'application/json' },
-            body: JSON.stringify(entry.event), signal: AbortSignal.timeout(5000) });
-          await response.body?.cancel();
-          if (!response.ok) {
-            if (response.status >= 400 && response.status < 500 && response.status !== 429) {
-              await this.deadLetter(entry, `HTTP_${response.status}`);
-              continue;
-            }
-            throw new Error('Callback rejected');
-          }
-          await this.outbox.update(data => { data.entries = data.entries.filter(item => item.event.event_id !== entry.event.event_id); });
-        } catch {
-          if (Date.now() - (entry.created_at ?? 0) > 7 * 24 * 60 * 60_000) {
-            await this.deadLetter(entry, 'RETRY_PERIOD_EXPIRED');
+    if (this.stopping) return;
+    const tasks = [];
+    for (const id of new Set(this.outbox.data.entries.map(item => item.event.line_id))) {
+      if (this.callbackTasks.has(id)) continue;
+      const task = this.deliverLineCallbacks(id).finally(() => this.callbackTasks.delete(id));
+      this.callbackTasks.set(id, task);
+      tasks.push(task);
+    }
+    const results = await Promise.allSettled(tasks);
+    for (const result of results) if (result.status === 'rejected') throw result.reason;
+  }
+  async deliverLineCallbacks(id) {
+    // One in-flight callback per line. A slow media/customer callback on one
+    // number must not delay receipt of messages on every other office number.
+    for (let count = 0; count < 100 && !this.stopping; count++) {
+      const entry = this.outbox.data.entries.find(item => item.event.line_id === id && item.next_try <= Date.now() && !this.lines.get(item.event.line_id)?.removing &&
+        !(this.manifest.data.removed_line_ids ?? []).includes(item.event.line_id));
+      if (!entry) return;
+      try {
+        const response = await this.fetch(this.config.callbackUrl, { method: 'POST', redirect: 'error',
+          headers: { Authorization: `Bearer ${this.config.secret}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify(entry.event), signal: AbortSignal.timeout(5000) });
+        await response.body?.cancel();
+        if (!response.ok) {
+          if (response.status >= 400 && response.status < 500 && response.status !== 429) {
+            await this.deadLetter(entry, `HTTP_${response.status}`);
             continue;
           }
-          await this.outbox.update(data => {
-            const current = data.entries.find(item => item.event.event_id === entry.event.event_id);
-            if (current) { current.attempts++; current.next_try = Date.now() + Math.min(60_000, 1000 * 2 ** Math.min(current.attempts, 6)); }
-          });
+          throw new Error('Callback rejected');
+        }
+        await this.outbox.update(data => { data.entries = data.entries.filter(item => item.event.event_id !== entry.event.event_id); });
+      } catch {
+        if (Date.now() - (entry.created_at ?? 0) > 7 * 24 * 60 * 60_000) {
+          await this.deadLetter(entry, 'RETRY_PERIOD_EXPIRED');
           continue;
         }
+        await this.outbox.update(data => {
+          const current = data.entries.find(item => item.event.event_id === entry.event.event_id);
+          if (current) { current.attempts++; current.next_try = Date.now() + Math.min(60_000, 1000 * 2 ** Math.min(current.attempts, 6)); }
+        });
+        continue;
       }
-    } finally { this.callbackRunning = false; }
+    }
   }
   async deadLetter(entry, reason) {
     await this.outbox.update(data => {
@@ -1057,6 +1099,7 @@ export class Bridge {
     this.stopping = true;
     clearInterval(this.workerTimer);
     clearInterval(this.pendingTimer);
+    await Promise.allSettled(this.callbackTasks.values());
     await this.registrationTail;
     for (const line of this.lines.values()) {
       clearTimeout(line.reconnectTimer);

@@ -64,14 +64,17 @@ function chatMessageEvent(line, message, senderPhone, mediaId, type) {
         ...(candidate === 'audio' ? { voice: Boolean(media.ptt) } : {}),
       };
       context = media.contextInfo;
-    } else if (type === 'outgoing_message') {
+    } else {
       // Preserve a visible timeline marker for a message type the dashboard
       // cannot render. Keep its private native payload in bridge storage only.
       const kind = Object.keys(content).find(key => !['messageContextInfo', 'senderKeyDistributionMessage'].includes(key));
       if (!kind) return null;
+      // Album envelopes and encryption/placeholder controls are not standalone
+      // customer content. Their individual media or recovered payloads follow.
+      if (['albumMessage', 'secretEncryptedMessage', 'placeholderMessage'].includes(kind)) return null;
       node.type = 'unsupported';
       node.unsupported = { kind: kind.slice(0, 60) };
-    } else return null;
+    }
   }
   if (context?.stanzaId) node.context = { id: wrapId(line.line_id, context.stanzaId) };
   const value = {
@@ -79,8 +82,11 @@ function chatMessageEvent(line, message, senderPhone, mediaId, type) {
     metadata: { phone_number_id: line.line_id, display_phone_number: line.display_phone_number },
     contacts: [{ wa_id: senderPhone, profile: { name: message.pushName ?? senderPhone } }], messages: [node],
   };
+  // Unknown inbound content must remain visible to staff, without entering AI
+  // or sending an automatic response during recovery of previously missed rows.
+  const eventType = type === 'message' && node.type === 'unsupported' ? 'message_snapshot' : type;
   return {
-    event_id: eventId(type, line.line_id, message.key.id, 0), type, line_id: line.line_id,
+    event_id: eventId(eventType, line.line_id, message.key.id, 0), type: eventType, line_id: line.line_id,
     display_phone_number: line.display_phone_number, message_id: node.id,
     timestamp, from_me: type === 'outgoing_message', sender_phone: senderPhone,
     payload: { object: 'whatsapp_business_account', entry: [{ id: line.line_id, changes: [{ field: 'messages', value }] }] },

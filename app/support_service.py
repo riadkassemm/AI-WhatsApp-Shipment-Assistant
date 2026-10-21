@@ -847,6 +847,16 @@ class SupportService:
         A new phone-origin conversation opens an unassigned ticket so no message
         disappears merely because the dashboard did not initiate the chat.
         """
+        return await self._sync_linked_device_transcript(incoming, from_me=True)
+
+    async def sync_linked_device_snapshot(self, incoming: IncomingWhatsAppMessage) -> bool:
+        """Recover unsupported inbound content directly into support, without AI or replies."""
+        if incoming.message_type != "unsupported":
+            raise SupportValidationError("Only unsupported inbound snapshots are accepted.")
+        return await self._sync_linked_device_transcript(incoming, from_me=False)
+
+    async def _sync_linked_device_transcript(self, incoming: IncomingWhatsAppMessage, *, from_me: bool) -> bool:
+        direction = "OUTBOUND" if from_me else "INBOUND"
         line_id = str(incoming.business_phone_number_id or "")
         peer = normalize_phone(incoming.from_number)
         provider_id = str(incoming.message_id or "")
@@ -915,7 +925,7 @@ class SupportService:
         elif incoming.message_type == "sticker":
             body = "Sticker"
         elif incoming.message_type == "unsupported":
-            body = "[Unsupported WhatsApp message sent]"
+            body = "[Unsupported WhatsApp message sent]" if from_me else "[Unsupported WhatsApp message received — view its content in WhatsApp]"
         else:
             name = sanitize_support_text(incoming.location_name).strip()
             address = sanitize_support_text(incoming.location_address).strip()
@@ -924,7 +934,7 @@ class SupportService:
         existing = await support_repository.get_message_by_whatsapp_id(provider_id)
         if existing:
             ticket = await support_repository.get_ticket(int(existing["ticket_id"]))
-            if not ticket or str(ticket.get("business_phone_number_id") or "") != line_id or normalize_phone(str(ticket.get("whatsapp_phone") or "")) != peer or existing.get("direction") != "OUTBOUND":
+            if not ticket or str(ticket.get("business_phone_number_id") or "") != line_id or normalize_phone(str(ticket.get("whatsapp_phone") or "")) != peer or existing.get("direction") != direction:
                 raise SupportValidationError("The outgoing message belongs to another conversation.")
             message = existing
             created = False
@@ -941,8 +951,8 @@ class SupportService:
                     business_phone_number_id=line_id,
                     business_display_phone_number=incoming.business_display_phone_number,
                     customer_id=None, customer_userid=None, customer_name=None,
-                    reason="Conversation started in WhatsApp app.",
-                    ai_summary="Conversation started in WhatsApp app.",
+                    reason="Conversation started in WhatsApp app." if from_me else "WhatsApp message requires staff review.",
+                    ai_summary="Conversation started in WhatsApp app." if from_me else "Unsupported inbound WhatsApp content recovered for staff.",
                     tracking_reference=None, requested_action=None,
                     current_language=None, communication_style=None,
                     context_json="{}", source_whatsapp_message_id=None,
@@ -955,8 +965,8 @@ class SupportService:
                     )
 
             message, created = await support_repository.add_ticket_message(
-                ticket_id=int(ticket["id"]), sender_type="AGENT", sender_id=None,
-                sender_name="WhatsApp app", direction="OUTBOUND", body=body,
+                ticket_id=int(ticket["id"]), sender_type="AGENT" if from_me else "CUSTOMER", sender_id=None,
+                sender_name="WhatsApp app" if from_me else None, direction=direction, body=body,
                 whatsapp_message_id=provider_id, whatsapp_timestamp=incoming.timestamp,
                 message_type=incoming.message_type,
                 reply_to_whatsapp_message_id=incoming.context_message_id,
@@ -964,14 +974,14 @@ class SupportService:
                 location_longitude=incoming.location_longitude,
                 location_name=sanitize_support_text(incoming.location_name).strip()[:255] or None,
                 location_address=sanitize_support_text(incoming.location_address).strip()[:1000] or None,
-                send_status="SENT", require_active=(ticket.get("active_key") is not None and ticket.get("status") in ACTIVE_TICKET_STATUSES),
+                send_status="SENT" if from_me else "RECEIVED", require_active=(ticket.get("active_key") is not None and ticket.get("status") in ACTIVE_TICKET_STATUSES),
                 expected_phone=peer, expected_line_id=line_id,
             )
-            if int(message.get("ticket_id") or 0) != int(ticket["id"]) or message.get("direction") != "OUTBOUND":
+            if int(message.get("ticket_id") or 0) != int(ticket["id"]) or message.get("direction") != direction:
                 raise SupportValidationError("The outgoing message belongs to another conversation.")
             if created:
                 await publish_support_event(
-                    "outbound_message", ticket_id=int(ticket["id"]),
+                    "outbound_message" if from_me else "customer_message", ticket_id=int(ticket["id"]),
                     message_id=int(message["id"]),
                     message=_serialize_support_messages(int(ticket["id"]), [message])[0],
                 )
