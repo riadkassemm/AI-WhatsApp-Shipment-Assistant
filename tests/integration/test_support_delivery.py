@@ -230,3 +230,12 @@ async def test_transfer_before_dispatch_prevents_old_agent_send(infrastructure):
     assert not await repo.begin_delivery(row['id'], token)
     with pytest.raises(SupportForbiddenError):
         await support_service.send_agent_message(42, agent=AGENT, body='test', client_message_id='request')
+
+
+@pytest.mark.asyncio
+async def test_schema_guard_rejects_partial_migration_without_uniqueness(infrastructure):
+    from app.support_repository import SupportSchemaError
+    repo, sql, _ = infrastructure
+    await sql('ALTER TABLE support_ticket_messages DROP INDEX uq_support_scoped_client')
+    with pytest.raises(SupportSchemaError, match='20261021_outbound_delivery_ownership'):
+        await repo._validate_schema(repo._pool)

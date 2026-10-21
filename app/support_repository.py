@@ -294,6 +294,26 @@ class SupportRepository(DeliveryRepositoryMixin):
         missing = _missing_support_schema_migrations(schema_columns)
         if missing:
             raise SupportSchemaError(missing)
+        # Columns alone are insufficient after a partially applied migration.
+        # Refuse startup unless both idempotency boundaries are actually unique.
+        async with pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute("""SELECT INDEX_NAME AS index_name, COLUMN_NAME AS column_name,
+                           NON_UNIQUE AS non_unique
+                    FROM INFORMATION_SCHEMA.STATISTICS
+                    WHERE TABLE_SCHEMA=%s AND TABLE_NAME='support_ticket_messages'
+                    ORDER BY INDEX_NAME, SEQ_IN_INDEX""", (settings.db_name,))
+                indexes = {}
+                for row in await cur.fetchall():
+                    if not row["non_unique"]:
+                        indexes.setdefault(row["index_name"], []).append(row["column_name"])
+        required = {
+            "uq_support_transport_client": ["transport_client_id"],
+            "uq_support_scoped_client": ["ticket_id", "sender_type", "sender_scope", "client_message_id"],
+        }
+        if any(indexes.get(name) != columns for name, columns in required.items()):
+            raise SupportSchemaError(["migrations/20261021_outbound_delivery_ownership.sql"])
+
 
     async def connect(self) -> None:
         if self._pool is not None:

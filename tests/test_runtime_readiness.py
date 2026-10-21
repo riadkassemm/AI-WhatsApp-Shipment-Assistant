@@ -47,6 +47,12 @@ def dependencies(monkeypatch):
             return (1,)
 
         async def fetchall(self):
+            if "INFORMATION_SCHEMA.STATISTICS" in self.query:
+                return [{"index_name": name, "column_name": column, "non_unique": 0}
+                        for name, columns in {
+                            "uq_support_transport_client": ["transport_client_id"],
+                            "uq_support_scoped_client": ["ticket_id", "sender_type", "sender_scope", "client_message_id"],
+                        }.items() for column in columns]
             if "INFORMATION_SCHEMA.COLUMNS" in self.query:
                 return [
                     {"table_name": table, "column_name": column}
@@ -110,7 +116,7 @@ def test_ready_checks_schema_read_only_with_one_database_connection(dependencies
     assert len(state.connections) == len(state.redis_clients) == 1
     assert state.connections[0].closed and state.redis_clients[0].closed
     assert state.queries[0] == "SELECT 1"
-    assert len(state.queries) == 4
+    assert len(state.queries) == 5
     assert all(query.lstrip().upper().startswith("SELECT ") for query in state.queries)
 
 
