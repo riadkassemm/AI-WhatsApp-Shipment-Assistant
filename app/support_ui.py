@@ -5082,13 +5082,28 @@ function addMessage(container, m, extraClass = '') {
       resend.onclick = () => resendMessage(m, resend);
       meta.append(resend);
     }
-  } else if (m.send_status === 'PENDING') {
+  } else if (m.send_status === 'UNCERTAIN') {
+    const uncertain = document.createElement('span');
+    uncertain.className = 'send-state failed';
+    uncertain.textContent = 'Delivery uncertain';
+    uncertain.title = 'WhatsApp may have received this message. Do not send it again; ask a supervisor to check delivery.';
+    meta.append(uncertain);
+  } else if (m.send_status === 'PENDING' || m.send_status === 'DISPATCHING') {
     const pending = document.createElement('span');
     pending.className = 'send-state pending';
     pending.title = 'Sending';
     pending.setAttribute('aria-label', 'Sending');
     pending.append(createIcon('clock', 'icon icon-sm'));
     meta.append(pending);
+    if (!extraClass && canResendMessage(m)) {
+      const resume = document.createElement('button');
+      resume.type = 'button';
+      resume.className = 'btn send-retry-btn';
+      resume.textContent = 'Resume send';
+      resume.title = 'Resume abandoned preparation. An active send will not be repeated.';
+      resume.onclick = () => resendMessage(m, resume);
+      meta.append(resume);
+    }
   } else if (outbound && m.send_status) {
     // WhatsApp-style ticks: one grey when sent, two grey when delivered, two blue when read.
     const receipt = m.delivery_status === 'read' ? 'read' : m.delivery_status === 'delivered' ? 'delivered' : 'sent';
@@ -5111,10 +5126,10 @@ function addMessage(container, m, extraClass = '') {
 // Compact message toolbar: the visible label stays in textContent (accessible
 // name); CSS draws the glyph from data-action and shows data-tooltip.
 function canResendMessage(m) {
-  if (m.direction !== 'OUTBOUND' || m.send_status !== 'FAILED' || m.deleted_for_everyone_at) return false;
+  if (m.direction !== 'OUTBOUND' || !['FAILED', 'PENDING'].includes(m.send_status) || m.deleted_for_everyone_at) return false;
   if (String(m.sender_id || '') !== String(state.agent?.id || '')) return false;
   if (!m.id) return Boolean(m.client_message_id && m.message_type === 'text');
-  return state.currentTicketData?.permissions?.can_reply !== false;
+  return (Boolean(m.delivery_retry_safe) || (m.send_status === 'PENDING' && !m.delivery_started_at)) && state.currentTicketData?.permissions?.can_reply !== false;
 }
 
 async function resendMessage(m, button) {
@@ -5127,15 +5142,6 @@ async function resendMessage(m, button) {
     m.error_message = null;
     upsertTimelineMessage(m, ticketId);
     await deliverTextMessage(m, ticketId);
-    return;
-  }
-  const uncertain = /acknowledg|timed out|HTTP 50[34]/i.test(m.error_message || '');
-  if (uncertain && !(await confirmDialog({
-    title: 'Resend message?',
-    message: 'WhatsApp did not confirm this message, so the customer might already have it. Send it again anyway?',
-    confirmLabel: 'Resend'
-  }))) {
-    if (button) { button.disabled = false; button.textContent = 'Resend'; }
     return;
   }
   try {

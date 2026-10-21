@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import json
 import re
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import aiomysql
 
 from app.config import settings
+from app.support_delivery_repository import DeliveryRepositoryMixin
 from app.support_models import ACTIVE_TICKET_STATUSES, ALLOWED_TRANSITIONS
 from app.whatsapp_client import get_transport
 
@@ -217,6 +219,10 @@ _SUPPORT_SCHEMA_MIGRATIONS: tuple[tuple[str, dict[str, set[str]]], ...] = (
         "migrations/20261020_message_delivery_status.sql",
         {"support_ticket_messages": {"delivery_status", "delivered_at", "read_at"}},
     ),
+    ("migrations/20261021_outbound_delivery_ownership.sql", {"support_ticket_messages": {
+        "transport_client_id", "sender_scope", "delivery_token", "delivery_claimed_at",
+        "delivery_started_at", "delivery_retry_safe",
+    }}),
 )
 
 MAX_QUICK_REPLIES_PER_STAFF = 200
@@ -238,7 +244,7 @@ def _missing_support_schema_migrations(
     return missing
 
 
-class SupportRepository:
+class SupportRepository(DeliveryRepositoryMixin):
     @staticmethod
     async def _lock_active_linked_device_line(conn: Any, line_id: str | None) -> None:
         """Serialize new human ownership with linked-device removal preflight."""
@@ -1310,7 +1316,7 @@ class SupportRepository:
             if existing:
                 return existing, False
         if client_message_id:
-            existing = await self.get_message_by_client_id(client_message_id)
+            existing = await self.get_message_by_client_id(client_message_id, ticket_id=ticket_id, sender_type=sender_type, sender_id=sender_id)
             if existing:
                 return existing, False
 
@@ -1318,35 +1324,43 @@ class SupportRepository:
             await conn.begin()
             try:
                 async with conn.cursor(aiomysql.DictCursor) as cur:
-                    if require_active or expected_phone is not None or expected_line_id is not None:
-                        await cur.execute(
-                            """
-                            SELECT id, status, active_key, current_assignee_id,
-                                   whatsapp_phone, business_phone_number_id
-                            FROM support_tickets
-                            WHERE id = %s
-                            FOR UPDATE
-                            """,
-                            (ticket_id,),
+                    # Lock the parent before insert/FK checks to avoid upgrade deadlocks.
+                    await cur.execute(
+                        """
+                        SELECT id, status, active_key, current_assignee_id,
+                               whatsapp_phone, business_phone_number_id
+                        FROM support_tickets
+                        WHERE id = %s
+                        FOR UPDATE
+                        """,
+                        (ticket_id,),
+                    )
+                    ticket_state = await cur.fetchone()
+                    if not ticket_state:
+                        raise SupportNotFoundError("Ticket not found.")
+                    if require_active and (
+                        ticket_state.get("active_key") is None
+                        or ticket_state.get("status") not in ACTIVE_TICKET_STATUSES
+                    ):
+                        raise SupportConflictError("Ticket is no longer active.")
+                    if require_assignee_id is not None and str(
+                        ticket_state.get("current_assignee_id") or ""
+                    ) != str(require_assignee_id):
+                        raise SupportConflictError(
+                            "Ticket ownership changed. Refresh before sending a message."
                         )
-                        ticket_state = await cur.fetchone()
-                        if not ticket_state:
-                            raise SupportNotFoundError("Ticket not found.")
-                        if require_active and (
-                            ticket_state.get("active_key") is None
-                            or ticket_state.get("status") not in ACTIVE_TICKET_STATUSES
-                        ):
-                            raise SupportConflictError("Ticket is no longer active.")
-                        if require_assignee_id is not None and str(
-                            ticket_state.get("current_assignee_id") or ""
-                        ) != str(require_assignee_id):
-                            raise SupportConflictError(
-                                "Ticket ownership changed. Refresh before sending a message."
-                            )
-                        if expected_phone is not None and str(ticket_state.get("whatsapp_phone") or "") != expected_phone:
-                            raise SupportConflictError("The WhatsApp counterpart changed before this message was stored.")
-                        if expected_line_id is not None and str(ticket_state.get("business_phone_number_id") or "") != expected_line_id:
-                            raise SupportConflictError("The WhatsApp number changed before this message was stored.")
+                    if expected_phone is not None and str(ticket_state.get("whatsapp_phone") or "") != expected_phone:
+                        raise SupportConflictError("The WhatsApp counterpart changed before this message was stored.")
+                    if expected_line_id is not None and str(ticket_state.get("business_phone_number_id") or "") != expected_line_id:
+                        raise SupportConflictError("The WhatsApp number changed before this message was stored.")
+                    if client_message_id:
+                        await cur.execute("""SELECT * FROM support_ticket_messages
+                            WHERE ticket_id=%s AND sender_type=%s AND sender_scope=%s AND client_message_id=%s""",
+                            (ticket_id, sender_type, str(sender_id or ""), client_message_id))
+                        existing = await cur.fetchone()
+                        if existing:
+                            await conn.commit()
+                            return existing, False
 
                     await cur.execute(
                         """
@@ -1365,6 +1379,7 @@ class SupportRepository:
                             location_address,
                             whatsapp_message_id,
                             client_message_id,
+                            transport_client_id,
                             whatsapp_timestamp,
                             send_status,
                             error_message,
@@ -1375,7 +1390,7 @@ class SupportRepository:
                             updated_at
                         ) VALUES (
                             %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                            %s, %s, %s,
+                            %s, %s, %s, %s,
                             UTC_TIMESTAMP(6), UTC_TIMESTAMP(6)
                         )
                         """,
@@ -1394,6 +1409,7 @@ class SupportRepository:
                             location_address,
                             whatsapp_message_id,
                             client_message_id,
+                            uuid.uuid4().hex if client_message_id else None,
                             whatsapp_timestamp,
                             send_status,
                             error_message,
@@ -1417,12 +1433,15 @@ class SupportRepository:
                 await conn.commit()
             except aiomysql.IntegrityError:
                 await conn.rollback()
-                if whatsapp_message_id:
-                    existing = await self.get_message_by_whatsapp_id(whatsapp_message_id)
-                    if existing:
-                        return existing, False
-                if client_message_id:
-                    existing = await self.get_message_by_client_id(client_message_id)
+                # Reuse this connection; acquiring a second one while all racing
+                # inserts hold pool slots can deadlock a bounded pool.
+                async with conn.cursor(aiomysql.DictCursor) as cur:
+                    await cur.execute("""SELECT * FROM support_ticket_messages
+                        WHERE (%s IS NOT NULL AND whatsapp_message_id=%s)
+                           OR (ticket_id=%s AND sender_type=%s AND sender_scope=%s AND client_message_id=%s)
+                        LIMIT 1""", (whatsapp_message_id, whatsapp_message_id, ticket_id, sender_type,
+                                    str(sender_id or ""), client_message_id))
+                    existing = await cur.fetchone()
                     if existing:
                         return existing, False
                 raise
@@ -1795,38 +1814,18 @@ class SupportRepository:
                 await conn.rollback()
                 raise
 
-    async def restart_failed_send(self, message_id: int) -> bool:
-        """Claim one FAILED outgoing message for a resend. Only one caller wins."""
+    async def get_message_by_client_id(
+        self, client_message_id: str, *, ticket_id: int, sender_type: str, sender_id: str | None = None,
+    ) -> dict[str, Any] | None:
         if self._pool is None:
             await self.connect()
-        assert self._pool is not None
-        async with self._pool.acquire() as conn:
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    """
-                    UPDATE support_ticket_messages
-                    SET send_status = 'PENDING', error_message = NULL, updated_at = UTC_TIMESTAMP(6)
-                    WHERE id = %s AND direction = 'OUTBOUND' AND send_status = 'FAILED'
-                      AND deleted_for_everyone_at IS NULL
-                    """,
-                    (message_id,),
-                )
-                claimed = cur.rowcount == 1
-            await conn.commit()
-            return claimed
-
-    async def get_message_by_client_id(self, client_message_id: str) -> dict[str, Any] | None:
-        if self._pool is None:
-            await self.connect()
-        assert self._pool is not None
         async with self._pool.acquire() as conn:
             async with conn.cursor(aiomysql.DictCursor) as cur:
                 await cur.execute(
-                    """
-                    SELECT * FROM support_ticket_messages
-                    WHERE client_message_id = %s LIMIT 1
-                    """,
-                    (client_message_id,),
+                    """SELECT * FROM support_ticket_messages
+                    WHERE client_message_id = %s AND ticket_id = %s
+                      AND sender_type = %s AND sender_scope = %s LIMIT 1""",
+                    (client_message_id, ticket_id, sender_type, str(sender_id or "")),
                 )
                 return await cur.fetchone()
 
@@ -2141,7 +2140,7 @@ class SupportRepository:
             try:
                 async with conn.cursor(aiomysql.DictCursor) as cur:
                     await cur.execute(
-                        "SELECT * FROM support_ticket_messages WHERE client_message_id = %s FOR UPDATE",
+                        "SELECT * FROM support_ticket_messages WHERE transport_client_id = %s FOR UPDATE",
                         (client_message_id,),
                     )
                     row = await cur.fetchone()
@@ -2158,7 +2157,7 @@ class SupportRepository:
                         or str(ticket.get("business_phone_number_id") or "") != business_phone_number_id
                         or str(row.get("sender_type") or "").upper() not in {"AGENT", "SYSTEM"}
                         or (str(row.get("sender_type") or "").upper() == "AGENT" and not row.get("sender_id"))
-                        or (str(row.get("sender_type") or "").upper() == "SYSTEM" and client_message_id not in {
+                        or (str(row.get("sender_type") or "").upper() == "SYSTEM" and row.get("client_message_id") not in {
                             f"system:claim:{row['ticket_id']}", f"system:resolved:{row['ticket_id']}"
                         })
                         or row.get("direction") != "OUTBOUND"

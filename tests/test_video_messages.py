@@ -133,16 +133,18 @@ def _stub_agent_send(monkeypatch) -> dict:
     async def get_ticket(_ticket_id):
         return dict(ticket)
 
-    async def no_existing(_client_id):
+    async def no_existing(_client_id, **_scope):
         return None
 
     async def add_message(**kwargs):
         sent["stored"] = kwargs
-        return {"id": 901, "ticket_id": 77, **kwargs}, True
+        return {"id": 901, "ticket_id": 77, "transport_client_id": "unit-wire-id", **kwargs}, True
+
+    real_save = support_service_module.support_media_store.save
 
     def save(**kwargs):
         sent["saved"] = kwargs
-        return object()
+        return real_save(**kwargs)
 
     async def upload_media(**kwargs):
         sent["upload"] = kwargs
@@ -174,7 +176,7 @@ def _stub_agent_send(monkeypatch) -> dict:
     return sent
 
 
-def test_staff_can_send_a_video_with_caption(monkeypatch) -> None:
+def test_staff_can_send_a_video_with_caption(monkeypatch, outbound_unit) -> None:
     sent = _stub_agent_send(monkeypatch)
     result = asyncio.run(support_service_module.support_service.send_agent_media(
         77, agent=AGENT, media_type="video", content=b"mp4-bytes", content_type="video/mp4",
@@ -211,7 +213,7 @@ def test_unsupported_or_empty_videos_are_rejected_before_sending(monkeypatch, co
     assert "send" not in sent
 
 
-def test_oversized_video_is_rejected(monkeypatch) -> None:
+def test_oversized_video_is_rejected(monkeypatch, outbound_unit) -> None:
     monkeypatch.setattr(config.settings, "support_video_max_bytes", 3)
     sent = _stub_agent_send(monkeypatch)
     with pytest.raises(SupportValidationError, match="3 MB|0 MB|WhatsApp limit"):

@@ -839,7 +839,7 @@ def test_ai_control_migration_preserves_ai_on_default_and_audits_changes() -> No
 
 
 
-def test_assigned_staff_can_send_native_voice_note_without_ai(monkeypatch) -> None:
+def test_assigned_staff_can_send_native_voice_note_without_ai(monkeypatch, outbound_unit) -> None:
     import app.support_service as support_service_module
 
     async def run() -> None:
@@ -856,21 +856,23 @@ def test_assigned_staff_can_send_native_voice_note_without_ai(monkeypatch) -> No
         async def get_ticket(_ticket_id):
             return dict(ticket)
 
-        async def no_existing(_client_id):
+        async def no_existing(_client_id, **_scope):
             return None
 
         async def add_message(**kwargs):
             sent["stored"] = kwargs
-            return {"id": 901, "ticket_id": 77, **kwargs}, True
+            return {"id": 901, "ticket_id": 77, "transport_client_id": "unit-wire-id", **kwargs}, True
 
         async def prepare(content, mime_type):
             assert content.startswith(b"OggS")
             assert "audio/ogg" in mime_type
             return content, "audio/ogg; codecs=opus", "voice-note.ogg", True
 
+        real_save = support_service_module.support_media_store.save
+
         def save(**kwargs):
             sent["saved"] = kwargs
-            return object()
+            return real_save(**kwargs)
 
         async def upload_media(**kwargs):
             sent["upload"] = kwargs
@@ -1061,7 +1063,7 @@ def test_ai_quality_prompt_requires_complete_grounded_answers() -> None:
     assert "fresh tool output controls facts" in CHATBOT_INSTRUCTIONS
 
 
-def test_assigned_staff_can_send_pdf_with_reply_context(monkeypatch) -> None:
+def test_assigned_staff_can_send_pdf_with_reply_context(monkeypatch, outbound_unit) -> None:
     import app.support_service as support_service_module
 
     async def run() -> None:
@@ -1078,7 +1080,7 @@ def test_assigned_staff_can_send_pdf_with_reply_context(monkeypatch) -> None:
         async def get_ticket(_ticket_id):
             return dict(ticket)
 
-        async def no_existing(_client_id):
+        async def no_existing(_client_id, **_scope):
             return None
 
         async def get_message(message_id):
@@ -1088,11 +1090,13 @@ def test_assigned_staff_can_send_pdf_with_reply_context(monkeypatch) -> None:
 
         async def add_message(**kwargs):
             sent["stored"] = kwargs
-            return {"id": 902, "ticket_id": 78, **kwargs}, True
+            return {"id": 902, "ticket_id": 78, "transport_client_id": "unit-wire-id", **kwargs}, True
+
+        real_save = support_service_module.support_media_store.save
 
         def save(**kwargs):
             sent["saved"] = kwargs
-            return object()
+            return real_save(**kwargs)
 
         async def upload_media(**kwargs):
             sent["upload"] = kwargs

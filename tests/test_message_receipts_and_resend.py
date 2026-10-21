@@ -53,12 +53,18 @@ class FakeRepository:
     async def get_message(self, message_id):
         return dict(self.message) if int(message_id) == self.message["id"] else None
 
-    async def restart_failed_send(self, message_id):
+    async def claim_delivery(self, message_id, *, retry=False, expected_token=None):
         self.claims += 1
         if not self.claimable or self.message["send_status"] != "FAILED":
-            return False
+            return None
         self.message.update(send_status="PENDING", error_message=None)
+        return "claim"
+
+    async def begin_delivery(self, message_id, token):
         return True
+
+    async def finish_delivery(self, message_id, token, *, status, provider_id=None, error=None):
+        await self.update_message_send_state(message_id, send_status=status, whatsapp_message_id=provider_id, error_message=error)
 
     async def update_message_send_state(self, message_id, *, send_status, whatsapp_message_id=None, error_message=None):
         self.states.append({"send_status": send_status, "whatsapp_message_id": whatsapp_message_id, "error_message": error_message})
@@ -100,7 +106,7 @@ def failed_message(**overrides):
     message = {
         "id": 900, "ticket_id": 42, "direction": "OUTBOUND", "sender_type": "AGENT", "sender_id": "7",
         "message_type": "text", "body": "Your parcel left Beirut", "client_message_id": "client-900",
-        "send_status": "FAILED", "error_message": "The linked-device bridge rejected the request with HTTP 504.",
+        "delivery_retry_safe": True, "transport_client_id": "wire-900", "send_status": "FAILED", "error_message": "The linked-device bridge rejected the request with HTTP 504.",
         "reply_to_whatsapp_message_id": "ld:90001:QUOTED", "deleted_for_everyone_at": None, "whatsapp_message_id": None,
     }
     message.update(overrides)
@@ -134,21 +140,20 @@ def test_resend_sends_the_failed_text_again_on_the_same_row(patched):
     repository, whatsapp, events = patched(failed_message())
     result = asyncio.run(support_service.resend_failed_message(42, 900, agent=AGENT))
     assert whatsapp.calls == [("text", {
-        "to": "96171111111", "body": "Your parcel left Beirut", "client_message_id": "client-900",
+        "to": "96171111111", "body": "Your parcel left Beirut", "client_message_id": "wire-900",
         "phone_number_id": "90001", "context_message_id": "ld:90001:QUOTED",
     })]
     assert result["send_status"] == "SENT" and result["whatsapp_message_id"] == "ld:90001:RESENT"
     assert result["id"] == 900, "no second timeline row is created"
-    assert [event for event, _payload in events] == ["outbound_message", "outbound_message"]
-    assert events[0][1]["message"]["send_status"] == "PENDING"
+    assert [event for event, _payload in events] == ["outbound_message"]
+    assert events[0][1]["message"]["send_status"] == "SENT"
 
 
 def test_resend_failure_keeps_the_row_failed(patched):
     repository, whatsapp, events = patched(failed_message(), whatsapp=FakeWhatsApp(fail=True))
-    with pytest.raises(SupportSendError):
-        asyncio.run(support_service.resend_failed_message(42, 900, agent=AGENT))
-    assert repository.message["send_status"] == "FAILED"
-    assert events[-1][1]["message"]["send_status"] == "FAILED"
+    asyncio.run(support_service.resend_failed_message(42, 900, agent=AGENT))
+    assert repository.message["send_status"] == "UNCERTAIN"
+    assert events[-1][1]["message"]["send_status"] == "UNCERTAIN"
 
 
 @pytest.mark.parametrize(
@@ -172,8 +177,7 @@ def test_resend_refuses_messages_that_are_not_your_failed_sends(patched, overrid
 def test_only_one_resend_wins(patched):
     repository, whatsapp, _events = patched(failed_message())
     repository.claimable = False
-    with pytest.raises(SupportConflictError):
-        asyncio.run(support_service.resend_failed_message(42, 900, agent=AGENT))
+    asyncio.run(support_service.resend_failed_message(42, 900, agent=AGENT))
     assert whatsapp.calls == []
 
 
@@ -187,7 +191,7 @@ def test_resend_media_uses_the_stored_file(patched, monkeypatch, tmp_path: Path)
     assert whatsapp.calls[0] == ("upload", {"content": b"OggS-voice", "mime_type": "audio/ogg", "filename": "voice.ogg", "phone_number_id": "90001"})
     kind, media = whatsapp.calls[1]
     assert kind == "media" and media["media_type"] == "audio" and media["voice"] is True and media["caption"] is None
-    assert media["client_message_id"] == "client-900"
+    assert media["client_message_id"] == "wire-900"
 
     monkeypatch.setattr(service_module.support_media_store, "get", lambda ticket_id, message_id: None)
     patched(failed_message(message_type="image", body="Image"))
@@ -387,7 +391,7 @@ def test_outgoing_messages_show_whatsapp_ticks(delivery, class_name, label, icon
 @pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is unavailable")
 def test_failed_messages_offer_resend_only_to_their_sender():
     message = {"id": 5, "ticket_id": 42, "direction": "OUTBOUND", "sender_type": "AGENT", "sender_id": "7",
-               "message_type": "text", "body": "Hello", "send_status": "FAILED", "error_message": "HTTP 500"}
+               "message_type": "text", "body": "Hello", "delivery_retry_safe": True, "transport_client_id": "wire-900", "send_status": "FAILED", "error_message": "HTTP 500"}
     found = _render_status(message)
     assert found["states"][0]["className"] == "send-state failed" and found["states"][0]["text"] == "Not sent"
     assert "Resend" in found["buttons"]
