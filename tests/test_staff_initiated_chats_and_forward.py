@@ -170,7 +170,8 @@ async def test_forward_allows_accessible_resolved_history_as_source(monkeypatch)
 def test_support_ui_keeps_forward_enabled_for_history_and_marks_forwarded_messages():
     from pathlib import Path
 
-    source = Path("app/support_ui.py").read_text(encoding="utf-8")
+    from app.support_ui import _HTML
+    source = _HTML
     assert "message-action-btn message-forward-btn" in source
     assert "forwardButton.disabled = state.busy || state.forwardBusy" in source
     assert "forwarded-label" in source
@@ -385,7 +386,8 @@ async def test_ticket_resolve_endpoint_semantics_reject_staff_chat(monkeypatch):
 def test_staff_chat_ui_uses_chat_not_ticket_lifecycle():
     from pathlib import Path
 
-    source = Path("app/support_ui.py").read_text(encoding="utf-8")
+    from app.support_ui import _HTML
+    source = _HTML
     assert "actionButton('Close chat', closeStaffChat" in source
     assert "'/api/support/chats/' + state.ticketId + '/close'" in source
     assert "const detailBase = chatRequest ? '/api/support/chats/' : '/api/support/tickets/'" in source

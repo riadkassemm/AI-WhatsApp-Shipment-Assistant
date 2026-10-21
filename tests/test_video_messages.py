@@ -248,7 +248,8 @@ def test_dashboard_page_gets_the_configured_video_limit(monkeypatch) -> None:
     monkeypatch.setattr(config.settings, "support_video_max_bytes", 12345)
     response = asyncio.run(support_dashboard())
     assert b"__VIDEO_MAX_BYTES__" not in response.body
-    assert b"Number('12345')" in response.body
+    from app.support_ui import support_asset
+    assert b"Number('12345')" in asyncio.run(support_asset("media.js")).body
     assert 'accept="image/jpeg,image/png,image/webp,application/pdf,video/mp4,video/3gpp"' in _HTML
 
 

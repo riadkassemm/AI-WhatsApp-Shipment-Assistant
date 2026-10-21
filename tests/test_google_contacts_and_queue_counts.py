@@ -64,7 +64,8 @@ async def test_queue_counts_refresh_every_view(monkeypatch):
 
 
 def test_support_ui_has_contacts_sync_forward_picker_and_global_counts():
-    source = Path("app/support_ui.py").read_text()
+    from app.support_ui import _HTML
+    source = _HTML
     assert 'data-view="contacts"' in source
     assert "/api/support/google-contacts/connect" in source
     assert "/api/support/google-contacts/sync" in source
@@ -90,7 +91,8 @@ def test_vcf_parser_extracts_deduplicates_and_decodes_contacts():
 
 
 def test_support_ui_has_vcf_import_and_source_badge():
-    source = Path("app/support_ui.py").read_text()
+    from app.support_ui import _HTML
+    source = _HTML
     assert 'id="importVcfContactsBtn"' in source
     assert 'id="vcfContactsInput"' in source
     assert "/api/support/contacts/import-vcf" in source
