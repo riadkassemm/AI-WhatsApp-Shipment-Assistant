@@ -321,11 +321,14 @@ def test_repository_history_and_search_count_staff_chat_starter_as_participant()
 
         calls.clear()
         await repository.search_messages(query="hello", agent_id="7")
-        assert len(calls) == 1
-        assert "t.initiated_by_staff_id = %s" in calls[0][0]
-        assert calls[0][1][:5] == ("7", "7", "7", "7", "7")
-        assert "LEFT JOIN whatsapp_phone_numbers n" in calls[0][0]
-        assert "n.display_name" in calls[0][0]
+        assert len(calls) == 2
+        assert "'conversation' AS result_type" in calls[0][0]
+        assert "'message' AS result_type" in calls[1][0]
+        for query, params in calls:
+            assert "t.initiated_by_staff_id = %s" in query
+            assert params[:5] == ("7", "7", "7", "7", "7")
+            assert "LEFT JOIN whatsapp_phone_numbers n" in query
+            assert "n.display_name" in query
 
         calls.clear()
         await repository.list_previous_customer_tickets(

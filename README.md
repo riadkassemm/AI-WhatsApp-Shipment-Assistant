@@ -967,6 +967,7 @@ Every queue (tickets, chats and contacts) is one continuous list with no page bu
 The support console includes WhatsApp-style message search:
 
 - The queue search covers shared closed ticket/chat history, unassigned tickets, and the active conversations the signed-in staff member can access.
+- Search by customer name, full or partial phone number (including formatted numbers), ticket reference, or message text. Matching conversations appear first, followed by message matches, up to 80 results; narrow your query for more specific results. Customer matches open the conversation directly, including conversations without messages.
 - Opening a conversation exposes a conversation search control with highlighted matches plus previous/next navigation.
 - Search results can jump to older messages outside the normal recent-message window by loading timeline context around the matched message.
 - Regular agents cannot search unrelated active assigned conversations; Supervisors/Admins retain global visibility.

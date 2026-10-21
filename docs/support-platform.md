@@ -163,6 +163,12 @@ a shared development or production database server. Without
 `SUPPORT_INTEGRATION=1`, integration tests explicitly skip; that is not a passing
 integration run.
 
+The voice-note DOM regression uses an installed Chrome/Chromium executable.
+Set `SUPPORT_TEST_BROWSER=google-chrome` (or an absolute executable path) to
+select it explicitly. An explicitly configured missing or failing browser fails
+the test; local runs without an available browser skip this one check. CI uses
+the Ubuntu runner's native Google Chrome and checks its version before testing.
+
 GitHub Actions runs the same suites with MariaDB/Redis service containers and
 real installed dependencies. It also runs the existing bridge tests, Python
 compilation, JavaScript syntax checks (including the combined browser scope),
