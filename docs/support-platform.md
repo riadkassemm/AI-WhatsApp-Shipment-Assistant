@@ -281,3 +281,34 @@ A code-only rollback to that code would reintroduce unsafe global client-ID
 lookups and resend behavior. Prefer a forward fix or a compatible hardened
 release; an older-code rollback needs a planned database restore while writes
 are stopped, with explicit handling of any messages accepted since the backup.
+
+## Linked-device callback recovery
+
+“Updates pending” counts bridge-to-app callbacks, including reactions and receipts;
+these are not necessarily unsent staff messages. A connected WhatsApp socket does
+not by itself confirm that every callback has reached the database. Each line now
+has its own callback worker, so a slow office line does not stall other lines.
+Retries remain durable and idempotent; permanent HTTP failures remain visible as
+failed updates rather than being silently discarded.
+
+Incoming content the dashboard cannot render (such as a shared contact card) is
+saved as a visible **unsupported WhatsApp message** marker. Staff can open the
+phone's WhatsApp to view its content. Album envelopes, encryption controls and
+incomplete placeholders are not presented as standalone customer messages.
+Previously stored, unnotified unsupported content is recovered automatically:
+it is attached to the historical conversation when its timestamp matches, otherwise
+the active conversation or a new unassigned ticket. Recovery does not call AI,
+notify customers, or reopen resolved tickets. Deleted content stays deleted.
+
+Phone responses to unavailable-message recovery requests are accepted only when
+matched to a previously observed placeholder's ID, chat, sender direction and,
+when known, request ID. Original routing and timestamps are retained. This fixes
+the old blanket rejection of recovery payloads; it cannot reconstruct messages
+that WhatsApp never delivered or that an older bridge discarded without storing.
+Reactions whose target is absent retry for up to 24 hours to allow target recovery,
+then are acknowledged as outside the support transcript. Actual message content
+is not expired by this reaction-only rule.
+
+Deploy the API before the bridge: older APIs do not recognize `message_snapshot`
+callbacks. No SQL migration or re-pairing is required. Keep the API upgrade when
+rolling back only the bridge, so already queued snapshots remain deliverable.

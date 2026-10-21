@@ -35,6 +35,7 @@ _MAX_EVENT_BYTES = 128 * 1024
 _PHONE = re.compile(r"^[0-9]{5,20}$")
 # How long a receipt for a not-yet-saved message is retried before it is dropped.
 _STATUS_RETRY_WINDOW_MS = 120_000
+_REACTION_TARGET_RETRY_WINDOW_MS = 24 * 60 * 60 * 1000
 _line_addition_lock = asyncio.Lock()
 
 
@@ -65,7 +66,7 @@ class RemoveLinkedDeviceLineRequest(BaseModel):
 
 class LinkedDeviceEvent(BaseModel):
     event_id: str = Field(min_length=1, max_length=128)
-    type: Literal["message", "message_tombstone", "outgoing_message", "outgoing_confirmation", "message_status", "message_updated", "message_deleted_for_everyone"]
+    type: Literal["message", "message_snapshot", "message_tombstone", "outgoing_message", "outgoing_confirmation", "message_status", "message_updated", "message_deleted_for_everyone"]
     line_id: str = Field(pattern=r"^[0-9]{5,32}$")
     display_phone_number: str | None = Field(default=None, max_length=64)
     payload: dict | None = None
@@ -317,14 +318,15 @@ async def receive_linked_device_event(request: Request):
             raise HTTPException(503, "The deleted message could not be synchronized yet. Retry this event.") from exc
         return {"status": "applied"}
 
-    if event.type == "outgoing_message":
+    if event.type in {"outgoing_message", "message_snapshot"}:
+        from_me = event.type == "outgoing_message"
         incoming = extract_incoming_message(event.payload or {})
         try:
             payload_timestamp = int(incoming.timestamp) if incoming else 0
         except (TypeError, ValueError):
             payload_timestamp = 0
         if (
-            not incoming or event.from_me is not True or not event.timestamp
+            not incoming or event.from_me is not from_me or not event.timestamp
             or not event.sender_phone or not _PHONE.fullmatch(event.sender_phone)
             or incoming.business_phone_number_id != event.line_id
             or incoming.message_id != event.message_id
@@ -333,7 +335,7 @@ async def receive_linked_device_event(request: Request):
             or payload_timestamp <= 0
             or abs(event.timestamp - payload_timestamp * 1000) >= 1000
         ):
-            raise HTTPException(400, "Invalid linked device outgoing message.")
+            raise HTTPException(400, "Invalid linked device transcript message.")
         try:
             line_enabled = await whatsapp_registry_service.observe_inbound(
                 waba_id=None, phone_number_id=event.line_id,
@@ -344,12 +346,18 @@ async def receive_linked_device_event(request: Request):
         if not line_enabled:
             return {"status": "ignored", "reason": "whatsapp_number_disabled"}
         try:
-            applied = await support_service.sync_linked_device_outbound(incoming)
+            applied = await (support_service.sync_linked_device_outbound(incoming) if from_me
+                             else support_service.sync_linked_device_snapshot(incoming))
         except SupportValidationError as exc:
             raise HTTPException(400, str(exc)) from exc
         except (SupportConflictError, SupportMediaError) as exc:
-            raise HTTPException(503, "The outgoing message could not be synchronized yet. Retry this event.") from exc
+            raise HTTPException(503, "The message could not be synchronized yet. Retry this event.") from exc
         if not applied:
+            # A phone can react to a pre-pairing or chatbot-only message that
+            # never belonged to support. Keep a day for delayed target recovery;
+            # do not report this non-message update as pending forever.
+            if incoming.message_type == "reaction" and time.time() * 1000 - event.timestamp >= _REACTION_TARGET_RETRY_WINDOW_MS:
+                return {"status": "ignored", "reason": "reaction_target_not_in_support"}
             raise HTTPException(503, "The original message is not available yet. Retry this event.")
         return {"status": "applied"}
 

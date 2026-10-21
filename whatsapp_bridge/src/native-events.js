@@ -9,8 +9,32 @@ import { millis, textBody } from './events.js';
 export function preserveNativeMutationMetadata(socket) {
   const emit = socket.ev.emit;
   const latest = new Map();
+  const placeholders = new Map();
   const identity = (key, id) => JSON.stringify([key?.remoteJid, Boolean(key?.fromMe), id]);
   socket.ev.emit = function (name, data) {
+    if (name === 'messages.upsert') {
+      for (const message of data.messages ?? []) {
+        if (data.requestId) {
+          // The native buffer drops the upsert requestId and may replace the
+          // original stub in the same batch. Preserve both provenance and the
+          // observed routing before that coalescing occurs.
+          message.bridgeRecoveryRequestId = data.requestId;
+          message.bridgeRecoveryOriginal = placeholders.get(message.key?.id);
+        } else if (message.messageStubType === proto.WebMessageInfo.StubType.CIPHERTEXT ||
+                   normalizeMessageContent(message.message)?.placeholderMessage) {
+          placeholders.set(message.key?.id, { message: { ...message, key: { ...message.key } },
+            pending_placeholder: true, placeholder_request_id: message.messageStubParameters?.[1] });
+          if (placeholders.size > 4096) placeholders.delete(placeholders.keys().next().value);
+        }
+      }
+    } else if (name === 'messages.update') {
+      for (const item of data) {
+        const pending = placeholders.get(item.key?.id);
+        if (pending && item.update?.messageStubParameters?.[1]) {
+          pending.placeholder_request_id = item.update.messageStubParameters[1];
+        }
+      }
+    }
     if (name === 'messages.upsert' && !data.requestId) {
       for (const message of data.messages ?? []) {
         const protocol = normalizeMessageContent(message.message)?.protocolMessage;
@@ -41,7 +65,7 @@ export function preserveNativeMutationMetadata(socket) {
     }
     return emit.call(this, name, data);
   };
-  const restore = () => { socket.ev.emit = emit; latest.clear(); };
+  const restore = () => { socket.ev.emit = emit; latest.clear(); placeholders.clear(); };
   restore.purgeTarget = id => { for (const [key, item] of latest) if (item.targetId === id) latest.delete(key); };
   return restore;
 }

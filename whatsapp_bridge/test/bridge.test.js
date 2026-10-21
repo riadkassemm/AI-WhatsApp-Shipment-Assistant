@@ -1182,3 +1182,113 @@ test('durable uncertain reservation blocks dispatch after restart', async t => {
   assert.deepEqual(await bridge.send(LINE, payload), { messages: [{ id: wrapId(LINE, 'CRASHED') }] });
   assert.equal(socket.calls.length, 0);
 });
+
+test('unsupported inbound contact cards become visible snapshots; internal envelopes do not', async t => {
+  const { bridge, line } = await fixture(t);
+  const contact = { ...original('INBOUND-CONTACT', false), message: { contactMessage: { displayName: 'Example', vcard: 'private contact data' } } };
+  await bridge.receive(line, contact);
+  await bridge.receive(line, contact);
+  assert.equal(bridge.outbox.data.entries.length, 1);
+  const event = bridge.outbox.data.entries[0].event;
+  assert.equal(event.type, 'message_snapshot');
+  assert.equal(event.from_me, false);
+  assert.equal(event.payload.entry[0].changes[0].value.messages[0].type, 'unsupported');
+  assert.equal(JSON.stringify(event).includes('private contact data'), false);
+  for (const kind of ['albumMessage', 'placeholderMessage', 'secretEncryptedMessage', 'senderKeyDistributionMessage']) {
+    await bridge.receive(line, { ...original(kind, false), message: { messageContextInfo: {}, [kind]: {} } });
+  }
+  assert.equal(bridge.outbox.data.entries.length, 1);
+});
+
+test('restart recovery forwards previously omitted content once and keeps deleted content private', async t => {
+  const { bridge, line, config } = await fixture(t);
+  await line.store.update(data => {
+    data.messages.MISSED = { message: { ...original('MISSED', false), message: { contactMessage: {} } }, phone: PHONE, notified: false };
+    data.messages.REVOKED = { message: { ...original('REVOKED', false), message: { contactMessage: {} } }, phone: PHONE, notified: false, deleted: true };
+  });
+  await bridge.close();
+  const resumed = await new Bridge(config, { makeSocket: () => mockSocket(), onError: () => {} }).initialize({ autoConnect: false });
+  t.after(() => resumed.close());
+  resumed.getLine(LINE).status = 'connected';
+  await resumed.recoverPending();
+  await resumed.recoverPending();
+  assert.equal(resumed.outbox.data.entries.length, 1);
+  assert.equal(resumed.outbox.data.entries[0].event.message_id, `ld:${LINE}:MISSED`);
+  assert.equal(resumed.outbox.data.entries[0].event.type, 'message_snapshot');
+});
+
+test('phone placeholder recovery requires an observed matching message and preserves original routing/time', async t => {
+  const { bridge, socket, line } = await fixture(t);
+  const stub = { ...original('UNAVAILABLE', false), message: undefined, messageStubType: proto.WebMessageInfo.StubType.CIPHERTEXT };
+  await socket.eventHandler({ 'messages.upsert': { messages: [stub], type: 'notify' } });
+  await socket.eventHandler({ 'messages.update': [{ key: stub.key, update: { messageStubParameters: ['unavailable', 'request-1'] } }] });
+  const recovered = original('UNAVAILABLE', false);
+  for (const [message, requestId] of [
+    [original('UNSOLICITED', false), 'request-1'],
+    [recovered, 'wrong-request'],
+    [{ ...recovered, key: { ...recovered.key, fromMe: true } }, 'request-1'],
+    [{ ...recovered, key: { ...recovered.key, remoteJid: '12345@s.whatsapp.net' } }, 'request-1'],
+  ]) await socket.eventHandler({ 'messages.upsert': { messages: [message], type: 'notify', requestId } });
+  assert.equal(bridge.outbox.data.entries.length, 0);
+  // Exercise the pinned Baileys PDO decoder, which emits requestId on recovery.
+  const msg = { ...original('PDO', true), message: { protocolMessage: {
+    type: proto.Message.ProtocolMessage.Type.PEER_DATA_OPERATION_REQUEST_RESPONSE_MESSAGE,
+    peerDataOperationRequestResponseMessage: { stanzaId: 'request-1', peerDataOperationResult: [{
+      placeholderMessageResendResponse: { webMessageInfoBytes: proto.WebMessageInfo.encode(recovered).finish() },
+    }] },
+  } } };
+  const emitted = [];
+  await processMessage(msg, { shouldProcessHistoryMsg: false, ev: { emit: (name, data) => emitted.push([name, data]) },
+    creds: { me: { id: '96170111111@s.whatsapp.net' } }, logger: pino({ level: 'silent' }),
+    placeholderResendCache: { get: async () => undefined, del: async () => {} } });
+  const [, upsert] = emitted.find(([name]) => name === 'messages.upsert');
+  assert.equal(upsert.requestId, 'request-1');
+  await socket.eventHandler({ 'messages.upsert': upsert });
+  await socket.eventHandler({ 'messages.upsert': upsert });
+  assert.equal(bridge.outbox.data.entries.length, 1);
+  assert.equal(bridge.outbox.data.entries[0].event.type, 'message');
+  assert.equal(bridge.outbox.data.entries[0].event.timestamp, stub.messageTimestamp * 1000);
+  assert.equal(line.store.data.messages.UNAVAILABLE.notified, true);
+});
+
+test('a blocked callback on one line does not block another line or duplicate an in-flight callback', async t => {
+  let release, entered;
+  const blocked = new Promise(resolve => { release = resolve; });
+  const started = new Promise(resolve => { entered = resolve; });
+  const calls = [];
+  const { bridge } = await fixture(t, 'ack', { fetch: async (_url, options) => {
+    const event = JSON.parse(options.body); calls.push(event.event_id);
+    if (event.event_id === 'slow') { entered(); await blocked; }
+    return new Response(null, { status: 200 });
+  } });
+  await bridge.enqueue({ event_id: 'slow', line_id: LINE });
+  const work = bridge.deliverCallbacks();
+  await started;
+  await bridge.enqueue({ event_id: 'other-office', line_id: '90002' });
+  try {
+    await bridge.deliverCallbacks();
+    assert.deepEqual(calls, ['slow', 'other-office']);
+    assert.equal(bridge.outbox.data.entries.length, 1);
+  } finally { release(); await work; }
+  assert.equal(bridge.outbox.data.entries.length, 0);
+});
+
+test('native event buffering preserves recovery provenance and rejects unsolicited recovered messages', async t => {
+  const { bridge, socket, line } = await fixture(t);
+  const ev = makeEventBuffer(pino({ level: 'silent' }));
+  const restore = preserveNativeMutationMetadata({ ev });
+  t.after(() => { restore(); ev.destroy(); });
+  const batches = [];
+  ev.process(events => batches.push(events));
+  ev.buffer();
+  const stub = { ...original('BUFFERED', false), message: undefined, messageStubType: proto.WebMessageInfo.StubType.CIPHERTEXT };
+  ev.emit('messages.upsert', { messages: [stub], type: 'notify' });
+  ev.emit('messages.update', [{ key: stub.key, update: { messageStubParameters: ['unavailable', 'pdo-buffered'] } }]);
+  ev.emit('messages.upsert', { messages: [original('BUFFERED', false), original('UNSOLICITED', false)], type: 'notify', requestId: 'pdo-buffered' });
+  ev.flush();
+  assert.equal(batches[0]['messages.upsert'].requestId, undefined, 'real Baileys buffer drops the top-level request ID');
+  for (const batch of batches) await socket.eventHandler(batch);
+  assert.equal(bridge.outbox.data.entries.length, 1);
+  assert.equal(bridge.outbox.data.entries[0].event.message_id, `ld:${LINE}:BUFFERED`);
+  assert.equal(line.store.data.messages.UNSOLICITED, undefined);
+});
