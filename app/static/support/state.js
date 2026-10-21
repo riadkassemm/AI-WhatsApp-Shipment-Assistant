@@ -427,7 +427,6 @@ function playNewConversationSound() {
 function notifyNewCustomerActivity(message) {
   const body = message || 'New customer conversation requires attention.';
   playNewConversationSound();
-  notify(body);
   document.title = '● Shipment Support';
   if ('setAppBadge' in navigator) navigator.setAppBadge(1).catch(() => {});
   if ('Notification' in window && Notification.permission === 'granted') {
