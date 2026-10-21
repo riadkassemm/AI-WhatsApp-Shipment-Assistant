@@ -53,6 +53,7 @@ class IncomingWhatsAppMessage:
     location_address: str | None = None
     reaction_message_id: str | None = None
     reaction_emoji: str | None = None
+    contacts: list[dict[str, Any]] | None = None
 
 
 @dataclass(frozen=True)
@@ -588,6 +589,7 @@ def extract_incoming_message(payload: dict) -> IncomingWhatsAppMessage | None:
                 location_address = str(location_node.get("address"))
 
         return IncomingWhatsAppMessage(
+            contacts=message.get("contacts") if message_type == "contacts" and isinstance(message.get("contacts"), list) else None,
             from_number=str(message["from"]),
             message_id=(str(message.get("id")) if message.get("id") else None),
             message_type=message_type,

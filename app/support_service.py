@@ -19,6 +19,7 @@ from app.google_contacts import google_contacts_service
 from app.shipment_client import shipment_client
 from app.staff_repository import staff_repository
 from app.support_auth import SupportAgent
+from app.support_contacts import format_shared_contacts
 from app.support_models import ALLOWED_TRANSITIONS, ACTIVE_TICKET_STATUSES, HandoffRequest, may_reopen_customer_ticket
 from app.support_media import (
     SUPPORT_MEDIA_MESSAGE_TYPES,
@@ -74,6 +75,13 @@ def sanitize_support_text(value: str | None) -> str:
     for pattern in _SECRET_PATTERNS:
         text = pattern.sub(lambda m: f"{m.group(1)}: [REDACTED]", text)
     return text
+
+
+def _transcript_body(row: dict[str, Any]) -> str:
+    body = str(row.get("body") or "")
+    if row.get("direction") == "OUTBOUND" and row.get("sender_type") == "AGENT":
+        return body
+    return sanitize_support_text(body)
 
 
 def _normalize_staff_message_preference(value: str | None) -> str | None:
@@ -394,7 +402,7 @@ def _serialize_support_messages(
                 safe_row.pop(field, None)
             safe_row["reactions"] = []
         if isinstance(safe_row.get("body"), str):
-            safe_row["body"] = sanitize_support_text(safe_row["body"])
+            safe_row["body"] = _transcript_body(safe_row)
         if isinstance(safe_row.get("error_message"), str):
             safe_row["error_message"] = sanitize_support_text(safe_row["error_message"])
         if not safe_row.get("deleted_for_everyone_at") and str(safe_row.get("message_type") or "") in SUPPORT_MEDIA_MESSAGE_TYPES:
@@ -850,9 +858,9 @@ class SupportService:
         return await self._sync_linked_device_transcript(incoming, from_me=True)
 
     async def sync_linked_device_snapshot(self, incoming: IncomingWhatsAppMessage) -> bool:
-        """Recover unsupported inbound content directly into support, without AI or replies."""
-        if incoming.message_type != "unsupported":
-            raise SupportValidationError("Only unsupported inbound snapshots are accepted.")
+        """Recover shared contacts and unsupported content without AI or replies."""
+        if incoming.message_type not in {"unsupported", "contacts"}:
+            raise SupportValidationError("Only contacts and unsupported inbound snapshots are accepted.")
         return await self._sync_linked_device_transcript(incoming, from_me=False)
 
     async def _sync_linked_device_transcript(self, incoming: IncomingWhatsAppMessage, *, from_me: bool) -> bool:
@@ -893,7 +901,7 @@ class SupportService:
                 )
             return True
 
-        if incoming.message_type not in SUPPORT_MEDIA_MESSAGE_TYPES | {"text", "location", "unsupported"}:
+        if incoming.message_type not in SUPPORT_MEDIA_MESSAGE_TYPES | {"text", "location", "unsupported", "contacts"}:
             raise SupportValidationError("Unsupported linked-device outgoing message type.")
         if incoming.message_type in SUPPORT_MEDIA_MESSAGE_TYPES:
             media_id = str(incoming.media_id or "")
@@ -908,20 +916,22 @@ class SupportService:
             raise SupportValidationError("Invalid linked-device outgoing timestamp.") from exc
 
         if incoming.message_type == "text":
-            body = sanitize_support_text(incoming.text)
+            body = str(incoming.text or "")
             if not body:
                 raise SupportValidationError("Invalid linked-device outgoing text.")
             if len(body) > 4096:
                 marker = "\n[Message exceeded dashboard length; truncated]"
                 body = body[:4096 - len(marker)] + marker
+        elif incoming.message_type == "contacts":
+            body = format_shared_contacts(incoming.contacts)
         elif incoming.message_type == "image":
-            body = sanitize_support_text(incoming.media_caption).strip() or "Image"
+            body = str(incoming.media_caption or "").strip() or "Image"
         elif incoming.message_type == "video":
-            body = sanitize_support_text(incoming.media_caption).strip() or "Video"
+            body = str(incoming.media_caption or "").strip() or "Video"
         elif incoming.message_type == "audio":
             body = "Voice note" if incoming.is_voice else "Audio message"
         elif incoming.message_type == "document":
-            body = sanitize_support_text(incoming.media_caption).strip() or sanitize_support_text(incoming.media_filename).strip() or "Document"
+            body = str(incoming.media_caption or "").strip() or sanitize_support_text(incoming.media_filename).strip() or "Document"
         elif incoming.message_type == "sticker":
             body = "Sticker"
         elif incoming.message_type == "unsupported":
@@ -985,6 +995,15 @@ class SupportService:
                     message_id=int(message["id"]),
                     message=_serialize_support_messages(int(ticket["id"]), [message])[0],
                 )
+
+        if incoming.message_type == "contacts" and message.get("message_type") == "unsupported":
+            message, upgraded = await support_repository.upgrade_shared_contact(
+                int(message["id"]), ticket_id=int(ticket["id"]), body=body,
+            )
+            if upgraded:
+                await publish_support_event("message_updated", ticket_id=int(ticket["id"]),
+                    message_id=int(message["id"]),
+                    message=_serialize_support_messages(int(ticket["id"]), [message])[0])
 
         if incoming.message_type in SUPPORT_MEDIA_MESSAGE_TYPES:
             try:
@@ -1574,7 +1593,7 @@ class SupportService:
         line_id = str(business_phone_number_id or "").strip()
         if not line_id or not await whatsapp_registry_service.is_number_enabled(line_id):
             raise SupportValidationError("Choose an enabled WhatsApp line.")
-        message_body = sanitize_support_text(body).strip()
+        message_body = str(body or "").strip()
         if not message_body:
             raise SupportValidationError("Enter the first message for this chat.")
         if len(message_body) > 4096:
@@ -1958,7 +1977,7 @@ class SupportService:
         ticket_id: int | None = None,
         limit: int = 80,
     ) -> dict[str, Any]:
-        normalized = sanitize_support_text(query).strip()
+        normalized = str(query or "").strip()
         if len(normalized) < 2:
             raise SupportValidationError("Enter at least 2 characters to search messages.")
         if len(normalized) > 200:
@@ -1983,7 +2002,7 @@ class SupportService:
         items: list[dict[str, Any]] = []
         for row in rows:
             item = _normalize_row(row) or {}
-            body = sanitize_support_text(str(item.get("body") or "")).strip()
+            body = _transcript_body(item).strip()
             location_name = sanitize_support_text(str(item.get("location_name") or "")).strip()
             location_address = sanitize_support_text(str(item.get("location_address") or "")).strip()
             filename = sanitize_support_text(str(item.get("provider_media_filename") or "")).strip()
@@ -2991,7 +3010,7 @@ class SupportService:
             prepared = content
             prepared_mime = normalized_mime
             prepared_filename = filename or "image"
-            safe_caption = sanitize_support_text(caption).strip()[:1024] if caption else ""
+            safe_caption = str(caption).strip()[:1024] if caption else ""
             body = safe_caption or "Image"
         elif media_type == "video":
             if media_kind_for_mime(normalized_mime) != "video":
@@ -3005,7 +3024,7 @@ class SupportService:
             prepared = content
             prepared_mime = normalized_mime
             prepared_filename = sanitize_support_text(filename).strip()[:180] or "video" + media_extension(normalized_mime)
-            safe_caption = sanitize_support_text(caption).strip()[:1024] if caption else ""
+            safe_caption = str(caption).strip()[:1024] if caption else ""
             body = safe_caption or "Video"
         elif media_type == "sticker":
             if media_kind_for_mime(normalized_mime) != "sticker":
@@ -3042,7 +3061,7 @@ class SupportService:
             prepared_filename = sanitize_support_text(filename).strip()[:180] or "document.pdf"
             if not prepared_filename.lower().endswith(".pdf"):
                 prepared_filename += ".pdf"
-            safe_caption = sanitize_support_text(caption).strip()[:1024] if caption else ""
+            safe_caption = str(caption).strip()[:1024] if caption else ""
             body = safe_caption or prepared_filename
 
         _reply_local_id, reply_whatsapp_id = await self._resolve_reply_target(

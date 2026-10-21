@@ -1636,6 +1636,11 @@ function addMessage(container, m, extraClass = '') {
       media.append(unavailable);
     }
     bubble.append(media);
+  } else if (kind === 'contacts') {
+    const label = document.createElement('div');
+    label.className = 'shared-contact-label';
+    label.textContent = 'Shared contact';
+    bubble.append(label);
   } else if (kind === 'location') {
     const card = document.createElement('div');
     card.className = 'location-card';
@@ -1668,7 +1673,7 @@ function addMessage(container, m, extraClass = '') {
   const bodyText = messageTextForCopy(m);
   if (bodyText) {
     const body = document.createElement('div');
-    body.className = 'message-body';
+    body.className = 'message-body' + (kind === 'contacts' ? ' shared-contact-body' : '');
     body.dir = 'auto';
     appendMessageTextWithLinks(body, bodyText);
     if (state.conversationSearchOpen && state.conversationSearchQuery) highlightSearchTerm(body, state.conversationSearchQuery);

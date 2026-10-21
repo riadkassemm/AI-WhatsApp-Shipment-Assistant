@@ -55,6 +55,7 @@ from app.support_repository import SupportConflictError
 from app.support_media import SUPPORT_MEDIA_MESSAGE_TYPES, SupportMediaError
 from app.support_models import HandoffRequest
 from app.support_service import sanitize_support_text, support_service
+from app.support_contacts import format_shared_contacts
 from app.support_ui import SUPPORT_UI_VERSION, router as support_ui_router
 from app.linked_device_api import router as linked_device_api_router
 from app.whatsapp_registry import WhatsAppRegistryError, whatsapp_registry_service
@@ -1568,6 +1569,8 @@ def _human_inbound_body(
     incoming: IncomingWhatsAppMessage,
     parsed_auth: CredentialExtraction,
 ) -> str:
+    if incoming.message_type == "contacts":
+        return format_shared_contacts(incoming.contacts)
     if incoming.message_type == "image" and incoming.media_id:
         return sanitize_support_text(incoming.media_caption).strip() or "Image"
     if incoming.message_type == "sticker" and incoming.media_id:
@@ -2076,10 +2079,12 @@ async def _process_incoming_message(
     # Meta marks push-to-talk voice notes as type=audio with audio.voice=true; that
     # flag only selects the more specific handoff reason/status. No transcription,
     # image analysis, semantic normalization, or other AI call is attempted.
-    if incoming.message_type in SUPPORT_MEDIA_MESSAGE_TYPES | {"location"}:
+    if incoming.message_type in SUPPORT_MEDIA_MESSAGE_TYPES | {"location", "contacts"}:
         is_voice_note = incoming.message_type == "audio" and incoming.is_voice
         media_label = (
-            "voice note"
+            "shared contact"
+            if incoming.message_type == "contacts"
+            else "voice note"
             if is_voice_note
             else "image"
             if incoming.message_type == "image"

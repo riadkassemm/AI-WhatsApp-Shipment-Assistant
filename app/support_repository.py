@@ -1300,6 +1300,24 @@ class SupportRepository(DeliveryRepositoryMixin):
                     (customer_name, phone_number),
                 )
 
+    async def upgrade_shared_contact(self, message_id: int, *, ticket_id: int, body: str) -> tuple[dict[str, Any], bool]:
+        """Replace an old unsupported marker without changing identity or reviving a revoke."""
+        if self._pool is None:
+            await self.connect()
+        async with self._pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("""
+                    UPDATE support_ticket_messages SET body=%s, message_type='contacts',
+                        version=version+1, updated_at=UTC_TIMESTAMP(6)
+                    WHERE id=%s AND ticket_id=%s AND message_type='unsupported'
+                      AND deleted_for_everyone_at IS NULL
+                """, (body, message_id, ticket_id))
+                changed = cur.rowcount == 1
+        message = await self.get_message(message_id)
+        if not message or int(message['ticket_id']) != ticket_id:
+            raise SupportNotFoundError("Message not found.")
+        return message, changed
+
     async def add_ticket_message(
         self,
         *,

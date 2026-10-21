@@ -55,7 +55,7 @@ async def test_snapshot_cannot_cross_conversations_or_accept_arbitrary_text(infr
         await support_service.sync_linked_device_snapshot(snapshot())
     incoming = snapshot()
     from dataclasses import replace
-    with pytest.raises(SupportValidationError, match='Only unsupported'):
+    with pytest.raises(SupportValidationError, match='Only contacts and unsupported'):
         await support_service.sync_linked_device_snapshot(replace(incoming, message_type='text', text='not a snapshot'))
 
 
