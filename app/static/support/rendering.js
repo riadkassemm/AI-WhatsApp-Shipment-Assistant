@@ -3082,7 +3082,7 @@ async function reopenTicket() {
     reopened = await api('/api/support/tickets/' + ticketId + '/reopen', {
       method: 'POST', body: JSON.stringify({resolved_at: data.ticket.resolved_at || null})
     });
-    notify('Ticket reopened. Its assignee and conversation history are preserved.');
+    notify('Ticket reopened. Conversation history is preserved.');
   } catch (error) {
     showError(error.message);
     notify(error.message, 'error');

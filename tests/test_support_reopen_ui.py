@@ -77,6 +77,12 @@ let api = async (path, options) => {
   assert.equal(notifications.at(-1)[1], 'error');
   calls.length = 0;
   state.agent.id = '8';
+  state.agent.role = 'supervisor';
+  api = async () => ({ticket: {current_assignee_id: '8'}});
+  await reopenTicket();
+  assert.equal(calls.find(c => c[0] === 'view')[1], 'mine');
+  calls.length = 0;
+  // A duplicate request after another manager won must follow the stored owner.
   api = async () => ({ticket: {current_assignee_id: '7'}});
   await reopenTicket();
   assert.equal(calls.find(c => c[0] === 'view')[1], 'active');

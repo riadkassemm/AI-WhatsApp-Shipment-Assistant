@@ -89,17 +89,35 @@ async def test_shared_history_and_missing_legacy_ids_do_not_grant_reopening(reop
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('actor', [ADMIN, SUPERVISOR])
-async def test_managers_reopen_without_taking_ownership_or_sending_rights(reopening, actor):
+async def test_managers_reopen_take_ownership_and_can_send(reopening, actor, monkeypatch):
     repo, sql, _, resolved = reopening
     await sql('UPDATE support_tickets SET resolved_by_staff_id=NULL WHERE id=42')
     assert (await support_service.ticket_detail(42, actor))['permissions']['can_reopen']
     result = await reopen(resolved, actor)
-    assert result['ticket']['current_assignee_id'] == '7'
+    assert result['ticket']['current_assignee_id'] == actor.id
+    stored = await repo.get_ticket(42)
+    assert stored['current_assignee_name'] == 'Other'  # Persisted staff name.
+    assert stored['assigned_at'] and stored['resolved_at'] == resolved['resolved_at']
     detail = await support_service.ticket_detail(42, actor)
-    assert detail['permissions']['can_transfer'] and not detail['permissions']['can_reply']
+    assert detail['permissions']['can_transfer'] and detail['permissions']['can_reply']
     with pytest.raises(SupportForbiddenError):
-        await support_service.send_agent_message(42, agent=actor, body='not mine', client_message_id='forbidden')
-    assert (await support_service.ticket_detail(42, AGENT))['permissions']['can_reply']
+        await support_service.ticket_detail(42, AGENT)
+    with pytest.raises(SupportForbiddenError):
+        await support_service.send_agent_message(42, agent=AGENT, body='former owner', client_message_id='forbidden')
+    send = AsyncMock(return_value={'messages': [{'id': 'manager-accepted'}]})
+    monkeypatch.setattr(service, 'whatsapp_client', SimpleNamespace(send_text=send))
+    assert (await support_service.send_agent_message(42, agent=actor, body='reopened', client_message_id='manager'))['send_status'] == 'SENT'
+    send.assert_awaited_once()
+    inbox = await repo.list_tickets(view='mine', agent_id=actor.id)
+    assert 42 in {t['id'] for t in inbox['items']}
+    old_inbox = await repo.list_tickets(view='mine', agent_id=AGENT.id)
+    assert 42 not in {t['id'] for t in old_inbox['items']}
+    event = (await sql("SELECT * FROM support_ticket_events WHERE ticket_id=42 AND event_type='TICKET_REOPENED'"))[0]
+    details = json.loads(event['details_json'])
+    assert event['actor_id'] == actor.id
+    assert str(details['last_assignee_id']) == AGENT.id
+    assert details['current_assignee_id'] == actor.id
+    assert not (await reopen(resolved, actor))['changed']
 
 
 @pytest.mark.asyncio
@@ -109,7 +127,7 @@ async def test_repeated_and_concurrent_requests_are_idempotent_and_old_cycle_con
     async def request(actor):
         await gate.wait()
         return await reopen(resolved, actor)
-    tasks = [asyncio.create_task(request(actor)) for actor in (AGENT, SUPERVISOR, AGENT)]
+    tasks = [asyncio.create_task(request(actor)) for actor in (AGENT, AGENT, AGENT)]
     gate.set()
     results = await asyncio.wait_for(asyncio.gather(*tasks), 10)
     assert sum(item['changed'] for item in results) == 1
@@ -130,13 +148,10 @@ async def test_conflicting_active_conversation_and_missing_assignee_are_explicit
         await reopen(resolved)
     assert (await repo.get_ticket(42))['status'] == 'RESOLVED'
     await sql("UPDATE support_tickets SET active_key='90005:43' WHERE id=43")
-    await sql('UPDATE support_tickets SET current_assignee_id=NULL WHERE id=42')
-    with pytest.raises(SupportConflictError, match='last assignee is unknown'):
-        await reopen(resolved, ADMIN)
     await sql("UPDATE support_tickets SET current_assignee_id='7' WHERE id=42")
     await sql('UPDATE staff SET is_active=0 WHERE id=7')
     with pytest.raises(SupportConflictError, match='unavailable'):
-        await reopen(resolved, ADMIN)
+        await reopen(resolved, AGENT)
 
 
 @pytest.mark.asyncio
@@ -285,3 +300,52 @@ async def test_linked_line_removal_rechecked_inside_transaction(reopening, monke
     with pytest.raises(SupportConflictError, match='inactive or removed'):
         await reopen(resolved)
     assert (await repo.get_ticket(42))['status'] == 'RESOLVED'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('missing_owner', [True, False])
+async def test_manager_reopening_does_not_require_available_previous_owner(reopening, missing_owner):
+    repo, sql, _, resolved = reopening
+    if missing_owner:
+        await sql('UPDATE support_tickets SET current_assignee_id=NULL WHERE id=42')
+    else:
+        await sql('UPDATE staff SET is_active=0 WHERE id=7')
+    result = await reopen(resolved, SUPERVISOR)
+    assert result['changed'] and result['ticket']['current_assignee_id'] == SUPERVISOR.id
+    assert (await repo.get_ticket(42))['resolved_by_staff_id'] == 7
+
+
+@pytest.mark.asyncio
+async def test_concurrent_managers_only_first_reopener_takes_ownership(reopening, monkeypatch):
+    repo, sql, _, resolved = reopening
+    await sql("UPDATE staff SET role='admin' WHERE id=7")
+    actors = [SupportAgent(id='7', name='Agent', role='admin'), SUPERVISOR]
+    original = repo.reopen_customer_ticket
+    entered = 0
+    gate = asyncio.Event()
+    async def together(*args, **kwargs):
+        nonlocal entered
+        entered += 1
+        if entered == 2:
+            gate.set()
+        await gate.wait()
+        return await original(*args, **kwargs)
+    monkeypatch.setattr(repo, 'reopen_customer_ticket', together)
+    results = await asyncio.wait_for(asyncio.gather(*(reopen(resolved, actor) for actor in actors)), 10)
+    assert sum(item['changed'] for item in results) == 1
+    winner = actors[next(i for i, result in enumerate(results) if result['changed'])]
+    assert (await repo.get_ticket(42))['current_assignee_id'] == winner.id
+    for actor in actors:
+        assert not (await reopen(resolved, actor))['changed']
+    assert (await repo.get_ticket(42))['current_assignee_id'] == winner.id
+    assert len(await sql("SELECT id FROM support_ticket_events WHERE ticket_id=42 AND event_type='TICKET_REOPENED'")) == 1
+
+
+@pytest.mark.asyncio
+async def test_manager_deactivated_before_reopening_cannot_become_assignee(reopening):
+    repo, sql, _, resolved = reopening
+    await sql('UPDATE staff SET is_active=0 WHERE id=8')
+    with pytest.raises(SupportConflictError, match='unavailable'):
+        await reopen(resolved, SUPERVISOR)
+    stored = await repo.get_ticket(42)
+    assert stored['status'] == 'RESOLVED' and stored['current_assignee_id'] == '7'
