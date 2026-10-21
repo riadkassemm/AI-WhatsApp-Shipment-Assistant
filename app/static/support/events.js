@@ -117,4 +117,3 @@ function connectSupportEvents() {
     // EventSource retries automatically. Polling remains active as a fallback.
   };
 }
-

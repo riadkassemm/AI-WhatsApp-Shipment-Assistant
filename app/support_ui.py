@@ -69,4 +69,4 @@ async def support_image_editor_script() -> Response:
 # receives the template and external assets; this is assembled from the same files.
 _HTML = (_TEMPLATE.replace("__SUPPORT_STYLE__", "<style>\n" + _ASSETS["support.css"] + "</style>")
          .replace("__SUPPORT_THEME__", "<script>\n" + _ASSETS["theme.js"] + "</script>")
-         .replace("__SUPPORT_SCRIPTS__", "<script>\n" + "".join(_ASSETS[name] for name in _SCRIPT_NAMES) + "</script>"))
+         .replace("__SUPPORT_SCRIPTS__", "<script>\n" + "\n".join(_ASSETS[name] for name in _SCRIPT_NAMES) + "</script>"))

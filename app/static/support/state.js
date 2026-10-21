@@ -439,4 +439,3 @@ function clearAttentionIndicator() {
   document.title = 'Shipment Support';
   if ('clearAppBadge' in navigator) navigator.clearAppBadge().catch(() => {});
 }
-

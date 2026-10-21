@@ -107,4 +107,3 @@ function emptyMarkup(title, body, iconName = 'inbox') {
   outer.append(inner);
   return {outer, inner};
 }
-
