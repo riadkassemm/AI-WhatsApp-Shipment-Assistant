@@ -48,15 +48,19 @@ ticket lock; shared-history access does not grant reopening or sending rights.
 
 The existing `current_assignee_id` remains the last assignee after resolution;
 `resolved_by_staff_id` records the resolver. Missing legacy IDs never grant agent
-permission. No migration or ownership backfill is needed. Reopening requires a
-known, active last assignee and retains that assignee. Managers must use the
-existing Transfer action to change ownership; sending remains assignee-only.
+permission. No migration or ownership backfill is needed. Regular agents retain
+their assignment. As an explicit exception, an Admin/Supervisor who successfully
+reopens a resolved ticket becomes its assignee, even when its previous assignee
+is unknown or inactive. The new assignee must be active. Sending remains
+assignee-only; the previous owner loses sending rights after reassignment.
 
 Reopening restores the pre-resolution status recorded in new resolution audit
 events. Older records without that status reopen as `ASSIGNED`. All messages,
 resolution timestamps, resolver records, and audit events are retained. Each
-successful transition adds a `TICKET_REOPENED` event with its actor and time;
-repeated requests for the same resolution do not add another event. The API
+successful transition adds a `TICKET_REOPENED` event with its actor, time, previous
+assignee and resulting assignee. Repeated requests for the same resolution do not
+add another event or change ownership again; concurrent reopeners cannot take
+over a ticket after the first reopening succeeds. The API
 requires the observed `resolved_at` value, including explicit `null` for legacy
 records, to reject stale requests after a newer resolution cycle.
 

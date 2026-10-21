@@ -2931,7 +2931,7 @@ class SupportRepository(DeliveryRepositoryMixin):
         self, ticket_id: int, *, agent_id: str, agent_name: str,
         supervisor: bool, expected_resolved_at: datetime | None,
     ) -> tuple[dict[str, Any], bool]:
-        """Reopen in place without assigning the actor or erasing resolution history."""
+        """Reopen atomically; managers take ownership, agents keep their assignment."""
         if self._pool is None:
             await self.connect()
         async with self._pool.acquire() as conn:
@@ -2965,12 +2965,14 @@ class SupportRepository(DeliveryRepositoryMixin):
                         return row, False
                     if row.get("status") != 'RESOLVED' or row.get("active_key") is not None:
                         raise SupportConflictError("Only resolved customer tickets can be reopened.")
-                    assignee = str(row.get("current_assignee_id") or "")
+                    previous_assignee = row.get("current_assignee_id")
+                    assignee = str(agent_id if supervisor else previous_assignee or "")
                     if not assignee:
                         raise SupportConflictError("The last assignee is unknown. Ownership cannot be inferred for this ticket.")
-                    await cur.execute("SELECT id FROM staff WHERE id=%s AND is_active=1 FOR UPDATE", (assignee,))
-                    if not await cur.fetchone():
-                        raise SupportConflictError("The last assigned staff member is unavailable. Reactivate that account before reopening.")
+                    await cur.execute("SELECT id,name FROM staff WHERE id=%s AND is_active=1 FOR UPDATE", (assignee,))
+                    target = await cur.fetchone()
+                    if not target:
+                        raise SupportConflictError("The assigned staff member is unavailable. Reactivate that account before reopening.")
                     if not await self._fence_deliveries_for_lifecycle(cur, ticket_id):
                         raise SupportConflictError("An outbound WhatsApp message is still being sent. Reopen after it finishes.")
                     active_key = _ticket_active_key(str(row['whatsapp_phone']), line_id)
@@ -2989,15 +2991,20 @@ class SupportRepository(DeliveryRepositoryMixin):
                     restored_status = previous if previous in ACTIVE_TICKET_STATUSES and previous != 'NEW' else 'ASSIGNED'
                     await cur.execute("""
                         UPDATE support_tickets SET status=%s, active_key=%s,
+                            current_assignee_id=%s, current_assignee_name=%s,
+                            assigned_at=IF(%s,UTC_TIMESTAMP(6),assigned_at),
                             updated_at=UTC_TIMESTAMP(6), last_activity_at=UTC_TIMESTAMP(6)
                         WHERE id=%s
-                    """, (restored_status, active_key, ticket_id))
+                    """, (restored_status, active_key, assignee,
+                          target['name'] if supervisor else row.get('current_assignee_name'),
+                          supervisor, ticket_id))
                     await cur.execute("""
                         INSERT INTO support_ticket_events
                             (ticket_id,event_type,actor_type,actor_id,actor_name,details_json,created_at)
                         VALUES (%s,'TICKET_REOPENED','AGENT',%s,%s,%s,UTC_TIMESTAMP(6))
                     """, (ticket_id, agent_id, agent_name, json.dumps({
-                        'restored_status': restored_status, 'last_assignee_id': assignee,
+                        'restored_status': restored_status, 'last_assignee_id': previous_assignee,
+                        'current_assignee_id': assignee,
                         'resolved_by_staff_id': row.get('resolved_by_staff_id'),
                         'resolved_at': row['resolved_at'].isoformat() if row.get('resolved_at') else None,
                     })))
