@@ -7,8 +7,22 @@ The chatbot accepts English, French, Arabic, Lebanese Arabic, Lebanese Arabizi, 
 > **About this README**
 > This document describes the latest cumulative build. Historical replacement-bundle and incremental-patch instructions have been intentionally removed so the repository presents one current deployment and operating guide.
 
+## Active customer-support workflow
+
+Use `/support` to claim customer tickets, reply, resolve cases, or start staff
+chats. All staff can read shared resolved/closed customer history; active
+conversation access still follows ownership, participation, and role rules.
+Outbound sends now use database delivery claims. Uncertain outcomes are blocked
+from resend; a provider timeout does not mean the customer did not receive it.
+
+See the [support platform guide](docs/support-platform.md) for the permission
+matrix, delivery states and recovery, disposable MariaDB/Redis integration tests,
+CI commands, dashboard asset layout, and migration/deployment requirements.
+The persistent VPS setup remains in [the deployment guide](docs/dev-deployment.md).
+
 ## Contents
 
+- [Active customer-support workflow](#active-customer-support-workflow)
 - [Highlights](#highlights)
 - [Architecture](#architecture)
 - [Shipping-catalog pipeline](#shipping-catalog-pipeline)
