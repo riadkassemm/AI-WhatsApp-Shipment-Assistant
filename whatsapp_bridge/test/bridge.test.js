@@ -1158,3 +1158,27 @@ test('the ACK timeout starts after a slow relay, not before it', async t => {
   const sent = await bridge.send(LINE, { to: PHONE, type: 'text', text: { body: 'Slow upload' }, client_message_id: 'slow-1' });
   assert.ok(sent.messages[0].id.startsWith(`ld:${LINE}:`));
 });
+
+test('concurrent duplicate sends reuse one durable provider ID', async t => {
+  const { bridge, socket } = await fixture(t);
+  const payload = { to: PHONE, type: 'text', text: { body: 'one send' }, client_message_id: 'duplicate-request' };
+  const [first, second] = await Promise.all([bridge.send(LINE, payload), bridge.send(LINE, payload)]);
+  assert.deepEqual(first, second);
+  assert.equal(socket.calls.length, 1);
+  await assert.rejects(bridge.send(LINE, { ...payload, to: '96170999999' }), /another recipient/);
+  assert.equal(socket.calls.length, 1);
+});
+
+test('durable uncertain reservation blocks dispatch after restart', async t => {
+  const { bridge, line, socket } = await fixture(t);
+  await line.store.update(data => {
+    data.messages.CRASHED = { phone: PHONE, client_message_id: 'lost-worker', pending_send: true,
+      message: { key: { id: 'CRASHED', remoteJid: `${PHONE}@s.whatsapp.net`, fromMe: true } } };
+  });
+  const payload = { to: PHONE, type: 'text', text: { body: 'do not duplicate' }, client_message_id: 'lost-worker' };
+  await assert.rejects(bridge.send(LINE, payload), error => error.delivery_uncertain === true);
+  assert.equal(socket.calls.length, 0);
+  await line.store.update(data => { data.messages.CRASHED.ack_confirmed = true; });
+  assert.deepEqual(await bridge.send(LINE, payload), { messages: [{ id: wrapId(LINE, 'CRASHED') }] });
+  assert.equal(socket.calls.length, 0);
+});

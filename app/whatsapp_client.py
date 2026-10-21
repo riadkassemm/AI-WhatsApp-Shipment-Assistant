@@ -144,7 +144,7 @@ class WhatsAppClient:
                 status = exc.response.status_code if exc.response is not None else "unknown"
                 raise WhatsAppSendError(
                     f"WhatsApp rejected the message with HTTP {status}.",
-                    delivery_uncertain=False,
+                    delivery_uncertain=not isinstance(status, int) or status >= 500,
                 ) from exc
             except httpx.RequestError as exc:
                 raise WhatsAppSendError(
@@ -160,6 +160,8 @@ class WhatsAppClient:
                     delivery_uncertain=True,
                 ) from exc
 
+            if not self._message_id(data):
+                raise WhatsAppSendError("WhatsApp returned no message ID.", delivery_uncertain=True)
             logger.info("WhatsApp %s sent: message_id=%s", label, self._message_id(data))
             return data
 

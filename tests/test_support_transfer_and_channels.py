@@ -374,7 +374,7 @@ def test_status_change_carries_assignment_snapshot_to_repository(monkeypatch: py
     asyncio.run(run())
 
 
-def test_agent_text_reply_uses_whatsapp_context_and_persists_reference(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_agent_text_reply_uses_whatsapp_context_and_persists_reference(outbound_unit, monkeypatch: pytest.MonkeyPatch) -> None:
     async def run() -> None:
         service = SupportService()
         agent = SupportAgent(id="7", name="Agent A", role="agent")
@@ -391,7 +391,7 @@ def test_agent_text_reply_uses_whatsapp_context_and_persists_reference(monkeypat
         async def get_ticket(_ticket_id: int) -> dict:
             return dict(ticket)
 
-        async def no_existing(_client_id: str):
+        async def no_existing(_client_id: str, **_scope):
             return None
 
         async def get_message(message_id: int):
@@ -411,7 +411,7 @@ def test_agent_text_reply_uses_whatsapp_context_and_persists_reference(monkeypat
 
         async def add_message(**kwargs):
             seen["stored"] = kwargs
-            return {"id": 10, "ticket_id": 42, **kwargs}, True
+            return {"id": 10, "ticket_id": 42, "transport_client_id": "unit-wire-id", **kwargs}, True
 
         async def send_text(to: str, body: str, **kwargs):
             seen["send"] = {"to": to, "body": body, **kwargs}
@@ -442,8 +442,7 @@ def test_agent_text_reply_uses_whatsapp_context_and_persists_reference(monkeypat
         assert result["send_status"] == "SENT"
         assert seen["stored"]["reply_to_whatsapp_message_id"] == "wamid.customer.9"
         assert seen["send"]["context_message_id"] == "wamid.customer.9"
-        assert [event for event, _payload in seen["events"]] == ["outbound_message", "outbound_message"]
-        assert seen["events"][0][1]["message"]["send_status"] == "PENDING"
-        assert seen["events"][1][1]["message"]["send_status"] == "SENT"
+        assert [event for event, _payload in seen["events"]] == ["outbound_message"]
+        assert seen["events"][0][1]["message"]["send_status"] == "SENT"
 
     asyncio.run(run())

@@ -1,0 +1,714 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="color-scheme" content="light dark" />
+<meta name="theme-color" content="#f4f6f8" />
+<title>Shipment Support</title>
+<script src="/support/image-editor.js"></script>
+__SUPPORT_THEME__
+__SUPPORT_STYLE__
+</head>
+<body>
+<svg class="sr-only" aria-hidden="true" focusable="false">
+  <symbol id="icon-logo" viewBox="0 0 24 24"><path d="M4 7.5h11.5v8H4z"/><path d="M15.5 10h2.2l2.3 2.5v3h-4.5z"/><circle cx="7.5" cy="17.5" r="1.5"/><circle cx="17.5" cy="17.5" r="1.5"/><path d="M7 10.5h5M9.5 8v5"/></symbol>
+  <symbol id="icon-inbox" viewBox="0 0 24 24"><path d="M4 5.5h16v13H4z"/><path d="M4 14h4l1.5 2h5l1.5-2h4"/></symbol>
+  <symbol id="icon-user-check" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3"/><path d="M3.5 19c.6-3.4 2.4-5.1 5.5-5.1 1.2 0 2.2.2 3 .7"/><path d="m15 17 2 2 4-5"/></symbol>
+  <symbol id="icon-eye" viewBox="0 0 24 24"><path d="M2.8 12s3.2-5.5 9.2-5.5S21.2 12 21.2 12 18 17.5 12 17.5 2.8 12 2.8 12Z"/><circle cx="12" cy="12" r="2.5"/></symbol>
+  <symbol id="icon-activity" viewBox="0 0 24 24"><path d="M3 12h4l2-6 4 12 2-6h6"/></symbol>
+  <symbol id="icon-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></symbol>
+  <symbol id="icon-history" viewBox="0 0 24 24"><path d="M4 7v5h5"/><path d="M5.2 16.7A8 8 0 1 0 4 12"/><path d="M12 8v4l2.5 1.5"/></symbol>
+  <symbol id="icon-users" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3"/><path d="M3.5 19c.5-3.3 2.4-5 5.5-5s5 1.7 5.5 5"/><path d="M15.5 6.4a3 3 0 0 1 0 5.2M16.5 14.2c2.2.4 3.5 2 4 4.8"/></symbol>
+  <symbol id="icon-log-out" viewBox="0 0 24 24"><path d="M10 5H5v14h5"/><path d="M13 8l4 4-4 4M8 12h9"/></symbol>
+  <symbol id="icon-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.5"/><path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.3 5.3l1.4 1.4M17.3 17.3l1.4 1.4M18.7 5.3l-1.4 1.4M6.7 17.3l-1.4 1.4"/></symbol>
+  <symbol id="icon-moon" viewBox="0 0 24 24"><path d="M20 15.2A8 8 0 0 1 8.8 4a8.2 8.2 0 1 0 11.2 11.2Z"/></symbol>
+  <symbol id="icon-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 4 4"/></symbol>
+  <symbol id="icon-x" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
+  <symbol id="icon-refresh" viewBox="0 0 24 24"><path d="M20 7v5h-5"/><path d="M18.6 16.8A8 8 0 1 1 20 12"/></symbol>
+  <symbol id="icon-chevron-left" viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"/></symbol>
+  <symbol id="icon-chevron-right" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></symbol>
+  <symbol id="icon-chevron-down" viewBox="0 0 24 24"><path d="m7 10 5 5 5-5"/></symbol>
+  <symbol id="icon-arrow-left" viewBox="0 0 24 24"><path d="M19 12H5M11 6l-6 6 6 6"/></symbol>
+  <symbol id="icon-panel-right" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="1.5"/><path d="M15 4v16"/></symbol>
+  <symbol id="icon-message" viewBox="0 0 24 24"><path d="M4 5h16v12H9l-5 3z"/></symbol>
+  <symbol id="icon-phone" viewBox="0 0 24 24"><path d="M7 3.5 10 7 8.2 9.2a14.6 14.6 0 0 0 6.6 6.6L17 14l3.5 3c-1.1 2.4-2.8 3.4-5 2.6A18.4 18.4 0 0 1 4.4 8.5c-.8-2.2.2-3.9 2.6-5Z"/></symbol>
+  <symbol id="icon-tag" viewBox="0 0 24 24"><path d="M4 4h7l9 9-7 7-9-9z"/><circle cx="8" cy="8" r="1"/></symbol>
+  <symbol id="icon-user" viewBox="0 0 24 24"><circle cx="12" cy="8" r="3.5"/><path d="M5 20c.7-4 3-6 7-6s6.3 2 7 6"/></symbol>
+  <symbol id="icon-transfer" viewBox="0 0 24 24"><path d="M4 8h12M13 5l3 3-3 3M20 16H8M11 13l-3 3 3 3"/></symbol>
+  <symbol id="icon-check" viewBox="0 0 24 24"><path d="m5 12 4 4 10-10"/></symbol>
+  <symbol id="icon-check-double" viewBox="0 0 24 24"><path d="m1.5 12.5 4 4 9.5-9.5"/><path d="m10.5 15.5 1 1 9.5-9.5"/></symbol>
+  <symbol id="icon-check-circle" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="m8 12 2.5 2.5L16.5 8"/></symbol>
+  <symbol id="icon-alert" viewBox="0 0 24 24"><path d="M12 3 2.8 20h18.4z"/><path d="M12 9v4M12 16.5h.01"/></symbol>
+  <symbol id="icon-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 10.5V17M12 7h.01"/></symbol>
+  <symbol id="icon-image" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="8.5" cy="9" r="1.5"/><path d="m5 18 5-5 3 3 2-2 4 4"/></symbol>
+  <symbol id="icon-video" viewBox="0 0 24 24"><rect x="3" y="6" width="13" height="12" rx="2"/><path d="m16 10 5-3v10l-5-3z"/></symbol>
+  <symbol id="icon-rotate" viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/></symbol>
+  <symbol id="icon-crop" viewBox="0 0 24 24"><path d="M6 2v14a2 2 0 0 0 2 2h14"/><path d="M2 6h14a2 2 0 0 1 2 2v14"/></symbol>
+  <symbol id="icon-undo" viewBox="0 0 24 24"><path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/></symbol>
+  <symbol id="icon-redo" viewBox="0 0 24 24"><path d="m15 14 5-5-5-5"/><path d="M20 9H9.5a5.5 5.5 0 0 0 0 11H13"/></symbol>
+  <symbol id="icon-pen" viewBox="0 0 24 24"><path d="m15 5 4 4L8 20H4v-4z"/><path d="m13 7 4 4"/></symbol>
+  <symbol id="icon-type" viewBox="0 0 24 24"><path d="M4 7V5h16v2M12 5v14M9 19h6"/></symbol>
+  <symbol id="icon-pointer" viewBox="0 0 24 24"><path d="m5 3 14 7-6 2-2 6z"/></symbol>
+  <symbol id="icon-download" viewBox="0 0 24 24"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></symbol>
+  <symbol id="icon-file" viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6z"/><path d="M14 3v5h5M8.5 13h7M8.5 16h7"/></symbol>
+  <symbol id="icon-paperclip" viewBox="0 0 24 24"><path d="m8.5 12.5 6.2-6.2a3 3 0 1 1 4.2 4.2l-8.1 8.1a5 5 0 0 1-7.1-7.1l8-8"/></symbol>
+  <symbol id="icon-reply" viewBox="0 0 24 24"><path d="m10 7-6 5 6 5v-3h3.5c3.3 0 5.6 1.2 7 3.5-.3-5.3-2.8-8-7.5-8H10z"/></symbol>
+  <symbol id="icon-map-pin" viewBox="0 0 24 24"><path d="M12 21s6-5.3 6-11a6 6 0 1 0-12 0c0 5.7 6 11 6 11Z"/><circle cx="12" cy="10" r="2"/></symbol>
+  <symbol id="icon-mic" viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11.5a6.5 6.5 0 0 0 13 0M12 18v3M8.5 21h7"/></symbol>
+  <symbol id="icon-square" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="1"/></symbol>
+  <symbol id="icon-send" viewBox="0 0 24 24"><path d="m3.5 4 17 8-17 8 3-8zM6.5 12h14"/></symbol>
+  <symbol id="icon-shield" viewBox="0 0 24 24"><path d="M12 3 5 6v5c0 4.5 2.5 7.7 7 10 4.5-2.3 7-5.5 7-10V6z"/><path d="m9 12 2 2 4-4"/></symbol>
+  <symbol id="icon-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="icon-edit" viewBox="0 0 24 24"><path d="M4 20h4l11-11-4-4L4 16zM13.5 6.5l4 4"/></symbol>
+  <symbol id="icon-zap" viewBox="0 0 24 24"><path d="M13 3 5 14h6l-1 7 8-11h-6z"/></symbol>
+  <symbol id="icon-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/></symbol>
+  <symbol id="icon-trash" viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13M10 11v5M14 11v5"/></symbol>
+  <symbol id="icon-lock" viewBox="0 0 24 24"><rect x="5" y="10" width="14" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></symbol>
+  <symbol id="icon-truck" viewBox="0 0 24 24"><path d="M3 6h11v10H3zM14 9h3l4 4v3h-7z"/><circle cx="7" cy="18" r="2"/><circle cx="17.5" cy="18" r="2"/></symbol>
+  <symbol id="icon-arrow-down" viewBox="0 0 24 24"><path d="M12 4v14M6 12l6 6 6-6"/></symbol>
+</svg>
+
+<main class="login-page" id="sessionLoading">
+  <div class="session-loading-content">
+    <span class="brand-logo" aria-hidden="true"><svg class="icon icon-lg"><use href="#icon-logo"></use></svg></span>
+    <strong>Shipment Support</strong>
+    <span class="session-spinner" aria-hidden="true"></span>
+    <p id="sessionLoadingStatus" role="status" aria-live="polite">Checking your session…</p>
+    <button class="btn primary hidden" id="sessionRetryBtn" type="button">Try again</button>
+  </div>
+</main>
+
+<main class="login-page hidden" id="loginPage">
+  <div class="login-shell">
+    <div class="login-theme-row">
+      <button class="icon-btn" id="loginThemeBtn" type="button" aria-label="Switch to dark theme" data-tooltip="Change theme">
+        <svg class="icon" aria-hidden="true"><use href="#icon-moon"></use></svg>
+      </button>
+    </div>
+    <form class="login-card" id="loginForm" novalidate>
+      <div class="login-card-accent"></div>
+      <div class="login-content">
+        <div class="login-brand">
+          <span class="brand-logo" aria-hidden="true"><svg class="icon icon-lg"><use href="#icon-logo"></use></svg></span>
+          <div class="login-brand-copy"><strong>Shipment Support</strong><span>Customer operations workspace</span></div>
+        </div>
+        <h1>Welcome back</h1>
+        <p class="login-intro">Sign in with your staff account to manage customer conversations and shipment escalations.</p>
+        <div class="field">
+          <label for="email">Email address</label>
+          <input id="email" type="email" inputmode="email" autocomplete="username" maxlength="320" required aria-describedby="emailHint" />
+          <div class="field-hint" id="emailHint">Use the email assigned to your support account.</div>
+        </div>
+        <div class="field">
+          <label for="password">Password</label>
+          <div class="password-field">
+            <input id="password" type="password" autocomplete="current-password" required />
+            <button class="icon-btn password-toggle" id="passwordToggleBtn" type="button" aria-label="Show password" aria-pressed="false" aria-controls="password" data-tooltip="Show password">
+              <svg class="icon icon-sm" aria-hidden="true"><use href="#icon-eye"></use></svg>
+            </button>
+          </div>
+        </div>
+        <button class="btn primary" id="loginBtn" type="submit">
+          <svg class="icon" aria-hidden="true"><use href="#icon-log-out"></use></svg>
+          <span>Sign in</span>
+        </button>
+        <div class="login-error" id="loginError" role="alert" aria-live="assertive"></div>
+        <div class="login-security"><svg class="icon icon-sm" aria-hidden="true"><use href="#icon-shield"></use></svg><span>Your support session and customer data are kept out of shared browser caches.</span></div>
+      </div>
+    </form>
+  </div>
+</main>
+
+<div class="update-banner hidden" id="updateBanner" role="status">
+  <span>The dashboard was updated. Reload to get the latest version.</span>
+  <button class="btn small primary" id="updateReloadBtn" type="button">Reload</button>
+</div>
+<div class="app-shell hidden" id="dashboard">
+  <aside class="global-sidebar" aria-label="Support workspace navigation">
+    <div class="brand-bar">
+      <span class="brand-logo" aria-hidden="true"><svg class="icon icon-lg"><use href="#icon-logo"></use></svg></span>
+      <div class="brand-copy"><strong>Shipment Support</strong><span>Customer operations</span></div>
+      <button class="icon-btn" id="themeBtn" type="button" aria-label="Switch to dark theme" data-tooltip="Change theme">
+        <svg class="icon" aria-hidden="true"><use href="#icon-moon"></use></svg>
+      </button>
+    </div>
+    <nav class="queue-nav" id="tabs" aria-label="Ticket queues">
+      <div class="nav-group-label" aria-hidden="true">Work</div>
+      <button class="queue-nav-btn active" data-view="unassigned" type="button" aria-label="Unassigned tickets" aria-current="page" title="Unassigned">
+        <svg class="icon" aria-hidden="true"><use href="#icon-inbox"></use></svg><span class="queue-nav-label">Unassigned</span><span class="queue-nav-count" data-count-for="unassigned"></span>
+      </button>
+      <button class="queue-nav-btn" data-view="mine" type="button" aria-label="My tickets" title="My tickets">
+        <svg class="icon" aria-hidden="true"><use href="#icon-user-check"></use></svg><span class="queue-nav-label">My tickets</span><span class="queue-nav-count" data-count-for="mine"></span>
+      </button>
+      <button class="queue-nav-btn" data-view="chats" type="button" aria-label="Staff initiated chats" title="Chats">
+        <svg class="icon" aria-hidden="true"><use href="#icon-message"></use></svg><span class="queue-nav-label">Chats</span><span class="queue-nav-count" data-count-for="chats"></span>
+      </button>
+      <button class="queue-nav-btn" data-view="watching" type="button" aria-label="Watching" title="Watching">
+        <svg class="icon" aria-hidden="true"><use href="#icon-eye"></use></svg><span class="queue-nav-label">Watching</span><span class="queue-nav-count" data-count-for="watching"></span>
+      </button>
+      <div class="nav-group-label" aria-hidden="true">Browse</div>
+      <button class="queue-nav-btn" data-view="active" type="button" aria-label="Active tickets" title="Active">
+        <svg class="icon" aria-hidden="true"><use href="#icon-activity"></use></svg><span class="queue-nav-label">Active</span><span class="queue-nav-count" data-count-for="active"></span>
+      </button>
+      <button class="queue-nav-btn" data-view="waiting" type="button" aria-label="Waiting tickets" title="Waiting">
+        <svg class="icon" aria-hidden="true"><use href="#icon-clock"></use></svg><span class="queue-nav-label">Waiting</span><span class="queue-nav-count" data-count-for="waiting"></span>
+      </button>
+      <button class="queue-nav-btn" data-view="history" type="button" aria-label="Ticket history" title="History">
+        <svg class="icon" aria-hidden="true"><use href="#icon-history"></use></svg><span class="queue-nav-label">History</span><span class="queue-nav-count" data-count-for="history"></span>
+      </button>
+      <button class="queue-nav-btn" data-view="contacts" type="button" aria-label="Contacts" title="Contacts">
+        <svg class="icon" aria-hidden="true"><use href="#icon-users"></use></svg><span class="queue-nav-label">Contacts</span><span class="queue-nav-count" data-count-for="contacts"></span>
+      </button>
+    </nav>
+    <div class="nav-spacer"></div>
+    <div class="account-zone">
+      <div class="message-preferences-slot">
+        <button class="btn ghost" id="messagePreferencesBtn" type="button" aria-label="My automatic messages" title="My automatic messages">
+          <svg class="icon" aria-hidden="true"><use href="#icon-message"></use></svg><span>Messages</span>
+        </button>
+      </div>
+      <div class="whatsapp-manage-slot">
+        <button class="btn ghost hidden" id="manageWhatsAppBtn" type="button" aria-label="WhatsApp numbers" title="WhatsApp numbers">
+          <svg class="icon" aria-hidden="true"><use href="#icon-phone"></use></svg><span>WhatsApp</span>
+        </button>
+      </div>
+      <div class="agent-card">
+        <div class="agent-main">
+          <div class="avatar" id="agentAvatar" aria-hidden="true">—</div>
+          <div class="agent-copy"><strong id="agentName">Support agent</strong><span id="agentLabel"></span></div>
+        </div>
+        <div class="staff-actions">
+          <button class="btn ghost hidden" id="manageStaffBtn" type="button" aria-label="Staff accounts" title="Staff accounts">
+            <svg class="icon" aria-hidden="true"><use href="#icon-users"></use></svg><span>Staff</span>
+          </button>
+          <button class="btn ghost" id="logoutBtn" type="button" aria-label="Sign out" title="Sign out">
+            <svg class="icon" aria-hidden="true"><use href="#icon-log-out"></use></svg><span>Sign out</span>
+          </button>
+        </div>
+      </div>
+    </div>
+  </aside>
+
+  <section class="inbox-panel" aria-labelledby="queueTitle">
+    <header class="inbox-header">
+      <div>
+        <div class="eyebrow">Support queue</div>
+        <div class="inbox-title-row"><h1 id="queueTitle">Unassigned</h1><span class="queue-total" id="queueTotal">—</span></div>
+      </div>
+      <div class="inbox-header-actions">
+        <button class="btn small primary" id="startChatBtn" type="button" aria-label="Start WhatsApp chat" title="Start WhatsApp chat">
+          <svg class="icon icon-sm" aria-hidden="true"><use href="#icon-plus"></use></svg><span class="optional-label">New chat</span>
+        </button>
+        <button class="ai-header-control" id="aiHeaderBtn" type="button" aria-label="AI assistant status" title="AI assistant status">
+          <i class="ai-status-dot" id="aiHeaderDot" aria-hidden="true"></i><span class="ai-header-copy">AI</span><span class="ai-header-state" id="aiHeaderStatus">—</span>
+        </button>
+        <button class="icon-btn" id="refreshQueueBtn" type="button" aria-label="Refresh queue" data-tooltip="Refresh queue">
+          <svg class="icon" aria-hidden="true"><use href="#icon-refresh"></use></svg>
+        </button>
+      </div>
+    </header>
+    <div class="search-wrap">
+      <label class="sr-only" for="queueSearch">Search conversations and messages</label>
+      <div class="search-field">
+        <svg class="icon" aria-hidden="true"><use href="#icon-search"></use></svg>
+        <input id="queueSearch" type="search" autocomplete="off" placeholder="Search conversations and messages" aria-describedby="searchScope" aria-keyshortcuts="Control+K /" />
+        <span class="search-kbd" aria-hidden="true"><kbd>/</kbd></span>
+        <button class="icon-btn search-clear hidden" id="clearQueueSearchBtn" type="button" aria-label="Clear ticket search">
+          <svg class="icon icon-sm" aria-hidden="true"><use href="#icon-x"></use></svg>
+        </button>
+      </div>
+      <div class="search-scope" id="searchScope">Searches message history you are allowed to access. Customer/ticket filtering remains available for short searches.</div>
+    </div>
+    <div class="contacts-toolbar hidden" id="contactsToolbar">
+      <div class="contacts-google-copy"><strong id="googleContactsTitle">Google Contacts</strong><span id="googleContactsStatus">Not connected</span></div>
+      <div class="contacts-toolbar-actions">
+        <button class="btn small" id="googleContactsConnectBtn" type="button">Sign in with Google</button>
+        <input class="hidden" id="vcfContactsInput" type="file" accept=".vcf,text/vcard,text/x-vcard,text/directory" />
+        <button class="btn small" id="importVcfContactsBtn" type="button"><svg class="icon icon-sm"><use href="#icon-plus"></use></svg>Import VCF</button>
+        <button class="btn small hidden" id="googleContactsSyncBtn" type="button"><svg class="icon icon-sm"><use href="#icon-refresh"></use></svg>Sync</button>
+        <button class="btn small danger hidden" id="googleContactsDisconnectBtn" type="button">Disconnect</button>
+      </div>
+    </div>
+    <div class="queue" id="queue" role="listbox" aria-label="Support tickets" aria-busy="false">
+      <div class="empty-state"><div class="empty-state-inner"><div class="empty-icon"><svg class="icon icon-lg" aria-hidden="true"><use href="#icon-inbox"></use></svg></div><h3>No tickets loaded</h3><p>Your selected queue will appear here after sign-in.</p></div></div>
+    </div>
+    <footer class="queue-footer" id="queueFooter">
+      <span class="page-summary" id="pageSummary" aria-live="polite"></span>
+    </footer>
+    <div class="layout-resizer queue-resizer" id="queueResizer" role="separator" aria-orientation="vertical" aria-label="Resize ticket list" aria-valuemin="260" aria-valuemax="520" tabindex="0"></div>
+  </section>
+
+  <main class="main" aria-labelledby="ticketTitle">
+    <header class="workspace-header">
+      <button class="icon-btn mobile-back" id="mobileBackBtn" type="button" aria-label="Back to ticket list">
+        <svg class="icon" aria-hidden="true"><use href="#icon-arrow-left"></use></svg>
+      </button>
+      <div class="avatar customer large ticket-heading-avatar" id="ticketAvatar" aria-hidden="true">—</div>
+      <div class="ticket-heading">
+        <div class="ticket-heading-line"><h2 id="ticketTitle">Select a ticket</h2><span id="ticketHeadingStatus"></span></div>
+        <div class="ticket-subtitle" id="ticketSubtitle">Choose a conversation from the queue to begin.</div>
+        <button class="ticket-history-shortcut hidden" id="viewSharedHistoryBtn" type="button" aria-controls="conversation" aria-label="View shared customer history"><svg class="icon icon-sm" aria-hidden="true"><use href="#icon-history"></use></svg><span class="ticket-history-shortcut-full">View shared history</span><span class="ticket-history-shortcut-compact">History</span><span id="sharedHistoryCount"></span></button>
+        <div class="ticket-header-meta" id="ticketHeaderMeta"></div>
+      </div>
+      <div class="actions" id="actions"></div>
+      <div class="header-tools">
+        <button class="icon-btn" id="conversationSearchBtn" type="button" aria-label="Search this conversation" data-tooltip="Search conversation">
+          <svg class="icon" aria-hidden="true"><use href="#icon-search"></use></svg>
+        </button>
+        <button class="icon-btn context-toggle" id="contextToggleBtn" type="button" aria-label="Open customer details" aria-controls="contextPanel" aria-expanded="false" data-tooltip="Customer details" data-tooltip-placement="start">
+          <svg class="icon" aria-hidden="true"><use href="#icon-panel-right"></use></svg>
+        </button>
+      </div>
+    </header>
+    <div class="workspace-loading hidden" id="workspaceLoading" role="progressbar" aria-label="Loading ticket"></div>
+    <div class="error-banner" id="error" role="alert" aria-live="assertive">
+      <svg class="icon" aria-hidden="true"><use href="#icon-alert"></use></svg>
+      <div class="error-banner-copy" id="errorText"></div>
+      <button class="icon-btn" id="dismissErrorBtn" type="button" aria-label="Dismiss error"><svg class="icon icon-sm" aria-hidden="true"><use href="#icon-x"></use></svg></button>
+    </div>
+    <div class="workspace-content" id="workspaceContent">
+      <section class="conversation-shell" aria-label="Ticket conversation">
+        <div class="conversation-search-toolbar hidden" id="conversationSearchToolbar">
+          <svg class="icon icon-sm" aria-hidden="true"><use href="#icon-search"></use></svg>
+          <input class="conversation-search-input" id="conversationSearchInput" type="search" autocomplete="off" placeholder="Search this conversation" aria-label="Search this conversation" />
+          <span class="conversation-search-count" id="conversationSearchCount">—</span>
+          <button class="icon-btn" id="conversationSearchPrev" type="button" aria-label="Previous match" data-tooltip="Previous match"><svg class="icon icon-sm"><use href="#icon-chevron-left"></use></svg></button>
+          <button class="icon-btn" id="conversationSearchNext" type="button" aria-label="Next match" data-tooltip="Next match"><svg class="icon icon-sm"><use href="#icon-chevron-right"></use></svg></button>
+          <button class="icon-btn" id="conversationSearchClose" type="button" aria-label="Close conversation search"><svg class="icon icon-sm"><use href="#icon-x"></use></svg></button>
+        </div>
+        <div class="conversation" id="conversation" role="log" aria-label="Conversation timeline" tabindex="0">
+          <div class="conversation-empty"><div class="empty-state-inner"><div class="empty-icon"><svg class="icon icon-lg" aria-hidden="true"><use href="#icon-message"></use></svg></div><h3>Open a customer conversation</h3><p>Ticket conversation will appear here.</p></div></div>
+        </div>
+        <button class="btn small scroll-latest hidden" id="scrollToLatestBtn" type="button"><svg class="icon icon-sm" aria-hidden="true"><use href="#icon-arrow-down"></use></svg><span id="scrollToLatestLabel">Latest</span></button>
+      </section>
+      <aside class="context-panel" id="contextPanel" aria-label="Customer and ticket details">
+        <div class="layout-resizer context-resizer" id="contextResizer" role="separator" aria-orientation="vertical" aria-label="Resize customer details" aria-valuemin="260" aria-valuemax="520" tabindex="0"></div>
+        <div class="context-panel-head"><strong>Customer details</strong><button class="icon-btn context-close" id="closeContextBtn" type="button" aria-label="Close customer details"><svg class="icon" aria-hidden="true"><use href="#icon-x"></use></svg></button></div>
+        <div class="context" id="context"><div class="empty-state"><div class="empty-state-inner"><div class="empty-icon"><svg class="icon icon-lg" aria-hidden="true"><use href="#icon-user"></use></svg></div><h3>No ticket selected</h3><p>Customer and shipment context will appear here.</p></div></div></div>
+      </aside>
+      <div class="context-backdrop" id="contextBackdrop" aria-hidden="true"></div>
+    </div>
+    <div class="composer-shell">
+      <div class="read-only-banner hidden" id="readOnlyBanner" role="status"></div>
+      <div class="reply-draft hidden" id="replyDraft" role="status">
+        <svg class="icon icon-sm" aria-hidden="true"><use href="#icon-reply"></use></svg>
+        <div class="reply-draft-copy"><strong id="replyDraftTitle">Replying to message</strong><span id="replyDraftBody"></span></div>
+        <button class="icon-btn" id="cancelReplyBtn" type="button" aria-label="Cancel reply"><svg class="icon icon-sm" aria-hidden="true"><use href="#icon-x"></use></svg></button>
+      </div>
+      <div class="reply-draft hidden" id="editDraft" role="status"><div class="reply-draft-copy"><strong>Editing WhatsApp message</strong><span>Your changes will update the message for the customer.</span></div><button class="btn small" id="cancelEditBtn" type="button">Cancel</button></div>
+      <div class="recording-bar hidden" id="recordingBar" role="status" aria-live="polite"><span class="recording-dot" aria-hidden="true"></span><span id="recordingTime">Recording 0:00</span><button class="btn small" id="cancelRecordingBtn" type="button">Cancel recording</button></div>
+      <div class="media-draft hidden" id="mediaDraft"></div>
+      <div class="composer">
+        <div class="composer-box">
+          <div class="composer-input-wrap">
+            <label class="sr-only" for="message">Public reply to customer on WhatsApp</label>
+            <textarea class="composer-textarea" id="message" dir="auto" rows="1" maxlength="4096" placeholder="Reply to customer on WhatsApp" disabled aria-describedby="composerHelp composerCount" aria-keyshortcuts="R"></textarea>
+          </div>
+          <div class="composer-toolbar">
+            <div class="composer-tools">
+              <input id="imageInput" type="file" accept="image/jpeg,image/png,image/webp,application/pdf,video/mp4,video/3gpp" class="hidden" />
+              <button class="icon-btn" id="imageBtn" type="button" disabled aria-label="Attach an image, video, sticker, or PDF" data-tooltip="Attach image, video, sticker, or PDF" data-tooltip-placement="top">
+                <svg class="icon" aria-hidden="true"><use href="#icon-paperclip"></use></svg>
+              </button>
+              <button class="icon-btn" id="voiceBtn" type="button" disabled aria-label="Record a voice note" aria-pressed="false" data-tooltip="Record voice note" data-tooltip-placement="top">
+                <svg class="icon" aria-hidden="true"><use href="#icon-mic"></use></svg>
+              </button>
+              <button class="icon-btn" id="locationBtn" type="button" disabled aria-label="Share a location" data-tooltip="Share location" data-tooltip-placement="top">
+                <svg class="icon" aria-hidden="true"><use href="#icon-map-pin"></use></svg>
+              </button>
+              <button class="icon-btn" id="quickRepliesBtn" type="button" aria-label="Quick replies" aria-haspopup="dialog" data-tooltip="Quick replies" data-tooltip-placement="top">
+                <svg class="icon" aria-hidden="true"><use href="#icon-zap"></use></svg>
+              </button>
+            </div>
+            <span class="composer-count" id="composerCount">0 / 4096</span>
+            <button class="btn primary send-btn" id="sendBtn" type="button" disabled>
+              <svg class="icon" aria-hidden="true"><use href="#icon-send"></use></svg><span class="send-label">Send</span>
+            </button>
+          </div>
+        </div>
+        <div class="composer-meta"><span class="reply-mode"><span class="reply-mode-dot" aria-hidden="true"></span>Public reply · WhatsApp</span><span id="composerHelp">Messages are sent from the WhatsApp number for this conversation.</span><span class="composer-shortcut"><span class="sr-only">Enter to send · Shift+Enter for a new line</span><span aria-hidden="true"><kbd>Enter</kbd> send · <kbd>Shift</kbd>+<kbd>Enter</kbd> new line ·</span><button class="shortcut-link" id="shortcutsHelpBtn" type="button">Shortcuts</button></span></div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<section class="modal-backdrop hidden" id="aiSettingsModal" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="aiSettingsModalTitle" aria-describedby="aiSettingsModalSubtitle">
+  <div class="modal-card ai-settings-card" role="document" tabindex="-1">
+    <div class="modal-head">
+      <div><h2 id="aiSettingsModalTitle">AI Assistant</h2><div class="modal-subtitle" id="aiSettingsModalSubtitle">Control global AI availability for new inbound WhatsApp messages.</div></div>
+      <button class="icon-btn modal-close" id="closeAiSettingsBtn" type="button" aria-label="Close AI settings" data-tooltip="Close"><svg class="icon" aria-hidden="true"><use href="#icon-x"></use></svg></button>
+    </div>
+    <div class="modal-body">
+      <div class="staff-feedback error-box" id="aiSettingsError" role="alert" aria-live="assertive"></div>
+      <div class="ai-status-card">
+        <div class="ai-status-copy"><strong>Current effective status</strong><span id="aiEffectiveReason">Loading current settings…</span></div>
+        <span class="ai-status-pill off" id="aiEffectiveStatus">—</span>
+      </div>
+      <form id="aiSettingsForm" novalidate>
+        <fieldset class="ai-mode-options">
+          <legend>Control mode</legend>
+          <label class="ai-mode-option"><input id="aiModeManual" type="radio" name="aiControlMode" value="MANUAL" /><span><strong>Manual</strong><span>Use the saved ON/OFF switch until a manager changes it.</span></span></label>
+          <label class="ai-mode-option"><input id="aiModeScheduled" type="radio" name="aiControlMode" value="SCHEDULED" /><span><strong>Automatic schedule</strong><span>Calculate availability from a daily time window and IANA timezone.</span></span></label>
+        </fieldset>
+        <div id="aiManualFields">
+          <div class="field"><label for="aiManualEnabled">AI mode</label><select id="aiManualEnabled"><option value="true">ON</option><option value="false">OFF</option></select></div>
+        </div>
+        <div class="hidden" id="aiScheduledFields">
+          <div class="ai-schedule-grid">
+            <div class="field"><label for="aiScheduleStart">AI active from</label><input id="aiScheduleStart" type="time" step="60" required /></div>
+            <div class="field"><label for="aiScheduleEnd">AI active until</label><input id="aiScheduleEnd" type="time" step="60" required /></div>
+            <div class="field wide"><label for="aiScheduleTimezone">Timezone</label><input id="aiScheduleTimezone" type="text" maxlength="128" placeholder="Asia/Beirut" autocomplete="off" required /><div class="field-hint">Use an IANA timezone such as Asia/Beirut, Europe/London, or UTC.</div></div>
+          </div>
+        </div>
+        <div class="ai-next-change" id="aiNextChange">Next automatic change: —</div>
+        <div class="form-note" id="aiUpdatedMeta">Saved configuration is authoritative across backend instances.</div>
+        <div class="modal-actions"><button class="btn" id="cancelAiSettingsBtn" type="button">Cancel</button><button class="btn primary" id="saveAiSettingsBtn" type="submit"><svg class="icon" aria-hidden="true"><use href="#icon-check"></use></svg>Save changes</button></div>
+      </form>
+    </div>
+  </div>
+</section>
+
+<section class="modal-backdrop hidden" id="whatsappModal" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="whatsappModalTitle" aria-describedby="whatsappModalSubtitle">
+  <div class="modal-card whatsapp-card" role="document" tabindex="-1">
+    <div class="modal-head">
+      <div><h2 id="whatsappModalTitle">WhatsApp numbers</h2><div class="modal-subtitle" id="whatsappModalSubtitle">Link WhatsApp numbers or sync them from Meta, then choose which numbers are active in the app.</div></div>
+      <button class="icon-btn modal-close" id="closeWhatsAppBtn" type="button" aria-label="Close WhatsApp numbers"><svg class="icon" aria-hidden="true"><use href="#icon-x"></use></svg></button>
+    </div>
+    <div class="modal-body">
+      <div class="staff-feedback error-box" id="whatsappError" role="alert" aria-live="assertive"></div>
+      <div class="staff-feedback success-box" id="whatsappSuccess" role="status" aria-live="polite"></div>
+      <section class="linked-device-section hidden" id="linkedDeviceSection" aria-labelledby="linkedDeviceTitle">
+        <div class="section-title"><div><strong id="linkedDeviceTitle">WhatsApp linked devices</strong><div class="muted">Link each number using its phone's WhatsApp → Settings → Linked devices. Add it to the app after pairing.</div></div><button class="btn primary" id="addLinkedDeviceBtn" type="button">Link another number</button></div>
+        <div id="linkedDeviceLines"></div>
+        <div class="form-note" id="linkedDeviceStatus" role="status"></div>
+      </section>
+      <div class="section-title">
+        <div><strong>Meta accounts</strong><div class="muted">The access token remains server-side. Add a WABA ID once, then Sync whenever numbers change in Meta.</div></div>
+        <button class="btn" id="refreshWhatsAppBtn" type="button"><svg class="icon" aria-hidden="true"><use href="#icon-refresh"></use></svg>Refresh</button>
+      </div>
+      <form class="whatsapp-sync-form" id="wabaSyncForm" novalidate>
+        <div class="field"><label for="wabaIdInput">WhatsApp Business Account (WABA) ID</label><input id="wabaIdInput" type="text" inputmode="numeric" pattern="[0-9]+" maxlength="64" placeholder="Enter WABA ID" required /><div class="field-hint">Found in Meta Business Manager / WhatsApp Manager. This is not a secret.</div></div>
+        <button class="btn primary" id="syncWabaBtn" type="submit"><svg class="icon" aria-hidden="true"><use href="#icon-refresh"></use></svg>Connect & sync</button>
+      </form>
+      <div class="form-note">Newly discovered numbers are disabled by default. Select <strong>Add to app</strong> to allow customer messages on that line. Removing a line preserves its historical tickets.</div>
+      <div class="whatsapp-account-list" id="whatsappAccounts"></div>
+      <div class="section-title section-spaced"><div><strong>Phone numbers</strong><div class="muted">Only enabled numbers are accepted for new inbound conversations.</div></div></div>
+      <div class="whatsapp-number-list" id="whatsappNumbers"></div>
+    </div>
+  </div>
+</section>
+
+<section class="modal-backdrop hidden" id="locationModal" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="locationModalTitle">
+  <div class="modal-card location-card-modal" role="document" tabindex="-1">
+    <div class="modal-head">
+      <div><h2 id="locationModalTitle">Share location</h2><div class="modal-subtitle">Send a WhatsApp location to the customer.</div></div>
+      <button class="icon-btn modal-close" id="closeLocationBtn" type="button" aria-label="Close location"><svg class="icon" aria-hidden="true"><use href="#icon-x"></use></svg></button>
+    </div>
+    <div class="modal-body">
+      <div class="staff-feedback error-box" id="locationError" role="alert"></div>
+      <form id="locationForm" novalidate>
+        <div class="location-grid">
+          <div class="field"><label for="locationLatitude">Latitude</label><input id="locationLatitude" type="number" step="any" min="-90" max="90" required /></div>
+          <div class="field"><label for="locationLongitude">Longitude</label><input id="locationLongitude" type="number" step="any" min="-180" max="180" required /></div>
+          <div class="field wide"><label for="locationName">Location name <span class="muted">(optional)</span></label><input id="locationName" type="text" maxlength="255" placeholder="Office, warehouse, branch…" /></div>
+          <div class="field wide"><label for="locationAddress">Address <span class="muted">(optional)</span></label><input id="locationAddress" type="text" maxlength="1000" placeholder="Street, city, country" /></div>
+        </div>
+        <div class="modal-actions"><button class="btn" id="useCurrentLocationBtn" type="button"><svg class="icon" aria-hidden="true"><use href="#icon-map-pin"></use></svg>Use my current location</button><button class="btn" id="cancelLocationBtn" type="button">Cancel</button><button class="btn primary" id="sendLocationBtn" type="submit"><svg class="icon" aria-hidden="true"><use href="#icon-send"></use></svg>Send location</button></div>
+      </form>
+    </div>
+  </div>
+</section>
+
+<section class="modal-backdrop hidden" id="messagePreferencesModal" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="messagePreferencesTitle" aria-describedby="messagePreferencesSubtitle">
+  <div class="modal-card message-preferences-card" role="document" tabindex="-1">
+    <div class="modal-head">
+      <div><h2 id="messagePreferencesTitle">My automatic messages</h2><div class="modal-subtitle" id="messagePreferencesSubtitle">Add a message if you want one sent when you claim or resolve a ticket.</div></div>
+      <button class="icon-btn modal-close" id="closeMessagePreferencesBtn" type="button" aria-label="Close automatic messages"><svg class="icon" aria-hidden="true"><use href="#icon-x"></use></svg></button>
+    </div>
+    <div class="modal-body">
+      <div class="staff-feedback error-box" id="messagePreferencesError" role="alert" aria-live="assertive"></div>
+      <form id="messagePreferencesForm" novalidate>
+        <div class="field">
+          <label for="customGreetingMessage">Greeting when I claim a ticket</label>
+          <textarea id="customGreetingMessage" class="message-preference-textarea" rows="4" maxlength="2000" placeholder="Leave empty to send no greeting"></textarea>
+          <div class="field-hint message-preference-hint"><span>Sent when you claim a ticket only if you add a message here.</span><span id="customGreetingCount">0 / 2000</span></div>
+        </div>
+        <div class="field">
+          <label for="customResolutionMessage">Resolution message</label>
+          <textarea id="customResolutionMessage" class="message-preference-textarea" rows="4" maxlength="2000" placeholder="Leave empty to send no resolution message"></textarea>
+          <div class="field-hint message-preference-hint"><span>Sent when you resolve a ticket and return it to AI only if you add a message here.</span><span id="customResolutionCount">0 / 2000</span></div>
+        </div>
+        <div class="form-note">These settings belong only to your staff account. Empty fields send no automatic message.</div>
+        <div class="modal-actions"><button class="btn" id="cancelMessagePreferencesBtn" type="button">Cancel</button><button class="btn primary" id="saveMessagePreferencesBtn" type="submit"><svg class="icon" aria-hidden="true"><use href="#icon-check"></use></svg>Save messages</button></div>
+      </form>
+    </div>
+  </div>
+</section>
+
+<section class="modal-backdrop hidden" id="quickRepliesModal" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="quickRepliesTitle" aria-describedby="quickRepliesSubtitle">
+  <div class="modal-card quick-replies-card" role="document" tabindex="-1">
+    <div class="modal-head">
+      <div><h2 id="quickRepliesTitle">Quick replies</h2><div class="modal-subtitle" id="quickRepliesSubtitle">Select a reply to copy it, then paste it into the chat. Only you can see your quick replies.</div></div>
+      <button class="icon-btn modal-close" id="closeQuickRepliesBtn" type="button" aria-label="Close quick replies"><svg class="icon" aria-hidden="true"><use href="#icon-x"></use></svg></button>
+    </div>
+    <div class="modal-body">
+      <div class="staff-feedback error-box" id="quickRepliesError" role="alert" aria-live="assertive"></div>
+      <div id="quickRepliesListView">
+        <div class="quick-replies-toolbar">
+          <div class="search-field">
+            <svg class="icon" aria-hidden="true"><use href="#icon-search"></use></svg>
+            <label class="sr-only" for="quickRepliesSearch">Search quick replies</label>
+            <input id="quickRepliesSearch" type="search" autocomplete="off" placeholder="Search quick replies" />
+          </div>
+          <button class="btn primary" id="addQuickReplyBtn" type="button"><svg class="icon" aria-hidden="true"><use href="#icon-plus"></use></svg>New reply</button>
+        </div>
+        <div class="quick-reply-list" id="quickRepliesList" role="list" aria-label="Your quick replies" aria-busy="false"></div>
+      </div>
+      <form class="hidden" id="quickReplyForm" novalidate>
+        <div class="field">
+          <label for="quickReplyTitle">Title <span class="field-optional">(optional)</span></label>
+          <input id="quickReplyTitle" type="text" maxlength="80" autocomplete="off" placeholder="For example: Delivery times" />
+        </div>
+        <div class="field">
+          <label for="quickReplyBody">Message</label>
+          <textarea id="quickReplyBody" class="message-preference-textarea" rows="5" maxlength="4096" dir="auto" required></textarea>
+          <div class="field-hint message-preference-hint"><span>Copied exactly as written.</span><span id="quickReplyBodyCount">0 / 4096</span></div>
+        </div>
+        <div class="modal-actions"><button class="btn" id="cancelQuickReplyBtn" type="button">Cancel</button><button class="btn primary" id="saveQuickReplyBtn" type="submit"><svg class="icon" aria-hidden="true"><use href="#icon-check"></use></svg>Save reply</button></div>
+      </form>
+    </div>
+  </div>
+</section>
+
+<section class="modal-backdrop hidden" id="contactEditModal" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="contactEditTitle" aria-describedby="contactEditNote">
+  <div class="modal-card contact-edit-card" role="document" tabindex="-1">
+    <div class="modal-head">
+      <div><h2 id="contactEditTitle">Edit contact</h2><div class="modal-subtitle" id="contactEditSubtitle">Contact</div></div>
+      <button class="icon-btn modal-close" id="closeContactEditBtn" type="button" aria-label="Close contact editor"><svg class="icon" aria-hidden="true"><use href="#icon-x"></use></svg></button>
+    </div>
+    <div class="modal-body">
+      <div class="staff-feedback error-box" id="contactEditError" role="alert" aria-live="assertive"></div>
+      <form id="contactEditForm" novalidate>
+        <div class="field"><label for="contactEditName">Name</label><input id="contactEditName" type="text" maxlength="191" autocomplete="off" dir="auto" required /></div>
+        <div class="field">
+          <label for="contactEditPhone">WhatsApp number</label>
+          <input id="contactEditPhone" type="tel" inputmode="tel" maxlength="40" autocomplete="off" placeholder="+961 3 123 456" required />
+          <div class="field-hint">Include the country code, for example +961 for Lebanon or +90 for Turkey.</div>
+        </div>
+        <div class="form-note" id="contactEditNote"></div>
+        <div class="modal-actions"><button class="btn" id="cancelContactEditBtn" type="button">Cancel</button><button class="btn primary" id="saveContactEditBtn" type="submit"><svg class="icon" aria-hidden="true"><use href="#icon-check"></use></svg>Save contact</button></div>
+      </form>
+    </div>
+  </div>
+</section>
+
+<section class="modal-backdrop hidden" id="mediaViewerModal" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="mediaViewerTitle">
+  <div class="modal-card media-viewer-card" role="document" tabindex="-1">
+    <div class="modal-head">
+      <div><h2 id="mediaViewerTitle">Attachment</h2><div class="modal-subtitle" id="mediaViewerSubtitle">Customer attachment</div></div>
+      <div class="media-viewer-tools hidden" id="mediaViewerTools">
+        <button class="btn small" id="editMediaBtn" type="button"><svg class="icon icon-sm" aria-hidden="true"><use href="#icon-edit"></use></svg>Edit</button>
+        <button class="btn small" id="copyMediaBtn" type="button"><svg class="icon icon-sm" aria-hidden="true"><use href="#icon-copy"></use></svg>Copy</button>
+        <a class="btn small" id="downloadMediaBtn" href="#" download><svg class="icon icon-sm" aria-hidden="true"><use href="#icon-download"></use></svg>Download</a>
+        <button class="btn small" id="zoomOutBtn" type="button" aria-label="Zoom out">−</button>
+        <span class="media-viewer-zoom" id="mediaViewerZoom">100%</span>
+        <button class="btn small" id="zoomInBtn" type="button" aria-label="Zoom in">+</button>
+        <button class="btn small" id="zoomResetBtn" type="button">Reset</button>
+      </div>
+      <button class="icon-btn modal-close" id="closeMediaViewerBtn" type="button" aria-label="Close attachment viewer"><svg class="icon" aria-hidden="true"><use href="#icon-x"></use></svg></button>
+    </div>
+    <div class="media-viewer-body" id="mediaViewerBody"></div>
+    <div class="image-editor-toolbar hidden" id="imageEditorToolbar" role="toolbar" aria-label="Image editing tools">
+      <div class="editor-group" role="group" aria-label="Editing tool">
+        <button class="btn small" id="editorDrawBtn" type="button" aria-pressed="true" title="Draw on the image"><svg class="icon icon-sm" aria-hidden="true"><use href="#icon-pen"></use></svg><span>Draw</span></button>
+        <button class="btn small" id="editorTextBtn" type="button" aria-pressed="false" title="Tap the image to add text"><svg class="icon icon-sm" aria-hidden="true"><use href="#icon-type"></use></svg><span>Text</span></button>
+        <button class="btn small" id="editorSelectBtn" type="button" aria-pressed="false" title="Select, move, or remove text and drawings"><svg class="icon icon-sm" aria-hidden="true"><use href="#icon-pointer"></use></svg><span>Select</span></button>
+        <button class="btn small" id="editorCropBtn" type="button" aria-pressed="false" title="Crop the image"><svg class="icon icon-sm" aria-hidden="true"><use href="#icon-crop"></use></svg><span>Crop</span></button>
+        <button class="btn small" id="editorRotateBtn" type="button" title="Rotate 90° clockwise"><svg class="icon icon-sm" aria-hidden="true"><use href="#icon-rotate"></use></svg><span>Rotate</span></button>
+      </div>
+      <div class="editor-group" role="group" aria-label="Style">
+        <label>Color <input id="editorColor" type="color" value="#ff3b30" /></label>
+        <label>Size <input id="editorSize" type="range" min="2" max="40" value="8" /></label>
+      </div>
+      <div class="editor-group" role="group" aria-label="History">
+        <button class="btn small" id="editorUndoBtn" type="button" title="Undo"><svg class="icon icon-sm" aria-hidden="true"><use href="#icon-undo"></use></svg><span>Undo</span></button>
+        <button class="btn small" id="editorRedoBtn" type="button" title="Redo"><svg class="icon icon-sm" aria-hidden="true"><use href="#icon-redo"></use></svg><span>Redo</span></button>
+      </div>
+      <div class="editor-group" role="group" aria-label="Selected item" id="editorSelectionActions">
+        <button class="btn small" id="editorEditTextBtn" type="button">Edit text</button>
+        <button class="btn small" id="editorDeleteBtn" type="button">Remove</button>
+      </div>
+      <div class="editor-group hidden" role="group" aria-label="Crop" id="editorCropActions">
+        <span class="editor-hint">Drag on the image to choose the area.</span>
+        <button class="btn small" id="editorCancelCropBtn" type="button">Cancel</button>
+        <button class="btn primary small" id="editorApplyCropBtn" type="button" disabled>Apply crop</button>
+      </div>
+      <div class="editor-finish">
+        <input id="editorCaption" type="text" maxlength="1024" placeholder="Caption (optional)" aria-label="Image caption" />
+        <button class="btn small" id="editorCopyBtn" type="button" title="Copy the edited image"><svg class="icon icon-sm" aria-hidden="true"><use href="#icon-copy"></use></svg><span>Copy</span></button>
+        <button class="btn primary small" id="editorSendBtn" type="button">Send image</button>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="modal-backdrop hidden" id="messageDeleteModal" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="messageDeleteTitle">
+  <div class="modal-card transfer-card" role="document" tabindex="-1">
+    <div class="modal-head"><div><h2 id="messageDeleteTitle">Delete message</h2><div class="modal-subtitle" id="messageDeleteSubtitle">Delete for me removes the message from your support view.</div></div><button class="icon-btn modal-close" id="cancelMessageDeleteBtn" type="button" aria-label="Cancel deletion"><svg class="icon" aria-hidden="true"><use href="#icon-x"></use></svg></button></div>
+    <div class="modal-body"><div class="modal-actions"><button class="btn danger" id="deleteMeBtn" type="button">Delete for me</button><button class="btn danger hidden" id="deleteEveryoneBtn" type="button">Delete for everyone</button><button class="btn" id="cancelMessageDeleteActionBtn" type="button">Cancel</button></div></div>
+  </div>
+</section>
+
+<section class="modal-backdrop hidden" id="staffModal" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="staffModalTitle" aria-describedby="staffModalSubtitle">
+  <div class="modal-card" role="document" tabindex="-1">
+    <div class="modal-head">
+      <div><h2 id="staffModalTitle">Staff accounts</h2><div class="modal-subtitle" id="staffModalSubtitle">Manage your support team from one place.</div></div>
+      <button class="icon-btn modal-close" id="closeStaffBtn" type="button" aria-label="Close staff accounts" data-tooltip="Close"><svg class="icon" aria-hidden="true"><use href="#icon-x"></use></svg></button>
+    </div>
+    <div class="modal-body">
+      <div class="staff-feedback error-box" id="staffError" role="alert" aria-live="assertive"></div>
+      <button class="btn hidden" id="editConflictStaffBtn" type="button"><svg class="icon" aria-hidden="true"><use href="#icon-edit"></use></svg>Edit the existing account</button>
+      <div class="staff-feedback success-box" id="staffSuccess" role="status" aria-live="polite"></div>
+
+      <div class="staff-view" id="staffListView">
+        <div class="section-title">
+          <div><strong>Existing staff</strong><div class="muted">Active and deactivated support accounts. Deleted accounts are removed from this list.</div></div>
+          <div class="staff-actions-header"><button class="btn primary" id="createStaffBtn" type="button"><svg class="icon" aria-hidden="true"><use href="#icon-plus"></use></svg>Create staff</button><button class="btn" id="refreshStaffBtn" type="button"><svg class="icon" aria-hidden="true"><use href="#icon-refresh"></use></svg>Refresh</button></div>
+        </div>
+        <div class="staff-list" role="table" aria-label="Support staff accounts">
+          <div class="staff-list-head" role="row"><span role="columnheader">Staff member</span><span role="columnheader">Email</span><span role="columnheader">Role</span><span role="columnheader">Status</span><span role="columnheader">Actions</span></div>
+          <div id="staffList" role="rowgroup"><div class="empty-state"><div class="empty-state-inner"><div class="empty-icon"><svg class="icon icon-lg" aria-hidden="true"><use href="#icon-users"></use></svg></div><h3>Loading staff</h3><p>Retrieving support accounts.</p></div></div></div>
+        </div>
+      </div>
+
+      <div class="staff-view hidden" id="staffCreateView">
+        <div class="staff-view-heading"><div><strong>Create staff account</strong><div class="muted">Add a new agent, administrator, or supervisor.</div></div><button class="btn" id="backFromCreateBtn" type="button"><svg class="icon" aria-hidden="true"><use href="#icon-arrow-left"></use></svg>Back to staff</button></div>
+        <form id="createStaffForm" novalidate>
+          <div class="staff-grid">
+            <div class="field"><label for="createStaffName">Name <span class="required-mark" aria-hidden="true">*</span></label><input id="createStaffName" type="text" minlength="2" maxlength="120" autocomplete="off" required /></div>
+            <div class="field"><label for="createStaffEmail">Email <span class="required-mark" aria-hidden="true">*</span></label><input id="createStaffEmail" type="email" maxlength="320" autocomplete="off" required /></div>
+            <div class="field"><label for="createStaffRole">Role <span class="required-mark" aria-hidden="true">*</span></label><select id="createStaffRole" required><option value="agent">Agent</option><option value="admin">Admin</option><option value="supervisor">Supervisor</option></select></div>
+            <div class="field"><span class="field-label">Status</span><div class="check-field static"><svg class="icon icon-sm" aria-hidden="true"><use href="#icon-check-circle"></use></svg>Active after creation</div></div>
+            <div class="field"><label for="createStaffPassword">Initial password <span class="required-mark" aria-hidden="true">*</span></label><input id="createStaffPassword" type="password" minlength="12" maxlength="72" autocomplete="new-password" required aria-describedby="createPasswordHint" /><div class="field-hint" id="createPasswordHint">12 characters minimum; 72 UTF-8 bytes maximum.</div></div>
+            <div class="field"><label for="createStaffPasswordConfirm">Confirm password <span class="required-mark" aria-hidden="true">*</span></label><input id="createStaffPasswordConfirm" type="password" minlength="12" maxlength="72" autocomplete="new-password" required aria-describedby="createPasswordConfirmHint createPasswordMatchError" /><div class="field-hint" id="createPasswordConfirmHint">Enter the same password again.</div><div class="field-error hidden" id="createPasswordMatchError" role="alert"></div></div>
+          </div>
+          <div class="form-note"><strong>Credential safety:</strong> Passwords are never displayed or returned by the API. New staff must sign in with the initial password you provide.</div>
+          <div class="modal-actions"><button class="btn" id="cancelCreateStaffBtn" type="button">Cancel</button><button class="btn primary" id="createStaffSubmitBtn" type="submit"><svg class="icon" aria-hidden="true"><use href="#icon-plus"></use></svg>Create account</button></div>
+        </form>
+      </div>
+
+      <div class="staff-view hidden" id="staffEditView">
+        <div class="staff-view-heading"><div><strong id="editStaffHeading">Edit staff account</strong><div class="muted">Update account details, status, role, or password.</div></div><button class="btn" id="backFromEditBtn" type="button"><svg class="icon" aria-hidden="true"><use href="#icon-arrow-left"></use></svg>Back to staff</button></div>
+        <form id="editStaffForm" novalidate>
+          <div class="staff-grid">
+            <div class="field"><label for="editStaffName">Name <span class="required-mark" aria-hidden="true">*</span></label><input id="editStaffName" type="text" minlength="2" maxlength="120" autocomplete="off" required /></div>
+            <div class="field"><label for="editStaffEmail">Email <span class="required-mark" aria-hidden="true">*</span></label><input id="editStaffEmail" type="email" maxlength="320" autocomplete="off" required /></div>
+            <div class="field"><label for="editStaffRole">Role <span class="required-mark" aria-hidden="true">*</span></label><select id="editStaffRole" required><option value="agent">Agent</option><option value="admin">Admin</option><option value="supervisor">Supervisor</option></select></div>
+            <div class="field"><span class="field-label">Status</span><label class="check-field"><input id="editStaffActive" type="checkbox" checked /> Account active</label></div>
+            <div class="field"><label for="editStaffPassword">New password <span class="muted">(optional)</span></label><input id="editStaffPassword" type="password" minlength="12" maxlength="72" autocomplete="new-password" aria-describedby="editPasswordHint" /><div class="field-hint" id="editPasswordHint">Leave blank to keep the current password.</div></div>
+            <div class="field"><label for="editStaffPasswordConfirm">Confirm new password</label><input id="editStaffPasswordConfirm" type="password" minlength="12" maxlength="72" autocomplete="new-password" aria-describedby="editPasswordConfirmHint editPasswordMatchError" /><div class="field-hint" id="editPasswordConfirmHint">Required only when setting a new password.</div><div class="field-error hidden" id="editPasswordMatchError" role="alert"></div></div>
+          </div>
+          <div class="form-note">Credential, role, or activation changes revoke the affected account’s current sessions.</div>
+          <div class="modal-actions"><button class="btn" id="cancelEditStaffBtn" type="button">Cancel</button><button class="btn primary" id="editStaffSubmitBtn" type="submit"><svg class="icon" aria-hidden="true"><use href="#icon-check"></use></svg>Save changes</button></div>
+        </form>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="modal-backdrop hidden" id="startChatModal" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="startChatTitle">
+  <div class="modal-card transfer-card" role="document" tabindex="-1">
+    <div class="modal-head">
+      <div><h2 id="startChatTitle">Start WhatsApp chat</h2><div class="modal-subtitle">Start a staff-owned conversation with a customer.</div></div>
+      <button class="icon-btn modal-close" id="closeStartChatBtn" type="button" aria-label="Close"><svg class="icon"><use href="#icon-x"></use></svg></button>
+    </div>
+    <div class="modal-body">
+      <div class="staff-feedback error-box" id="startChatError" role="alert"></div>
+      <form id="startChatForm" novalidate>
+        <div class="field"><label for="startChatLine">Send from</label><select id="startChatLine" required></select><div class="field-hint" id="startChatLinePreview"></div></div>
+        <div class="field"><label for="startChatPhone">Customer WhatsApp number</label><input id="startChatPhone" type="tel" inputmode="tel" placeholder="96170123456" maxlength="32" required /><div class="field-hint">Use the international number, with or without +.</div></div>
+        <div class="field"><label for="startChatName">Customer name <span class="muted">(optional)</span></label><input id="startChatName" type="text" maxlength="191" /></div>
+        <div class="field"><label for="startChatBody">First message</label><textarea id="startChatBody" rows="5" maxlength="4096" required placeholder="Write the first WhatsApp message"></textarea></div>
+        <div class="form-note">If WhatsApp's customer-service window is closed, Meta may require an approved template instead of a free-form first message.</div>
+        <div class="modal-actions"><button class="btn" id="cancelStartChatBtn" type="button">Cancel</button><button class="btn primary" id="confirmStartChatBtn" type="submit"><svg class="icon"><use href="#icon-send"></use></svg>Start chat</button></div>
+      </form>
+    </div>
+  </div>
+</section>
+
+<section class="modal-backdrop hidden" id="forwardModal" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="forwardTitle">
+  <div class="modal-card transfer-card" role="document" tabindex="-1">
+    <div class="modal-head">
+      <div><h2 id="forwardTitle">Forward message</h2><div class="modal-subtitle" id="forwardSubtitle">Forward a message from any conversation you can view.</div></div>
+      <button class="icon-btn modal-close" id="closeForwardBtn" type="button" aria-label="Close"><svg class="icon"><use href="#icon-x"></use></svg></button>
+    </div>
+    <div class="modal-body">
+      <div class="staff-feedback error-box" id="forwardError" role="alert"></div>
+      <div class="field"><label for="forwardSearch">Search contact or conversation</label><input id="forwardSearch" type="search" autocomplete="off" placeholder="Search name or phone number" /></div>
+      <div class="contact-picker-section"><div class="contact-picker-section-title">Contacts</div><div class="contact-picker-list" id="forwardContactsList"></div></div>
+      <div class="contact-picker-section"><div class="contact-picker-section-title">Active conversations</div><div class="contact-picker-list" id="forwardConversationsList"></div></div>
+      <div class="form-note">Selecting a contact forwards through the source WhatsApp line and opens/reopens a staff chat when needed. Media is re-uploaded securely.</div>
+      <div class="modal-actions"><button class="btn" id="cancelForwardBtn" type="button">Cancel</button><button class="btn primary" id="confirmForwardBtn" type="button"><svg class="icon"><use href="#icon-reply"></use></svg>Forward</button></div>
+    </div>
+  </div>
+</section>
+
+<section class="modal-backdrop hidden" id="transferModal" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="transferModalTitle" aria-describedby="transferModalSubtitle">
+  <div class="modal-card transfer-card" role="document" tabindex="-1">
+    <div class="modal-head">
+      <div><h2 id="transferModalTitle">Transfer ticket</h2><div class="modal-subtitle" id="transferModalSubtitle">Assign this conversation to another staff member.</div></div>
+      <button class="icon-btn modal-close" id="closeTransferBtn" type="button" aria-label="Close transfer window" data-tooltip="Close"><svg class="icon" aria-hidden="true"><use href="#icon-x"></use></svg></button>
+    </div>
+    <div class="modal-body">
+      <div class="staff-feedback error-box" id="transferError" role="alert" aria-live="assertive"></div>
+      <div class="transfer-summary">After transfer, you can keep watching the conversation, but only the new assignee can send messages.</div>
+      <div class="field"><label for="transferTarget">Transfer to</label><select id="transferTarget"></select></div>
+      <div class="form-note">The new assignee may transfer the ticket again or resolve it and return the customer to AI.</div>
+      <div class="modal-actions"><button class="btn" id="cancelTransferBtn" type="button">Cancel</button><button class="btn primary" id="confirmTransferBtn" type="button"><svg class="icon" aria-hidden="true"><use href="#icon-transfer"></use></svg>Transfer ticket</button></div>
+    </div>
+  </div>
+</section>
+
+<section class="modal-backdrop hidden" id="confirmModal" role="alertdialog" aria-modal="true" aria-hidden="true" aria-labelledby="confirmTitle" aria-describedby="confirmMessage">
+  <div class="modal-card confirm-card" role="document" tabindex="-1" data-tone="default">
+    <form class="modal-body" id="confirmForm" novalidate>
+      <div class="confirm-body">
+        <span class="confirm-icon" aria-hidden="true"><svg class="icon"><use id="confirmIconUse" href="#icon-info"></use></svg></span>
+        <div class="confirm-copy">
+          <h2 id="confirmTitle">Are you sure?</h2>
+          <p class="confirm-message" id="confirmMessage"></p>
+          <div class="field hidden" id="confirmInputField"><label for="confirmInput" id="confirmInputLabel">Value</label><input id="confirmInput" type="text" maxlength="191" autocomplete="off" /></div>
+        </div>
+      </div>
+      <div class="modal-actions"><button class="btn" id="confirmCancelBtn" type="button">Cancel</button><button class="btn primary" id="confirmAcceptBtn" type="submit">Confirm</button></div>
+    </form>
+  </div>
+</section>
+
+<section class="modal-backdrop hidden" id="shortcutsModal" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="shortcutsTitle">
+  <div class="modal-card shortcuts-card" role="document" tabindex="-1">
+    <div class="modal-head">
+      <div><h2 id="shortcutsTitle">Keyboard shortcuts</h2><div class="modal-subtitle">Shortcuts work when you are not typing in a field.</div></div>
+      <button class="icon-btn modal-close" id="closeShortcutsBtn" type="button" aria-label="Close keyboard shortcuts"><svg class="icon" aria-hidden="true"><use href="#icon-x"></use></svg></button>
+    </div>
+    <div class="modal-body">
+      <dl class="shortcut-list">
+        <div class="shortcut-row"><dt>Next conversation in the list</dt><dd><kbd>J</kbd></dd></div>
+        <div class="shortcut-row"><dt>Previous conversation in the list</dt><dd><kbd>K</kbd></dd></div>
+        <div class="shortcut-row"><dt>Reply to the open conversation</dt><dd><kbd>R</kbd></dd></div>
+        <div class="shortcut-row"><dt>Search conversations and messages</dt><dd><kbd>/</kbd> or <kbd>Ctrl</kbd><kbd>K</kbd></dd></div>
+        <div class="shortcut-row"><dt>Send the reply</dt><dd><kbd>Enter</kbd></dd></div>
+        <div class="shortcut-row"><dt>New line in the reply</dt><dd><kbd>Shift</kbd><kbd>Enter</kbd></dd></div>
+        <div class="shortcut-row"><dt>Close a panel, dialog, or edit</dt><dd><kbd>Esc</kbd></dd></div>
+        <div class="shortcut-row"><dt>Show this list</dt><dd><kbd>?</kbd></dd></div>
+      </dl>
+    </div>
+  </div>
+</section>
+
+<div class="toast-region" id="toastRegion" aria-live="polite" aria-atomic="false"></div>
+<div class="sr-only" id="appStatus" role="status" aria-live="polite" aria-atomic="true"></div>
+__SUPPORT_SCRIPTS__
+</body>
+</html>

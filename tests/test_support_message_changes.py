@@ -462,9 +462,10 @@ def test_original_sender_can_change_own_message_after_ticket_reassignment(
     asyncio.run(run())
 
 
-def test_successful_staff_send_returns_message_change_capabilities(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_successful_staff_send_returns_message_change_capabilities(outbound_unit, monkeypatch: pytest.MonkeyPatch) -> None:
     async def run() -> None:
         service, _connection, _events = linked_service(monkeypatch)
+        outbound_unit(service_module.support_repository)
         owner = SupportAgent(id="7", name="Owner", role="agent")
         ticket = {"id": 42, "status": "IN_PROGRESS", "whatsapp_phone": "96170123456",
                   "business_phone_number_id": "90001"}
@@ -475,12 +476,12 @@ def test_successful_staff_send_returns_message_change_capabilities(monkeypatch: 
             return ticket
 
         async def add_message(**_kwargs: Any) -> tuple[dict[str, Any], bool]:
-            return original, True
+            return {**original, "transport_client_id": "unit-wire-id"}, True
 
         async def send_text(**_kwargs: Any) -> dict[str, Any]:
             return {"messages": [{"id": sent["whatsapp_message_id"]}]}
 
-        async def no_existing(_client_id: str) -> None:
+        async def no_existing(_client_id: str, **_scope) -> None:
             return None
 
         async def no_reply(_ticket_id: int, _message_id: int | None) -> tuple[None, None]:

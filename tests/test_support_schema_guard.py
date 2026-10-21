@@ -10,6 +10,7 @@ def add_base_schema(columns):
 
 
 def add_linked_device_schema(columns):
+    columns["support_ticket_messages"].update({"transport_client_id", "sender_scope", "delivery_token", "delivery_claimed_at", "delivery_started_at", "delivery_retry_safe"})
     columns["support_ticket_messages"].update({"whatsapp_change_timestamp", "pending_change_operation_id"})
     columns["support_ticket_messages"].update({"delivery_status", "delivered_at", "read_at"})
     columns["support_message_change_operations"] = {
@@ -242,3 +243,12 @@ def test_support_schema_guard_identifies_editable_contacts_migration():
 def test_support_schema_guard_identifies_delivery_status_migration():
     columns = {"support_ticket_messages": {"id"}}
     assert "migrations/20261020_message_delivery_status.sql" in _missing_support_schema_migrations(columns)
+
+
+def test_support_schema_guard_identifies_delivery_ownership_migration():
+    columns = {}
+    for path, requirements in _SUPPORT_SCHEMA_MIGRATIONS:
+        if "20261021" not in path:
+            for table, required in requirements.items():
+                columns.setdefault(table, set()).update(required)
+    assert _missing_support_schema_migrations(columns) == ["migrations/20261021_outbound_delivery_ownership.sql"]

@@ -800,7 +800,6 @@ export class Bridge {
   async send(id, payload) {
     const line = this.getLine(id);
     return this.serialSend(line, async () => {
-      const socket = this.connected(line);
       const phone = phoneDigits(payload?.to);
       const jid = `${phone}@s.whatsapp.net`;
       const clientMessageId = payload?.client_message_id;
@@ -809,6 +808,20 @@ export class Bridge {
            /[\u0000-\u001f\u007f]/u.test(clientMessageId))) {
         throw new BridgeError(400, 'INVALID_CLIENT_MESSAGE_ID', 'The client message ID must contain 1–191 printable characters.');
       }
+      // The line send queue serializes this lookup with durable reservation.
+      // A retry never invents a second native ID, even after a process restart.
+      if (clientMessageId) {
+        const previous = Object.entries(line.store.data.messages).find(([, record]) => record.client_message_id === clientMessageId);
+        if (previous) {
+          const [nativeId, record] = previous;
+          if (record.phone !== phone) throw new BridgeError(409, 'CLIENT_ID_CONFLICT', 'The client ID belongs to another recipient.');
+          if (record.ack_confirmed || record.echo_seen) return { messages: [{ id: wrapId(id, nativeId) }] };
+          const error = new BridgeError(409, 'DELIVERY_UNCERTAIN', 'The original delivery is unconfirmed; it will not be sent again.');
+          error.delivery_uncertain = true;
+          throw error;
+        }
+      }
+      const socket = this.connected(line);
       let content;
       if (payload.type === 'text') {
         if (typeof payload.text?.body !== 'string' || !payload.text.body.trim() || payload.text.body.length > 4096) throw new BridgeError(400, 'INVALID_TEXT', 'Text must contain 1–4096 characters.');
@@ -869,6 +882,7 @@ export class Bridge {
             throw persistError;
           }
         }
+        error.delivery_uncertain = true;
         throw error;
       }
     });

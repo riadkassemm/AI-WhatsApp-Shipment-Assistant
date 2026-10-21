@@ -1,0 +1,62 @@
+name: Support regression tests
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  support:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      mariadb:
+        image: mariadb:10.11
+        env:
+          MARIADB_ROOT_PASSWORD: disposable-test-password
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=5s --health-timeout=5s --health-retries=20
+      redis:
+        image: redis:7.4
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd="redis-cli ping"
+          --health-interval=5s --health-timeout=5s --health-retries=20
+    env:
+      OPENAI_API_KEY: unused-test-key
+      WHATSAPP_TOKEN: unused-test-token
+      TEST_DB_HOST: 127.0.0.1
+      TEST_DB_USER: root
+      TEST_DB_PASSWORD: disposable-test-password
+      TEST_REDIS_URL: redis://127.0.0.1:6379/15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: whatsapp_bridge/package-lock.json
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - run: python -m pip install -r requirements-dev.txt
+      - run: npm ci --prefix whatsapp_bridge
+      - name: Syntax and whitespace checks
+        run: |
+          python -m compileall -q app scripts tests
+          git diff --check
+          python scripts/check_support_assets.py
+          find whatsapp_bridge/src -name '*.js' -exec node --check {} \;
+      - name: Unit regressions
+        run: python -m pytest --ignore=tests/integration
+      - name: Real MariaDB and Redis integration (fresh schema per test)
+        env:
+          SUPPORT_INTEGRATION: '1'
+        run: python -m pytest tests/integration
+      - name: Bridge regressions (mock WhatsApp)
+        run: npm test --prefix whatsapp_bridge
