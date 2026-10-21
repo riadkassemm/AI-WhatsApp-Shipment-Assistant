@@ -1135,18 +1135,7 @@ class SupportRepository(DeliveryRepositoryMixin):
                         assert chat is not None
                         return chat, False
 
-                    await cur.execute(
-                        """
-                        SELECT id FROM support_ticket_messages
-                        WHERE ticket_id = %s
-                          AND direction = 'OUTBOUND'
-                          AND send_status = 'PENDING'
-                          AND created_at >= (UTC_TIMESTAMP(6) - INTERVAL 2 MINUTE)
-                        ORDER BY id DESC LIMIT 1 FOR UPDATE
-                        """,
-                        (chat_id,),
-                    )
-                    if await cur.fetchone():
+                    if not await self._fence_deliveries_for_lifecycle(cur, chat_id):
                         raise SupportConflictError(
                             "An outbound WhatsApp message is still being sent. Refresh and close the chat after it finishes."
                         )
@@ -2715,23 +2704,7 @@ class SupportRepository(DeliveryRepositoryMixin):
                             "The selected staff member is no longer active. Refresh the staff list."
                         )
 
-                    # Do not change ownership while the previous assignee may still have
-                    # a WhatsApp request in flight. This closes the transfer/send race.
-                    await cur.execute(
-                        """
-                        SELECT id
-                        FROM support_ticket_messages
-                        WHERE ticket_id = %s
-                          AND direction = 'OUTBOUND'
-                          AND send_status = 'PENDING'
-                          AND created_at >= (UTC_TIMESTAMP(6) - INTERVAL 2 MINUTE)
-                        ORDER BY id DESC
-                        LIMIT 1
-                        FOR UPDATE
-                        """,
-                        (ticket_id,),
-                    )
-                    if await cur.fetchone():
+                    if not await self._fence_deliveries_for_lifecycle(cur, ticket_id):
                         raise SupportConflictError(
                             "An outbound WhatsApp message is still being sent. Refresh and transfer after it finishes."
                         )
@@ -2891,26 +2864,7 @@ class SupportRepository(DeliveryRepositoryMixin):
                         assert ticket is not None
                         return ticket, False
 
-                    # Outbound send attempts are persisted as PENDING before the
-                    # WhatsApp HTTP call. Refuse resolution while a recent send
-                    # may still be in flight, preventing return-to-AI from racing
-                    # an agent response. PENDING older than two minutes is treated
-                    # as stale/uncertain (the HTTP client timeout is much shorter).
-                    await cur.execute(
-                        """
-                        SELECT id
-                        FROM support_ticket_messages
-                        WHERE ticket_id = %s
-                          AND direction = 'OUTBOUND'
-                          AND send_status = 'PENDING'
-                          AND created_at >= (UTC_TIMESTAMP(6) - INTERVAL 2 MINUTE)
-                        ORDER BY id DESC
-                        LIMIT 1
-                        FOR UPDATE
-                        """,
-                        (ticket_id,),
-                    )
-                    if await cur.fetchone():
+                    if not await self._fence_deliveries_for_lifecycle(cur, ticket_id):
                         raise SupportConflictError(
                             "An outbound WhatsApp message is still being sent. Refresh and resolve after it finishes."
                         )

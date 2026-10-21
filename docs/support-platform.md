@@ -65,6 +65,35 @@ uploads happen before the dispatch marker because uploading an asset does not
 send a customer message. Repeated upload after a preparation crash may leave an
 unused provider asset; it does not duplicate the customer message.
 
+### Ticket lifecycle and active delivery
+
+Transfer, ticket resolution, and staff-chat closure use the same ticket-scoped
+guard. A `PENDING` message with a current delivery claim blocks these operations
+for its five-minute preparation lease, including media upload. Every
+`DISPATCHING` message blocks them until completion or explicit recovery, even
+after its lease expires. Message creation time is irrelevant: retrying an old
+message obtains a fresh claim and blocks lifecycle changes again.
+
+Claiming, beginning dispatch, and lifecycle changes acquire the parent ticket
+lock before any message lock. If dispatch wins, the lifecycle transaction sees
+the committed active state and refuses the change. If the lifecycle operation
+wins, it marks unclaimed or expired preparation `FAILED` (safely not sent) and
+replaces its token in the same transaction. A suspended worker cannot resume
+that attempt, even if the chat is later reopened or transferred back. Resuming
+requires an explicit retry with the newly observed token and the existing
+sender/ownership permissions. No database lock spans upload or provider calls.
+
+An expired preparation token cannot begin dispatch or record failure; reclamation
+issues a different token. Recovery of an expired dispatch records `UNCERTAIN`,
+never another send. `UNCERTAIN` does not block lifecycle changes and remains
+visible in history; closure/transfer never relabels it. A matching late acceptance
+may still mark it `SENT`, but a late failure cannot turn it into a retryable row.
+Provider acceptance or a delayed in-flight request can arrive after recovery and
+closure; this policy does not claim cancellation of work past the dispatch boundary.
+
+Configured resolution notices remain separate system sends created after
+resolution. Permissions and shared-history visibility are unchanged.
+
 Duplicate send requests return the existing row/state without dispatching.
 A duplicate does not automatically resume preparation. The UI offers **Resume
 send** for pending preparation and **Resend** only for proven failures. A claim
@@ -105,7 +134,9 @@ not included in staff message responses.
 3. After an outage, run `python scripts/recover_support_deliveries.py` in the
    app's configured environment. It marks dispatches older than five minutes
    `UNCERTAIN` and never contacts WhatsApp. This is an explicit operator command,
-   not an automatic resend worker. Late linked-device confirmations remain valid.
+   not an automatic resend worker. Until recovery or confirmation, expired
+   `DISPATCHING` rows continue to block transfer/resolution/closure. Inspect or
+   stop abandoned workers before recovery; late confirmations remain valid.
 4. For `UNCERTAIN`, inspect the paired phone/provider delivery evidence and
    logs. Do not clear the marker, change the client ID, or force a SQL reset to
    resend. There is deliberately no “send anyway” action. If a staff member
