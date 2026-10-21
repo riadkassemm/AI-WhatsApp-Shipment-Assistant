@@ -95,8 +95,22 @@ async def event_stream(
                 yield ": keepalive\n\n"
             await asyncio.sleep(0)
     finally:
-        try:
+        async def unsubscribe_confirmed() -> None:
             await pubsub.unsubscribe(CHANNEL)
+            # unsubscribe() only writes the command. Wait for Redis to confirm
+            # removal before declaring the subscription closed; pending protected
+            # events are discarded here, never emitted after revocation.
+            while True:
+                reply = await pubsub.get_message(ignore_subscribe_messages=False, timeout=1.0)
+                if reply and reply.get("type") == "unsubscribe" and reply.get("data") == 0:
+                    return
+
+        try:
+            await asyncio.wait_for(unsubscribe_confirmed(), timeout=1.0)
+        except Exception:
+            # Redis may be unreachable. Always close the connection even if its
+            # unsubscribe acknowledgment cannot be obtained within the bound.
+            logger.warning("Could not confirm support stream unsubscribe")
         finally:
             try:
                 await pubsub.aclose()
