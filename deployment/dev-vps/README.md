@@ -1,8 +1,8 @@
 # Development VPS service configuration
 
 These reviewed units target the application VPS `158.220.113.93`. They retain
-the existing API service name and reuse the supervised database tunnel and
-Redis. Files in this directory are configuration sources; installation and
+the existing API service name and use local MariaDB and the dedicated
+`shipment-redis.service`. Files in this directory are configuration sources; installation and
 cutover are separate deployment steps.
 
 | Source | Installation destination |
@@ -28,8 +28,9 @@ The populated environment must use these agreed deployment values:
 
 | Setting | Value |
 | --- | --- |
-| `DB_HOST` / `DB_PORT` | `127.0.0.1` / `3307` |
-| `REDIS_URL` | Existing development Redis instance on `127.0.0.1:6379` |
+| `DB_HOST` / `DB_PORT` | `127.0.0.1` / `3306` |
+| `DB_NAME` / `SHIPPING_DB_SCHEMA` | `whatsapp_support_dev` (both) |
+| `REDIS_URL` | Preserve the existing dedicated development Redis URL |
 | `SUPPORT_MEDIA_DIRECTORY` | `/var/lib/whatsapp-support/support-media` |
 | `WHATSAPP_LINKED_DEVICE_URL` | `http://127.0.0.1:3010` |
 | `WHATSAPP_LINKED_DEVICE_CALLBACK_URL` | `http://127.0.0.1:8000/api/whatsapp/linked-device/events` |
@@ -68,11 +69,11 @@ The result must contain only `whatsapp-dev.target`. Restarting the API alone
 then leaves ngrok running; confirm its process ID stays unchanged during the
 restart check. The existing Nginx/TLS sites remain configured separately.
 
-`shipment-db-tunnel.service` and `redis-server.service` are already enabled
-shared dependencies. The target starts them when necessary; stopping or
-restarting `whatsapp-dev.target` does not stop or restart them. Their current
-configuration is retained, including the canary application's use of the tunnel.
-The target controls the API, the new bridge, and ngrok together.
+`mariadb.service` and `shipment-redis.service` are shared dependencies. The target
+starts them when necessary; stopping or restarting `whatsapp-dev.target` does not
+stop or restart them. The target controls the API, bridge, and ngrok together.
+The old database tunnel is retired after the [verified database cutover](../../docs/local-database-migration.md).
+Do not re-enable it or point a rollback release at the former remote database.
 
 ## Validation and daily commands
 
@@ -94,8 +95,8 @@ systemctl enable whatsapp-dev.target
 
 Enable the target as the boot entry for the group. The existing API/ngrok boot
 entries can remain during validation and be disabled after successful cutover;
-their services are then started by the enabled target. Keep the shared tunnel
-and Redis boot entries enabled.
+their services are then started by the enabled target. Keep local MariaDB
+and the dedicated Redis boot entries enabled.
 
 ```sh
 # Restart or stop the app, bridge, and ingress together.

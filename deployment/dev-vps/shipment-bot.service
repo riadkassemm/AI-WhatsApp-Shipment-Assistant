@@ -1,7 +1,7 @@
 [Unit]
 Description=WhatsApp Support Development API
-Wants=network-online.target shipment-db-tunnel.service redis-server.service
-After=network-online.target shipment-db-tunnel.service redis-server.service
+Wants=network-online.target mariadb.service shipment-redis.service
+After=network-online.target mariadb.service shipment-redis.service
 PartOf=whatsapp-dev.target
 StartLimitIntervalSec=0
 

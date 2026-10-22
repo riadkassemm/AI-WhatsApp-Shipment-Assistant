@@ -520,9 +520,9 @@ Local compilation and tests do not replace a live WhatsApp and MariaDB acceptanc
 
 ## Deployment
 
-For the persistent development VPS, use the [development service setup and production plan](docs/dev-deployment.md). It covers the API, WhatsApp bridge, private database tunnel, ngrok, readiness checks, and preservation of paired sessions and media. The supplied systemd files are examples to adapt after inspecting the server.
+For the persistent development VPS, use the [development service setup and production plan](docs/dev-deployment.md). It covers the API, WhatsApp bridge, local MariaDB, ngrok, readiness checks, and preservation of paired sessions and media. The supplied systemd files are examples to adapt after inspecting the server.
 
-The development VPS selects its release through `/opt/whatsapp-support/current`. Its API (`shipment-bot.service`), bridge (`whatsapp-bridge.service`), and existing ngrok service are managed together by `whatsapp-dev.target`. Private configuration and persistent media/session state live outside the release. The shared database tunnel and Redis keep their own service lifecycle.
+The development VPS selects its release through `/opt/whatsapp-support/current`. Its API (`shipment-bot.service`), bridge (`whatsapp-bridge.service`), and existing ngrok service are managed together by `whatsapp-dev.target`. Private configuration and persistent media/session state live outside the release. Local MariaDB and the dedicated Redis service keep their own lifecycle. Both chatbot and support use `whatsapp_support_dev` on `127.0.0.1:3306`; shipping catalog queries use the same schema. See the [database migration and recovery guide](docs/local-database-migration.md).
 
 ```bash
 # On the development VPS:
@@ -839,7 +839,7 @@ The signed Meta webhook includes the receiving `metadata.phone_number_id` and WA
 Apply the registry migration before using the management screen:
 
 ```bash
-mysql -h 127.0.0.1 -P 3307 -u whatsapp_bot -p mikexport \
+sudo mariadb --protocol=socket whatsapp_support_dev \
   < migrations/20260921_whatsapp_number_registry.sql
 ```
 
@@ -872,7 +872,7 @@ This build adds:
 Apply the additive contact migration before using saved contacts:
 
 ```bash
-mariadb -h 127.0.0.1 -P 3307 -u whatsapp_bot -p mikexport --ssl=OFF \
+sudo mariadb --protocol=socket whatsapp_support_dev \
   < migrations/20260922_support_contacts.sql
 ```
 
@@ -892,14 +892,14 @@ Preferences are scoped to the authenticated staff account; Agents, Supervisors, 
 Apply the additive migration before saving custom messages:
 
 ```bash
-mariadb -h 127.0.0.1 -P 3307 -u whatsapp_bot -p mikexport --ssl=OFF \
+sudo mariadb --protocol=socket whatsapp_support_dev \
   < migrations/20260922_staff_message_preferences.sql
 ```
 
 To clear existing staff preferences for every account once, apply this data migration **after deploying the updated code**:
 
 ```bash
-mariadb -h 127.0.0.1 -P 3307 -u whatsapp_bot -p mikexport --ssl=OFF \
+sudo mariadb --protocol=socket whatsapp_support_dev \
   < migrations/20261020_clear_staff_automatic_messages.sql
 ```
 
@@ -914,7 +914,7 @@ Each list is private to one staff account, Supervisors and Admins included. The 
 Apply the additive migration before deploying this version (the schema guard reports it as missing otherwise):
 
 ```bash
-mariadb -h 127.0.0.1 -P 3307 -u whatsapp_bot -p mikexport --ssl=OFF \
+sudo mariadb --protocol=socket whatsapp_support_dev \
   < migrations/20261019_staff_quick_replies.sql
 ```
 
@@ -923,7 +923,7 @@ mariadb -h 127.0.0.1 -P 3307 -u whatsapp_bot -p mikexport --ssl=OFF \
 Apply the additive migration before deploying this version:
 
 ```bash
-mariadb -h 127.0.0.1 -P 3307 -u whatsapp_bot -p mikexport --ssl=OFF \
+sudo mariadb --protocol=socket whatsapp_support_dev \
   < migrations/20260922_staff_initiated_chats.sql
 ```
 
@@ -934,7 +934,7 @@ The **Forward** action can use any persisted message from a ticket/chat the curr
 Forwarded destination messages persist `is_forwarded` plus their source ticket/message IDs for audit/provenance, and the support timeline renders a WhatsApp-style **Forwarded** label. Apply the additive marker migration before deploying this behavior:
 
 ```bash
-mariadb -h 127.0.0.1 -P 3307 -u whatsapp_bot -p mikexport --ssl=OFF \
+sudo mariadb --protocol=socket whatsapp_support_dev \
   < migrations/20260922_forwarded_message_marker.sql
 ```
 
@@ -990,7 +990,7 @@ No additional migration is required for this lifecycle correction; it reuses the
 Apply the additive reaction-state migration before deploying sticker/reaction support:
 
 ```bash
-mariadb -h 127.0.0.1 -P 3307 -u whatsapp_bot -p mikexport --ssl=OFF \
+sudo mariadb --protocol=socket whatsapp_support_dev \
   < migrations/20260926_whatsapp_stickers_and_reactions.sql
 ```
 
@@ -1042,7 +1042,7 @@ python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().d
 Apply the additive schema migration:
 
 ```bash
-mariadb -h 127.0.0.1 -P 3307 -u whatsapp_bot -p mikexport --ssl=OFF \
+sudo mariadb --protocol=socket whatsapp_support_dev \
   < migrations/20260923_google_contacts.sql
 ```
 
@@ -1065,7 +1065,7 @@ This keeps only one visible/searchable entry while preserving the imported VCF r
 Apply the additive migration before using VCF import:
 
 ```bash
-mariadb -h 127.0.0.1 -P 3307 -u whatsapp_bot -p mikexport --ssl=OFF \
+sudo mariadb --protocol=socket whatsapp_support_dev \
   < migrations/20260925_vcf_contacts.sql
 ```
 
@@ -1082,7 +1082,7 @@ Registered customers (the `users` table) can be renamed too, with **Edit contact
 Apply the additive migration before deploying this version (the schema guard reports it as missing otherwise):
 
 ```bash
-mariadb -h 127.0.0.1 -P 3307 -u root -p mikexport --ssl=OFF \
+sudo mariadb --protocol=socket whatsapp_support_dev \
   < migrations/20261020_editable_contacts.sql
 ```
 

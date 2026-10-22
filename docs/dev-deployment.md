@@ -15,36 +15,30 @@ and two consecutive message edits reached the recipient phone. The user
 selected this updated local project and fresh VPS linked-device pairings. Its
 concrete service names, paths, and ports take precedence over the generic
 examples. On this existing host the target controls API, bridge, and ngrok;
-the shared database tunnel and Redis start as dependencies but are never stopped
+local MariaDB and the dedicated Redis start as dependencies but are never stopped
 or restarted by target operations.
 
-The current development application VPS is `158.220.113.93`; MariaDB is on
-`94.156.144.65`. Keep MariaDB reachable through an SSH forward bound to
-`127.0.0.1:3307` on the application VPS. Application database authentication still
-uses the existing database user, independently of SSH authentication.
+The development VPS `158.220.113.93` now hosts the dedicated
+`whatsapp_support_dev` database in local MariaDB at `127.0.0.1:3306`. Both the
+support application and chatbot use it directly. `SHIPPING_DB_SCHEMA` points to
+the same database. There is no runtime connection or tunnel to `94.156.144.65`.
+See [local database migration](local-database-migration.md) for the selected
+tables, verification, independent-snapshot behavior, and rollback limits.
 
 | Component | Development VPS | Production |
 | --- | --- | --- |
 | HTTPS ingress | Existing stable ngrok HTTPS endpoint | Permanent domain using existing Nginx/TLS |
 | Python API | systemd, loopback `127.0.0.1:8000`, one worker | Same, without reload |
 | Linked-device bridge | `whatsapp-bridge.service`, loopback `127.0.0.1:3010`, fresh VPS pairing | One bridge for its state directory |
-| MariaDB access | Private SSH forward or private network | Private network, or a supervised SSH forward |
+| MariaDB access | Local dedicated database, loopback TCP | Local/private dedicated database |
 | Redis | Managed local/private persistent Redis | Separate managed persistent Redis instance |
 | Deployment/state | Dedicated `whatsapp-support` account, versioned releases, persistent state outside source | Same separation, isolated production state |
 
-The concrete [VPS units](../deployment/dev-vps/README.md) retain
-`shipment-bot.service`, `ngrok.service`, and `shipment-db-tunnel.service`, and
-add `whatsapp-bridge.service` and `whatsapp-dev.target`. The selected release is
-`/opt/whatsapp-support/releases/20261012-dev-v19-ticket-history-number-check`; `current`
-selects it. The previous `20261012-dev-v19-ticket-history` release remains
-available for a code rollback. The linked-device bridge continues to use its
-persistent state outside the release.
-
-The [generic examples](../deployment/examples/README.md) describe a new host.
-They use generic service names and bridge port `3001`, already occupied on this
-VPS. They also give the tunnel its own target lifecycle; the concrete VPS units
-keep the existing shared tunnel independent. Use the appropriate configuration
-set for the host instead of installing both sets.
+The concrete [VPS units](../deployment/dev-vps/README.md) manage
+`shipment-bot.service`, `whatsapp-bridge.service`, `ngrok.service`, and
+`whatsapp-dev.target`. `/opt/whatsapp-support/current` selects the release.
+The bridge keeps its persistent state outside the release. The generic examples
+use bridge port `3001`, already occupied on this VPS; do not install both sets.
 
 ```text
 /opt/whatsapp-support/releases/<release>/    application, venv, Node dependencies
@@ -60,7 +54,7 @@ API and bridge run as `whatsapp-support`, sharing only their required applicatio
 state. Keep source and dependencies read-only to that account; systemd creates
 owned state directories. Keep `app.env` owned by root with mode `0600`.
 On the actual VPS, ngrok retains its existing root service and private config
-under `/root/.config/ngrok`, and the existing tunnel retains its
+under `/root/.config/ngrok`, and the retired tunnel retains its
 `shipment-tunnel` account and configuration under `/etc/shipment-db-tunnel`.
 The generic ngrok and SSH paths above apply to a clean new-host layout.
 
@@ -103,46 +97,14 @@ Do not start another `npm start` when the persistent bridge service is active.
 Only one process may own a bridge state directory. A saved linked-device pairing
 reconnects after service restarts; restarting is not an unlink operation.
 
-### Unattended database connection
+### Local database service
 
-The inspected VPS already has `shipment-db-tunnel.service`, a dedicated
-`shipment-tunnel` user, and a forwarding key. Read-only checks verified the
-forward, strict host-key policy, noninteractive key authentication, and
-keepalives. Reuse it; creating another tunnel would conflict with port `3307`.
-The older development API connected directly to the database host on `3306`.
-The selected replacement uses the verified local forward at `127.0.0.1:3307`.
-The following setup applies when a new forwarding identity is actually needed;
-it is not another tunnel to install on this VPS.
-
-Use a dedicated forwarding identity on the database host and a dedicated SSH
-key on the application host. An unattended systemd service cannot answer a
-password prompt. The key must be usable without an interactive agent; restrict
-its scope to forwarding to MariaDB and protect its private file. Retain
-administrator password login for normal administration independently.
-
-Use [ssh-client.conf.example](../deployment/examples/ssh-client.conf.example).
-Set its database host to `94.156.144.65` and verify the server's SSH host-key
-fingerprint through the existing trusted administration connection before
-installing `known_hosts`. Do not disable host-key verification or automatically
-trust an unverified scan.
-
-On the database host, an authorized-key restriction can use:
-
-```text
-restrict,port-forwarding,permitopen="127.0.0.1:3306",command="/bin/false" <forwarding-public-key>
-```
-
-Apply an `sshd` Match block for that dedicated account with
-`AllowTcpForwarding local`, `PermitOpen 127.0.0.1:3306`,
-`PasswordAuthentication no`, `KbdInteractiveAuthentication no`,
-`PermitTTY no`, and `X11Forwarding no`. Validate SSH configuration before
-reloading it and keep the administration connection open during the change.
-The tunnel uses `-N`, so it does not request the disabled remote command.
-
-The client options enable keepalives and reject a failed forward bind.
-`ExitOnForwardFailure` does not prove that MariaDB behind the forward is alive;
-database readiness needs a real query. See the
-[OpenSSH client configuration reference](https://man.openbsd.org/ssh_config).
+`mariadb.service` owns the loopback database listener. The application account
+has CRUD access only to `whatsapp_support_dev`; schema changes use a separate
+administrator connection. `shipment-db-tunnel.service` is disabled after the
+verified cutover. Keep its private rollback configuration protected, but do
+not restart it as part of the app's normal operation. The earlier tunnel setup
+is historical; it is no longer required for this deployment.
 
 ### Development HTTPS endpoint
 
@@ -176,8 +138,7 @@ Load the units with `systemctl daemon-reload`. Before enabling the target:
 1. Back up the original unit/configuration files and record enabled states.
    Stop the previous API before assigning its replacement to `8000`; ensure
    only one bridge owns the intended state directory. On this VPS, retain the
-   existing ngrok endpoint during initial cutover and keep the shared tunnel,
-   Redis, Nginx, and canary running.
+   existing ngrok endpoint and keep local MariaDB, Redis, and unrelated services running.
 2. Check MariaDB `SELECT 1`, required support schema, and Redis `PING` through
    the exact retained private configuration without printing credentials.
 3. Start the new API and bridge. Verify API reachability, authenticated bridge
@@ -188,7 +149,7 @@ Load the units with `systemctl daemon-reload`. Before enabling the target:
    end-to-end checks separately from service/readiness results.
 5. After service cutover verification, enable `whatsapp-dev.target` and disable
    the separate API/ngrok boot entries. Preserve their definitions for rollback
-   and keep the shared tunnel and Redis independently enabled.
+   and keep local MariaDB and Redis independently enabled.
 
 After that validation, enable the new target at boot:
 
@@ -218,7 +179,7 @@ persistence, backups, and lifecycle; do not replace it with an ephemeral process
 For the concrete development VPS units:
 
 ```sh
-# Start or stop the API, bridge, and ngrok; shared tunnel/Redis remain running.
+# Start or stop the API, bridge, and ngrok; shared MariaDB/Redis remain running.
 sudo systemctl start whatsapp-dev.target
 sudo systemctl stop whatsapp-dev.target
 
@@ -232,7 +193,7 @@ sudo systemctl restart shipment-bot.service
 sudo systemctl restart whatsapp-bridge.service
 
 # Inspect child states and shared dependencies; target status is insufficient.
-sudo systemctl status shipment-bot.service whatsapp-bridge.service ngrok.service shipment-db-tunnel.service redis-server.service
+sudo systemctl status shipment-bot.service whatsapp-bridge.service ngrok.service mariadb.service shipment-redis.service
 
 # Read recent logs, then follow live output if required.
 sudo journalctl -u shipment-bot.service -u whatsapp-bridge.service -u ngrok.service -n 100 --no-pager
@@ -240,10 +201,8 @@ sudo journalctl -u shipment-bot.service -u whatsapp-bridge.service -f
 ```
 
 On a clean host installed from the generic examples, substitute
-`whatsapp-api.service`, `whatsapp-db-tunnel.service`, and
-`whatsapp-ngrok.service` for the corresponding concrete service names. Its
-nonshared tunnel belongs to the target, so target stop/restart controls all four
-components. Redis remains independent in both configurations.
+`whatsapp-api.service` and `whatsapp-ngrok.service` for the corresponding
+concrete service names. MariaDB and Redis remain independent in both configurations.
 
 The API start runs the dependency/schema check automatically. From a local
 project directory with its private `.env`, the same read-only check can be run
@@ -309,8 +268,7 @@ source that configuration.
 
 Switch `current` only after preparation. For an update affecting both Python and
 bridge code, stop those two services first so they do not load source from a
-changed link midway through processing. Leave ngrok, the shared tunnel, and
-Redis running. An example root command sequence on the VPS is:
+changed link midway through processing. Leave ngrok, local MariaDB, and Redis running. An example root command sequence on the VPS is:
 
 ```sh
 set -eu

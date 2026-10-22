@@ -235,7 +235,7 @@ the toggle still works for the current page but may not persist after refresh.
 ## Local development and integration tests
 
 For the persistent dev VPS, use the existing supervised API, bridge, Redis,
-SSH database tunnel, and ingress described in [dev-deployment.md](dev-deployment.md).
+local MariaDB, and ingress described in [dev-deployment.md](dev-deployment.md).
 Local interactive development can still use `uvicorn app.main:app --reload` with
 private configuration and a local/private database. Do not use production
 WhatsApp credentials or production databases for regression tests.
