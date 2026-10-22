@@ -2758,7 +2758,7 @@ function renderActions(data) {
         if (focusTarget) focusTarget.focus({preventScroll: true});
       }
     }
-    container.append(actionButton('Resolve & return to AI', resolveTicket, 'success-action', 'check-circle'));
+    container.append(actionButton('Resolve', resolveTicket, 'success-action', 'check-circle'));
   }
   if (permissions.can_delete_history) {
     container.append(actionButton('Delete ticket', deleteHistoryTicket, 'danger', 'trash'));
@@ -3132,7 +3132,7 @@ async function setStatus(status) {
 }
 
 async function resolveTicket() {
-  if (!(await confirmDialog({title: 'Resolve ticket?', message: 'Resolve this ticket and return the WhatsApp conversation to AI?', confirmLabel: 'Resolve & return to AI', tone: 'success'}))) return;
+  if (!(await confirmDialog({title: 'Resolve ticket?', message: 'Resolve this ticket and return the WhatsApp conversation to AI?', confirmLabel: 'Resolve', tone: 'success'}))) return;
   await doAction('/resolve', 'Ticket resolved and returned to AI.');
 }
 

@@ -31,6 +31,7 @@ from app.support_media import (
     normalize_mime_type,
     support_media_store,
 )
+from app.quick_reply_media import quick_reply_media_store
 from app.support_delivery import deliver
 from app.support_events import publish_support_event
 from app.support_repository import (
@@ -105,12 +106,14 @@ QUICK_REPLY_TITLE_MAX_LENGTH = 80
 QUICK_REPLY_BODY_MAX_LENGTH = 4096
 
 
-def _normalize_quick_reply(title: str | None, body: str | None) -> tuple[str | None, str]:
+def _normalize_quick_reply(title: str | None, body: str | None, *, pdf: bool = False) -> tuple[str | None, str]:
     """Validate one staff quick reply; a blank title is stored as NULL."""
     rendered_title = " ".join(str(title or "").split())
     rendered_body = str(body or "").replace("\r\n", "\n").replace("\r", "\n").strip()
-    if not rendered_body:
+    if not rendered_body and not pdf:
         raise SupportValidationError("Enter the quick reply message.")
+    if pdf and len(rendered_body) > 1024:
+        raise SupportValidationError("PDF captions must be 1024 characters or fewer.")
     if len(rendered_title) > QUICK_REPLY_TITLE_MAX_LENGTH:
         raise SupportValidationError(f"Quick reply titles must be {QUICK_REPLY_TITLE_MAX_LENGTH} characters or fewer.")
     if len(rendered_body) > QUICK_REPLY_BODY_MAX_LENGTH:
@@ -125,6 +128,8 @@ def _normalize_quick_reply(title: str | None, body: str | None) -> tuple[str | N
 def _quick_reply_payload(row: dict[str, Any] | None) -> dict[str, Any]:
     normalized = _normalize_row(row) or {}
     return {
+        **({"attachment_filename": normalized["attachment_filename"], "attachment_size": normalized["attachment_size"]}
+           if normalized.get("attachment_key") else {}),
         "id": int(normalized.get("id") or 0),
         "title": str(normalized.get("title") or ""),
         "body": str(normalized.get("body") or ""),
@@ -2641,15 +2646,53 @@ class SupportService:
     async def update_quick_reply(
         self, agent: SupportAgent, reply_id: int, *, title: str | None, body: str | None
     ) -> dict[str, Any]:
-        clean_title, clean_body = _normalize_quick_reply(title, body)
-        row = await support_repository.update_quick_reply(
-            int(agent.id), int(reply_id), title=clean_title, body=clean_body
-        )
-        logger.info("Support quick reply updated: staff_id=%s quick_reply_id=%s", agent.id, reply_id)
+        existing = await support_repository.get_quick_reply(int(agent.id), reply_id)
+        clean_title, clean_body = _normalize_quick_reply(title, body, pdf=bool(existing.get('attachment_key')))
+        row = await support_repository.update_quick_reply(int(agent.id), reply_id, title=clean_title, body=clean_body)
         return _quick_reply_payload(row)
 
+    async def save_quick_reply_pdf(
+        self, agent: SupportAgent, *, title: str | None, body: str | None,
+        content: bytes, filename: str | None, reply_id: int | None = None,
+    ) -> dict[str, Any]:
+        clean_title, clean_body = _normalize_quick_reply(title, body, pdf=True)
+        if reply_id is not None:
+            await support_repository.get_quick_reply(int(agent.id), reply_id)
+        try:
+            attachment = await asyncio.to_thread(quick_reply_media_store.save, content, filename)
+        except SupportMediaError as exc:
+            raise SupportValidationError(str(exc)) from exc
+        # On ambiguous DB failure retain the immutable file: a commit might have
+        # succeeded. Unreferenced files can be cleaned during scheduled maintenance.
+        old_key = None
+        try:
+            if reply_id is None:
+                row = await support_repository.create_quick_reply(int(agent.id), title=clean_title, body=clean_body, attachment=attachment)
+            else:
+                row, old_key = await support_repository.replace_quick_reply_pdf(int(agent.id), reply_id, title=clean_title, body=clean_body, attachment=attachment)
+        except (SupportConflictError, SupportNotFoundError):
+            await self._remove_quick_reply_pdf(attachment['attachment_key'])
+            raise
+        await self._remove_quick_reply_pdf(old_key)
+        return _quick_reply_payload(row)
+
+    async def get_quick_reply_pdf(self, agent: SupportAgent, reply_id: int) -> tuple[bytes, str]:
+        row = await support_repository.get_quick_reply(int(agent.id), reply_id)
+        if not row.get('attachment_key'):
+            raise SupportNotFoundError("PDF quick reply not found.")
+        content = await asyncio.to_thread(quick_reply_media_store.read, row['attachment_key'])
+        return content, row['attachment_filename']
+
+    @staticmethod
+    async def _remove_quick_reply_pdf(key: str | None) -> None:
+        try:
+            await asyncio.to_thread(quick_reply_media_store.delete, key)
+        except OSError:
+            logger.exception("Could not remove an unreferenced quick reply PDF")
+
     async def delete_quick_reply(self, agent: SupportAgent, reply_id: int) -> dict[str, Any]:
-        await support_repository.delete_quick_reply(int(agent.id), int(reply_id))
+        key = await support_repository.delete_quick_reply(int(agent.id), int(reply_id))
+        await self._remove_quick_reply_pdf(key)
         logger.info("Support quick reply deleted: staff_id=%s quick_reply_id=%s", agent.id, reply_id)
         return {"deleted": True, "id": int(reply_id)}
 

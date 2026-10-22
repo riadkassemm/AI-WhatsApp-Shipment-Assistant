@@ -226,6 +226,9 @@ _SUPPORT_SCHEMA_MIGRATIONS: tuple[tuple[str, dict[str, set[str]]], ...] = (
     ("migrations/20261022_uncertain_delivery_copies.sql", {"support_ticket_messages": {
         "replacement_for_message_id",
     }}),
+    ("migrations/20261023_quick_reply_pdfs.sql", {
+        "support_quick_replies": {"attachment_key", "attachment_filename", "attachment_size"},
+    }),
     ("migrations/20261023_agent_statistics.sql", {
         "support_statistics_metadata": {"activity_tracking_started_at"},
         "support_agent_heartbeats": {"staff_id", "session_id", "tab_id", "sequence_number", "last_seen_at", "active_until"},
@@ -482,7 +485,7 @@ class SupportRepository(DeliveryRepositoryMixin):
 
     # Quick replies are private to one staff account. Every query is scoped by
     # staff_id, so another account's reply behaves exactly like a missing one.
-    _QUICK_REPLY_COLUMNS = "id, title, body, created_at, updated_at"
+    _QUICK_REPLY_COLUMNS = "id, title, body, created_at, updated_at, attachment_key, attachment_filename, attachment_size"
 
     async def list_quick_replies(self, staff_id: int) -> list[dict[str, Any]]:
         if self._pool is None:
@@ -501,7 +504,7 @@ class SupportRepository(DeliveryRepositoryMixin):
                 )
                 return list(await cur.fetchall())
 
-    async def create_quick_reply(self, staff_id: int, *, title: str | None, body: str) -> dict[str, Any]:
+    async def create_quick_reply(self, staff_id: int, *, title: str | None, body: str, attachment: dict | None = None) -> dict[str, Any]:
         if self._pool is None:
             await self.connect()
         assert self._pool is not None
@@ -533,6 +536,11 @@ class SupportRepository(DeliveryRepositoryMixin):
                         (int(staff_id), title, body),
                     )
                     reply_id = int(cur.lastrowid)
+                    if attachment:
+                        await cur.execute("""UPDATE support_quick_replies
+                            SET attachment_key=%s,attachment_filename=%s,attachment_size=%s
+                            WHERE id=%s AND staff_id=%s""",
+                            (attachment['attachment_key'],attachment['attachment_filename'],attachment['attachment_size'],reply_id,int(staff_id)))
                     await cur.execute(
                         f"SELECT {self._QUICK_REPLY_COLUMNS} FROM support_quick_replies WHERE id = %s AND staff_id = %s",
                         (reply_id, int(staff_id)),
@@ -551,39 +559,85 @@ class SupportRepository(DeliveryRepositoryMixin):
     ) -> dict[str, Any]:
         if self._pool is None:
             await self.connect()
-        assert self._pool is not None
+        async with self._pool.acquire() as conn:
+            await conn.begin()
+            try:
+                async with conn.cursor(aiomysql.DictCursor) as cur:
+                    await cur.execute("SELECT attachment_key FROM support_quick_replies WHERE id=%s AND staff_id=%s FOR UPDATE", (reply_id,staff_id))
+                    current = await cur.fetchone()
+                    if current is None:
+                        raise SupportNotFoundError("Quick reply not found.")
+                    if current.get('attachment_key') and len(body) > 1024:
+                        raise SupportConflictError("This reply now contains a PDF. Limit its caption to 1024 characters.")
+                    if not current.get('attachment_key') and not body.strip():
+                        raise SupportConflictError("A text quick reply needs a message.")
+                    await cur.execute("""UPDATE support_quick_replies
+                        SET title = %s, body = %s, updated_at = UTC_TIMESTAMP(6)
+                        WHERE id = %s AND staff_id = %s""", (title,body,reply_id,staff_id))
+                    await cur.execute(f"SELECT {self._QUICK_REPLY_COLUMNS} FROM support_quick_replies WHERE id=%s AND staff_id=%s", (reply_id,staff_id))
+                    row = await cur.fetchone()
+                await conn.commit()
+                return row
+            except BaseException:
+                await conn.rollback()
+                raise
+
+    async def get_quick_reply(self, staff_id: int, reply_id: int) -> dict[str, Any]:
+        if self._pool is None:
+            await self.connect()
         async with self._pool.acquire() as conn:
             async with conn.cursor(aiomysql.DictCursor) as cur:
-                await cur.execute(
-                    """
-                    UPDATE support_quick_replies
-                    SET title = %s, body = %s, updated_at = UTC_TIMESTAMP(6)
-                    WHERE id = %s AND staff_id = %s
-                    """,
-                    (title, body, int(reply_id), int(staff_id)),
-                )
-                # rowcount is zero when nothing changed, so re-read with the same owner scope.
-                await cur.execute(
-                    f"SELECT {self._QUICK_REPLY_COLUMNS} FROM support_quick_replies WHERE id = %s AND staff_id = %s",
-                    (int(reply_id), int(staff_id)),
-                )
+                await cur.execute(f"SELECT {self._QUICK_REPLY_COLUMNS} FROM support_quick_replies WHERE id=%s AND staff_id=%s",
+                                  (reply_id, staff_id))
                 row = await cur.fetchone()
         if row is None:
             raise SupportNotFoundError("Quick reply not found.")
         return row
 
-    async def delete_quick_reply(self, staff_id: int, reply_id: int) -> None:
+    async def replace_quick_reply_pdf(
+        self, staff_id: int, reply_id: int, *, title: str | None, body: str, attachment: dict[str, Any],
+    ) -> tuple[dict[str, Any], str | None]:
         if self._pool is None:
             await self.connect()
-        assert self._pool is not None
         async with self._pool.acquire() as conn:
-            async with conn.cursor(aiomysql.DictCursor) as cur:
-                await cur.execute(
-                    "DELETE FROM support_quick_replies WHERE id = %s AND staff_id = %s",
-                    (int(reply_id), int(staff_id)),
-                )
-                if cur.rowcount != 1:
-                    raise SupportNotFoundError("Quick reply not found.")
+            await conn.begin()
+            try:
+                async with conn.cursor(aiomysql.DictCursor) as cur:
+                    await cur.execute("SELECT attachment_key FROM support_quick_replies WHERE id=%s AND staff_id=%s FOR UPDATE", (reply_id,staff_id))
+                    old = await cur.fetchone()
+                    if old is None:
+                        raise SupportNotFoundError("Quick reply not found.")
+                    await cur.execute("""UPDATE support_quick_replies SET title=%s,body=%s,
+                        attachment_key=%s,attachment_filename=%s,attachment_size=%s,updated_at=UTC_TIMESTAMP(6)
+                        WHERE id=%s AND staff_id=%s""",
+                        (title,body,attachment['attachment_key'],attachment['attachment_filename'],attachment['attachment_size'],reply_id,staff_id))
+                    await cur.execute(f"SELECT {self._QUICK_REPLY_COLUMNS} FROM support_quick_replies WHERE id=%s AND staff_id=%s", (reply_id,staff_id))
+                    row = await cur.fetchone()
+                await conn.commit()
+                return row, old.get('attachment_key')
+            except BaseException:
+                await conn.rollback()
+                raise
+
+    async def delete_quick_reply(self, staff_id: int, reply_id: int) -> str | None:
+        if self._pool is None:
+            await self.connect()
+        async with self._pool.acquire() as conn:
+            await conn.begin()
+            try:
+                async with conn.cursor(aiomysql.DictCursor) as cur:
+                    await cur.execute("SELECT attachment_key FROM support_quick_replies WHERE id=%s AND staff_id=%s FOR UPDATE", (reply_id,staff_id))
+                    row = await cur.fetchone()
+                    if row is None:
+                        raise SupportNotFoundError("Quick reply not found.")
+                    await cur.execute("DELETE FROM support_quick_replies WHERE id = %s AND staff_id = %s", (reply_id,staff_id))
+                    if cur.rowcount != 1:
+                        raise SupportNotFoundError("Quick reply not found.")
+                await conn.commit()
+                return row.get('attachment_key')
+            except BaseException:
+                await conn.rollback()
+                raise
 
     async def agent_has_participated(
         self,

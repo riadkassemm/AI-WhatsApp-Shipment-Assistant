@@ -339,23 +339,82 @@ function chooseImage() {
 
 const VIDEO_MAX_BYTES = Number('__VIDEO_MAX_BYTES__') || 16 * 1024 * 1024;
 
-function imageSelected() {
-  const file = $('imageInput').files && $('imageInput').files[0];
-  if (!file) return;
-  if (!['image/jpeg', 'image/png', 'image/webp', 'application/pdf', 'video/mp4', 'video/3gpp'].includes(file.type)) {
-    showError('Use a JPEG/PNG image, MP4 video, WebP sticker, or PDF document.');
-    $('imageInput').value = '';
-    return;
+function canAttachToComposer() {
+  return Boolean(state.ticketId && state.composerEnabled && !state.busy && !state.mediaRecorder && !state.editTarget);
+}
+
+function attachComposerFile(file, {replace = false} = {}) {
+  if (!canAttachToComposer()) { showError('Open a conversation you can reply to before attaching a file.'); return false; }
+  if (state.pendingMedia && !replace) { showError('Send or remove the current attachment first.'); return false; }
+  const types = {'jpg':'image/jpeg', 'jpeg':'image/jpeg', 'png':'image/png', 'webp':'image/webp',
+    'pdf':'application/pdf', 'mp4':'video/mp4', '3gp':'video/3gpp'};
+  if (!file.type || file.type === 'application/octet-stream') {
+    const type = types[String(file.name || '').split('.').pop().toLowerCase()];
+    if (type) file = new File([file], file.name, {type});
   }
+  if (!Object.values(types).includes(file.type)) {
+    showError('Use a JPEG/PNG image, MP4/3GP video, WebP sticker, or PDF document.'); return false;
+  }
+  if (!file.size) { showError('This file is empty.'); return false; }
   const kind = file.type === 'application/pdf' ? 'document' : file.type === 'image/webp' ? 'sticker' : file.type.startsWith('video/') ? 'video' : 'image';
-  if (kind === 'video' && file.size > VIDEO_MAX_BYTES) {
-    showError('This video is ' + formatBytes(file.size) + '. WhatsApp videos must be ' + formatBytes(VIDEO_MAX_BYTES) + ' or smaller.');
-    $('imageInput').value = '';
-    return;
-  }
+  const limits = {image: Number('__IMAGE_MAX_BYTES__'), document: Number('__DOCUMENT_MAX_BYTES__'), sticker: Number('__STICKER_MAX_BYTES__'), video: VIDEO_MAX_BYTES};
+  if (file.size > limits[kind]) { showError('This file exceeds the ' + formatBytes(limits[kind]) + ' limit.'); return false; }
   setPendingMedia(kind, file);
   $('message').focus();
-  setAppStatus(kind === 'document' ? 'PDF attached. You may add a caption before sending.' : kind === 'sticker' ? 'Sticker attached and ready to send.' : kind === 'video' ? 'Video attached. You may add a caption before sending.' : 'Image attached. You may add a caption before sending.');
+  setAppStatus('Attachment ready. Review the preview, then click Send.');
+  return true;
+}
+
+function imageSelected() {
+  const file = $('imageInput').files && $('imageInput').files[0];
+  if (file && !attachComposerFile(file, {replace: true})) $('imageInput').value = '';
+}
+
+function composerFilesReceived(files) {
+  if (state.activeModal) return;
+  if (files.length !== 1) { showError('Attach one file at a time.'); return; }
+  attachComposerFile(files[0]);
+}
+
+function transferHasFiles(transfer) {
+  return Boolean(transfer && (Array.from(transfer.types || []).includes('Files') || transfer.files?.length));
+}
+
+function installComposerFileInput() {
+  const zone = $('composerDropZone');
+  let depth = 0;
+  const clear = () => { depth = 0; zone.classList.remove('drag-active'); };
+  zone.addEventListener('dragenter', event => {
+    if (!transferHasFiles(event.dataTransfer)) return;
+    event.preventDefault(); depth += 1;
+    if (canAttachToComposer() && !state.activeModal) zone.classList.add('drag-active');
+  });
+  zone.addEventListener('dragover', event => {
+    if (!transferHasFiles(event.dataTransfer)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = canAttachToComposer() && !state.activeModal && !state.pendingMedia ? 'copy' : 'none';
+  });
+  zone.addEventListener('dragleave', () => { if (--depth <= 0) clear(); });
+  zone.addEventListener('drop', event => {
+    clear();
+    if (!transferHasFiles(event.dataTransfer)) return;
+    event.preventDefault(); event.stopPropagation();
+    composerFilesReceived(Array.from(event.dataTransfer.files || []));
+  });
+  document.addEventListener('dragend', clear);
+  // Never navigate away from an in-progress conversation when a file misses the composer.
+  for (const name of ['dragover', 'drop']) document.addEventListener(name, event => {
+    if (transferHasFiles(event.dataTransfer)) { event.preventDefault(); if (name === 'drop') clear(); }
+  });
+  $('message').addEventListener('paste', event => {
+    const transfer = event.clipboardData;
+    const files = Array.from(transfer?.files || []);
+    if (!files.length) for (const item of Array.from(transfer?.items || [])) {
+      if (item.kind === 'file') { const file = item.getAsFile(); if (file) files.push(file); }
+    }
+    if (!files.length) return; // Leave ordinary text and keyboard paste untouched.
+    event.preventDefault(); composerFilesReceived(files);
+  });
 }
 
 async function sendMediaMessage() {

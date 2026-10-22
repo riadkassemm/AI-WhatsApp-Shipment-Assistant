@@ -1444,3 +1444,7 @@ body.column-resizing * { cursor: col-resize !important; }
 #statisticsTable th button{font:inherit;color:inherit;background:none;border:0;padding:0;cursor:pointer;text-decoration:underline;text-underline-offset:4px}
 #statisticsTable th[aria-sort="descending"] button::after{content:" ↓"}
 #statisticsTable th[aria-sort="ascending"] button::after{content:" ↑"}
+
+.composer-shell{position:relative}
+.composer-drop-hint{display:none;position:absolute;inset:0;z-index:5;align-items:center;justify-content:center;border:2px dashed var(--primary);border-radius:var(--radius-sm);background:var(--surface);color:var(--primary-text);font-weight:600;pointer-events:none}
+.composer-shell.drag-active .composer-drop-hint{display:flex}

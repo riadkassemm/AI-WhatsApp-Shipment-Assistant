@@ -461,6 +461,53 @@ async def delete_quick_reply(
         raise _translate_error(exc) from exc
 
 
+async def _save_quick_reply_pdf_upload(
+    file: UploadFile, title: str, body: str, agent: SupportAgent, reply_id: int | None = None,
+) -> dict:
+    try:
+        content = await file.read(max_media_bytes("document") + 1)
+        if len(content) > max_media_bytes("document"):
+            raise SupportValidationError("The PDF document is too large.")
+        return await support_service.save_quick_reply_pdf(agent, title=title, body=body,
+            content=content, filename=file.filename, reply_id=reply_id)
+    except Exception as exc:
+        raise _translate_error(exc) from exc
+    finally:
+        await file.close()
+
+
+@router.post("/quick-replies/pdf", status_code=status.HTTP_201_CREATED)
+async def create_quick_reply_pdf(
+    file: UploadFile = File(...), title: str = Form(default="", max_length=80),
+    body: str = Form(default="", max_length=1024),
+    agent: SupportAgent = Depends(require_support_csrf),
+) -> dict:
+    return await _save_quick_reply_pdf_upload(file, title, body, agent)
+
+
+@router.put("/quick-replies/{reply_id}/pdf")
+async def replace_quick_reply_pdf(
+    reply_id: int = Path(gt=0), file: UploadFile = File(...),
+    title: str = Form(default="", max_length=80), body: str = Form(default="", max_length=1024),
+    agent: SupportAgent = Depends(require_support_csrf),
+) -> dict:
+    return await _save_quick_reply_pdf_upload(file, title, body, agent, reply_id)
+
+
+@router.get("/quick-replies/{reply_id}/pdf")
+async def quick_reply_pdf(reply_id: int = Path(gt=0), agent: SupportAgent = Depends(get_current_agent)) -> Response:
+    from urllib.parse import quote
+    try:
+        content, filename = await support_service.get_quick_reply_pdf(agent, reply_id)
+        return Response(content, media_type="application/pdf", headers={
+            "Content-Disposition": "attachment; filename*=UTF-8''" + quote(filename, safe=''),
+            "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "sandbox",
+        })
+    except Exception as exc:
+        raise _translate_error(exc) from exc
+
+
 @router.get("/ai-settings")
 async def get_ai_settings(
     _agent: SupportAgent = Depends(get_current_agent),

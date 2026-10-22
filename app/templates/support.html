@@ -301,7 +301,8 @@ __SUPPORT_STYLE__
       </aside>
       <div class="context-backdrop" id="contextBackdrop" aria-hidden="true"></div>
     </div>
-    <div class="composer-shell">
+    <div class="composer-shell" id="composerDropZone">
+      <div class="composer-drop-hint" aria-hidden="true">Drop an attachment to preview it</div>
       <div class="read-only-banner hidden" id="readOnlyBanner" role="status"></div>
       <div class="reply-draft hidden" id="replyDraft" role="status">
         <svg class="icon icon-sm" aria-hidden="true"><use href="#icon-reply"></use></svg>
@@ -461,7 +462,7 @@ __SUPPORT_STYLE__
 <section class="modal-backdrop hidden" id="quickRepliesModal" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="quickRepliesTitle" aria-describedby="quickRepliesSubtitle">
   <div class="modal-card quick-replies-card" role="document" tabindex="-1">
     <div class="modal-head">
-      <div><h2 id="quickRepliesTitle">Quick replies</h2><div class="modal-subtitle" id="quickRepliesSubtitle">Select a reply to copy it, then paste it into the chat. Only you can see your quick replies.</div></div>
+      <div><h2 id="quickRepliesTitle">Quick replies</h2><div class="modal-subtitle" id="quickRepliesSubtitle">Copy a saved message or attach a saved PDF to the chat. Only you can see your quick replies.</div></div>
       <button class="icon-btn modal-close" id="closeQuickRepliesBtn" type="button" aria-label="Close quick replies"><svg class="icon" aria-hidden="true"><use href="#icon-x"></use></svg></button>
     </div>
     <div class="modal-body">
@@ -483,9 +484,14 @@ __SUPPORT_STYLE__
           <input id="quickReplyTitle" type="text" maxlength="80" autocomplete="off" placeholder="For example: Delivery times" />
         </div>
         <div class="field">
-          <label for="quickReplyBody">Message</label>
-          <textarea id="quickReplyBody" class="message-preference-textarea" rows="5" maxlength="4096" dir="auto" required></textarea>
-          <div class="field-hint message-preference-hint"><span>Copied exactly as written.</span><span id="quickReplyBodyCount">0 / 4096</span></div>
+          <label for="quickReplyBody">Message / PDF caption</label>
+          <textarea id="quickReplyBody" class="message-preference-textarea" rows="5" maxlength="4096" dir="auto"></textarea>
+          <div class="field-hint message-preference-hint"><span id="quickReplyBodyHint">Copied exactly as written.</span><span id="quickReplyBodyCount">0 / 4096</span></div>
+        </div>
+        <div class="field">
+          <label for="quickReplyPdf">PDF file <span class="field-optional">(optional)</span></label>
+          <input id="quickReplyPdf" type="file" accept="application/pdf,.pdf" />
+          <div class="field-hint" id="quickReplyPdfHint">Save a PDF to attach it to future replies. A caption is optional.</div>
         </div>
         <div class="modal-actions"><button class="btn" id="cancelQuickReplyBtn" type="button">Cancel</button><button class="btn primary" id="saveQuickReplyBtn" type="submit"><svg class="icon" aria-hidden="true"><use href="#icon-check"></use></svg>Save reply</button></div>
       </form>
