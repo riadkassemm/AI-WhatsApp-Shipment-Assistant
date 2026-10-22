@@ -397,3 +397,66 @@ Contact details are stored as bounded, searchable text under message type
 unsupported markers with the same provider ID. Deploy the API before the bridge
 so new contact callbacks can be accepted. This adds display for shared cards, not
 a new contact-sharing composer.
+
+## Agent Statistics
+
+Admins and supervisors open **Statistics** in the dashboard header. The reporting
+API (`GET /api/support/statistics`) checks the current authenticated role on every
+request; regular agents cannot retrieve either individual or team reports. All
+staff can submit a CSRF-protected heartbeat for their own session only. Existing
+conversation permissions are unchanged. Reports use the application's existing
+local MariaDB pool, with no separate database connection or remote catalog query.
+
+Choose inclusive calendar dates (up to 366 days), a staff member or **All staff**,
+and a ranking metric/order. Dates use the browser's timezone, shown above the
+leaderboard; the API defaults to Asia/Beirut. Daylight-saving boundaries are
+converted to UTC. Equal values share a rank; name and ID make ties stable. Totals
+sum the displayed staff rows, including inactive accounts retained in the database.
+
+| Metric | Attribution and counting |
+| --- | --- |
+| Tickets claimed | Distinct tickets with `TICKET_CLAIMED` audit events performed by that staff member in the selected range. Transfers and reopenings are not claims. |
+| Tickets resolved | Distinct tickets with staff `TICKET_RESOLVED` audit events in the range. Repeated resolutions of the same ticket count once per staff member in that range; automatic system resolutions do not count. |
+| Outbound messages sent | Confirmed `SENT` outbound `AGENT` message rows with a provider ID and identifiable staff sender, across tickets and chats. Includes media and later recalled messages. Excludes AI/system notices, pending/failed/uncertain sends and phone-app replies with no staff identity. Uses delivery-attempt time when recorded; legacy rows fall back to creation time. Edits and receipts do not move that timestamp. |
+| Active dashboard time | Union of confirmed activity intervals for that staff member, across all tabs and login sessions. No historical activity is inferred. |
+
+Ticket and message counts use retained audit/message records, never the current
+assignee. A ticket handled by multiple people can contribute to multiple staff
+rows; team totals intentionally sum those rows. Permanently deleting conversation
+history also removes its historical counts. The report shows the earliest retained
+ticket/message records and the exact active-time tracking start date. Coverage
+dates indicate available records, not a guarantee of complete past history.
+
+### Activity accounting
+
+A visible, focused dashboard sends a heartbeat every 15 seconds while active.
+Pointer, keyboard, wheel and touch activity renew a 60-second inactivity timeout.
+Idle/hidden/unfocused dashboards stop active heartbeats. Resuming creates a new
+baseline. The server credits only the interval between accepted heartbeats, capped
+at the preceding activity deadline; gaps longer than 45 seconds earn no time.
+It does not credit future time if a browser crashes or loses its connection.
+Offline time and a final unconfirmed interval may therefore be undercounted.
+This is an activity estimate, not a tamper-proof attendance or productivity measure.
+
+A short transaction locks the staff row, rechecks the session, ignores stale or
+repeated sequence numbers, and merges overlapping intervals into a daily UTC
+union. This prevents duplicate time across tabs/sessions without holding locks
+across network calls. Heartbeat baselines older than two days are cleaned up on
+subsequent activity. Reports are loaded on demand, not continuously polled.
+
+### Installation and verification
+
+Apply `migrations/20261023_agent_statistics.sql` on the **local application database**
+before deploying the code. It adds three small tracking tables, two reporting
+indexes and an indexed generated send-time column. It is safe to reapply and
+preserves the first tracking-start timestamp. Adding the stored column/indexes
+may rebuild existing tables: schedule a quiet deployment for a large database.
+Grant the runtime account SELECT/INSERT/UPDATE/DELETE on the three new tables if
+it uses per-table grants. No remote database changes or new secrets are required.
+Older code can run with this additive schema; rollback need not remove history.
+
+Run `venv/bin/python -m pytest tests/test_agent_statistics.py` for date/UI tests.
+With the disposable MariaDB/Redis environment described above, run
+`venv/bin/python -m pytest tests/integration/test_agent_statistics.py` separately
+for real-session authorization, actor/range accuracy, rankings, idle recovery and
+concurrent overlapping heartbeats. CI includes both through the existing suites.

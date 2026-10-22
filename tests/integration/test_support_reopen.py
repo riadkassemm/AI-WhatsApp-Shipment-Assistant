@@ -224,7 +224,7 @@ async def test_removed_line_staff_chat_and_closed_ticket_are_not_reopened(reopen
 @pytest.mark.asyncio
 async def test_api_requires_csrf_and_resolution_version_and_translates_denial(reopening):
     _, _, _, resolved = reopening
-    route = next(r for r in api.router.routes if r.path.endswith('/tickets/{ticket_id}/reopen'))
+    route = next(r for r in api.router.routes if getattr(r, 'path', '').endswith('/tickets/{ticket_id}/reopen'))
     assert any(d.call is api.require_support_csrf for d in route.dependant.dependencies)
     with pytest.raises(ValueError):
         api.ReopenTicketRequest()

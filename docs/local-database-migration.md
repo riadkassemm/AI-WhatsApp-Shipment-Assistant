@@ -160,3 +160,11 @@ git diff --check
 
 CI runs the same integration suite on MariaDB 10.11. Its result must be checked
 for the final commit separately from these local and deployed checks.
+
+### Statistics tables added after the database cutover
+
+`migrations/20261023_agent_statistics.sql` creates `support_statistics_metadata`,
+`support_agent_heartbeats`, and `support_agent_activity` locally. The clone tool's
+application-table allowlist includes these tables for future moves/backups. The
+original cutover table counts above describe that earlier snapshot. Grant the
+runtime account CRUD on the new tables and retain them in local database backups.

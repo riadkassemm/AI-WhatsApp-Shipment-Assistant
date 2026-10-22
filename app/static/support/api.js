@@ -89,6 +89,8 @@ function configureStaffAccess() {
   if (state.view === 'active' && !canViewActiveQueue()) setQueueView('unassigned', {load: false, persist: false});
   $('manageStaffBtn').classList.toggle('hidden', !canManageStaff());
   $('manageWhatsAppBtn').classList.toggle('hidden', !canManageWhatsApp());
+  $('agentStatisticsBtn').classList.toggle('hidden', !canViewAgentStatistics());
+  if (!canViewAgentStatistics()) clearAgentStatistics();
 }
 
 function emptyMarkup(title, body, iconName = 'inbox') {

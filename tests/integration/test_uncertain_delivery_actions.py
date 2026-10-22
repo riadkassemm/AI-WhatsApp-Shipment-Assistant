@@ -256,7 +256,7 @@ async def test_api_actions_require_csrf_and_strict_risk_confirmation(infrastruct
     row = await uncertain(repo)
     provider(monkeypatch)
     for suffix in ('check-delivery', 'new-copy'):
-        route = next(route for route in api.router.routes if route.path.endswith('/messages/{message_id}/'+suffix))
+        route = next(route for route in api.router.routes if getattr(route, 'path', '').endswith('/messages/{message_id}/'+suffix))
         assert any(dependency.call is api.require_support_csrf for dependency in route.dependant.dependencies)
     for invalid in ({}, {'accept_duplicate_risk': 'true'}, {'accept_duplicate_risk': 1}):
         with pytest.raises(ValidationError):
