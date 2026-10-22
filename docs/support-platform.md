@@ -184,6 +184,8 @@ recovery command below after inspecting the abandoned worker.
 
 ### Uncertain delivery actions
 
+![Uncertain-message actions and a tracked new copy, using synthetic test data](images/support-uncertain-delivery.png)
+
 The API checks saved linked-device acknowledgements/own echoes in batches of 20,
 with a 30-second pause between batches. A cursor ensures older unresolved rows
 do not starve newer ones. Checks never contact a customer or resend a message.
