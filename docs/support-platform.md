@@ -220,6 +220,18 @@ is available. No new dependency or re-pairing is required. API startup verifies
 both the column and uniqueness constraint. The migration may be left in place
 when rolling back the application.
 
+## Notification sounds
+
+![Muted notification-sound control in the compact layout](images/support-notification-sound.png)
+
+Use **Sound on / Sound muted** in the dashboard sidebar to toggle sounds for new
+tickets and customer messages. The setting is saved in this browser and synced
+across its open dashboard tabs; it applies to accounts using that browser.
+Other browsers/devices keep their own setting. Sounds are on by default.
+Visual alerts remain available, desktop notifications are requested silently
+when muted, and voice-note playback is unaffected. If browser storage is blocked,
+the toggle still works for the current page but may not persist after refresh.
+
 ## Local development and integration tests
 
 For the persistent dev VPS, use the existing supervised API, bridge, Redis,
