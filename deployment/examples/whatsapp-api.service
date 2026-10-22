@@ -1,7 +1,7 @@
 [Unit]
 Description=WhatsApp Support API
-Wants=network-online.target whatsapp-db-tunnel.service
-After=network-online.target whatsapp-db-tunnel.service
+Wants=network-online.target mariadb.service
+After=network-online.target mariadb.service
 # Add the actual Redis unit to Wants/After when Redis runs on this host.
 PartOf=whatsapp-dev.target
 StartLimitIntervalSec=0
