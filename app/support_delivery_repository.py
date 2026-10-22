@@ -141,6 +141,29 @@ class DeliveryRepositoryMixin:
                 """, (status, provider_id, error, status == 'FAILED', message_id, token, status, status, DELIVERY_LEASE_MINUTES))
             await conn.commit()
 
+    async def interrupt_delivery(self, message_id: int, token: str) -> None:
+        """Record cancellation without guessing whether dispatch reached WhatsApp.
+
+        A matching confirmed/reclaimed attempt is never overwritten. Inspect the
+        persisted boundary, not the caller's potentially stale local flag.
+        """
+        async with self._pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("""
+                    UPDATE support_ticket_messages
+                    SET delivery_retry_safe = (send_status = 'PENDING'),
+                        error_message = CASE WHEN send_status = 'PENDING'
+                            THEN 'Preparation interrupted; retry is available.'
+                            ELSE 'Delivery confirmation was interrupted; do not resend.' END,
+                        send_status = CASE WHEN send_status = 'PENDING' THEN 'FAILED' ELSE 'UNCERTAIN' END,
+                        updated_at = UTC_TIMESTAMP(6)
+                    WHERE id = %s AND delivery_token = %s AND direction = 'OUTBOUND'
+                      AND (send_status = 'DISPATCHING' OR
+                           (send_status = 'PENDING' AND delivery_started_at IS NULL
+                            AND delivery_claimed_at >= UTC_TIMESTAMP(6) - INTERVAL %s MINUTE))
+                """, (message_id, token, DELIVERY_LEASE_MINUTES))
+            await conn.commit()
+
     async def recover_abandoned_deliveries(self) -> int:
         """Quarantine lost dispatches. Never automatically resend customer messages."""
         if self._pool is None:

@@ -158,6 +158,14 @@ not included in staff message responses.
 
 ### Recovery procedure
 
+When an API task is cancelled (for example during a service restart), it records
+`FAILED` for preparation that has not dispatched, or `UNCERTAIN` after the
+persisted dispatch boundary. This releases lifecycle blocking without resending.
+Matching late acceptance can still confirm the message. Cancellation never
+overwrites a confirmed result or a newer attempt. A hard process kill, repeated
+cancellation, or unavailable database can prevent this cleanup; use the explicit
+recovery command below after inspecting the abandoned worker.
+
 1. Refresh the conversation and inspect the stored state. For `PENDING`, the
    original sender can choose **Resume send** while still assigned. Claims older
    than five minutes can be reclaimed; younger active claims cannot.
