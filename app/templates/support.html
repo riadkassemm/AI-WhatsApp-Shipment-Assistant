@@ -601,12 +601,12 @@ __SUPPORT_STYLE__
       </div>
 
       <div class="staff-view hidden" id="staffCreateView">
-        <div class="staff-view-heading"><div><strong>Create staff account</strong><div class="muted">Add a new agent, administrator, or supervisor.</div></div><button class="btn" id="backFromCreateBtn" type="button"><svg class="icon" aria-hidden="true"><use href="#icon-arrow-left"></use></svg>Back to staff</button></div>
+        <div class="staff-view-heading"><div><strong>Create staff account</strong><div class="muted">Add a new agent, administrator, or Super Admin.</div></div><button class="btn" id="backFromCreateBtn" type="button"><svg class="icon" aria-hidden="true"><use href="#icon-arrow-left"></use></svg>Back to staff</button></div>
         <form id="createStaffForm" novalidate>
           <div class="staff-grid">
             <div class="field"><label for="createStaffName">Name <span class="required-mark" aria-hidden="true">*</span></label><input id="createStaffName" type="text" minlength="2" maxlength="120" autocomplete="off" required /></div>
             <div class="field"><label for="createStaffEmail">Email <span class="required-mark" aria-hidden="true">*</span></label><input id="createStaffEmail" type="email" maxlength="320" autocomplete="off" required /></div>
-            <div class="field"><label for="createStaffRole">Role <span class="required-mark" aria-hidden="true">*</span></label><select id="createStaffRole" required><option value="agent">Agent</option><option value="admin">Admin</option><option value="supervisor">Supervisor</option></select></div>
+            <div class="field"><label for="createStaffRole">Role <span class="required-mark" aria-hidden="true">*</span></label><select id="createStaffRole" required><option value="agent">Agent</option><option value="admin">Admin</option><option value="supervisor">Super Admin</option></select></div>
             <div class="field"><span class="field-label">Status</span><div class="check-field static"><svg class="icon icon-sm" aria-hidden="true"><use href="#icon-check-circle"></use></svg>Active after creation</div></div>
             <div class="field"><label for="createStaffPassword">Initial password <span class="required-mark" aria-hidden="true">*</span></label><input id="createStaffPassword" type="password" minlength="12" maxlength="72" autocomplete="new-password" required aria-describedby="createPasswordHint" /><div class="field-hint" id="createPasswordHint">12 characters minimum; 72 UTF-8 bytes maximum.</div></div>
             <div class="field"><label for="createStaffPasswordConfirm">Confirm password <span class="required-mark" aria-hidden="true">*</span></label><input id="createStaffPasswordConfirm" type="password" minlength="12" maxlength="72" autocomplete="new-password" required aria-describedby="createPasswordConfirmHint createPasswordMatchError" /><div class="field-hint" id="createPasswordConfirmHint">Enter the same password again.</div><div class="field-error hidden" id="createPasswordMatchError" role="alert"></div></div>
@@ -622,7 +622,7 @@ __SUPPORT_STYLE__
           <div class="staff-grid">
             <div class="field"><label for="editStaffName">Name <span class="required-mark" aria-hidden="true">*</span></label><input id="editStaffName" type="text" minlength="2" maxlength="120" autocomplete="off" required /></div>
             <div class="field"><label for="editStaffEmail">Email <span class="required-mark" aria-hidden="true">*</span></label><input id="editStaffEmail" type="email" maxlength="320" autocomplete="off" required /></div>
-            <div class="field"><label for="editStaffRole">Role <span class="required-mark" aria-hidden="true">*</span></label><select id="editStaffRole" required><option value="agent">Agent</option><option value="admin">Admin</option><option value="supervisor">Supervisor</option></select></div>
+            <div class="field"><label for="editStaffRole">Role <span class="required-mark" aria-hidden="true">*</span></label><select id="editStaffRole" required><option value="agent">Agent</option><option value="admin">Admin</option><option value="supervisor">Super Admin</option></select></div>
             <div class="field"><span class="field-label">Status</span><label class="check-field"><input id="editStaffActive" type="checkbox" checked /> Account active</label></div>
             <div class="field"><label for="editStaffPassword">New password <span class="muted">(optional)</span></label><input id="editStaffPassword" type="password" minlength="12" maxlength="72" autocomplete="new-password" aria-describedby="editPasswordHint" /><div class="field-hint" id="editPasswordHint">Leave blank to keep the current password.</div></div>
             <div class="field"><label for="editStaffPasswordConfirm">Confirm new password</label><input id="editStaffPasswordConfirm" type="password" minlength="12" maxlength="72" autocomplete="new-password" aria-describedby="editPasswordConfirmHint editPasswordMatchError" /><div class="field-hint" id="editPasswordConfirmHint">Required only when setting a new password.</div><div class="field-error hidden" id="editPasswordMatchError" role="alert"></div></div>
@@ -739,6 +739,7 @@ __SUPPORT_STYLE__
         <button class="btn primary" type="submit">Apply / refresh</button>
       </form>
       <div id="statisticsError" role="status" aria-live="polite"></div>
+      <button class="btn" id="statisticsPdfBtn" type="button" title="Export the last applied filters and ranking" disabled>Download PDF</button>
       <h3>Totals for selected staff and dates</h3><div class="statistics-totals" id="statisticsTotals"></div>
       <h3 id="statisticsRanking"></h3>
       <div class="statistics-table-wrap"><table id="statisticsTable"><thead><tr><th scope="col">Rank</th><th scope="col">Staff</th>

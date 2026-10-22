@@ -67,6 +67,11 @@ const state={authenticated:true,agent:{id:'8',role:'supervisor'},activeModal:nul
 function openDialog(id){$(id).classList.remove('hidden');state.activeModal=id;}
 function closeDialog(id){$(id).classList.add('hidden');state.activeModal=null;}
 const calls=[];
+const downloads=[];const exports=[];
+URL.createObjectURL=()=> 'blob:test'; URL.revokeObjectURL=()=>{};
+HTMLAnchorElement.prototype.click=function(){downloads.push(this.download)};
+async function fetch(path){exports.push(path);return {ok:true,blob:async()=>new Blob(['%PDF-test'])};}
+
 const report={agents:[{id:7,name:'Alex',role:'agent',is_active:1},{id:8,name:'Morgan',role:'supervisor',is_active:1}],
 rows:[{id:7,name:'Alex',role:'agent',is_active:1,rank:1,active_seconds:7215,tickets_claimed:12,tickets_resolved:10,messages_sent:48},
 {id:8,name:'Morgan',role:'supervisor',is_active:1,rank:2,active_seconds:3600,tickets_claimed:8,tickets_resolved:6,messages_sent:25}],
@@ -82,6 +87,7 @@ async function api(path) {
 }
 function check(condition,message){if(!condition)throw Error(message);}
 '''
+    setup += _ASSETS['state.js'][_ASSETS['state.js'].index('function staffRoleLabel(role)'):]
     assertions = '''
 (async()=>{
 for(const role of ['agent','unexpected']){state.agent.role=role;check(!canViewAgentStatistics(),'agent cannot open report');}
@@ -90,6 +96,15 @@ state.agent.role='supervisor';check(canViewAgentStatistics(),'supervisor access'
 $('agentStatisticsBtn').classList.remove('hidden');$('agentStatisticsBtn').click();
 await Promise.resolve();await Promise.resolve();
 check($('statisticsRows').children.length===2,'report renders staff');
+check($('statisticsRows').textContent.includes('Super Admin'),'role uses new display label');
+check(!$('statisticsPdfBtn').disabled,'export enabled after report loads');
+const appliedStart=$('statisticsStart').value;
+$('statisticsStart').value='2020-01-01';
+await downloadAgentStatisticsPdf();
+check(exports[0].includes('start='+appliedStart),'PDF uses applied filters, not an unsaved draft');
+check(downloads[0].endsWith('.pdf'),'PDF attachment downloads');
+$('statisticsStart').value=appliedStart;
+
 check($('statisticsRanking').textContent.includes('Tickets resolved'),'ranking criterion explicit');
 check($('statisticsTotals').textContent.includes('73'),'team totals');
 $('statisticsAgent').value='7';$('statisticsAgent').dispatchEvent(new Event('change'));
@@ -105,8 +120,12 @@ resolvePending='wait';const pending=loadAgentStatistics();
 state.agent.role='agent';clearAgentStatistics();resolvePending(report);await pending;
 check($('statisticsRows').children.length===0,'late response after permission loss cannot disclose data');
 check($('agentStatisticsModal').classList.contains('hidden'),'report closes on permission loss');
+check($('statisticsPdfBtn').disabled,'export disabled on permission loss');
+await downloadAgentStatisticsPdf();check(exports.length===1,'agent cannot export');
+
 state.agent.role='supervisor';report.rows[0].name='Alex';renderAgentStatistics(report);openDialog('agentStatisticsModal');
 $('statisticsAgent').value='';$('statisticsMetric').value='tickets_resolved';$('statisticsDirection').value='desc';
+resolvePending=null;await loadAgentStatistics();
 $('statisticsError').textContent='';
 document.body.dataset.statisticsTest='passed';
 })().catch(error=>{document.body.dataset.statisticsTest='FAILED: '+error.message;});
@@ -123,3 +142,26 @@ document.body.dataset.statisticsTest='passed';
     result=subprocess.run([*command,path.as_uri()],capture_output=True,text=True,timeout=45)
     assert result.returncode==0,result.stderr
     assert 'data-statistics-test="passed"' in result.stdout,result.stdout[-5000:]
+
+
+def test_pdf_export_paginates_includes_filters_and_escapes_staff_names():
+    from io import BytesIO
+    from pypdf import PdfReader
+    from app.support_statistics_pdf import statistics_pdf, display_text
+    row = dict(id='8', name='Morgan <Admin> & Team', role='supervisor', is_active=True,
+               rank=1, active_seconds=3661, tickets_claimed=12, tickets_resolved=10, messages_sent=30)
+    report = dict(start='2026-10-01', end='2026-10-23', timezone='Asia/Beirut', agent_id=8,
+                  agents=[row], rows=[{**row, 'rank': i} for i in range(1, 101)], totals=row,
+                  rank_by='messages_sent', direction='desc')
+    content = statistics_pdf(report)
+    reader = PdfReader(BytesIO(content))
+    text = '\n'.join(page.extract_text() for page in reader.pages)
+    assert len(reader.pages) > 1
+    for expected in ['Agent Statistics', 'Morgan <Admin> & Team', 'Super Admin',
+                     'Outbound messages sent', 'Highest first', '2026-10-01', '2026-10-23',
+                     'Asia/Beirut', '1h 1m 1s', 'Deleted staff are excluded']:
+        assert expected in text
+    assert all('Rank' in page.extract_text() for page in reader.pages[:-1])
+    assert '&lt;' in display_text('<Admin>')
+    assert display_text('محمد') != 'محمد'  # Arabic shaping and visual direction
+    assert statistics_pdf({**report, 'rows': [{**row, 'name': 'محمد أحمد'}]}).startswith(b'%PDF-')

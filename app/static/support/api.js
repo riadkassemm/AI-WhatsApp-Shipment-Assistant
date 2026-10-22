@@ -53,7 +53,7 @@ function noticeDashboardUpdate(version) {
 function setAgentIdentity(agent) {
   const name = agent?.name || 'Support agent';
   text($('agentName'), name);
-  text($('agentLabel'), agent?.role || 'agent');
+  text($('agentLabel'), staffRoleLabel(agent?.role || 'agent'));
   text($('agentAvatar'), initials(name));
 }
 

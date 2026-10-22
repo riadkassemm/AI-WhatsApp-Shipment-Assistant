@@ -75,7 +75,7 @@ def _patch_repo(monkeypatch, chat: dict[str, Any] | None, calls: list[str]) -> N
 def test_agent_cannot_delete_a_chat(monkeypatch) -> None:
     calls: list[str] = []
     _patch_repo(monkeypatch, _chat(), calls)
-    with pytest.raises(SupportForbiddenError, match="Supervisors and Admins"):
+    with pytest.raises(SupportForbiddenError, match="Super Admins and Admins"):
         asyncio.run(SupportService().delete_staff_chat(85, agent=AGENT))
     assert calls == []
 

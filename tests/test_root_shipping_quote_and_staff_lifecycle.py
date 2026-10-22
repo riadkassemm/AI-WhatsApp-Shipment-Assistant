@@ -309,7 +309,7 @@ def test_supervisor_updates_credentials_role_activation_and_deletes_agent() -> N
         repo = staff_management.staff_repository
         original_get = repo.get_staff_by_id
         original_update = repo.update_staff
-        original_delete = repo.soft_delete_staff
+        original_delete = repo.delete_staff
 
         async def get_target(_staff_id: int):
             return target
@@ -334,7 +334,7 @@ def test_supervisor_updates_credentials_role_activation_and_deletes_agent() -> N
 
         repo.get_staff_by_id = get_target  # type: ignore[method-assign]
         repo.update_staff = update_target  # type: ignore[method-assign]
-        repo.soft_delete_staff = delete_target  # type: ignore[method-assign]
+        repo.delete_staff = delete_target  # type: ignore[method-assign]
         try:
             updated = await staff_management.update_staff_account(
                 actor,
@@ -349,7 +349,7 @@ def test_supervisor_updates_credentials_role_activation_and_deletes_agent() -> N
         finally:
             repo.get_staff_by_id = original_get  # type: ignore[method-assign]
             repo.update_staff = original_update  # type: ignore[method-assign]
-            repo.soft_delete_staff = original_delete  # type: ignore[method-assign]
+            repo.delete_staff = original_delete  # type: ignore[method-assign]
 
         staff_id, kwargs = calls["update"]  # type: ignore[misc]
         assert staff_id == 12
@@ -455,7 +455,7 @@ def test_supervisor_can_modify_and_delete_another_supervisor() -> None:
         repo = staff_management.staff_repository
         original_get = repo.get_staff_by_id
         original_update = repo.update_staff
-        original_delete = repo.soft_delete_staff
+        original_delete = repo.delete_staff
 
         async def get_target(staff_id: int):
             assert staff_id == 2
@@ -471,7 +471,7 @@ def test_supervisor_can_modify_and_delete_another_supervisor() -> None:
 
         repo.get_staff_by_id = get_target  # type: ignore[method-assign]
         repo.update_staff = update_target  # type: ignore[method-assign]
-        repo.soft_delete_staff = delete_target  # type: ignore[method-assign]
+        repo.delete_staff = delete_target  # type: ignore[method-assign]
         try:
             updated = await staff_management.update_staff_account(
                 actor, 2, name="Supervisor Updated", role="supervisor"
@@ -485,7 +485,7 @@ def test_supervisor_can_modify_and_delete_another_supervisor() -> None:
         finally:
             repo.get_staff_by_id = original_get  # type: ignore[method-assign]
             repo.update_staff = original_update  # type: ignore[method-assign]
-            repo.soft_delete_staff = original_delete  # type: ignore[method-assign]
+            repo.delete_staff = original_delete  # type: ignore[method-assign]
 
         assert updated["name"] == "Supervisor Updated"
         assert updated["role"] == "supervisor"

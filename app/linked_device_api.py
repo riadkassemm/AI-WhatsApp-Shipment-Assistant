@@ -83,7 +83,7 @@ class LinkedDeviceEvent(BaseModel):
 
 def _require_manager(agent: SupportAgent) -> None:
     if not agent.is_supervisor:
-        raise HTTPException(403, "Only Supervisors and Admins can manage WhatsApp connections.")
+        raise HTTPException(403, "Only Super Admins and Admins can manage WhatsApp connections.")
 
 
 def _require_line(line_id: str) -> None:

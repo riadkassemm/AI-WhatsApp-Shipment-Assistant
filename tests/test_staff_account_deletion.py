@@ -28,10 +28,14 @@ class FakeCursor:
         self.conn.statements.append((normalized, params))
         if "GET_LOCK" in normalized:
             self._result = {"acquired": 1}
-        elif normalized.startswith("SELECT id FROM staff"):
+        elif normalized.startswith("SELECT id, name, email"):
+
             self._result = {"id": params[0]} if self.conn.row_exists else None
         else:
             self._result = None
+
+    async def fetchall(self):
+        return []
 
     async def fetchone(self):
         return self._result
@@ -74,7 +78,7 @@ class FakePool:
         return _Acquire()
 
 
-def test_soft_delete_tombstones_row_frees_email_and_revokes_sessions() -> None:
+def test_permanent_delete_removes_account_and_personal_records() -> None:
     async def run() -> None:
         conn = FakeConnection()
         repo = StaffRepository()
@@ -84,14 +88,13 @@ def test_soft_delete_tombstones_row_frees_email_and_revokes_sessions() -> None:
             return {"id": staff_id, "name": "Agent", "role": "agent", "is_active": 0}
 
         repo.get_public_staff_by_id = reload  # type: ignore[method-assign]
-        deleted = await repo.soft_delete_staff(12)
+        deleted = await repo.delete_staff(12)
 
         sql = [statement for statement, _ in conn.statements]
-        update = next(s for s in sql if s.startswith("UPDATE staff SET"))
-        assert "is_active = 0" in update
-        assert "deleted_at = UTC_TIMESTAMP(6)" in update
-        assert "email_normalized = CONCAT('deleted:', id)" in update
-        assert any(s.startswith("UPDATE staff_sessions") for s in sql)
+        assert "DELETE FROM staff WHERE id = %s" in sql
+        for table in ("staff_sessions", "support_quick_replies", "support_agent_heartbeats", "support_agent_activity"):
+            assert f"DELETE FROM {table} WHERE staff_id = %s" in sql
+        assert not any(s.startswith("UPDATE staff SET") for s in sql)
         assert any("deleted_at IS NULL FOR UPDATE" in s for s in sql)
         assert conn.committed and not conn.rolled_back
         assert deleted["id"] == 12
@@ -99,13 +102,13 @@ def test_soft_delete_tombstones_row_frees_email_and_revokes_sessions() -> None:
     asyncio.run(run())
 
 
-def test_soft_delete_of_missing_or_already_deleted_row_is_not_found() -> None:
+def test_delete_of_missing_or_already_deleted_row_is_not_found() -> None:
     async def run() -> None:
         conn = FakeConnection(row_exists=False)
         repo = StaffRepository()
         repo._pool = FakePool(conn)  # type: ignore[assignment]
         try:
-            await repo.soft_delete_staff(12)
+            await repo.delete_staff(12)
         except StaffNotFoundError:
             pass
         else:  # pragma: no cover - assertion path
@@ -139,7 +142,7 @@ def test_inactive_staff_account_can_be_deleted() -> None:
         calls: list[int] = []
         repo = staff_management.staff_repository
         original_get = repo.get_staff_by_id
-        original_delete = repo.soft_delete_staff
+        original_delete = repo.delete_staff
 
         async def get_target(_staff_id: int):
             return target
@@ -149,12 +152,12 @@ def test_inactive_staff_account_can_be_deleted() -> None:
             return {**target}
 
         repo.get_staff_by_id = get_target  # type: ignore[method-assign]
-        repo.soft_delete_staff = delete_target  # type: ignore[method-assign]
+        repo.delete_staff = delete_target  # type: ignore[method-assign]
         try:
             deleted = await staff_management.delete_staff_account(actor, 7)
         finally:
             repo.get_staff_by_id = original_get  # type: ignore[method-assign]
-            repo.soft_delete_staff = original_delete  # type: ignore[method-assign]
+            repo.delete_staff = original_delete  # type: ignore[method-assign]
 
         assert calls == [7]
         assert deleted["deleted"] is True

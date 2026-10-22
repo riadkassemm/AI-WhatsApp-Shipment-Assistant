@@ -488,7 +488,7 @@ function syncAiSettingsEditability() {
     $('aiSettingsModalSubtitle'),
     editable
       ? 'Control global AI availability for new inbound WhatsApp messages.'
-      : 'View the current global AI availability. Only Supervisors and Admins can change it.'
+      : 'View the current global AI availability. Only Super Admins and Admins can change it.'
   );
 }
 
@@ -1246,7 +1246,7 @@ function renderStaffAccounts(items) {
     const role = document.createElement('span');
     role.className = 'role-badge';
     role.setAttribute('role', 'cell');
-    role.textContent = item.role || '—';
+    role.textContent = staffRoleLabel(item.role);
 
     const active = document.createElement('span');
     active.className = 'status-dot' + (item.is_active ? '' : ' off');
@@ -1347,7 +1347,7 @@ async function createStaffAccount(event) {
     const data = await api('/api/support/staff', {method:'POST', body: JSON.stringify(payload)});
     resetCreateStaffForm();
     setStaffView('list');
-    showStaffFeedback('staffSuccess', 'Created ' + data.staff.name + ' (' + data.staff.role + ').');
+    showStaffFeedback('staffSuccess', 'Created ' + data.staff.name + ' (' + staffRoleLabel(data.staff.role) + ').');
     notify('Staff account created.');
     await loadStaffAccounts();
   } catch (error) {
@@ -1389,7 +1389,7 @@ async function updateStaffAccount(event) {
     const sessionRevoked = Boolean(data.staff.current_session_revoked);
     resetEditStaffForm();
     setStaffView('list');
-    showStaffFeedback('staffSuccess', 'Updated ' + data.staff.name + ' (' + data.staff.role + ').');
+    showStaffFeedback('staffSuccess', 'Updated ' + data.staff.name + ' (' + staffRoleLabel(data.staff.role) + ').');
     notify('Staff account updated.');
     if (sessionRevoked) {
       await alertDialog({title: 'Sign in again', message: 'Your credentials changed, so this staff session was revoked. Please sign in again.', confirmLabel: 'Go to sign in', tone: 'warning'});
@@ -1413,12 +1413,13 @@ async function deleteStaffAccount(item) {
     showStaffFeedback('staffError', 'You cannot delete your own active account.');
     return;
   }
-  if (!(await confirmDialog({title: 'Delete staff account?', message: 'Delete ' + (item.name || item.email || 'this staff account') + '? The account is removed from the staff list, signed out everywhere, and cannot be reactivated. Past conversations keep its name.', confirmLabel: 'Delete account', tone: 'danger'}))) return;
+  if (!(await confirmDialog({title: 'Delete staff account?', message: 'Delete ' + (item.name || item.email || 'this staff account') + '? The account, credentials, private quick replies and activity records are permanently deleted and removed from statistics. Past conversations keep its name and assignment; transfer active work first.', confirmLabel: 'Delete account', tone: 'danger'}))) return;
   state.staffBusy = true;
   try {
     await api('/api/support/staff/' + encodeURIComponent(item.id), {method:'DELETE'});
     showStaffFeedback('staffSuccess', 'Deleted ' + (item.name || item.email) + '.');
     notify('Staff account deleted.');
+    clearAgentStatistics();
     await loadStaffAccounts();
   } catch (error) {
     showStaffFeedback('staffError', error.message);
@@ -1863,7 +1864,7 @@ async function openTransferModal() {
       showTransferError('There is no other active staff member available for transfer.');
       return;
     }
-    for (const item of state.transferTargets) select.append(new Option(item.name + ' · ' + item.role, item.id));
+    for (const item of state.transferTargets) select.append(new Option(item.name + ' · ' + staffRoleLabel(item.role), item.id));
     $('confirmTransferBtn').disabled = false;
     select.focus();
   } catch (error) {

@@ -119,7 +119,7 @@ class StatisticsRepository:
             await conn.begin()
             try:
                 async with conn.cursor(aiomysql.DictCursor) as cur:
-                    await cur.execute("SELECT id,name,role,is_active FROM staff WHERE role IN ('agent','supervisor','admin') ORDER BY name,id")
+                    await cur.execute("SELECT id,name,role,is_active FROM staff WHERE deleted_at IS NULL AND role IN ('agent','supervisor','admin') ORDER BY name,id")
                     agents = list(await cur.fetchall())
                     rows = {str(a["id"]): dict(a, **{metric: 0 for metric in METRICS})
                             for a in agents if staff_id is None or a["id"] == staff_id}
@@ -201,7 +201,21 @@ async def agent_statistics(
     agent: SupportAgent = Depends(get_current_agent),
 ):
     if not agent.is_supervisor:
-        raise HTTPException(403, "Agent statistics are available to admins and supervisors only.")
+        raise HTTPException(403, "Agent statistics are available to admins and Super Admins only.")
     lower, upper = date_bounds(start, end, timezone_name)
     result = await statistics_repository.report(lower, upper, agent_id, rank_by, direction == "desc")
-    return {**result, "start": start.isoformat(), "end": end.isoformat(), "timezone": timezone_name}
+    return {**result, "start": start.isoformat(), "end": end.isoformat(), "timezone": timezone_name, "agent_id": agent_id}
+
+
+@router.get("/pdf")
+async def download_statistics_pdf(report: dict = Depends(agent_statistics)):
+    from starlette.concurrency import run_in_threadpool
+    from fastapi.responses import Response
+    from app.support_statistics_pdf import statistics_pdf
+
+    content = await run_in_threadpool(statistics_pdf, report)
+    filename = f'agent-statistics-{report["start"]}-to-{report["end"]}.pdf'
+    return Response(content, media_type="application/pdf", headers={
+        "Content-Disposition": f'attachment; filename="{filename}"',
+        "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff",
+    })

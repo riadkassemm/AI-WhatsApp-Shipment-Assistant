@@ -381,7 +381,7 @@ class AIAvailabilityService:
     def _require_manager(actor: SupportAgent) -> None:
         if not actor.is_supervisor:
             raise AIControlForbiddenError(
-                "Only a supervisor or administrator can change AI control settings."
+                "Only a Super Admin or administrator can change AI control settings."
             )
 
     async def get_effective_ai_availability(

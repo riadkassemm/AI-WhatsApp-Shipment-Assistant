@@ -766,7 +766,7 @@ async def google_contacts_connect(
 ) -> dict:
     try:
         if not agent.is_supervisor:
-            raise SupportForbiddenError("Only Supervisors and Admins can connect the shared Google Contacts account.")
+            raise SupportForbiddenError("Only Super Admins and Admins can connect the shared Google Contacts account.")
         return {"authorization_url": await google_contacts_service.begin_connect(
             staff_id=agent.id, session_id=agent.session_id
         )}
@@ -814,7 +814,7 @@ async def disconnect_google_contacts(
 ) -> dict:
     try:
         if not agent.is_supervisor:
-            raise SupportForbiddenError("Only Supervisors and Admins can disconnect the shared Google Contacts account.")
+            raise SupportForbiddenError("Only Super Admins and Admins can disconnect the shared Google Contacts account.")
         await google_contacts_service.disconnect()
         return {"disconnected": True}
     except Exception as exc:
