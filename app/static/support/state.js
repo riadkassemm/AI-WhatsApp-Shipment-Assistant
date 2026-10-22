@@ -129,6 +129,8 @@ const state = {
   lastFocused: null,
   contextOpen: false,
   notificationAudioContext: null,
+  notificationSoundGain: null,
+  notificationSoundsMuted: readNotificationSoundPreference(),
   notificationUnlocked: false,
   notificationPermissionRequested: false,
   supportEventSource: null,
@@ -386,6 +388,34 @@ if (typeof ResizeObserver === 'function') {
 }
 window.addEventListener('resize', positionToastRegion);
 
+function readNotificationSoundPreference() {
+  try { return localStorage.getItem('shipment-support-sounds-muted') === 'true'; }
+  catch (_) { return false; }
+}
+
+function syncNotificationSoundControls() {
+  const button = $('notificationSoundBtn');
+  if (!button) return;
+  button.setAttribute('aria-pressed', String(state.notificationSoundsMuted));
+  button.title = state.notificationSoundsMuted ? 'Unmute notification sounds' : 'Mute notification sounds';
+  setIcon(button, state.notificationSoundsMuted ? 'volume-off' : 'volume');
+  $('notificationSoundLabel').textContent = state.notificationSoundsMuted ? 'Sound muted' : 'Sound on';
+  if (state.notificationSoundGain) state.notificationSoundGain.gain.value = state.notificationSoundsMuted ? 0 : 1;
+}
+
+function toggleNotificationSounds() {
+  state.notificationSoundsMuted = !state.notificationSoundsMuted;
+  try { localStorage.setItem('shipment-support-sounds-muted', String(state.notificationSoundsMuted)); } catch (_) {}
+  syncNotificationSoundControls();
+  if (!state.notificationSoundsMuted) unlockNotificationAudio();
+}
+
+function syncNotificationSoundStorage(event) {
+  if (event.key !== 'shipment-support-sounds-muted' && event.key !== null) return;
+  state.notificationSoundsMuted = readNotificationSoundPreference();
+  syncNotificationSoundControls();
+}
+
 function unlockNotificationAudio() {
   try {
     const AudioContextClass = window.AudioContext || window.webkitAudioContext;
@@ -401,9 +431,15 @@ function unlockNotificationAudio() {
 
 function playNewConversationSound() {
   const context = state.notificationAudioContext;
-  if (!state.notificationUnlocked || !context || context.state === 'closed') return;
+  if (state.notificationSoundsMuted || !state.notificationUnlocked || !context || context.state === 'closed') return;
   const play = () => {
+    // A mute click may happen while the browser is resuming the audio context.
+    if (state.notificationSoundsMuted) return;
     try {
+      if (!state.notificationSoundGain) {
+        state.notificationSoundGain = context.createGain();
+        state.notificationSoundGain.connect(context.destination);
+      }
       const start = context.currentTime + 0.01;
       for (const [offset, frequency] of [[0, 740], [0.16, 980], [0.32, 820]]) {
         const oscillator = context.createOscillator();
@@ -414,7 +450,7 @@ function playNewConversationSound() {
         gain.gain.exponentialRampToValueAtTime(0.22, start + offset + 0.02);
         gain.gain.exponentialRampToValueAtTime(0.0001, start + offset + 0.14);
         oscillator.connect(gain);
-        gain.connect(context.destination);
+        gain.connect(state.notificationSoundGain);
         oscillator.start(start + offset);
         oscillator.stop(start + offset + 0.15);
       }
@@ -430,7 +466,7 @@ function notifyNewCustomerActivity(message) {
   document.title = '● Shipment Support';
   if ('setAppBadge' in navigator) navigator.setAppBadge(1).catch(() => {});
   if ('Notification' in window && Notification.permission === 'granted') {
-    try { new Notification('Shipment Support', {body, tag: 'shipment-support', renotify: true}); } catch (_) {}
+    try { new Notification('Shipment Support', {body, tag: 'shipment-support', renotify: true, silent: state.notificationSoundsMuted}); } catch (_) {}
   }
 }
 
