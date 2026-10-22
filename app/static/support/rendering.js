@@ -1682,6 +1682,12 @@ function addMessage(container, m, extraClass = '') {
 
   const meta = document.createElement('div');
   meta.className = 'message-meta';
+  if (m.replacement_for_message_id) {
+    const replacement = document.createElement('span');
+    replacement.className = 'muted';
+    replacement.textContent = 'New copy of message #' + m.replacement_for_message_id;
+    meta.append(replacement);
+  }
   const time = document.createElement('time');
   time.dateTime = m.created_at || '';
   const occurredAt = messageOccurredAt(m);
@@ -1804,8 +1810,24 @@ function addMessage(container, m, extraClass = '') {
     const uncertain = document.createElement('span');
     uncertain.className = 'send-state failed';
     uncertain.textContent = 'Delivery uncertain';
-    uncertain.title = 'WhatsApp may have received this message. Do not send it again; ask a supervisor to check delivery.';
+    uncertain.title = 'WhatsApp may have received this message. Check its status before deciding whether to send a new copy.';
     meta.append(uncertain);
+    if (!extraClass && m.id && !m.deleted_for_everyone_at) {
+      const check = document.createElement('button');
+      check.type = 'button';
+      check.className = 'btn send-retry-btn';
+      check.textContent = 'Check status';
+      check.onclick = () => checkUncertainDelivery(m, check);
+      meta.append(check);
+      if (canCopyUncertainMessage(m)) {
+        const copy = document.createElement('button');
+        copy.type = 'button';
+        copy.className = 'btn send-retry-btn';
+        copy.textContent = 'Send a new copy';
+        copy.onclick = () => sendUncertainCopy(m, copy);
+        meta.append(copy);
+      }
+    }
   } else if (m.send_status === 'PENDING' || m.send_status === 'DISPATCHING') {
     const pending = document.createElement('span');
     pending.className = 'send-state pending';
@@ -1843,6 +1865,41 @@ function addMessage(container, m, extraClass = '') {
 }
 // Compact message toolbar: the visible label stays in textContent (accessible
 // name); CSS draws the glyph from data-action and shows data-tooltip.
+function canCopyUncertainMessage(m) {
+  return Boolean(m.id && m.direction === 'OUTBOUND' && m.send_status === 'UNCERTAIN' &&
+    !m.deleted_for_everyone_at && state.currentTicketData?.permissions?.can_reply &&
+    String(m.ticket_id || state.ticketId) === String(state.ticketId));
+}
+
+async function checkUncertainDelivery(m, button) {
+  const ticketId = m.ticket_id || state.ticketId;
+  setButtonBusy(button, true, 'Checking…');
+  try {
+    const result = await api('/api/support/tickets/' + ticketId + '/messages/' + m.id + '/check-delivery', {method: 'POST'});
+    if (result.message) upsertTimelineMessage(result.message, ticketId);
+    await alertDialog({title: 'Delivery status', message: result.notice});
+  } catch (error) {
+    notify(error.message || 'Delivery status could not be checked.', 'error');
+  } finally { setButtonBusy(button, false); }
+}
+
+async function sendUncertainCopy(m, button) {
+  const ticketId = m.ticket_id || state.ticketId;
+  const accepted = await confirmDialog({title: 'Send a new copy?',
+    message: 'The original may already have reached the customer or could arrive later. Sending a new copy could deliver the message twice. The original will remain in the history.',
+    confirmLabel: 'Send a new copy', tone: 'danger'});
+  if (!accepted) return;
+  setButtonBusy(button, true, 'Sending…');
+  try {
+    const result = await api('/api/support/tickets/' + ticketId + '/messages/' + m.id + '/new-copy',
+      {method: 'POST', body: JSON.stringify({accept_duplicate_risk: true})});
+    if (result.message) upsertTimelineMessage(result.message, ticketId);
+    loadQueue({silent: true}).catch(() => {});
+  } catch (error) {
+    notify(error.message || 'The new copy could not be sent.', 'error');
+  } finally { setButtonBusy(button, false); }
+}
+
 function canResendMessage(m) {
   if (m.direction !== 'OUTBOUND' || !['FAILED', 'PENDING'].includes(m.send_status) || m.deleted_for_everyone_at) return false;
   if (String(m.sender_id || '') !== String(state.agent?.id || '')) return false;

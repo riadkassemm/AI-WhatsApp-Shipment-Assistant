@@ -1183,6 +1183,103 @@ class SupportService:
                     logger.exception("Sent message status transition failed: ticket_id=%s", ticket["id"])
         return updated or message
 
+    async def _delivery_action_context(self, ticket_id, message_id, agent):
+        ticket = await support_repository.get_ticket(ticket_id)
+        if not ticket or not await _can_view_ticket(ticket, agent):
+            raise SupportNotFoundError('Conversation not found.')
+        message = await support_repository.get_message(message_id)
+        if (not message or int(message['ticket_id']) != ticket_id or message['direction'] != 'OUTBOUND'
+                or message.get('deleted_for_everyone_at')
+                or await support_repository.message_hidden_for_user(message_id, agent.id)):
+            raise SupportNotFoundError('Message not found.')
+        return ticket, message
+
+    async def _reconcile_delivery(self, ticket, message):
+        """Query saved bridge evidence only; never dispatch or infer failure."""
+        line_id = str(ticket.get('business_phone_number_id') or '')
+        if message.get('send_status') not in {'UNCERTAIN', 'DISPATCHING'}:
+            return
+        if get_transport(line_id) != 'linked_device' or not message.get('transport_client_id'):
+            return
+        evidence = await linked_device_client.get_delivery_status(
+            phone=str(ticket['whatsapp_phone']), phone_number_id=line_id,
+            client_message_id=message['transport_client_id'])
+        if evidence['status'] == 'confirmed':
+            await self.confirm_linked_device_outgoing({
+                'type': 'outgoing_confirmation', 'from_me': True, 'line_id': line_id,
+                'message_id': evidence['message_id'], 'timestamp': evidence['timestamp'],
+                'sender_phone': str(ticket['whatsapp_phone']), 'client_message_id': message['transport_client_id'],
+            })
+
+    async def reconcile_uncertain_deliveries(self, after_id=0):
+        rows = await support_repository.list_delivery_reconciliation_candidates(after_id, limit=20)
+        for row in rows:
+            try:
+                await self._reconcile_delivery(row, row)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # Do not log provider exceptions, recipient IDs or message text.
+                logger.warning('Delivery verification unavailable: message_id=%s', row['id'])
+        return int(rows[-1]['id']) if len(rows) == 20 else 0
+
+    async def check_message_delivery(self, ticket_id, message_id, *, agent):
+        ticket, message = await self._delivery_action_context(ticket_id, message_id, agent)
+        try:
+            await self._reconcile_delivery(ticket, message)
+        except Exception as exc:
+            raise SupportSendError('Delivery status could not be checked. No message was sent. Try again later.') from exc
+        current = await support_repository.get_message(message_id)
+        confirmed = current.get('send_status') == 'SENT'
+        return {'message': _serialize_support_messages(ticket_id, [current])[0],
+                'notice': 'WhatsApp acceptance is confirmed.' if confirmed else
+                    'No acceptance confirmation is available. The original may still arrive. Nothing was resent.'}
+
+    async def send_uncertain_copy(self, ticket_id, message_id, *, agent, accept_duplicate_risk=False):
+        if accept_duplicate_risk is not True:
+            raise SupportValidationError('Confirm that the customer could receive both messages.')
+        ticket, original = await self._delivery_action_context(ticket_id, message_id, agent)
+        # History access never reopens a conversation or grants sending rights.
+        if not _is_assignee(ticket, agent):
+            raise SupportForbiddenError('Only the currently assigned agent can send a new copy.')
+        if ticket.get('active_key') is None or ticket['status'] not in ACTIVE_TICKET_STATUSES:
+            raise SupportConflictError('Reopen the conversation before sending a new copy.')
+        ticket = await self._prepare_agent_outbound_ticket(ticket_id, agent)
+        existing = await support_repository.get_delivery_replacement(ticket_id, message_id)
+        if existing:
+            if await support_repository.message_hidden_for_user(int(existing['id']), agent.id):
+                raise SupportConflictError('A copy already exists but is hidden from your view. No new copy was sent.')
+            return _serialize_support_messages(ticket_id, [existing])[0]
+        # Recheck available evidence before creating a customer-visible copy.
+        await self.check_message_delivery(ticket_id, message_id, agent=agent)
+        original = await support_repository.get_message(message_id)
+        if original['send_status'] != 'UNCERTAIN':
+            raise SupportConflictError('The original delivery is no longer uncertain. Refresh before sending.')
+        kind = str(original.get('message_type') or 'text')
+        if kind not in {'text', 'location'} | SUPPORT_MEDIA_MESSAGE_TYPES:
+            raise SupportValidationError('This message type cannot be copied.')
+        asset = None
+        if kind in SUPPORT_MEDIA_MESSAGE_TYPES:
+            asset = support_media_store.get(ticket_id, message_id)
+            if asset is None:
+                raise SupportConflictError('The original attachment is unavailable. No copy was sent.')
+        copy, created = await support_repository.add_ticket_message(
+            ticket_id=ticket_id, sender_type='AGENT', sender_id=agent.id, sender_name=agent.name,
+            direction='OUTBOUND', body=str(original.get('body') or ''), message_type=kind,
+            client_message_id=uuid.uuid4().hex, send_status='PENDING',
+            replacement_for_message_id=message_id, require_active=True, require_assignee_id=agent.id,
+            reply_to_whatsapp_message_id=original.get('reply_to_whatsapp_message_id'),
+            **{field: original.get(field) for field in ('location_latitude', 'location_longitude', 'location_name', 'location_address')})
+        if created:
+            if asset:
+                try:
+                    support_media_store.save(ticket_id=ticket_id, message_id=int(copy['id']),
+                        content=asset.path.read_bytes(), mime_type=asset.mime_type, filename=asset.filename)
+                except Exception as exc:
+                    raise SupportSendError('Could not store the new attachment. No copy was dispatched.') from exc
+            copy = await self._deliver_outbound(ticket, copy)
+        return _serialize_support_messages(ticket_id, [copy])[0]
+
     async def resend_failed_message(
         self,
         ticket_id: int,

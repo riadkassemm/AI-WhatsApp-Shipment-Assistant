@@ -51,6 +51,7 @@ def dependencies(monkeypatch):
                 return [{"index_name": name, "column_name": column, "non_unique": 0}
                         for name, columns in {
                             "uq_support_transport_client": ["transport_client_id"],
+                            "uq_support_delivery_replacement": ["replacement_for_message_id"],
                             "uq_support_scoped_client": ["ticket_id", "sender_type", "sender_scope", "client_message_id"],
                         }.items() for column in columns]
             if "INFORMATION_SCHEMA.COLUMNS" in self.query:

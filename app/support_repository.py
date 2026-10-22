@@ -223,6 +223,9 @@ _SUPPORT_SCHEMA_MIGRATIONS: tuple[tuple[str, dict[str, set[str]]], ...] = (
         "transport_client_id", "sender_scope", "delivery_token", "delivery_claimed_at",
         "delivery_started_at", "delivery_retry_safe",
     }}),
+    ("migrations/20261022_uncertain_delivery_copies.sql", {"support_ticket_messages": {
+        "replacement_for_message_id",
+    }}),
 )
 
 MAX_QUICK_REPLIES_PER_STAFF = 200
@@ -313,6 +316,8 @@ class SupportRepository(DeliveryRepositoryMixin):
         }
         if any(indexes.get(name) != columns for name, columns in required.items()):
             raise SupportSchemaError(["migrations/20261021_outbound_delivery_ownership.sql"])
+        if indexes.get('uq_support_delivery_replacement') != ['replacement_for_message_id']:
+            raise SupportSchemaError(['migrations/20261022_uncertain_delivery_copies.sql'])
 
 
     async def connect(self) -> None:
@@ -1347,6 +1352,7 @@ class SupportRepository(DeliveryRepositoryMixin):
         expected_line_id: str | None = None,
         current_language: str | None = None,
         communication_style: str | None = None,
+        replacement_for_message_id: int | None = None,
     ) -> tuple[dict[str, Any], bool]:
         if self._pool is None:
             await self.connect()
@@ -1394,6 +1400,24 @@ class SupportRepository(DeliveryRepositoryMixin):
                         raise SupportConflictError("The WhatsApp counterpart changed before this message was stored.")
                     if expected_line_id is not None and str(ticket_state.get("business_phone_number_id") or "") != expected_line_id:
                         raise SupportConflictError("The WhatsApp number changed before this message was stored.")
+                    if replacement_for_message_id is not None:
+                        # Ticket -> original message -> replacement. Serialize
+                        # against lifecycle changes and late confirmations.
+                        await cur.execute('SELECT * FROM support_ticket_messages WHERE id=%s AND ticket_id=%s FOR UPDATE',
+                                          (replacement_for_message_id, ticket_id))
+                        original = await cur.fetchone()
+                        if not original or original['direction'] != 'OUTBOUND' or original.get('deleted_for_everyone_at'):
+                            raise SupportNotFoundError('Original message not found.')
+                        await cur.execute('SELECT * FROM support_ticket_messages WHERE replacement_for_message_id=%s',
+                                          (replacement_for_message_id,))
+                        existing_copy = await cur.fetchone()
+                        if existing_copy:
+                            await conn.commit()
+                            return existing_copy, False
+                        if original['send_status'] != 'UNCERTAIN':
+                            raise SupportConflictError('The original delivery is no longer uncertain. Refresh before sending.')
+                        if not require_active or require_assignee_id != sender_id or sender_type != 'AGENT':
+                            raise SupportConflictError('A new copy requires the assigned agent and an active conversation.')
                     if client_message_id:
                         await cur.execute("""SELECT * FROM support_ticket_messages
                             WHERE ticket_id=%s AND sender_type=%s AND sender_scope=%s AND client_message_id=%s""",
@@ -1460,6 +1484,14 @@ class SupportRepository(DeliveryRepositoryMixin):
                         ),
                     )
                     message_id = cur.lastrowid
+                    if replacement_for_message_id is not None:
+                        await cur.execute('UPDATE support_ticket_messages SET replacement_for_message_id=%s WHERE id=%s',
+                                          (replacement_for_message_id, message_id))
+                        await cur.execute("""INSERT INTO support_ticket_events
+                            (ticket_id,event_type,actor_type,actor_id,actor_name,details_json,created_at)
+                            VALUES (%s,'UNCERTAIN_MESSAGE_COPY','AGENT',%s,%s,%s,UTC_TIMESTAMP(6))""",
+                            (ticket_id, sender_id, sender_name, json.dumps({'original_message_id': replacement_for_message_id,
+                                                                         'message_id': message_id, 'duplicate_risk_accepted': True})))
                     await cur.execute(
                         """
                         UPDATE support_tickets

@@ -1,0 +1,25 @@
+import asyncio
+from types import SimpleNamespace
+import pytest
+
+from app.support_delivery_reconciliation import reconcile_deliveries_forever
+
+
+@pytest.mark.asyncio
+async def test_worker_keeps_cursor_after_failure_and_propagates_cancellation(monkeypatch):
+    cursors = []
+    pauses = []
+    async def pause(interval):
+        pauses.append(interval)
+    async def reconcile(cursor):
+        cursors.append(cursor)
+        if len(cursors) == 1:
+            return 20
+        if len(cursors) == 2:
+            raise RuntimeError('temporary failure')
+        raise asyncio.CancelledError
+    monkeypatch.setattr('app.support_delivery_reconciliation.asyncio.sleep', pause)
+    with pytest.raises(asyncio.CancelledError):
+        await reconcile_deliveries_forever(SimpleNamespace(reconcile_uncertain_deliveries=reconcile))
+    assert cursors == [0, 20, 20]
+    assert pauses == [30, 30, 30]
