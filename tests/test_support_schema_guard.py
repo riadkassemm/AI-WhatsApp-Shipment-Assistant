@@ -10,6 +10,10 @@ def add_base_schema(columns):
 
 
 def add_linked_device_schema(columns):
+    for path, required_tables in _SUPPORT_SCHEMA_MIGRATIONS:
+        if "20261023_agent_statistics" in path:
+            for table, required in required_tables.items():
+                columns.setdefault(table, set()).update(required)
     columns['support_ticket_messages'].add('replacement_for_message_id')
     columns["support_ticket_messages"].update({"transport_client_id", "sender_scope", "delivery_token", "delivery_claimed_at", "delivery_started_at", "delivery_retry_safe"})
     columns["support_ticket_messages"].update({"whatsapp_change_timestamp", "pending_change_operation_id"})
@@ -253,3 +257,12 @@ def test_support_schema_guard_identifies_delivery_ownership_migration():
             for table, required in requirements.items():
                 columns.setdefault(table, set()).update(required)
     assert _missing_support_schema_migrations(columns) == ["migrations/20261021_outbound_delivery_ownership.sql"]
+
+
+def test_support_schema_guard_requires_statistics_migration():
+    columns = {}
+    for path, tables in _SUPPORT_SCHEMA_MIGRATIONS:
+        if "20261023_agent_statistics" not in path:
+            for table, required in tables.items():
+                columns.setdefault(table, set()).update(required)
+    assert _missing_support_schema_migrations(columns) == ["migrations/20261023_agent_statistics.sql"]

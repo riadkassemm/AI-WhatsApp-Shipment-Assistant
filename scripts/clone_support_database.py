@@ -26,6 +26,7 @@ APP_TABLES = (
     "support_ticket_events", "support_ticket_messages", "support_tickets",
     "support_vcf_contacts", "whatsapp_business_accounts", "whatsapp_integration_audit",
     "whatsapp_phone_numbers", "users", "user_wallet", "orders_new", "shipments",
+    "support_statistics_metadata", "support_agent_heartbeats", "support_agent_activity",
 )
 CATALOG_TABLES = ("destinations", "shipping_rates")
 

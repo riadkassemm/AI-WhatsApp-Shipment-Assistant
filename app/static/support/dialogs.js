@@ -408,6 +408,10 @@ function handleGlobalKeydown(event) {
       closeMessageDelete();
       return;
     }
+    if (state.activeModal === 'agentStatisticsModal') {
+      closeDialog('agentStatisticsModal');
+      return;
+    }
     if (state.activeModal === 'staffModal') {
       event.preventDefault();
       closeStaffModal();

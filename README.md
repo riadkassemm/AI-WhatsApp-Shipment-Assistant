@@ -15,6 +15,11 @@ conversation access still follows ownership, participation, and role rules.
 Outbound sends now use database delivery claims. Uncertain outcomes are blocked
 from resend; a provider timeout does not mean the customer did not receive it.
 
+Admins and supervisors can open **Statistics** for staff activity, ticket claims/resolutions,
+confirmed outbound sends, date/agent filters and a sortable team leaderboard.
+Active-time tracking begins when the statistics migration is applied; retained
+action history supplies the other metrics. See [metric definitions and setup](docs/support-platform.md#agent-statistics).
+
 See the [support platform guide](docs/support-platform.md) for the permission
 matrix, delivery states and recovery, disposable MariaDB/Redis integration tests,
 CI commands, dashboard asset layout, and migration/deployment requirements.

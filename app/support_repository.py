@@ -226,6 +226,12 @@ _SUPPORT_SCHEMA_MIGRATIONS: tuple[tuple[str, dict[str, set[str]]], ...] = (
     ("migrations/20261022_uncertain_delivery_copies.sql", {"support_ticket_messages": {
         "replacement_for_message_id",
     }}),
+    ("migrations/20261023_agent_statistics.sql", {
+        "support_statistics_metadata": {"activity_tracking_started_at"},
+        "support_agent_heartbeats": {"staff_id", "session_id", "tab_id", "sequence_number", "last_seen_at", "active_until"},
+        "support_agent_activity": {"staff_id", "activity_day", "started_at", "ended_at"},
+        "support_ticket_messages": {"statistics_sent_at"},
+    }),
 )
 
 MAX_QUICK_REPLIES_PER_STAFF = 200

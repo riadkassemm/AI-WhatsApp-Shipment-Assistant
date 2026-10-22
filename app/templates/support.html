@@ -180,6 +180,11 @@ __SUPPORT_STYLE__
           <svg class="icon" aria-hidden="true"><use href="#icon-phone"></use></svg><span>WhatsApp</span>
         </button>
       </div>
+      <div class="message-preferences-slot">
+        <button class="btn ghost hidden" id="agentStatisticsBtn" type="button" aria-label="Agent Statistics" title="Agent Statistics">
+          <svg class="icon" aria-hidden="true"><use href="#icon-activity"></use></svg><span>Statistics</span>
+        </button>
+      </div>
       <div class="agent-card">
         <div class="agent-main">
           <div class="avatar" id="agentAvatar" aria-hidden="true">—</div>
@@ -710,6 +715,34 @@ __SUPPORT_STYLE__
         <div class="shortcut-row"><dt>Close a panel, dialog, or edit</dt><dd><kbd>Esc</kbd></dd></div>
         <div class="shortcut-row"><dt>Show this list</dt><dd><kbd>?</kbd></dd></div>
       </dl>
+    </div>
+  </div>
+</section>
+
+<section class="modal-backdrop hidden" id="agentStatisticsModal" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="statisticsTitle">
+  <div class="modal-card statistics-card" role="document" tabindex="-1">
+    <div class="modal-head"><div><h2 id="statisticsTitle">Agent Statistics</h2><div class="modal-subtitle">Staff activity and work attributed to the person who performed it.</div></div>
+      <button class="icon-btn modal-close" id="closeStatisticsBtn" type="button" aria-label="Close statistics">×</button></div>
+    <div class="modal-body">
+      <form id="statisticsFilters" class="statistics-filters">
+        <div class="field"><label for="statisticsStart">From</label><input type="date" id="statisticsStart" required></div>
+        <div class="field"><label for="statisticsEnd">Through</label><input type="date" id="statisticsEnd" required></div>
+        <div class="field"><label for="statisticsAgent">Staff member</label><select id="statisticsAgent"><option value="">All staff</option></select></div>
+        <div class="field"><label for="statisticsMetric">Rank by</label><select id="statisticsMetric"><option value="tickets_resolved">Tickets resolved</option><option value="tickets_claimed">Tickets claimed</option><option value="messages_sent">Outbound messages sent</option><option value="active_seconds">Active dashboard time</option></select></div>
+        <div class="field"><label for="statisticsDirection">Order</label><select id="statisticsDirection"><option value="desc">Highest first</option><option value="asc">Lowest first</option></select></div>
+        <button class="btn primary" type="submit">Apply / refresh</button>
+      </form>
+      <div id="statisticsError" role="status" aria-live="polite"></div>
+      <h3>Totals for selected staff and dates</h3><div class="statistics-totals" id="statisticsTotals"></div>
+      <h3 id="statisticsRanking"></h3>
+      <div class="statistics-table-wrap"><table id="statisticsTable"><thead><tr><th scope="col">Rank</th><th scope="col">Staff</th>
+        <th scope="col" data-metric="active_seconds"><button type="button" data-metric="active_seconds">Active time</button></th>
+        <th scope="col" data-metric="tickets_claimed"><button type="button" data-metric="tickets_claimed">Claimed</button></th>
+        <th scope="col" data-metric="tickets_resolved"><button type="button" data-metric="tickets_resolved">Resolved</button></th>
+        <th scope="col" data-metric="messages_sent"><button type="button" data-metric="messages_sent">Messages sent</button></th>
+      </tr></thead><tbody id="statisticsRows"></tbody></table></div>
+      <p class="form-note" id="statisticsCoverage"></p>
+      <p class="form-note">Tickets are counted once per staff member within the selected dates. Team totals sum staff counts. Messages include confirmed staff sends in tickets and chats; bot/system messages and phone-app replies without an identifiable staff sender are excluded. Historical send dates use the dispatch time when available, otherwise creation time. Permanently deleted history cannot be counted.</p>
     </div>
   </div>
 </section>

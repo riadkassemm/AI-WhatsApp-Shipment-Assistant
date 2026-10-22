@@ -42,6 +42,7 @@ from app.staff_management import (
     update_staff_account,
 )
 from app.support_events import event_stream
+from app.support_statistics import router as statistics_router
 from app.support_media import SupportMediaError, max_media_bytes
 from app.support_repository import SupportConflictError, SupportNotFoundError, SupportSchemaError
 from app.vcf_contacts import (
@@ -72,6 +73,8 @@ from app.support_service import (
 logger = logging.getLogger("shipment-bot")
 
 router = APIRouter(prefix="/api/support", tags=["support"])
+# Statistics keeps its own focused API/repository while sharing normal auth.
+router.include_router(statistics_router, prefix="")
 
 
 class LoginRequest(BaseModel):

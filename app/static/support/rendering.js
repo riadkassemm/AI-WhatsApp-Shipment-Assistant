@@ -70,6 +70,9 @@ function showLogin() {
   state.deleteTarget = null;
   clearSupportSelections();
   state.authenticated = false;
+  stopSupportActivity();
+  clearAgentStatistics();
+  $('agentStatisticsBtn').classList.add('hidden');
   disconnectSupportEvents();
   saveLinkedDeviceAddition(null);
   state.agent = null;
@@ -130,6 +133,7 @@ function showDashboard() {
   $('loginPage').classList.add('hidden');
   $('dashboard').classList.remove('hidden');
   configureStaffAccess();
+  startSupportActivity();
   connectSupportEvents();
 }
 
