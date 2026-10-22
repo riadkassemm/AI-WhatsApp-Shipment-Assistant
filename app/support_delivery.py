@@ -1,6 +1,9 @@
 """One delivery attempt shared by text, location, media and lifecycle notices."""
 from __future__ import annotations
 
+import asyncio
+import logging
+
 from app.whatsapp_client import WhatsAppSendError
 
 
@@ -9,6 +12,22 @@ async def deliver(repository, transport, media_store, ticket, message, *, retry=
     token = await repository.claim_delivery(message_id, retry=retry, expected_token=message.get("delivery_token"))
     if token is None:
         return await repository.get_message(message_id)
+    try:
+        return await _deliver_claimed(repository, transport, media_store, ticket, message, token)
+    except asyncio.CancelledError:
+        # Cancellation bypasses Exception handlers (e.g. graceful shutdown).
+        # Consult the committed state: begin_delivery may have committed before
+        # cancellation was observed, even if its caller never received success.
+        try:
+            await repository.interrupt_delivery(message_id, token)
+        except Exception:
+            logging.getLogger('shipment-bot').warning(
+                'Interrupted support delivery requires operator recovery: message_id=%s', message_id)
+        raise
+
+
+async def _deliver_claimed(repository, transport, media_store, ticket, message, token):
+    message_id = int(message['id'])
     started = False
     try:
         kind = message.get('message_type') or 'text'

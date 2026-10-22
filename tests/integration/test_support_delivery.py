@@ -239,3 +239,105 @@ async def test_schema_guard_rejects_partial_migration_without_uniqueness(infrast
     await sql('ALTER TABLE support_ticket_messages DROP INDEX uq_support_scoped_client')
     with pytest.raises(SupportSchemaError, match='20261021_outbound_delivery_ownership'):
         await repo._validate_schema(repo._pool)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('phase', ['preparing', 'begin_committed', 'provider', 'finalizing', 'confirmed'])
+async def test_cancelled_delivery_records_committed_state_and_unblocks_resolution(infrastructure, monkeypatch, tmp_path, phase):
+    repo, _, _ = infrastructure
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    calls = []
+    async def pause():
+        entered.set()
+        await release.wait()
+    async def upload(**kwargs):
+        await pause()
+    async def send(**kwargs):
+        calls.append(kwargs)
+        if phase == 'provider':
+            await pause()
+        return {'messages': [{'id': 'ld:90005:cancel-test'}]}
+    if phase == 'begin_committed':
+        original = repo.begin_delivery
+        async def begin(*args, **kwargs):
+            assert await original(*args, **kwargs)
+            await pause()
+            return True
+        monkeypatch.setattr(repo, 'begin_delivery', begin)
+    if phase in ('finalizing', 'confirmed'):
+        original = repo.finish_delivery
+        async def finish(*args, **kwargs):
+            if phase == 'confirmed':
+                await original(*args, **kwargs)
+            await pause()
+        monkeypatch.setattr(repo, 'finish_delivery', finish)
+    asset = tmp_path / 'image.jpg'
+    asset.write_bytes(b'test image')
+    media = SimpleNamespace(get=lambda *args: SimpleNamespace(path=asset, mime_type='image/jpeg', filename='image.jpg'))
+    row, _ = await create(repo, message_type='image' if phase == 'preparing' else 'text')
+    worker = asyncio.create_task(deliver(repo, SimpleNamespace(send_text=send, upload_media=upload), media,
+                                        await repo.get_ticket(42), row))
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+    finally:
+        worker.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await worker
+    result = await repo.get_message(row['id'])
+    expected = 'FAILED' if phase == 'preparing' else 'SENT' if phase == 'confirmed' else 'UNCERTAIN'
+    assert result['send_status'] == expected
+    assert bool(result['delivery_retry_safe']) == (phase == 'preparing')
+    assert len(calls) == (0 if phase in ('preparing', 'begin_committed') else 1)
+    if expected == 'UNCERTAIN':
+        assert await repo.claim_delivery(row['id'], retry=True, expected_token=result['delivery_token']) is None
+    await repo.resolve_ticket(42, agent_id='7', agent_name='Agent', expected_assignee_id='7')
+    if expected == 'UNCERTAIN':
+        # A matching late provider acceptance remains valid after resolution.
+        from app.support_delivery_repository import DeliveryRepositoryMixin
+        await DeliveryRepositoryMixin.finish_delivery(repo, row['id'], result['delivery_token'],
+            status='SENT', provider_id='ld:90005:late-cancel-test')
+        assert (await repo.get_message(row['id']))['send_status'] == 'SENT'
+
+
+@pytest.mark.asyncio
+async def test_cancelled_obsolete_worker_cannot_change_reclaimed_attempt(infrastructure):
+    repo, sql, _ = infrastructure
+    row, _ = await create(repo)
+    old_token = await repo.claim_delivery(row['id'])
+    await sql('UPDATE support_ticket_messages SET delivery_claimed_at=UTC_TIMESTAMP(6)-INTERVAL 6 MINUTE WHERE id=%s', (row['id'],))
+    await repo.interrupt_delivery(row['id'], old_token)
+    assert (await repo.get_message(row['id']))['send_status'] == 'PENDING'
+    new_token = await repo.claim_delivery(row['id'])
+    assert new_token and new_token != old_token
+    await repo.interrupt_delivery(row['id'], old_token)
+    assert await repo.begin_delivery(row['id'], new_token)
+    await repo.interrupt_delivery(row['id'], old_token)
+    current = await repo.get_message(row['id'])
+    assert current['send_status'] == 'DISPATCHING' and current['delivery_token'] == new_token
+
+
+@pytest.mark.asyncio
+async def test_cancellation_cleanup_failure_preserves_cancellation_and_recovery(infrastructure, monkeypatch):
+    repo, sql, _ = infrastructure
+    entered, release = asyncio.Event(), asyncio.Event()
+    async def send(**kwargs):
+        entered.set()
+        await release.wait()
+    async def unavailable(*args):
+        raise RuntimeError('simulated database outage')
+    monkeypatch.setattr(repo, 'interrupt_delivery', unavailable)
+    row, _ = await create(repo)
+    worker = asyncio.create_task(deliver(repo, SimpleNamespace(send_text=send), None,
+                                        await repo.get_ticket(42), row))
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+    finally:
+        worker.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await worker
+    assert (await repo.get_message(row['id']))['send_status'] == 'DISPATCHING'
+    await sql('UPDATE support_ticket_messages SET delivery_claimed_at=UTC_TIMESTAMP(6)-INTERVAL 6 MINUTE WHERE id=%s', (row['id'],))
+    assert await repo.recover_abandoned_deliveries() == 1
+    result = await repo.get_message(row['id'])
+    assert result['send_status'] == 'UNCERTAIN' and not result['delivery_retry_safe']
