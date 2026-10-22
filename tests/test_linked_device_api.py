@@ -266,7 +266,7 @@ def test_linked_status_is_manager_only_and_filters_accounts(linked_config, monke
     async def status():
         calls.append(True)
         return {"lines": [
-            {"line_id": "90001", "status": "qr", "qr_data_url": "data:image/png;base64,test"},
+            {"line_id": "90001", "status": "qr", "qr_data_url": "data:image/png;base64,test", "waiting_history_reactions": 2, "pending_callbacks": 1},
             {"line_id": "90002", "status": "qr", "qr_data_url": "private-other-account"},
         ]}
 
@@ -277,6 +277,8 @@ def test_linked_status_is_manager_only_and_filters_accounts(linked_config, monke
     payload = request("GET", path).json()
     assert len(payload["lines"]) == 1 and payload["lines"][0]["line_id"] == "90001"
     assert payload["lines"][0]["active_transport"] == "linked_device"
+    assert payload["lines"][0]["waiting_history_reactions"] == 2
+    assert payload["lines"][0]["pending_callbacks"] == 1
     assert "private-other-account" not in str(payload)
 
 
@@ -681,23 +683,44 @@ def test_inbound_snapshot_uses_transcript_sync_and_never_customer_ai(linked_conf
     assert sync.await_count == 1
 
 
-def test_missing_phone_reaction_retries_for_target_recovery_then_acknowledges_absence(linked_config, monkeypatch):
+@pytest.mark.parametrize('event_type,from_me,sync_method', [
+    ('outgoing_message', True, 'sync_linked_device_outbound'),
+    ('message_snapshot', False, 'sync_linked_device_snapshot'),
+])
+def test_missing_phone_reaction_retries_for_target_recovery_then_acknowledges_absence(linked_config, monkeypatch, event_type, from_me, sync_method):
     from unittest.mock import AsyncMock
     now = 1_800_000_000
     monkeypatch.setattr(api_module.time, 'time', lambda: now)
     monkeypatch.setattr(api_module.whatsapp_registry_service, 'observe_inbound', AsyncMock(return_value=True))
     sync = AsyncMock(return_value=False)
-    monkeypatch.setattr(api_module.support_service, 'sync_linked_device_outbound', sync)
+    monkeypatch.setattr(api_module.support_service, sync_method, sync)
     event = message_event()
-    event.update(type='outgoing_message', from_me=True, sender_phone='96171111111', message_id='ld:90001:MESSAGE1')
+    event.update(type=event_type, from_me=from_me, sender_phone='96171111111', message_id='ld:90001:MESSAGE1')
     node = event['payload']['entry'][0]['changes'][0]['value']['messages'][0]
     node.update(type='reaction', reaction={'message_id': 'ld:90001:MISSING', 'emoji': '👍'})
-    for age, expected in [(60, 503), (86_400, 200)]:
+    for age, expected in [(60, 503), (86_399, 503), (86_400, 200)]:
         event['timestamp'] = (now-age)*1000
         node['timestamp'] = str(now-age)
         response = request('POST', '/api/whatsapp/linked-device/events', payload=event)
         assert response.status_code == expected
+        assert response.headers.get('X-WhatsApp-Callback-State') == (
+            'waiting_for_reaction_target' if expected == 503 else None)
     assert response.json()['reason'] == 'reaction_target_not_in_support'
     # Actual message content is never discarded just because it is old.
     node['type'] = 'text'
-    assert request('POST', '/api/whatsapp/linked-device/events', payload=event).status_code == 503
+    response = request('POST', '/api/whatsapp/linked-device/events', payload=event)
+    assert response.status_code == 503
+    assert 'X-WhatsApp-Callback-State' not in response.headers
+
+    # An actual failure must stay visible, even for an old reaction.
+    node['type'] = 'reaction'
+    sync.side_effect = api_module.SupportConflictError('Database operation must retry')
+    response = request('POST', '/api/whatsapp/linked-device/events', payload=event)
+    assert response.status_code == 503
+    assert 'X-WhatsApp-Callback-State' not in response.headers
+
+    # Even after the recovery window, apply a target that has finally arrived.
+    sync.side_effect = None
+    sync.return_value = True
+    response = request('POST', '/api/whatsapp/linked-device/events', payload=event)
+    assert response.status_code == 200 and response.json()['status'] == 'applied'

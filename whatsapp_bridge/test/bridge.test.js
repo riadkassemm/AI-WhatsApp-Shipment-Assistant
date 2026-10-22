@@ -877,6 +877,69 @@ test('callbacks retry durably without blocking unrelated events, and permanent f
   assert.equal(bridge.status().lines[0].failed_callbacks, 1);
 });
 
+test('missing reaction targets stay durable across restarts without inflating pending delivery', async t => {
+  let outcome = 'history';
+  const seen = [];
+  const fetchCallback = async (_url, options) => {
+    const event = JSON.parse(options.body);
+    seen.push(event.event_id);
+    if (event.event_id === 'ordinary-message') return new Response(null, { status: 200 });
+    if (outcome === 'network') throw new Error('Connection lost');
+    return new Response(null, { status: outcome === 'applied' ? 200 : 503,
+      headers: outcome === 'history' ? { 'X-WhatsApp-Callback-State': 'waiting_for_reaction_target' } : {} });
+  };
+  const { bridge, config } = await fixture(t, 'ack', { fetch: fetchCallback });
+  const reaction = { event_id: 'waiting-reaction', line_id: LINE, type: 'outgoing_message',
+    payload: { entry: [{ changes: [{ value: { messages: [{ type: 'reaction', reaction: { message_id: 'missing', emoji: '👍' } }] } }] }] } };
+  await bridge.enqueue(reaction);
+  await bridge.enqueue({ event_id: 'ordinary-message', line_id: LINE, type: 'message' });
+  await bridge.deliverCallbacks();
+  assert.deepEqual(seen, ['waiting-reaction', 'ordinary-message']);
+  assert.equal(bridge.status().lines[0].pending_callbacks, 0);
+  assert.equal(bridge.status().lines[0].waiting_history_reactions, 1);
+  assert.deepEqual(bridge.outbox.data.entries[0].event, reaction);
+  assert.equal(bridge.outbox.data.dead_letters.length, 0);
+  await bridge.close();
+
+  const resumed = await new Bridge(config, { makeSocket: () => mockSocket(), onError: () => {}, fetch: fetchCallback }).initialize({ autoConnect: false });
+  t.after(() => resumed.close());
+  assert.equal(resumed.status().lines[0].waiting_history_reactions, 1);
+  for (const failure of ['network', 'database']) {
+    outcome = failure;
+    await resumed.outbox.update(data => { data.entries[0].next_try = 0; });
+    await resumed.deliverCallbacks();
+    assert.equal(resumed.status().lines[0].pending_callbacks, 1);
+    assert.equal(resumed.status().lines[0].waiting_history_reactions, 0);
+    // A subsequent confirmed history wait can restore the background state.
+    outcome = 'history';
+    await resumed.outbox.update(data => { data.entries[0].next_try = 0; });
+    await resumed.deliverCallbacks();
+    assert.equal(resumed.status().lines[0].waiting_history_reactions, 1);
+  }
+  outcome = 'applied'; // Original message finally synchronized (or API confirms expiry).
+  await resumed.outbox.update(data => { data.entries[0].next_try = 0; });
+  await resumed.deliverCallbacks();
+  assert.equal(resumed.outbox.data.entries.length, 0);
+  assert.equal(resumed.status().lines[0].waiting_history_reactions, 0);
+  assert.equal(resumed.status().lines[0].pending_callbacks, 0);
+});
+
+test('a history-wait response cannot hide real messages or authorization failures', async t => {
+  const { bridge } = await fixture(t, 'ack', { fetch: async (_url, options) => {
+    const event = JSON.parse(options.body);
+    return new Response(null, { status: event.event_id === 'unauthorized-reaction' ? 403 : 503,
+      headers: { 'X-WhatsApp-Callback-State': 'waiting_for_reaction_target' } });
+  } });
+  const payload = type => ({ entry: [{ changes: [{ value: { messages: [{ type }] } }] }] });
+  await bridge.enqueue({ event_id: 'text', type: 'outgoing_message', line_id: LINE, payload: payload('text') });
+  await bridge.enqueue({ event_id: 'unauthorized-reaction', type: 'message_snapshot', line_id: LINE, payload: payload('reaction') });
+  await bridge.deliverCallbacks();
+  assert.equal(bridge.status().lines[0].pending_callbacks, 1);
+  assert.equal(bridge.status().lines[0].waiting_history_reactions, 0);
+  assert.equal(bridge.status().lines[0].failed_callbacks, 1);
+  assert.equal(bridge.outbox.data.dead_letters[0].reason, 'HTTP_403');
+});
+
 test('HTTP routes protect QR/media with shared auth, reject invalid/oversized JSON, and serve media bytes', async t => {
   const { bridge, config } = await fixture(t);
   const server = createServer(bridge, config);

@@ -340,7 +340,7 @@ are stopped, with explicit handling of any messages accepted since the backup.
 
 ## Linked-device callback recovery
 
-“Updates pending” counts bridge-to-app callbacks, including reactions and receipts;
+“Updates pending” counts bridge-to-app callbacks that still need delivery, including receipts;
 these are not necessarily unsent staff messages. A connected WhatsApp socket does
 not by itself confirm that every callback has reached the database. Each line now
 has its own callback worker, so a slow office line does not stall other lines.
@@ -367,6 +367,15 @@ that WhatsApp never delivered or that an older bridge discarded without storing.
 Reactions whose target is absent retry for up to 24 hours to allow target recovery,
 then are acknowledged as outside the support transcript. Actual message content
 is not expired by this reaction-only rule.
+
+An explicit API response distinguishes reactions waiting for an absent history
+target from message-delivery failures. The bridge retains these reactions in its
+durable outbox and retries normally, including after restarts, but reports them
+separately as `waiting_history_reactions`. Hover over the connection status to
+see this background count. They do not inflate “updates pending”. Network,
+database, media, and authentication failures remain pending/failed updates;
+only the validated missing-reaction-target response enables this distinction.
+If the target arrives, the reaction is applied before expiry is considered.
 
 Deploy the API before the bridge: older APIs do not recognize `message_snapshot`
 callbacks. No SQL migration or re-pairing is required. Keep the API upgrade when

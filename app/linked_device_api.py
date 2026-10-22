@@ -120,6 +120,7 @@ async def linked_device_status(agent: SupportAgent = Depends(get_current_agent))
             "error": item.get("error"),
             "active_transport": get_transport(line_id),
             "pending_callbacks": item.get("pending_callbacks", 0),
+            "waiting_history_reactions": item.get("waiting_history_reactions", 0),
             "failed_callbacks": item.get("failed_callbacks", 0),
             "uncertain_sends": item.get("uncertain_sends", 0),
         })
@@ -358,6 +359,14 @@ async def receive_linked_device_event(request: Request):
             # do not report this non-message update as pending forever.
             if incoming.message_type == "reaction" and time.time() * 1000 - event.timestamp >= _REACTION_TARGET_RETRY_WINDOW_MS:
                 return {"status": "ignored", "reason": "reaction_target_not_in_support"}
+            if incoming.message_type == "reaction":
+                # Retain the event in the bridge's durable queue without
+                # reporting this expected history wait as a blocked message.
+                # Older bridges still safely retry the 503 response.
+                raise HTTPException(
+                    503, "Waiting for the original reaction target to sync.",
+                    headers={"X-WhatsApp-Callback-State": "waiting_for_reaction_target"},
+                )
             raise HTTPException(503, "The original message is not available yet. Retry this event.")
         return {"status": "applied"}
 
