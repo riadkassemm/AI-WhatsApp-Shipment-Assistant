@@ -182,9 +182,13 @@ const changeLinkedDeviceConnection = (...args) => changes.push(args);
 const removeLinkedDeviceNumber = id => changes.push(['remove', id]);
 """ + function + r"""
 renderLinkedDeviceStatus({configured: true, lines: [
-  {line_id: '90001', status: 'connected', is_paired: true},
-  {line_id: '90002', status: 'error', is_paired: true, error: 'Number already linked'}]});
+  {line_id: '90001', status: 'connected', is_paired: true, waiting_history_reactions: 2},
+  {line_id: '90002', status: 'error', is_paired: true, error: 'Number already linked', pending_callbacks: 1, failed_callbacks: 1}]});
 const rows = elements.linkedDeviceLines.children;
+assert.equal(rows[0].children[1].textContent, 'Connected');
+assert.match(rows[0].children[1].title, /2 reactions are waiting for older messages/);
+assert.match(rows[1].children[1].textContent, /1 updates pending/);
+assert.match(rows[1].children[1].textContent, /1 failed updates need administrator attention/);
 assert.equal(rows[0].children[2].textContent, 'Remove and unlink');
 assert.equal(rows[0].children[2].disabled, false);
 assert.equal(rows[1].children[2].textContent, 'Pair WhatsApp');

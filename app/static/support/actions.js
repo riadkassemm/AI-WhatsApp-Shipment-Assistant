@@ -747,6 +747,7 @@ function renderLinkedDeviceStatus(payload) {
     status.textContent = labels[line.status] || 'Not paired';
     if (line.error) status.textContent += ' · ' + line.error;
     if (line.pending_callbacks) status.textContent += ' · ' + line.pending_callbacks + ' updates pending';
+    if (line.waiting_history_reactions) status.title = line.waiting_history_reactions + ' reactions are waiting for older messages to sync. This does not block new messages.';
     if (line.failed_callbacks) status.textContent += ' · ' + line.failed_callbacks + ' failed updates need administrator attention';
     row.append(heading, status);
     if (line.status === 'qr' && typeof line.qr_data_url === 'string' && line.qr_data_url.startsWith('data:image/png;base64,')) {

@@ -13,6 +13,13 @@ import { preserveNativeMutationMetadata } from './native-events.js';
 const silentLogger = pino({ level: 'silent' });
 const DEFAULT_MEDIA_HOST = 'mmg.whatsapp.net';
 
+function isReactionCallback(event) {
+  if (!['outgoing_message', 'message_snapshot'].includes(event.type)) return false;
+  const messages = (event.payload?.entry ?? []).flatMap(entry =>
+    (entry.changes ?? []).flatMap(change => change.value?.messages ?? []));
+  return messages.length === 1 && messages[0].type === 'reaction';
+}
+
 // Host of the media URL stored in a WhatsApp message, if any.
 function mediaUrlHost(message) {
   const content = normalizeMessageContent(message?.message);
@@ -284,7 +291,8 @@ export class Bridge {
     const creds = line.auth?.store?.data?.creds;
     return { line_id: line.line_id, display_phone_number: line.display_phone_number, status: line.status,
       is_paired: Boolean(creds?.registered || creds?.me?.id),
-      pending_callbacks: this.outbox.data.entries.filter(item => item.event.line_id === line.line_id).length,
+      pending_callbacks: this.outbox.data.entries.filter(item => item.event.line_id === line.line_id && !item.waiting_for_history).length,
+      waiting_history_reactions: this.outbox.data.entries.filter(item => item.event.line_id === line.line_id && item.waiting_for_history).length,
       failed_callbacks: (this.outbox.data.dead_letters ?? []).filter(item => item.event.line_id === line.line_id).length,
       uncertain_sends: Object.values(line.store?.data?.messages ?? {}).filter(item => item.delivery_uncertain && !item.confirmation_enqueued).length,
       ...(line.qr ? { qr: line.qr, qr_data_url: line.qr_data_url } : {}), ...(line.error ? { error: line.error } : {}) };
@@ -1084,12 +1092,15 @@ export class Bridge {
       const entry = this.outbox.data.entries.find(item => item.event.line_id === id && item.next_try <= Date.now() && !this.lines.get(item.event.line_id)?.removing &&
         !(this.manifest.data.removed_line_ids ?? []).includes(item.event.line_id));
       if (!entry) return;
+      let waitingForHistory = false;
       try {
         const response = await this.fetch(this.config.callbackUrl, { method: 'POST', redirect: 'error',
           headers: { Authorization: `Bearer ${this.config.secret}`, 'Content-Type': 'application/json' },
           body: JSON.stringify(entry.event), signal: AbortSignal.timeout(5000) });
         await response.body?.cancel();
         if (!response.ok) {
+          waitingForHistory = response.status === 503 && isReactionCallback(entry.event) &&
+            response.headers?.get('X-WhatsApp-Callback-State') === 'waiting_for_reaction_target';
           if (response.status >= 400 && response.status < 500 && response.status !== 429) {
             await this.deadLetter(entry, `HTTP_${response.status}`);
             continue;
@@ -1104,7 +1115,14 @@ export class Bridge {
         }
         await this.outbox.update(data => {
           const current = data.entries.find(item => item.event.event_id === entry.event.event_id);
-          if (current) { current.attempts++; current.next_try = Date.now() + Math.min(60_000, 1000 * 2 ** Math.min(current.attempts, 6)); }
+          if (current) {
+            // Keep the full event durable and retry it as before. Only a
+            // validated missing reaction target is background history work;
+            // another failure makes it an ordinary pending update again.
+            current.waiting_for_history = waitingForHistory;
+            current.attempts++;
+            current.next_try = Date.now() + Math.min(60_000, 1000 * 2 ** Math.min(current.attempts, 6));
+          }
         });
         continue;
       }
