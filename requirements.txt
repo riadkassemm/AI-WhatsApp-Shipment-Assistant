@@ -44,3 +44,6 @@ watchfiles==1.2.0
 websockets==16.1.1
 
 python-multipart==0.0.29
+reportlab==4.5.1
+arabic-reshaper==3.0.0
+python-bidi==0.6.7

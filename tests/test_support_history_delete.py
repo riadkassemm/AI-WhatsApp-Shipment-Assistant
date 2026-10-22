@@ -75,7 +75,7 @@ def test_agent_cannot_delete_history_ticket(monkeypatch: pytest.MonkeyPatch) -> 
             should_not_delete,
         )
 
-        with pytest.raises(SupportForbiddenError, match="Supervisors and Admins"):
+        with pytest.raises(SupportForbiddenError, match="Super Admins and Admins"):
             await service.delete_history_ticket(52, agent=agent)
         assert called["delete"] == 0
 

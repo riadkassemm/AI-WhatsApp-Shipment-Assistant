@@ -1579,7 +1579,7 @@ class SupportService:
             raise SupportNotFoundError("Ticket not found.")
         if not _can_operate(ticket, agent):
             raise SupportForbiddenError(
-                "Only the assigned agent or a supervisor can save this contact."
+                "Only the assigned agent or a Super Admin can save this contact."
             )
         name = sanitize_support_text(display_name).strip()
         if not name:
@@ -1789,7 +1789,7 @@ class SupportService:
         if not chat or str(chat.get("conversation_origin") or "") != "STAFF":
             raise SupportNotFoundError("Chat not found.")
         if not _can_operate(chat, agent):
-            raise SupportForbiddenError("Only the assigned staff member or a supervisor can close this chat.")
+            raise SupportForbiddenError("Only the assigned staff member or a Super Admin can close this chat.")
 
         closed, changed = await support_repository.close_staff_chat(
             chat_id,
@@ -2060,7 +2060,7 @@ class SupportService:
     ) -> dict[str, Any]:
         if view == "active" and not agent.is_supervisor:
             # Active lists every live ticket for monitoring; agents work from their own queues.
-            raise SupportForbiddenError("Only Supervisors and Admins can view all active tickets.")
+            raise SupportForbiddenError("Only Super Admins and Admins can view all active tickets.")
         result = await support_repository.list_tickets(
             view=view,
             agent_id=agent.id,
@@ -2416,7 +2416,7 @@ class SupportService:
         """
         if not agent.is_supervisor:
             raise SupportForbiddenError(
-                "Only Supervisors and Admins can delete history tickets."
+                "Only Super Admins and Admins can delete history tickets."
             )
 
         ticket = await support_repository.get_ticket(ticket_id)
@@ -2471,7 +2471,7 @@ class SupportService:
         are not affected.
         """
         if not agent.is_supervisor:
-            raise SupportForbiddenError("Only Supervisors and Admins can delete chats.")
+            raise SupportForbiddenError("Only Super Admins and Admins can delete chats.")
 
         chat = await support_repository.get_ticket(chat_id)
         if not chat or str(chat.get("conversation_origin") or "") != "STAFF":
@@ -2534,7 +2534,7 @@ class SupportService:
             raise SupportConflictError(f"The {noun} has no current assignee.")
         if not _can_operate(ticket, agent):
             raise SupportForbiddenError(
-                f"Only the assigned staff member or a supervisor can transfer this {noun}."
+                f"Only the assigned staff member or a Super Admin can transfer this {noun}."
             )
 
         transferred = await support_repository.transfer_ticket(
@@ -2762,7 +2762,7 @@ class SupportService:
         if str(ticket.get("conversation_origin") or "CUSTOMER") == "STAFF":
             raise SupportValidationError("Staff chats do not use support-ticket status transitions.")
         if not _can_operate(ticket, agent):
-            raise SupportForbiddenError("Only the assigned agent or a supervisor can update this ticket.")
+            raise SupportForbiddenError("Only the assigned agent or a Super Admin can update this ticket.")
 
         current = str(ticket["status"])
         if new_status == "RESOLVED":
@@ -3322,7 +3322,7 @@ class SupportService:
         if not await _can_view_ticket(ticket, agent) or not may_reopen_customer_ticket(
             ticket, agent.id, supervisor=agent.is_supervisor,
         ):
-            raise SupportForbiddenError("Only the last assignee who resolved this ticket, or a supervisor, may reopen it.")
+            raise SupportForbiddenError("Only the last assignee who resolved this ticket, or a Super Admin, may reopen it.")
         if get_transport(str(ticket.get("business_phone_number_id") or "") or None) == "removed":
             raise SupportConflictError("This WhatsApp number has been removed. Its history is read-only.")
         if resolved_at is not None and resolved_at.tzinfo is not None:
@@ -3360,7 +3360,7 @@ class SupportService:
         if str(ticket.get("conversation_origin") or "CUSTOMER") == "STAFF":
             raise SupportValidationError("Staff-initiated chats must be closed from Chats; they are not support tickets.")
         if not _can_operate(ticket, agent):
-            raise SupportForbiddenError("Only the assigned agent or a supervisor can resolve this ticket.")
+            raise SupportForbiddenError("Only the assigned agent or a Super Admin can resolve this ticket.")
         if ticket.get("current_assignee_id") is None and not agent.is_supervisor:
             raise SupportConflictError("Claim the ticket before resolving it.")
 

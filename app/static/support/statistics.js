@@ -3,11 +3,14 @@ const statisticsMetrics = {
   tickets_resolved: 'Tickets resolved', messages_sent: 'Outbound messages sent',
 };
 let statisticsRequest = 0;
+let statisticsAppliedQuery = null;
 function canViewAgentStatistics() {
   return Boolean(state.agent && ['admin', 'supervisor'].includes(state.agent.role));
 }
 function clearAgentStatistics() {
   statisticsRequest += 1;
+  statisticsAppliedQuery = null;
+  $('statisticsPdfBtn').disabled = true;
   if (state.activeModal === 'agentStatisticsModal') closeDialog('agentStatisticsModal');
   for (const id of ['statisticsRows', 'statisticsTotals', 'statisticsCoverage', 'statisticsError', 'statisticsRanking']) $(id).replaceChildren();
   $('statisticsAgent').replaceChildren(new Option('All staff', ''));
@@ -37,7 +40,7 @@ function renderAgentStatistics(report) {
   $('statisticsRows').replaceChildren();
   for (const row of report.rows) {
     const tr = document.createElement('tr');
-    for (const value of [row.rank, row.name + ' · ' + row.role + (row.is_active ? '' : ' (inactive)'), ...Object.keys(statisticsMetrics).map(metric => statisticsValue(metric, row[metric]))]) {
+    for (const value of [row.rank, row.name + ' · ' + staffRoleLabel(row.role) + (row.is_active ? '' : ' (inactive)'), ...Object.keys(statisticsMetrics).map(metric => statisticsValue(metric, row[metric]))]) {
       const td = document.createElement('td'); td.textContent = value; tr.append(td);
     }
     $('statisticsRows').append(tr);
@@ -48,6 +51,8 @@ function renderAgentStatistics(report) {
 async function loadAgentStatistics() {
   if (!canViewAgentStatistics()) { clearAgentStatistics(); return; }
   const request = ++statisticsRequest;
+  statisticsAppliedQuery = null;
+  $('statisticsPdfBtn').disabled = true;
   $('statisticsError').textContent = 'Loading statistics…';
   for (const id of ['statisticsRows', 'statisticsTotals', 'statisticsRanking', 'statisticsCoverage']) $(id).replaceChildren();
   const query = new URLSearchParams({start: $('statisticsStart').value, end: $('statisticsEnd').value,
@@ -58,6 +63,8 @@ async function loadAgentStatistics() {
     const report = await api('/api/support/statistics?' + query);
     if (request !== statisticsRequest || !state.authenticated || !canViewAgentStatistics()) return;
     renderAgentStatistics(report);
+    statisticsAppliedQuery = query.toString();
+    $('statisticsPdfBtn').disabled = false;
     $('statisticsError').textContent = report.rows.length ? '' : 'No staff match this filter.';
   } catch (error) {
     if (request !== statisticsRequest) return;
@@ -66,6 +73,35 @@ async function loadAgentStatistics() {
     if (error.status === 403) clearAgentStatistics();
   }
 }
+async function downloadAgentStatisticsPdf() {
+  if (!canViewAgentStatistics() || statisticsAppliedQuery === null) return;
+  const request = statisticsRequest;
+  const agentId = state.agent.id;
+  const query = statisticsAppliedQuery;
+  $('statisticsPdfBtn').disabled = true;
+  try {
+    const response = await fetch('/api/support/statistics/pdf?' + query, {credentials: 'same-origin', cache: 'no-store'});
+    if (!response.ok) {
+      if (response.status === 401) showLogin();
+      if (response.status === 403) clearAgentStatistics();
+      const body = await response.json().catch(() => ({}));
+      throw new Error(typeof body.detail === 'string' ? body.detail : 'Could not export statistics.');
+    }
+    const blob = await response.blob();
+    if (request !== statisticsRequest || !state.authenticated || state.agent?.id !== agentId || !canViewAgentStatistics()) return;
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    const dates = new URLSearchParams(query);
+    link.href = url; link.download = 'agent-statistics-' + dates.get('start') + '-to-' + dates.get('end') + '.pdf';
+    document.body.append(link); link.click(); link.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  } catch (error) {
+    if (request === statisticsRequest && canViewAgentStatistics()) $('statisticsError').textContent = error.message;
+  } finally {
+    if (request === statisticsRequest && canViewAgentStatistics()) $('statisticsPdfBtn').disabled = statisticsAppliedQuery === null;
+  }
+}
+$('statisticsPdfBtn').addEventListener('click', downloadAgentStatisticsPdf);
 $('agentStatisticsBtn').addEventListener('click', () => {
   if (!canViewAgentStatistics()) return;
   if (!$('statisticsStart').value) {

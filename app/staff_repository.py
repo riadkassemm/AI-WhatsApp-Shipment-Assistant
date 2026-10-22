@@ -565,12 +565,12 @@ class StaffRepository:
             raise StaffNotFoundError("Staff account not found after update.")
         return updated
 
-    async def soft_delete_staff(self, staff_id: int) -> dict[str, Any]:
-        """Delete from staff management while preserving ticket/audit references.
+    async def delete_staff(self, staff_id: int) -> dict[str, Any]:
+        """Permanently remove credentials and private records; retain conversation audit.
 
-        The row is kept but deactivated, marked deleted and its sessions revoked.
-        Deleted rows are excluded from listing, lookup and editing. The normalized
-        email becomes a non-email placeholder so the unique key frees the address.
+        The account row serializes deletion against account updates, heartbeat
+        writes and quick-reply creation. Session foreign keys cascade; historical
+        ticket resolver references become NULL without removing ticket events.
         """
         pool = await self._ensure_pool()
         async with pool.acquire() as conn:
@@ -581,40 +581,28 @@ class StaffRepository:
                 try:
                     await conn.begin()
                     await cur.execute(
-                        "SELECT id FROM staff WHERE id = %s AND deleted_at IS NULL FOR UPDATE",
+                        f"SELECT {self._PUBLIC_COLUMNS} FROM staff WHERE id = %s AND deleted_at IS NULL FOR UPDATE",
                         (int(staff_id),),
                     )
-                    if not await cur.fetchone():
+                    deleted = await cur.fetchone()
+                    if not deleted:
                         raise StaffNotFoundError("Staff account not found.")
                     await cur.execute(
-                        """
-                        UPDATE staff
-                        SET is_active = 0,
-                            deleted_at = UTC_TIMESTAMP(6),
-                            email_normalized = CONCAT('deleted:', id),
-                            updated_at = UTC_TIMESTAMP(6)
-                        WHERE id = %s
-                        """,
+                        "SELECT attachment_key FROM support_quick_replies WHERE staff_id = %s FOR UPDATE",
                         (int(staff_id),),
                     )
-                    await cur.execute(
-                        """
-                        UPDATE staff_sessions
-                        SET revoked_at = COALESCE(revoked_at, UTC_TIMESTAMP(6))
-                        WHERE staff_id = %s AND revoked_at IS NULL
-                        """,
-                        (int(staff_id),),
-                    )
+                    deleted["attachment_keys"] = [row["attachment_key"] for row in await cur.fetchall() if row["attachment_key"]]
+                    for table in ("support_quick_replies", "support_agent_heartbeats", "support_agent_activity", "staff_sessions"):
+                        await cur.execute(f"DELETE FROM {table} WHERE staff_id = %s", (int(staff_id),))
+                    await cur.execute("DELETE FROM support_message_user_deletions WHERE user_id = %s", (str(staff_id),))
+                    await cur.execute("DELETE FROM staff WHERE id = %s", (int(staff_id),))
                     await conn.commit()
-                except Exception:
+                    deleted["is_active"] = False
+                except BaseException:
                     await conn.rollback()
                     raise
                 finally:
                     await self._release_named_locks(cur, locks)
-
-        deleted = await self.get_public_staff_by_id(int(staff_id))
-        if not deleted:
-            raise StaffNotFoundError("Staff account not found after deletion.")
         return deleted
 
 

@@ -10,7 +10,7 @@ member can set their own messages in preferences.
 
 The current visibility policy is unchanged by the hardening work:
 
-| Action/data | Agent | Supervisor / Admin |
+| Action/data | Agent | Super Admin / Admin |
 | --- | --- | --- |
 | Read claimable, unassigned NEW tickets | Yes | Yes |
 | Read own active tickets/chats | Yes | Yes |
@@ -42,14 +42,14 @@ the dashboard's normal polling refreshes state after missed events.
 ## Reopening resolved customer tickets
 
 The resolved ticket's **Reopen ticket** button is available to its last assignee
-only when that same agent resolved it. Admins/Supervisors can reopen within their
+only when that same agent resolved it. Admins/Super Admins can reopen within their
 existing visibility scope. These rules are checked again under the database
 ticket lock; shared-history access does not grant reopening or sending rights.
 
 The existing `current_assignee_id` remains the last assignee after resolution;
 `resolved_by_staff_id` records the resolver. Missing legacy IDs never grant agent
 permission. No migration or ownership backfill is needed. Regular agents retain
-their assignment. As an explicit exception, an Admin/Supervisor who successfully
+their assignment. As an explicit exception, an Admin/Super Admin who successfully
 reopens a resolved ticket becomes its assignee, even when its previous assignee
 is unknown or inactive. The new assignee must be active. Sending remains
 assignee-only; the previous owner loses sending rights after reassignment.
@@ -496,3 +496,33 @@ quick-reply list after a failed save before saving another copy.
 
 The ticket action and confirmation button now say **Resolve**. Resolution behavior
 (including returning the customer to AI) is unchanged.
+
+### Permanent staff deletion and statistics exports
+
+The dashboard calls the stored `supervisor` role **Super Admin**. This is a display
+name change; API role identifiers, existing sessions and permissions stay the same.
+Admins and Super Admins can delete other accounts; self-deletion remains forbidden.
+Deletion now removes the `staff` row, sessions, private quick replies (including
+saved PDFs), activity intervals/heartbeats and personal message-hide records in one
+database transaction. PDF files are removed after commit. If filesystem cleanup
+fails or the process stops after commit, an inaccessible orphan PDF may remain;
+check the server log and remove unreferenced files during maintenance.
+
+Conversation messages, ticket assignments and actor audit records are preserved.
+The resolver foreign key becomes NULL; resolution events retain their original
+actor. Transfer active work before deleting its assignee. If already deleted, an
+Admin/Super Admin can find that work in **Active** and use the existing transfer
+workflow. Deletion does not cancel or retry in-progress/uncertain deliveries.
+Old soft-deleted accounts are excluded from statistics as well; this release does
+not bulk-delete legacy tombstones. Inactive, non-deleted accounts remain reportable.
+Deleted staff and their counts are excluded from leaderboard filters and totals.
+
+In **Statistics**, apply dates, staff and ranking, then choose **Download PDF**.
+The export re-queries the local database using the last successfully applied filters
+and current authorization; newly recorded actions may change its totals. It includes
+ranking direction, timezone, selected-staff totals and historical coverage notes.
+GET `/api/support/statistics/pdf` accepts the same query parameters and enforces the
+same Admin/Super Admin permission as the report API; responses are private/no-store.
+PDFs are generated in memory, with pagination and an embedded licensed DejaVu font
+for Latin/Arabic names. Install updated `requirements.txt` before restarting the API.
+No database migration is required. Existing downloaded files cannot be revoked.

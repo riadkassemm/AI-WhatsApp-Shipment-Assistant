@@ -334,7 +334,7 @@ class WhatsAppRegistryService:
     def _require_manager(agent: SupportAgent) -> None:
         if not agent.is_supervisor:
             raise WhatsAppRegistryForbiddenError(
-                "Only Supervisors and Admins can manage WhatsApp numbers."
+                "Only Super Admins and Admins can manage WhatsApp numbers."
             )
 
     async def _ensure_schema(self) -> None:

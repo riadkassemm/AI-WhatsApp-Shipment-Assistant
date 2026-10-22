@@ -474,3 +474,7 @@ function clearAttentionIndicator() {
   document.title = 'Shipment Support';
   if ('clearAppBadge' in navigator) navigator.clearAppBadge().catch(() => {});
 }
+
+function staffRoleLabel(role) {
+  return ({agent: 'Agent', admin: 'Admin', supervisor: 'Super Admin'})[role] || role || '—';
+}

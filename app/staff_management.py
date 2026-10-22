@@ -101,7 +101,7 @@ def _normalize_public_row(row: dict[str, Any]) -> dict[str, Any]:
 def _require_manager(actor: SupportAgent) -> None:
     if not actor.is_supervisor:
         raise StaffManagementForbiddenError(
-            "Only a supervisor or administrator can manage staff accounts."
+            "Only a Super Admin or administrator can manage staff accounts."
         )
 
 
@@ -150,7 +150,7 @@ def _validate_role(role: str, *, allow_supervisor: bool = False) -> str:
     allowed = ASSIGNABLE_STAFF_ROLES if allow_supervisor else CREATABLE_STAFF_ROLES
     if normalized not in allowed:
         raise StaffManagementValidationError(
-            "Role must be agent, admin, or supervisor."
+            "Role must be Agent, Admin, or Super Admin."
             if allow_supervisor else "Role must be either agent or admin."
         )
     return normalized
@@ -378,8 +378,8 @@ async def update_staff_account(
 async def delete_staff_account(actor: SupportAgent, staff_id: int) -> dict[str, Any]:
     """Delete an active or inactive account from staff management.
 
-    The row is kept for ticket/audit references, but the account is hidden, can no
-    longer sign in, be edited or reactivated, and its sessions are revoked.
+    Credentials, sessions and private activity/settings are removed. Historical
+    conversations and actor attribution are retained.
     """
     _require_manager(actor)
     target = await staff_repository.get_staff_by_id(int(staff_id))
@@ -395,7 +395,7 @@ async def delete_staff_account(actor: SupportAgent, staff_id: int) -> dict[str, 
     )
 
     try:
-        deleted = await staff_repository.soft_delete_staff(int(staff_id))
+        deleted = await staff_repository.delete_staff(int(staff_id))
     except StaffNotFoundError as exc:
         raise StaffManagementNotFoundError(str(exc)) from exc
 
@@ -406,6 +406,12 @@ async def delete_staff_account(actor: SupportAgent, staff_id: int) -> dict[str, 
         target.get("role"),
         bool(target.get("is_active")),
     )
+    from app.quick_reply_media import quick_reply_media_store
+    for key in deleted.pop("attachment_keys", []):
+        try:
+            await asyncio.to_thread(quick_reply_media_store.delete, key)
+        except OSError:
+            logger.exception("Could not remove deleted staff quick-reply PDF")
     result = _normalize_public_row(deleted)
     result["deleted"] = True
     result["already_inactive"] = not bool(target.get("is_active"))
