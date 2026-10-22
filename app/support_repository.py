@@ -8,6 +8,7 @@ from typing import Any
 
 import aiomysql
 
+from app.support_staff_names import attach_current_staff_names
 from app.config import settings
 from app.support_delivery_repository import DeliveryRepositoryMixin
 from app.support_models import ACTIVE_TICKET_STATUSES, ALLOWED_TRANSITIONS, may_reopen_customer_ticket
@@ -380,7 +381,10 @@ class SupportRepository(DeliveryRepositoryMixin):
                     """,
                     (ticket_id,),
                 )
-                return await cur.fetchone()
+                row = await cur.fetchone()
+                if row:
+                    await attach_current_staff_names(cur, [row])
+                return row
 
     async def delete_history_ticket(self, ticket_id: int) -> dict[str, Any]:
         """Hard-delete one resolved/closed ticket and its support timeline.
@@ -718,7 +722,10 @@ class SupportRepository(DeliveryRepositoryMixin):
                     """,
                     (whatsapp_message_id,),
                 )
-                return await cur.fetchone()
+                row = await cur.fetchone()
+                if row:
+                    await attach_current_staff_names(cur, [row])
+                return row
 
     async def find_active_ticket_by_phone(
         self,
@@ -772,7 +779,10 @@ class SupportRepository(DeliveryRepositoryMixin):
                         """,
                         (phone_number, *ACTIVE_TICKET_STATUSES),
                     )
-                return await cur.fetchone()
+                row = await cur.fetchone()
+                if row:
+                    await attach_current_staff_names(cur, [row])
+                return row
 
     async def find_ticket_at_whatsapp_timestamp(
         self, phone_number: str, business_phone_number_id: str,
@@ -879,7 +889,8 @@ class SupportRepository(DeliveryRepositoryMixin):
                     (current_ticket_id, before_ticket_id, before_ticket_id,
                      phone_number, phone_digits, f"00{phone_digits}", limit),
                 )
-                return list(await cur.fetchall())
+                rows = list(await cur.fetchall())
+                return await attach_current_staff_names(cur, rows)
 
     async def bind_ticket_channel(
         self,
@@ -1597,7 +1608,10 @@ class SupportRepository(DeliveryRepositoryMixin):
                     "SELECT * FROM support_ticket_messages WHERE id = %s LIMIT 1",
                     (message_id,),
                 )
-                return await cur.fetchone()
+                row = await cur.fetchone()
+                if row:
+                    await attach_current_staff_names(cur, [row])
+                return row
 
     async def change_message(
         self, message_id: int, *, ticket_id: int, user_id: str,
@@ -1883,7 +1897,10 @@ class SupportRepository(DeliveryRepositoryMixin):
                     """,
                     (message_id,),
                 )
-                return await cur.fetchone()
+                row = await cur.fetchone()
+                if row:
+                    await attach_current_staff_names(cur, [row])
+                return row
 
     async def apply_delivery_status(
         self,
@@ -1960,7 +1977,10 @@ class SupportRepository(DeliveryRepositoryMixin):
                       AND sender_type = %s AND sender_scope = %s LIMIT 1""",
                     (client_message_id, ticket_id, sender_type, str(sender_id or "")),
                 )
-                return await cur.fetchone()
+                row = await cur.fetchone()
+                if row:
+                    await attach_current_staff_names(cur, [row])
+                return row
 
     async def get_reaction_by_client_id(
         self, client_reaction_id: str
@@ -2216,6 +2236,7 @@ class SupportRepository(DeliveryRepositoryMixin):
                     tuple(message_ids),
                 )
                 reactions = list(await cur.fetchall())
+                await attach_current_staff_names(cur, rows + reactions)
         by_message: dict[int, list[dict[str, Any]]] = {}
         for reaction in reactions:
             by_message.setdefault(int(reaction["message_id"]), []).append(reaction)
@@ -2533,7 +2554,7 @@ class SupportRepository(DeliveryRepositoryMixin):
                     f"""
                     SELECT
                         'message' AS result_type,
-                        m.id AS message_id, m.ticket_id, m.sender_type, m.sender_name,
+                        m.id AS message_id, m.ticket_id, m.sender_type, m.sender_id, m.sender_name,
                         m.direction, m.message_type, m.body, m.location_name,
                         m.location_address, m.provider_media_filename, m.created_at,
                         t.ticket_reference, t.customer_name, t.customer_userid,
@@ -2550,7 +2571,8 @@ class SupportRepository(DeliveryRepositoryMixin):
                     """,
                     (*access_params, like, like, like, like, agent_id, limit - len(conversations)),
                 )
-                return conversations + list(await cur.fetchall())
+                rows = conversations + list(await cur.fetchall())
+                return await attach_current_staff_names(cur, rows)
 
     async def list_events(self, ticket_id: int, limit: int = 100) -> list[dict[str, Any]]:
         limit = max(1, min(limit, 200))
@@ -2569,7 +2591,8 @@ class SupportRepository(DeliveryRepositoryMixin):
                     """,
                     (ticket_id, limit),
                 )
-                return await cur.fetchall()
+                rows = list(await cur.fetchall())
+                return await attach_current_staff_names(cur, rows)
 
     async def add_event(
         self,
@@ -3355,7 +3378,8 @@ class SupportRepository(DeliveryRepositoryMixin):
                     """,
                     tuple(list_params),
                 )
-                rows = await cur.fetchall()
+                rows = list(await cur.fetchall())
+                await attach_current_staff_names(cur, rows)
         return {
             "items": rows,
             "page": page,

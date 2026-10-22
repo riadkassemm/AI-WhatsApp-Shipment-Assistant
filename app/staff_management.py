@@ -16,6 +16,7 @@ from app.staff_repository import (
     staff_repository,
 )
 from app.support_auth import SupportAgent, normalize_staff_email
+from app.support_events import publish_support_event
 
 
 logger = logging.getLogger("shipment-bot")
@@ -367,6 +368,8 @@ async def update_staff_account(
         staff_id,
         ",".join(changed_fields),
     )
+    if clean_name is not None and clean_name != target.get("name"):
+        await publish_support_event("staff_profile_updated", staff_id=str(staff_id), name=updated["name"])
     result = _normalize_public_row(updated)
     result["sessions_revoked"] = revoke_sessions
     result["current_session_revoked"] = (

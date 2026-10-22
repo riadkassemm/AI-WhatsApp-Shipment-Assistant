@@ -1983,18 +1983,18 @@ function addDateDivider(container, value) {
 
 function timelineSignature(data) {
   const messageSignature = message => [
-    message.id, message.updated_at, message.send_status, message.delivery_status, message.error_message,
+    message.id, message.sender_name, message.reply_to?.sender_name, message.updated_at, message.send_status, message.delivery_status, message.error_message,
     message.media_available, message.body, message.version, message.edited_at,
     message.deleted_for_everyone_at, message.can_edit, message.can_delete_for_everyone,
     (message.reactions || []).map(reaction => [reaction.id, reaction.emoji, reaction.reactor_type, reaction.reactor_name, reaction.updated_at])
   ];
   const messages = (data.messages || []).map(messageSignature);
-  const events = (data.events || []).map(event => [event.id, event.event_type, event.created_at, event.details_json]);
+  const events = (data.events || []).map(event => [event.id, event.event_type, event.actor_name, event.created_at, event.details_json]);
   const recent = ((data.context || {}).recent_messages || []).map(message => [message.role, message.content]);
   const previous = (data.previous_ticket_history || []).map(thread => [
     thread.ticket?.id,
     thread.ticket?.updated_at,
-    thread.ticket?.display_name,
+    thread.ticket?.display_name, thread.ticket?.current_assignee_name, thread.ticket?.initiated_by_staff_name,
     thread.messages_has_more,
     ((thread.context || {}).recent_messages || []).map(message => [message.role, message.content]),
     (thread.messages || []).map(messageSignature)

@@ -490,6 +490,7 @@ def _serialize_support_messages(
             "id": target.get("id"),
             "sender_type": target.get("sender_type"),
             "sender_name": target.get("sender_name"),
+            "sender_id": target.get("sender_id"),
             "message_type": target.get("message_type"),
             "deleted_for_everyone_at": target.get("deleted_for_everyone_at"),
             "body": "Original message deleted" if target.get("deleted_for_everyone_at") else target.get("body"),

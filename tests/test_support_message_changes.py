@@ -32,6 +32,8 @@ class FakeCursor:
         self.rowcount = 1
         if query.startswith("SELECT * FROM support_ticket_messages"):
             self.result = dict(row) if params[0] == row["id"] and (len(params) == 1 or params[1] == row["ticket_id"]) else None
+        elif query.startswith("SELECT id, name FROM staff"):
+            self.result = {"id": int(row["sender_id"]), "name": row.get("sender_name") or "Agent"} if str(row.get("sender_id")) in params else None
         elif query.startswith("SELECT * FROM support_message_change_operations"):
             operation = self.connection.operations.get(params[0])
             self.result = dict(operation) if operation else None
@@ -77,6 +79,9 @@ class FakeCursor:
                     operation["content"] = None
         else:
             raise AssertionError(query)
+
+    async def fetchall(self):
+        return [self.result] if self.result else []
 
     async def fetchone(self) -> dict[str, Any] | None:
         return self.result
