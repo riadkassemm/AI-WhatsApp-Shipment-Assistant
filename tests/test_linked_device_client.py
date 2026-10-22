@@ -493,3 +493,20 @@ def test_removed_registration_uuid_is_exposed_as_terminal_conflict(bridge):
         asyncio.run(LinkedDeviceWhatsAppClient().add_line(str(uuid.uuid4())))
     assert caught.value.http_status == 409
     assert caught.value.definitive_failure
+
+
+def test_delivery_lookup_uses_read_only_status_endpoint_and_checks_line(bridge):
+    requests = bridge(lambda _: httpx.Response(200, json={'status': 'confirmed', 'message_id': MESSAGE, 'timestamp': 1792660000000}))
+    result = asyncio.run(LinkedDeviceWhatsAppClient().get_delivery_status(
+        phone='96171111111', client_message_id='transport-key', phone_number_id='10001'))
+    assert result['message_id'] == MESSAGE
+    assert len(requests) == 1 and requests[0].url.path == '/v1/lines/10001/messages/status'
+    assert json.loads(requests[0].content) == {'phone': '96171111111', 'client_message_id': 'transport-key'}
+
+
+@pytest.mark.parametrize('payload', [{'status': 'sent'}, {'status': 'confirmed', 'message_id': 'ld:10002:OTHER'}])
+def test_delivery_lookup_rejects_invalid_evidence(bridge, payload):
+    bridge(lambda _: httpx.Response(200, json=payload))
+    with pytest.raises(WhatsAppSendError):
+        asyncio.run(LinkedDeviceWhatsAppClient().get_delivery_status(
+            phone='96171111111', client_message_id='transport-key', phone_number_id='10001'))

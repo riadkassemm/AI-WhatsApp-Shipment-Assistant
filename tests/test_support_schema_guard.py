@@ -10,6 +10,7 @@ def add_base_schema(columns):
 
 
 def add_linked_device_schema(columns):
+    columns['support_ticket_messages'].add('replacement_for_message_id')
     columns["support_ticket_messages"].update({"transport_client_id", "sender_scope", "delivery_token", "delivery_claimed_at", "delivery_started_at", "delivery_retry_safe"})
     columns["support_ticket_messages"].update({"whatsapp_change_timestamp", "pending_change_operation_id"})
     columns["support_ticket_messages"].update({"delivery_status", "delivered_at", "read_at"})

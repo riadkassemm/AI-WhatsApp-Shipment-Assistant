@@ -102,6 +102,11 @@ class EditMessageRequest(BaseModel):
     version: int = Field(ge=1)
 
 
+class UncertainCopyRequest(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    accept_duplicate_risk: bool = Field(strict=True)
+
+
 class DeleteMessageRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     scope: Literal["me", "everyone"]
@@ -1091,6 +1096,25 @@ async def resend_ticket_message(
 ) -> dict:
     try:
         return {"message": await support_service.resend_failed_message(ticket_id, message_id, agent=agent)}
+    except Exception as exc:
+        raise _translate_error(exc) from exc
+
+
+@router.post('/tickets/{ticket_id}/messages/{message_id}/check-delivery')
+async def check_ticket_message_delivery(ticket_id: int, message_id: int,
+                                        agent: SupportAgent = Depends(require_support_csrf)) -> dict:
+    try:
+        return await support_service.check_message_delivery(ticket_id, message_id, agent=agent)
+    except Exception as exc:
+        raise _translate_error(exc) from exc
+
+
+@router.post('/tickets/{ticket_id}/messages/{message_id}/new-copy')
+async def copy_uncertain_ticket_message(ticket_id: int, message_id: int, request: UncertainCopyRequest,
+                                        agent: SupportAgent = Depends(require_support_csrf)) -> dict:
+    try:
+        return {'message': await support_service.send_uncertain_copy(ticket_id, message_id, agent=agent,
+            accept_duplicate_risk=request.accept_duplicate_risk)}
     except Exception as exc:
         raise _translate_error(exc) from exc
 

@@ -107,10 +107,18 @@ async def _stop_idle_ticket_sweeper() -> None:
 
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
+    from app.support_delivery_reconciliation import reconcile_deliveries_forever
+    reconciliation = asyncio.create_task(reconcile_deliveries_forever(support_service)) if settings.support_ui_enabled else None
     await _start_idle_ticket_sweeper()
     try:
         yield
     finally:
+        if reconciliation is not None:
+            reconciliation.cancel()
+            try:
+                await reconciliation
+            except asyncio.CancelledError:
+                pass
         await _stop_idle_ticket_sweeper()
 
 

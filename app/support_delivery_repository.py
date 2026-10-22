@@ -10,6 +10,29 @@ DELIVERY_LEASE_MINUTES = 5
 
 
 class DeliveryRepositoryMixin:
+    async def get_delivery_replacement(self, ticket_id: int, message_id: int):
+        if self._pool is None:
+            await self.connect()
+        async with self._pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute('SELECT * FROM support_ticket_messages WHERE ticket_id=%s AND replacement_for_message_id=%s',
+                                  (ticket_id, message_id))
+                return await cur.fetchone()
+
+    async def list_delivery_reconciliation_candidates(self, after_id: int = 0, limit: int = 20):
+        if self._pool is None:
+            await self.connect()
+        async with self._pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute("""SELECT m.*, t.whatsapp_phone, t.business_phone_number_id
+                    FROM support_ticket_messages m JOIN support_tickets t ON t.id=m.ticket_id
+                    WHERE m.id > %s AND m.direction='OUTBOUND' AND m.transport_client_id IS NOT NULL
+                      AND m.deleted_for_everyone_at IS NULL
+                      AND (m.send_status='UNCERTAIN' OR (m.send_status='DISPATCHING'
+                           AND m.delivery_claimed_at < UTC_TIMESTAMP(6)-INTERVAL %s MINUTE))
+                    ORDER BY m.id LIMIT %s""", (after_id, DELIVERY_LEASE_MINUTES, limit))
+                return list(await cur.fetchall())
+
     async def _lock_delivery_ticket(self, conn, cur, message_id: int):
         """Start a transaction locking the ticket before any message lock.
 

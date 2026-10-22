@@ -545,6 +545,24 @@ export class Bridge {
     await this.enqueue(messageStatusEvent(line, key.id, record.phone, status, Date.now()));
     await line.store.update(data => { if (data.messages[key.id]) data.messages[key.id].receipt = status; });
   }
+  deliveryStatus(id, payload) {
+    const line = this.getLine(id);
+    const clientId = payload?.client_message_id;
+    const phone = payload?.phone;
+    if (typeof clientId !== 'string' || !clientId || clientId.length > 191 ||
+        typeof phone !== 'string' || !/^\d{6,20}$/.test(phone)) {
+      throw new BridgeError(400, 'INVALID_DELIVERY_LOOKUP', 'A client message ID and recipient are required.');
+    }
+    const found = Object.entries(line.store.data.messages).find(([, record]) => record.client_message_id === clientId);
+    if (!found) return { status: 'unknown' };
+    const [nativeId, record] = found;
+    if (record.phone !== phone) throw new BridgeError(409, 'CLIENT_ID_CONFLICT', 'The client ID belongs to another recipient.');
+    // Read durable evidence only, even while disconnected. No socket send,
+    // resend, queue mutation, or receipt upgrade occurs in this endpoint.
+    if (!record.ack_confirmed && !record.echo_seen) return { status: 'unconfirmed' };
+    return { status: 'confirmed', message_id: wrapId(id, nativeId), timestamp: record.timestamp };
+  }
+
   async enqueueOwnConfirmation(line, nativeId) {
     const record = line.store.data.messages[nativeId];
     if (!record?.client_message_id || record.confirmation_enqueued || (!record.ack_confirmed && !record.echo_seen)) return;

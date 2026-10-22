@@ -277,6 +277,16 @@ class LinkedDeviceWhatsAppClient:
             "whatsapp_phone": whatsapp_phone if whatsapp_phone.isdigit() else phone,
         }
 
+    async def get_delivery_status(self, *, phone: str, client_message_id: str, phone_number_id: str) -> dict:
+        line = self._phone_number_id(phone_number_id)
+        data = await self._json_request('POST', f'/v1/lines/{line}/messages/status',
+            payload={'phone': phone, 'client_message_id': client_message_id}, timeout_seconds=5.0)
+        if data.get('status') not in {'unknown', 'unconfirmed', 'confirmed'}:
+            raise _send_error('The bridge returned an invalid delivery status.')
+        if data['status'] == 'confirmed' and not str(data.get('message_id') or '').startswith(f'ld:{line}:'):
+            raise _send_error('The bridge returned an invalid delivery confirmation.')
+        return data
+
     async def get_status(self) -> dict:
         data = await self._json_request("GET", "/v1/status")
         _, configured = self._configuration()

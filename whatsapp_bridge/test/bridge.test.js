@@ -1332,3 +1332,46 @@ test('large contact bundles stay within callback limits with a visible truncatio
   assert.ok(Buffer.byteLength(JSON.stringify(event)) < 128 * 1024);
   assert.equal(event.payload.entry[0].changes[0].value.messages[0].contacts.at(-1).name.formatted_name, '[Additional contact details omitted]');
 });
+
+test('delivery lookup reads durable evidence without sending and enforces recipient scope', async t => {
+  const { bridge, line, socket } = await fixture(t);
+  await line.store.update(data => {
+    data.messages.ORIGINAL.client_message_id = 'lookup';
+    data.messages.ORIGINAL.pending_send = false;
+    data.messages.ORIGINAL.delivery_uncertain = true;
+  });
+  const payload = { client_message_id: 'lookup', phone: PHONE };
+  const before = JSON.stringify(line.store.data);
+  assert.deepEqual(bridge.deliveryStatus(LINE, payload), { status: 'unconfirmed' });
+  assert.deepEqual(bridge.deliveryStatus(LINE, { ...payload, client_message_id: 'missing' }), { status: 'unknown' });
+  assert.throws(() => bridge.deliveryStatus(LINE, { ...payload, phone: '15555555555' }), /another recipient/);
+  assert.equal(JSON.stringify(line.store.data), before);
+  for (const evidence of ['ack_confirmed', 'echo_seen']) {
+    await line.store.update(data => {
+      data.messages.ORIGINAL.ack_confirmed = false;
+      data.messages.ORIGINAL.echo_seen = false;
+      data.messages.ORIGINAL[evidence] = true;
+    });
+    line.status = 'disconnected';
+    assert.deepEqual(bridge.deliveryStatus(LINE, payload), {
+      status: 'confirmed', message_id: `ld:${LINE}:ORIGINAL`, timestamp: line.store.data.messages.ORIGINAL.timestamp,
+    });
+  }
+  assert.equal(socket.calls.length, 0);
+});
+
+test('delivery lookup HTTP route requires bridge auth and never dispatches', async t => {
+  const { bridge, config, socket } = await fixture(t);
+  const server = createServer(bridge, config);
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => { server.close(resolve); server.closeAllConnections(); }));
+  const url = `http://127.0.0.1:${server.address().port}/v1/lines/${LINE}/messages/status`;
+  const payload = JSON.stringify({ client_message_id: 'missing', phone: PHONE });
+  assert.equal((await fetch(url, { method: 'POST', body: payload })).status, 401);
+  const response = await fetch(url, { method: 'POST', headers: {
+    Authorization: `Bearer ${SECRET}`, 'Content-Type': 'application/json',
+  }, body: payload });
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { status: 'unknown' });
+  assert.equal(socket.calls.length, 0);
+});

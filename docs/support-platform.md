@@ -88,7 +88,7 @@ lookup; first payload wins within a scope. Do not reuse a key for a new message.
 | `DISPATCHING` | The dispatch marker was committed before provider I/O | Never resend; await confirmation or quarantine after five minutes |
 | `SENT` | Provider accepted and its message ID was persisted, or an authenticated bridge confirmation reconciled it | No resend; delivery/read receipts are separate |
 | `FAILED` with `delivery_retry_safe=1` | Preparation failed, or the provider definitively rejected dispatch | Sender may explicitly retry the same row while owning the conversation |
-| `UNCERTAIN` | Provider acceptance cannot be ruled out | No resend; investigate or await late confirmation |
+| `UNCERTAIN` | Provider acceptance cannot be ruled out | Check evidence; never retry this attempt. An authorized sender may explicitly create one tracked new copy after accepting duplicate risk. |
 
 A database update atomically grants a random delivery token. Only that token can
 cross the dispatch boundary and finish the attempt. A reclaimed worker is fenced
@@ -178,11 +178,47 @@ recovery command below after inspecting the abandoned worker.
    not an automatic resend worker. Until recovery or confirmation, expired
    `DISPATCHING` rows continue to block transfer/resolution/closure. Inspect or
    stop abandoned workers before recovery; late confirmations remain valid.
-4. For `UNCERTAIN`, inspect the paired phone/provider delivery evidence and
-   logs. Do not clear the marker, change the client ID, or force a SQL reset to
-   resend. There is deliberately no “send anyway” action. If a staff member
-   deliberately sends a new message after investigation, it is a distinct send
-   with a possible duplicate-delivery risk. Retain the original audit row.
+4. For `UNCERTAIN`, use **Check status** or inspect the paired phone/provider
+   evidence. Do not clear the marker, change its client ID, or force a SQL reset.
+   The original attempt and its audit record are retained.
+
+### Uncertain delivery actions
+
+![Uncertain-message actions and a tracked new copy, using synthetic test data](images/support-uncertain-delivery.png)
+
+The API checks saved linked-device acknowledgements/own echoes in batches of 20,
+with a 30-second pause between batches. A cursor ensures older unresolved rows
+do not starve newer ones. Checks never contact a customer or resend a message.
+Only matching confirmation changes a message to `SENT`; it does not fabricate
+delivered/read receipts. The same check is available through **Check status**.
+Cloud messages without a persisted provider ID cannot be reconciled this way;
+absence of evidence never becomes a definitive failure. Bridge outages leave
+the original state intact. Expired `DISPATCHING` rows are also checked for saved
+confirmation, but this worker does not replace explicit abandoned-work recovery.
+
+**Send a new copy** is available only to the current assignee of an active
+conversation, with the existing sending permissions. It requires explicit
+confirmation that the original might still arrive, and checks available evidence
+again before inserting. Shared-history access allows status inspection, not
+sending/reopening. Admins/supervisors must use the existing assignment workflow
+when they do not own the conversation. There is no review queue.
+
+A unique original-to-copy link permits only one replacement per uncertain
+message, across simultaneous/repeated requests and staff changes. Repeated
+requests return that same copy and never dispatch it again. The new row has its
+own transport identity and records the sending staff member, timestamp, original
+ID, and acceptance of duplicate risk in the ticket audit. The original remains
+uncertain unless later evidence confirms it. A late arrival of both messages
+is still possible. Copies use the usual delivery claims and failure recovery.
+Text, location, and locally retained media are supported; missing attachments
+are not silently replaced. The timeline labels the copy with the original ID.
+
+Deploy `migrations/20261022_uncertain_delivery_copies.sql` before the new API.
+It adds one nullable column and a unique index without changing existing rows.
+Upgrade the bridge before starting the new API so the read-only lookup endpoint
+is available. No new dependency or re-pairing is required. API startup verifies
+both the column and uniqueness constraint. The migration may be left in place
+when rolling back the application.
 
 ## Local development and integration tests
 
