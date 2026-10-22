@@ -111,7 +111,7 @@ async function saveMessagePreferences(event) {
 
 // Quick replies are private to the signed-in staff account and stored by the API.
 // Selecting one copies it to the clipboard so staff can paste it into the chat.
-const QUICK_REPLIES_LIST_SUBTITLE = 'Select a reply to copy it, then paste it into the chat. Only you can see your quick replies.';
+const QUICK_REPLIES_LIST_SUBTITLE = 'Copy a saved message or attach a saved PDF to the chat. Only you can see your quick replies.';
 
 function showQuickRepliesError(message) {
   const element = $('quickRepliesError');
@@ -122,7 +122,7 @@ function showQuickRepliesError(message) {
 function quickReplyLabel(reply) {
   const title = String(reply?.title || '').trim();
   if (title) return title;
-  const firstLine = String(reply?.body || '').trim().split('\n')[0] || 'Quick reply';
+  const firstLine = String(reply?.body || '').trim().split('\n')[0] || reply?.attachment_filename || 'Quick reply';
   return firstLine.length > 60 ? firstLine.slice(0, 59).trimEnd() + '…' : firstLine;
 }
 
@@ -134,10 +134,16 @@ function resetQuickReplies() {
   state.quickReplyEditing = null;
   $('quickRepliesSearch').value = '';
   $('quickRepliesList').replaceChildren();
+  $('quickReplyPdf').value = '';
+  setButtonBusy($('saveQuickReplyBtn'), false);
 }
 
 function updateQuickReplyCount() {
-  text($('quickReplyBodyCount'), $('quickReplyBody').value.length + ' / 4096');
+  const reply = state.quickReplies.find(item => String(item.id) === String(state.quickReplyEditing));
+  const pdf = Boolean($('quickReplyPdf').files?.length || reply?.attachment_filename);
+  $('quickReplyBody').maxLength = pdf ? 1024 : 4096;
+  text($('quickReplyBodyHint'), pdf ? 'Optional PDF caption. Review before sending.' : 'Copied exactly as written.');
+  text($('quickReplyBodyCount'), $('quickReplyBody').value.length + ' / ' + (pdf ? 1024 : 4096));
 }
 
 function quickReplyRow(reply) {
@@ -150,7 +156,7 @@ function quickReplyRow(reply) {
   const copy = document.createElement('button');
   copy.type = 'button';
   copy.className = 'quick-reply-copy';
-  copy.setAttribute('aria-label', 'Copy quick reply: ' + label);
+  copy.setAttribute('aria-label', (reply.attachment_filename ? 'Attach PDF: ' : 'Copy quick reply: ') + label);
   const copyText = document.createElement('span');
   copyText.className = 'quick-reply-text';
   if (String(reply.title || '').trim()) {
@@ -161,14 +167,14 @@ function quickReplyRow(reply) {
     copyText.classList.add('untitled');
   }
   const preview = document.createElement('span');
-  preview.textContent = reply.body;
+  preview.textContent = reply.attachment_filename ? reply.attachment_filename + (reply.body ? ' · ' + reply.body : '') : reply.body;
   copyText.append(preview);
   const hint = document.createElement('span');
   hint.className = 'quick-reply-copy-hint';
   hint.setAttribute('aria-hidden', 'true');
-  hint.append(createIcon('copy', 'icon icon-sm'), document.createTextNode('Copy'));
+  hint.append(createIcon(reply.attachment_filename ? 'paperclip' : 'copy', 'icon icon-sm'), document.createTextNode(reply.attachment_filename ? 'Attach PDF' : 'Copy'));
   copy.append(copyText, hint);
-  copy.addEventListener('click', () => copyQuickReply(reply));
+  copy.addEventListener('click', () => reply.attachment_filename ? attachQuickReplyPdf(reply) : copyQuickReply(reply));
 
   const actions = document.createElement('div');
   actions.className = 'quick-reply-actions';
@@ -197,7 +203,8 @@ function renderQuickReplies() {
   const query = $('quickRepliesSearch').value.trim().toLocaleLowerCase();
   const replies = state.quickReplies.filter(reply => !query
     || String(reply.title || '').toLocaleLowerCase().includes(query)
-    || String(reply.body || '').toLocaleLowerCase().includes(query));
+    || String(reply.body || '').toLocaleLowerCase().includes(query)
+    || String(reply.attachment_filename || '').toLocaleLowerCase().includes(query));
   list.replaceChildren();
   if (!state.quickRepliesLoaded) {
     list.append(emptyMarkup('Loading quick replies…', 'Fetching your saved messages.', 'zap').outer);
@@ -248,11 +255,13 @@ function showQuickReplyForm(reply) {
   if (state.quickRepliesBusy) return;
   state.quickReplyEditing = reply ? reply.id : 'new';
   showQuickRepliesError('');
+  $('quickReplyPdf').value = '';
+  text($('quickReplyPdfHint'), reply?.attachment_filename ? 'Saved PDF: ' + reply.attachment_filename + '. Choose another PDF to replace it.' : 'Save a PDF to attach it to future replies. A caption is optional.');
   $('quickReplyTitle').value = reply ? String(reply.title || '') : '';
   $('quickReplyBody').value = reply ? String(reply.body || '') : '';
   updateQuickReplyCount();
   text($('quickRepliesTitle'), reply ? 'Edit quick reply' : 'New quick reply');
-  text($('quickRepliesSubtitle'), 'Save a message you send often. Only you can see your quick replies.');
+  text($('quickRepliesSubtitle'), 'Save text or a PDF you send often. Only you can see your quick replies.');
   $('quickRepliesListView').classList.add('hidden');
   $('quickReplyForm').classList.remove('hidden');
   $(reply ? 'quickReplyBody' : 'quickReplyTitle').focus();
@@ -293,34 +302,77 @@ async function copyQuickReply(reply) {
   if (state.composerEnabled) focusMessageComposer();
 }
 
+async function attachQuickReplyPdf(reply) {
+  if (state.quickRepliesBusy) return;
+  if (!canAttachToComposer()) { showQuickRepliesError('Open a conversation you can reply to first.'); return; }
+  if (state.pendingMedia || $('message').value.trim()) { showQuickRepliesError('Send or clear your current draft before attaching a saved PDF.'); return; }
+  const ticketId = state.ticketId;
+  const agentId = state.agent?.id;
+  const request = state.quickRepliesRequest;
+  state.quickRepliesBusy = true;
+  showQuickRepliesError('Loading PDF…');
+  try {
+    const response = await fetch('/api/support/quick-replies/' + encodeURIComponent(reply.id) + '/pdf', {credentials: 'same-origin', cache: 'no-store'});
+    if (!response.ok) {
+      if (response.status === 401) showLogin();
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.detail || 'Could not load the saved PDF.');
+    }
+    const file = new File([await response.blob()], reply.attachment_filename, {type: 'application/pdf'});
+    if (!state.authenticated || state.agent?.id !== agentId || request !== state.quickRepliesRequest) return;
+    if (state.ticketId !== ticketId || !canAttachToComposer() || state.pendingMedia || $('message').value.trim()) {
+      showQuickRepliesError('The conversation or draft changed. Select the PDF again.'); return;
+    }
+    if (attachComposerFile(file)) {
+      $('message').value = reply.body || ''; updateComposerCount(); resizeComposer();
+      closeDialog('quickRepliesModal', false); focusMessageComposer();
+    }
+  } catch (error) {
+    if (request === state.quickRepliesRequest) showQuickRepliesError(error.message);
+  } finally {
+    if (request === state.quickRepliesRequest) state.quickRepliesBusy = false;
+  }
+}
+
 async function saveQuickReply(event) {
   event.preventDefault();
   if (!state.authenticated || state.quickRepliesBusy || !state.quickReplyEditing) return;
   const body = $('quickReplyBody').value;
-  if (!body.trim()) {
+  const file = $('quickReplyPdf').files?.[0];
+  const current = state.quickReplies.find(item => String(item.id) === String(state.quickReplyEditing));
+  if ((file || current?.attachment_filename) && body.length > 1024) { showQuickRepliesError('PDF captions must be 1024 characters or fewer.'); return; }
+  if (!body.trim() && !file && !current?.attachment_filename) {
     showQuickRepliesError('Enter the quick reply message.');
     $('quickReplyBody').focus();
     return;
   }
   const editing = state.quickReplyEditing;
+  const request = state.quickRepliesRequest;
   state.quickRepliesBusy = true;
   setButtonBusy($('saveQuickReplyBtn'), true, 'Saving…');
   showQuickRepliesError('');
   try {
-    const payload = JSON.stringify({title: $('quickReplyTitle').value, body});
-    const saved = editing === 'new'
-      ? await api('/api/support/quick-replies', {method: 'POST', body: payload})
-      : await api('/api/support/quick-replies/' + encodeURIComponent(editing), {method: 'PUT', body: payload});
+    let payload = JSON.stringify({title: $('quickReplyTitle').value, body});
+    let path = '/api/support/quick-replies' + (editing === 'new' ? '' : '/' + encodeURIComponent(editing));
+    if (file) {
+      payload = new FormData(); payload.append('file', file, file.name);
+      payload.append('title', $('quickReplyTitle').value); payload.append('body', body);
+      path += '/pdf';
+    }
+    const saved = await api(path, {method: editing === 'new' ? 'POST' : 'PUT', body: payload});
+    if (!state.authenticated || request !== state.quickRepliesRequest) return;
     state.quickReplies = [...state.quickReplies.filter(item => String(item.id) !== String(saved.id)), saved]
       .sort((left, right) => quickReplyLabel(left).localeCompare(quickReplyLabel(right), undefined, {sensitivity: 'base'}) || left.id - right.id);
     state.quickReplyEditing = saved.id;
     notify(editing === 'new' ? 'Quick reply saved.' : 'Quick reply updated.');
   } catch (error) {
-    showQuickRepliesError(error.message);
+    if (request === state.quickRepliesRequest) showQuickRepliesError(error.message);
     return;
   } finally {
-    state.quickRepliesBusy = false;
-    setButtonBusy($('saveQuickReplyBtn'), false);
+    if (request === state.quickRepliesRequest) {
+      state.quickRepliesBusy = false;
+      setButtonBusy($('saveQuickReplyBtn'), false);
+    }
   }
   showQuickReplyList();
 }
@@ -1933,6 +1985,7 @@ $('cancelMessageDeleteActionBtn').addEventListener('click', closeMessageDelete);
 $('deleteMeBtn').addEventListener('click', () => deleteMessage('me'));
 $('deleteEveryoneBtn').addEventListener('click', () => deleteMessage('everyone'));
 $('imageInput').addEventListener('change', imageSelected);
+installComposerFileInput();
 $('sendBtn').addEventListener('click', sendMessage);
 $('message').addEventListener('input', () => {
   updateComposerCount();
@@ -1960,6 +2013,7 @@ $('cancelQuickReplyBtn').addEventListener('click', showQuickReplyList);
 $('quickReplyForm').addEventListener('submit', saveQuickReply);
 $('quickRepliesSearch').addEventListener('input', renderQuickReplies);
 $('quickReplyBody').addEventListener('input', updateQuickReplyCount);
+$('quickReplyPdf').addEventListener('change', updateQuickReplyCount);
 $('customGreetingMessage').addEventListener('input', updateMessagePreferenceCounts);
 $('customResolutionMessage').addEventListener('input', updateMessagePreferenceCounts);
 

@@ -15,6 +15,10 @@ conversation access still follows ownership, participation, and role rules.
 Outbound sends now use database delivery claims. Uncertain outcomes are blocked
 from resend; a provider timeout does not mean the customer did not receive it.
 
+Staff can drag supported attachments onto the chatbox or paste an image, review its preview,
+and click **Send**. **Quick replies** can also save private PDFs with optional captions
+for reuse. See [attachments and PDF quick replies](docs/support-platform.md#droppedpasted-attachments-and-pdf-quick-replies).
+
 Admins and supervisors can open **Statistics** for staff activity, ticket claims/resolutions,
 confirmed outbound sends, date/agent filters and a sortable team leaderboard.
 Active-time tracking begins when the statistics migration is applied; retained

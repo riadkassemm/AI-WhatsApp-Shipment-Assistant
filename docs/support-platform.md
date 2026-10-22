@@ -460,3 +460,39 @@ With the disposable MariaDB/Redis environment described above, run
 `venv/bin/python -m pytest tests/integration/test_agent_statistics.py` separately
 for real-session authorization, actor/range accuracy, rankings, idle recovery and
 concurrent overlapping heartbeats. CI includes both through the existing suites.
+
+## Dropped/pasted attachments and PDF quick replies
+
+Drop one supported file onto the chatbox, or paste a copied image into its message
+field. The attachment appears in the existing preview; add a caption if wanted,
+then click **Send**. Nothing sends automatically. Ordinary text paste still works.
+The picker, drop and paste paths accept JPEG/PNG images, WebP stickers, MP4/3GP
+videos and PDFs, using the configured media size limits. Unsupported/empty files,
+multiple-file drops, read-only conversations, message editing and active voice
+recordings are rejected. Dropping over an existing attachment does not replace it.
+
+In **Quick replies → New reply**, choose an optional **PDF file**. A saved PDF can
+have a title and a caption (up to 1024 characters); its caption may be empty.
+Select **Attach PDF** to load it into the current writable conversation, review
+the preview, then send normally. Send or clear an existing draft first. Text-only
+quick replies continue to copy their message. Search also matches PDF filenames.
+Edit to change the title/caption or replace the PDF; Delete removes the saved
+reply and its private file. Already-sent conversation attachments are independent.
+All saved replies remain private to their owner, including against admins and
+supervisors. Each PDF counts toward the existing 200-reply limit per staff member.
+
+Apply `migrations/20261023_quick_reply_pdfs.sql` to the local application database
+before deploying. It adds three nullable metadata columns to `support_quick_replies`
+and is safe to reapply. Existing text replies remain intact; no new grants or
+credentials are required. PDFs are stored under `SUPPORT_MEDIA_DIRECTORY/quick-replies`
+with opaque filenames and served only through authenticated, owner-scoped endpoints.
+Back up this directory together with the local database. Keep it outside the public
+web root. PDF uploads check their signature and configured size limit; this is not
+an antivirus scan. Unknown database commit outcomes retain the file to avoid deleting
+a successfully saved PDF. Such failures/crashes can leave unreferenced files: during
+maintenance with uploads stopped, compare filenames against `attachment_key` before
+removing unreferenced files; never remove referenced files by age alone. Refresh the
+quick-reply list after a failed save before saving another copy.
+
+The ticket action and confirmation button now say **Resolve**. Resolution behavior
+(including returning the customer to AI) is unchanged.

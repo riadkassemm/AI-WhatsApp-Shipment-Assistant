@@ -258,6 +258,7 @@ def test_attach_picker_accepts_videos_within_the_limit() -> None:
     picker = _HTML[_HTML.index("const VIDEO_MAX_BYTES = "): _HTML.index("async function sendMediaMessage(")]
     script = r"""
 const assert = require('node:assert/strict');
+const state = {ticketId: 42, composerEnabled: true};
 const input = {files: [], value: 'C:\\fakepath'};
 const $ = id => ({imageInput: input, message: {focus() {}}})[id];
 const calls = [];
@@ -269,16 +270,16 @@ const formatBytes = bytes => Math.round(bytes / 1024 / 1024) + ' MB';
 input.files = [{name: 'clip.mp4', type: 'video/mp4', size: 5 * 1024 * 1024}];
 imageSelected();
 assert.deepEqual(calls[0], ['pending', 'video', 'clip.mp4']);
-assert.match(calls[1][1], /Video attached/);
+assert.match(calls[1][1], /Review the preview/);
 calls.length = 0;
 input.files = [{name: 'big.mp4', type: 'video/mp4', size: 40 * 1024 * 1024}];
 imageSelected();
-assert.deepEqual(calls, [['error', 'This video is 40 MB. WhatsApp videos must be 16 MB or smaller.']]);
+assert.deepEqual(calls, [['error', 'This file exceeds the 16 MB limit.']]);
 assert.equal(input.value, '');
 calls.length = 0;
 input.files = [{name: 'clip.mov', type: 'video/quicktime', size: 10}];
 imageSelected();
-assert.match(calls[0][1], /MP4 video/);
+assert.match(calls[0][1], /MP4\/3GP video/);
 """
     result = subprocess.run(["node", "-e", script], text=True, capture_output=True, timeout=10)
     assert result.returncode == 0, result.stderr

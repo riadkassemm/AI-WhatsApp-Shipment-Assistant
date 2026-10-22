@@ -88,7 +88,11 @@ def test_service_scopes_every_call_to_the_authenticated_agent(monkeypatch: pytes
     async def delete(staff_id: int, reply_id: int):
         calls.append(("delete", staff_id, reply_id))
 
+    async def get_reply(staff_id, reply_id):
+        return row
+
     repo = support_service_module.support_repository
+    monkeypatch.setattr(repo, "get_quick_reply", get_reply)
     monkeypatch.setattr(repo, "list_quick_replies", list_replies)
     monkeypatch.setattr(repo, "create_quick_reply", create)
     monkeypatch.setattr(repo, "update_quick_reply", update)
@@ -274,6 +278,12 @@ class InMemoryQuickReplies:
         self.next_id += 1
         return dict(row)
 
+    async def get_quick_reply(self, staff_id: int, reply_id: int):
+        row = self.rows.get(reply_id)
+        if not row or row['staff_id'] != staff_id:
+            raise SupportNotFoundError("Quick reply not found.")
+        return dict(row)
+
     async def update_quick_reply(self, staff_id: int, reply_id: int, *, title, body):
         row = self.rows.get(reply_id)
         if not row or row["staff_id"] != staff_id:
@@ -291,7 +301,7 @@ class InMemoryQuickReplies:
 def test_api_keeps_each_staff_members_quick_replies_private(monkeypatch: pytest.MonkeyPatch) -> None:
     store = InMemoryQuickReplies()
     repo = support_service_module.support_repository
-    for name in ("list_quick_replies", "create_quick_reply", "update_quick_reply", "delete_quick_reply"):
+    for name in ("get_quick_reply", "list_quick_replies", "create_quick_reply", "update_quick_reply", "delete_quick_reply"):
         monkeypatch.setattr(repo, name, getattr(store, name))
 
     app = FastAPI()
@@ -336,6 +346,9 @@ def test_quick_reply_routes_require_session_and_csrf_for_changes() -> None:
         ("POST", "/api/support/quick-replies"),
         ("PUT", "/api/support/quick-replies/{reply_id}"),
         ("DELETE", "/api/support/quick-replies/{reply_id}"),
+        ("POST", "/api/support/quick-replies/pdf"),
+        ("PUT", "/api/support/quick-replies/{reply_id}/pdf"),
+        ("GET", "/api/support/quick-replies/{reply_id}/pdf"),
     }
     for (method, _path), route in routes.items():
         dependencies = {dep.call for dep in route.dependant.dependencies}

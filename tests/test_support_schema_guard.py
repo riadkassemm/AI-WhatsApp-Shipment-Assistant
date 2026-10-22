@@ -11,7 +11,7 @@ def add_base_schema(columns):
 
 def add_linked_device_schema(columns):
     for path, required_tables in _SUPPORT_SCHEMA_MIGRATIONS:
-        if "20261023_agent_statistics" in path:
+        if "20261023_agent_statistics" in path or "20261023_quick_reply_pdfs" in path:
             for table, required in required_tables.items():
                 columns.setdefault(table, set()).update(required)
     columns['support_ticket_messages'].add('replacement_for_message_id')
