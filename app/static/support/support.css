@@ -1433,7 +1433,8 @@ body.column-resizing * { cursor: col-resize !important; }
 /* Manager-only activity report. */
 .statistics-card{width:min(1100px,96vw);max-width:1100px}
 .statistics-filters{display:flex;flex-wrap:wrap;gap:12px;align-items:end;margin-bottom:16px}
-.statistics-filters .field{flex:1;min-width:140px}
+.statistics-filters .field{flex:1;min-width:140px;margin:0}
+.statistics-filters input,.statistics-filters select,.statistics-filters>.btn{min-height:40px}
 .statistics-totals{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;margin:16px 0}
 .statistics-totals>div{border:1px solid var(--border);border-radius:10px;padding:14px;display:flex;flex-direction:column;gap:8px}
 .statistics-totals strong{font-size:1.35rem}
