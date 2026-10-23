@@ -10,6 +10,9 @@ import aiomysql
 
 from app.support_staff_names import attach_current_staff_names
 from app.config import settings
+from app.support_read_sync import ReadSyncRepositoryMixin, attach_conversation_read_state
+from app.support_receipts import ReceiptRepositoryMixin
+from app.whatsapp_failures import failure_policy
 from app.support_delivery_repository import DeliveryRepositoryMixin
 from app.support_models import ACTIVE_TICKET_STATUSES, ALLOWED_TRANSITIONS, may_reopen_customer_ticket
 from app.whatsapp_client import get_transport
@@ -220,6 +223,9 @@ _SUPPORT_SCHEMA_MIGRATIONS: tuple[tuple[str, dict[str, set[str]]], ...] = (
         "migrations/20261020_message_delivery_status.sql",
         {"support_ticket_messages": {"delivery_status", "delivered_at", "read_at"}},
     ),
+    ("migrations/20261023_reply_read_sync.sql", {"support_ticket_messages": {"read_sync_pending", "read_sync_attempted_at"}, "support_delivery_receipts": {"provider_message_id", "line_id", "status", "checked_at"}}),
+    ("migrations/20261023_whatsapp_failure_codes.sql", {"support_delivery_receipts": {"failure_code"}}),
+    ("migrations/20261023_removed_meta_numbers.sql", {"whatsapp_phone_numbers": {"removed_at"}}),
     ("migrations/20261021_outbound_delivery_ownership.sql", {"support_ticket_messages": {
         "transport_client_id", "sender_scope", "delivery_token", "delivery_claimed_at",
         "delivery_started_at", "delivery_retry_safe",
@@ -240,8 +246,8 @@ _SUPPORT_SCHEMA_MIGRATIONS: tuple[tuple[str, dict[str, set[str]]], ...] = (
 
 MAX_QUICK_REPLIES_PER_STAFF = 200
 
-# WhatsApp receipts only move a message forward: sent, then delivered, then read.
-DELIVERY_STATUS_RANK = {"delivered": 1, "read": 2}
+# Confirmed receipts advance monotonically; playback is distinct from reading.
+DELIVERY_STATUS_RANK = {"delivered": 1, "read": 2, "played": 3}
 
 
 def _missing_support_schema_migrations(
@@ -257,18 +263,23 @@ def _missing_support_schema_migrations(
     return missing
 
 
-class SupportRepository(DeliveryRepositoryMixin):
+
+class SupportRepository(DeliveryRepositoryMixin, ReadSyncRepositoryMixin, ReceiptRepositoryMixin):
     @staticmethod
-    async def _lock_active_linked_device_line(conn: Any, line_id: str | None) -> None:
-        """Serialize new human ownership with linked-device removal preflight."""
-        if not line_id or get_transport(str(line_id)) not in {"linked_device", "removed"}:
+    async def _lock_available_whatsapp_line(conn: Any, line_id: str | None) -> None:
+        """Serialize new/reopened conversations with number removal."""
+        if not line_id:
             return
         async with conn.cursor(aiomysql.DictCursor) as cur:
             await cur.execute(
-                "SELECT source, is_enabled, provider_present FROM whatsapp_phone_numbers WHERE phone_number_id = %s FOR UPDATE",
+                "SELECT source, is_enabled, provider_present, removed_at FROM whatsapp_phone_numbers WHERE phone_number_id = %s FOR UPDATE",
                 (str(line_id),),
             )
             row = await cur.fetchone()
+            if row and row.get('removed_at'):
+                raise SupportConflictError("This WhatsApp number was permanently removed. Its chat history is read-only.")
+            if get_transport(str(line_id)) not in {"linked_device", "removed"}:
+                return
             if get_transport(str(line_id)) == "removed" or not row or row.get("source") != "LINKED_DEVICE" or not row.get("is_enabled") or not row.get("provider_present"):
                 raise SupportConflictError("This WhatsApp linked-device number is inactive or removed. Link and add it to the app before opening a conversation.")
 
@@ -372,7 +383,7 @@ class SupportRepository(DeliveryRepositoryMixin):
             async with conn.cursor(aiomysql.DictCursor) as cur:
                 await cur.execute(
                     """
-                    SELECT t.*, n.display_name
+                    SELECT t.*, n.display_name, n.removed_at AS business_number_removed_at
                     FROM support_tickets t
                     LEFT JOIN whatsapp_phone_numbers n
                       ON n.phone_number_id = t.business_phone_number_id
@@ -384,6 +395,7 @@ class SupportRepository(DeliveryRepositoryMixin):
                 row = await cur.fetchone()
                 if row:
                     await attach_current_staff_names(cur, [row])
+                    await attach_conversation_read_state(cur, [row])
                 return row
 
     async def delete_history_ticket(self, ticket_id: int) -> dict[str, Any]:
@@ -987,7 +999,7 @@ class SupportRepository(DeliveryRepositoryMixin):
         async with self._pool.acquire() as conn:
             await conn.begin()
             try:
-                await self._lock_active_linked_device_line(conn, business_phone_number_id)
+                await self._lock_available_whatsapp_line(conn, business_phone_number_id)
                 async with conn.cursor() as cur:
                     await cur.execute(
                         """
@@ -1122,15 +1134,16 @@ class SupportRepository(DeliveryRepositoryMixin):
             await self.connect()
         assert self._pool is not None
         async with self._pool.acquire() as conn:
-            await conn.begin()
             try:
                 # Determine the immutable channel without taking the ticket
-                # lock. All removal/create paths lock number before ticket.
+                # lock or establishing a transaction snapshot. Removal/create
+                # paths then lock number before ticket and see current state.
                 async with conn.cursor(aiomysql.DictCursor) as channel_cur:
                     await channel_cur.execute("SELECT business_phone_number_id FROM support_tickets WHERE id = %s", (chat_id,))
                     channel = await channel_cur.fetchone()
                 line_id = str((channel or {}).get("business_phone_number_id") or "")
-                await self._lock_active_linked_device_line(conn, line_id)
+                await conn.begin()
+                await self._lock_available_whatsapp_line(conn, line_id)
                 async with conn.cursor(aiomysql.DictCursor) as cur:
                     await cur.execute(
                         "SELECT * FROM support_tickets WHERE id = %s FOR UPDATE",
@@ -1284,7 +1297,7 @@ class SupportRepository(DeliveryRepositoryMixin):
         async with self._pool.acquire() as conn:
             await conn.begin()
             try:
-                await self._lock_active_linked_device_line(conn, business_phone_number_id)
+                await self._lock_available_whatsapp_line(conn, business_phone_number_id)
                 async with conn.cursor() as cur:
                     await cur.execute(
                         """
@@ -1910,9 +1923,10 @@ class SupportRepository(DeliveryRepositoryMixin):
         at: datetime,
         business_phone_number_id: str | None,
         phone_number: str | None,
+        failure_code: int | None = None,
     ) -> tuple[dict[str, Any], bool] | None:
         """Move an outgoing message forward to delivered or read; never backward."""
-        if status not in DELIVERY_STATUS_RANK:
+        if status not in {*DELIVERY_STATUS_RANK, "failed"}:
             raise ValueError("Unknown delivery status.")
         if self._pool is None:
             await self.connect()
@@ -1940,17 +1954,27 @@ class SupportRepository(DeliveryRepositoryMixin):
                         await conn.rollback()
                         return None
                     current = DELIVERY_STATUS_RANK.get(str(row.get("delivery_status") or ""), 0)
-                    changed = DELIVERY_STATUS_RANK[status] > current
-                    if changed:
+                    changed = DELIVERY_STATUS_RANK.get(status, 0) > current
+                    if status == 'failed' and current == 0:
+                        error, retry_safe = failure_policy(failure_code)
+                        # An old generic callback must not erase a known blocking error.
+                        if failure_code is not None or not str(row.get('error_message') or '').startswith('WhatsApp 131047:'):
+                            changed = row.get('send_status') != 'FAILED' or row.get('error_message') != error or bool(row.get('delivery_retry_safe')) != retry_safe
+                            if changed:
+                                await cur.execute("""UPDATE support_ticket_messages SET send_status='FAILED',
+                                    delivery_retry_safe=%s, read_sync_pending=0,
+                                    error_message=%s, updated_at=UTC_TIMESTAMP(6) WHERE id=%s""", (retry_safe, error, row['id']))
+                    elif changed:
                         await cur.execute(
                             """
                             UPDATE support_ticket_messages
                             SET delivery_status = %s,
                                 delivered_at = COALESCE(delivered_at, %s),
-                                read_at = CASE WHEN %s = 'read' THEN COALESCE(read_at, %s) ELSE read_at END,
+                                read_at = CASE WHEN %s IN ('read', 'played') THEN COALESCE(read_at, %s) ELSE read_at END,
                                 -- MariaDB applies assignments left to right: clear the
                                 -- error before send_status changes.
                                 error_message = CASE WHEN send_status = 'SENT' THEN error_message ELSE NULL END,
+                                read_sync_pending = IF(send_status <> 'SENT' AND sender_type='AGENT',1,read_sync_pending),
                                 send_status = 'SENT'
                             WHERE id = %s
                             """,
@@ -2333,6 +2357,7 @@ class SupportRepository(DeliveryRepositoryMixin):
                             """
                             UPDATE support_ticket_messages
                             SET send_status = 'SENT', whatsapp_message_id = %s,
+                                read_sync_pending = IF(sender_type='AGENT',1,read_sync_pending),
                                 whatsapp_timestamp = COALESCE(whatsapp_timestamp, %s),
                                 error_message = NULL, updated_at = UTC_TIMESTAMP(6)
                             WHERE id = %s
@@ -3078,7 +3103,7 @@ class SupportRepository(DeliveryRepositoryMixin):
                         raise SupportNotFoundError("Ticket not found.")
                     line_id = str(channel.get("business_phone_number_id") or "")
                     await conn.begin()
-                    await self._lock_active_linked_device_line(conn, line_id)
+                    await self._lock_available_whatsapp_line(conn, line_id)
                     await cur.execute("SELECT * FROM support_tickets WHERE id=%s FOR UPDATE", (ticket_id,))
                     row = await cur.fetchone()
                     if not row:
@@ -3380,6 +3405,7 @@ class SupportRepository(DeliveryRepositoryMixin):
                 )
                 rows = list(await cur.fetchall())
                 await attach_current_staff_names(cur, rows)
+                await attach_conversation_read_state(cur, rows)
         return {
             "items": rows,
             "page": page,

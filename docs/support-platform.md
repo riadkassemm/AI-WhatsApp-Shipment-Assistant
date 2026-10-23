@@ -232,6 +232,32 @@ Visual alerts remain available, desktop notifications are requested silently
 when muted, and voice-note playback is unaffected. If browser storage is blocked,
 the toggle still works for the current page but may not persist after refresh.
 
+## Removing saved Meta numbers
+
+![Inactive Meta entries with Remove saved number controls, using example numbers](screenshots/meta-number-removal.png)
+
+Admins and Super Admins can choose **Remove saved number** beside an inactive
+Meta Cloud entry in WhatsApp numbers. Active entries must first be deactivated
+with **Remove from app**; its existing active-conversation checks still apply.
+Resolve or close remaining active conversations before removing a saved entry.
+Linked-device numbers continue to use **Remove and unlink**.
+
+Removal hides the entry from number management and outbound selection and blocks
+reactivation through the API. Its history is read-only for sending/reopening.
+Historical tickets, messages, and custom number
+labels are preserved. A local retirement timestamp and audit record prevent Meta
+sync, inbound webhooks, or legacy environment seeding from restoring the entry.
+Concurrent removal requests are idempotent; an activation that wins first causes
+removal to be rejected. Removing the saved entry does not unregister the number
+from Meta or close existing conversations. A new linked-device registration uses
+its own line ID and can still be added normally.
+
+Apply `migrations/20261023_removed_meta_numbers.sql` before restarting the API.
+It adds one nullable column to the existing local registry; no rows are removed
+by the migration. Routing fails closed if registry schema validation fails.
+There is no automatic restore action. Rolling back to code that predates this
+feature would expose retired entries again, so retain this change after use.
+
 ## Local development and integration tests
 
 For the persistent dev VPS, use the existing supervised API, bridge, Redis,
@@ -564,3 +590,72 @@ recipient. Inactive accounts remain reportable. Consequently totals need not mat
 These metrics use retained historical events in the local database; the report
 shows when retained transfer audit starts. No migration, new tracking table or
 remote database connection is required. Admin/Super Admin access is unchanged.
+
+### Delivery receipts and reply-triggered read synchronization
+
+A successful send confirms **WhatsApp server acceptance**, not delivery to the
+recipient. One grey tick means accepted; two grey ticks require a delivery event;
+two blue ticks require a read event. Voice-note microphones turn blue only for a
+separate **played** event. Local dashboard playback does not change this state.
+Read/playback receipts may be unavailable because of recipient privacy settings
+or provider support; Cloud read events never imply playback.
+
+All dashboard voice recordings, including browser-native Ogg/Opus, are normalized
+by FFmpeg to **mono, 48 kHz Opus** before storage. Browser recordings can contain
+stereo audio that plays on WhatsApp Web but fails on mobile as a voice note.
+Linked-device PTT retains `audio/ogg; codecs=opus` through upload and relay; the
+bridge rejects non-Opus or non-mono PTT before dispatch. Text, locations and all
+supported attachment kinds share delivery ownership and ACK handling. Explicit
+provider rejections become failed deliveries eligible for manual retry. Lost
+ACKs/timeouts remain uncertain: they are never automatically resent. A failed
+Cloud attempt's provider ID is preserved in a `DELIVERY_RETRY` audit event before
+an explicit retry acquires a fresh attempt; obsolete callbacks cannot alter the
+new attempt. Delayed Cloud callbacks are stored locally and replayed; unmatched
+callbacks (including bot messages) expire after seven days. Receipt-storage
+failures return HTTP 503 for provider redelivery.
+
+Cloud error **131047** means that business number's 24-hour reply window has
+closed. The dashboard displays this confirmed reason and disables retries for
+that attempt. The customer must message that business number before staff send
+a new free-form message; a conversation with another office number does not
+open its window. An approved Meta template is another provider-supported option
+(the dashboard does not currently provide template sending). Repeated retries
+cannot bypass this restriction. Other definitive failures remain eligible for
+manual retry; network ambiguity remains uncertain. Only numeric provider error
+codes and curated explanations are retained, not raw error payloads.
+
+After a confirmed staff reply, the local database queues read receipts for
+incoming messages in the **same ticket**, with IDs preceding that reply's
+immutable message ID. This boundary is retained across retries and late ACKs.
+The reconciliation worker submits individual provider read receipts (normally
+within 30 seconds), then records incoming `read_at`. For linked devices, it also
+submits a Baileys `chatModify(markRead)` app-state patch to clear the account's
+**staff-phone unread counter**. That patch carries the original incoming key and
+timestamp as its message range. It is skipped when a newer or same-second unread
+incoming message is known, preserving that message's unread state. A fresh reply
+also resynchronizes the last eligible incoming message if customer read receipts
+were recorded previously. Failed submissions remain queued, survive restarts and
+retry without sending another message or advancing the original read boundary.
+
+Queue rows show **unread** (no successful read submission recorded) separately
+from **Awaiting staff reply** (incoming content after the last accepted staff
+reply). Viewing or playing a message does not count as replying. Historical read
+state is unknown until synchronized; the migration does not mark old messages
+read or enqueue historical replies. For linked devices the confirmation boundary
+is successful submission through Baileys `readMessages` and the bounded app-state
+patch where applicable, not an independently observable acknowledgment from
+either phone. WhatsApp controls propagation to linked devices; physical phone
+verification is needed after transport changes.
+
+Apply `migrations/20261023_reply_read_sync.sql` before restarting the API and
+bridge. It adds two message columns, an index and the local receipt inbox; no
+customer content is modified. No dependency changes are needed. Existing
+unconfirmed voice notes must not be automatically replayed after deployment.
+Apply `migrations/20261023_whatsapp_failure_codes.sql` as well; it adds an optional
+numeric error-code column to the receipt inbox so early failures retain their
+reason. Both migrations are additive and repeatable. Existing stereo recordings
+are not rewritten or resent; record a new voice note after this fix.
+
+For deployments with table-level runtime grants, grant SELECT, INSERT, UPDATE
+and DELETE on `support_delivery_receipts` to the existing local application
+account. The schema preflight checks visibility before release activation.

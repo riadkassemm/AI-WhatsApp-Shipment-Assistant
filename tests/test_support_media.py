@@ -312,30 +312,29 @@ def test_support_media_store_persists_remote_reference_for_recovery(tmp_path: Pa
     assert loaded.business_phone_number_id == "phone-number-id"
 
 
-def test_native_ogg_opus_voice_note_does_not_require_ffmpeg(tmp_path: Path, monkeypatch) -> None:
-    async def run() -> None:
-        original = config.settings.support_media_directory
-        config.settings.support_media_directory = str(tmp_path / "support-media")
-        try:
-            store = SupportMediaStore()
+def test_native_stereo_ogg_is_normalized_for_mobile_voice_playback(tmp_path: Path) -> None:
+    import json
+    import subprocess
 
-            async def must_not_run(*_args, **_kwargs):
-                raise AssertionError("ffmpeg should not run for native Ogg/Opus")
+    source = tmp_path / 'stereo.ogg'
+    subprocess.run(['ffmpeg', '-v', 'error', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=0.1',
+                    '-ac', '2', '-c:a', 'libopus', str(source)], check=True, capture_output=True)
+    content, mime, filename, voice = asyncio.run(SupportMediaStore().prepare_voice_note(
+        source.read_bytes(), 'audio/ogg; codecs=opus'))
+    output = tmp_path / filename
+    output.write_bytes(content)
+    metadata = json.loads(subprocess.check_output(['ffprobe', '-v', 'error', '-show_entries',
+        'stream=codec_name,channels,sample_rate', '-of', 'json', str(output)]))['streams'][0]
+    assert metadata == {'codec_name': 'opus', 'sample_rate': '48000', 'channels': 1}
+    assert mime == 'audio/ogg; codecs=opus' and voice is True
+    assert content != source.read_bytes()
 
-            monkeypatch.setattr(asyncio, "create_subprocess_exec", must_not_run)
-            content, mime_type, filename, send_as_voice = await store.prepare_voice_note(
-                b"OggS" + b"\x00" * 64,
-                "audio/ogg; codecs=opus",
-            )
-        finally:
-            config.settings.support_media_directory = original
 
-        assert content.startswith(b"OggS")
-        assert mime_type == "audio/ogg; codecs=opus"
-        assert filename == "voice-note.ogg"
-        assert send_as_voice is True
-
-    asyncio.run(run())
+def test_native_ogg_does_not_trust_the_browser_codec_label():
+    import pytest
+    from app.support_media import SupportMediaError
+    with pytest.raises(SupportMediaError, match='could not be converted'):
+        asyncio.run(SupportMediaStore().prepare_voice_note(b'OggS' + bytes(64), 'audio/ogg; codecs=opus'))
 
 
 def test_supported_mp4_audio_falls_back_when_ffmpeg_is_missing(tmp_path: Path, monkeypatch) -> None:

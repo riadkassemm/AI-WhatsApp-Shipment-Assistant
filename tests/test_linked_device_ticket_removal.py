@@ -28,7 +28,7 @@ class ChannelCursor:
             if self.connection.blocked is not None:
                 self.connection.entered.set()
                 await self.connection.blocked.wait()
-            self.result = dict(self.connection.number)
+            self.result = dict(self.connection.number) if self.connection.number else None
         else:
             raise AssertionError("A removed/inactive line must fail before ticket locks or writes: " + query)
 
@@ -142,6 +142,8 @@ def test_delayed_handoff_rechecks_number_after_waiting_for_removal_transaction(m
 
 def test_cloud_channels_do_not_require_a_linked_registry_row(monkeypatch):
     connection = ChannelConnection()
+    connection.number = None
     monkeypatch.setattr(repository_module, "get_transport", lambda _line: "cloud")
-    asyncio.run(SupportRepository._lock_active_linked_device_line(connection, "123456789"))
-    assert connection.queries == []
+    asyncio.run(SupportRepository._lock_available_whatsapp_line(connection, "123456789"))
+    assert len(connection.queries) == 1
+    assert 'removed_at' in connection.queries[0] and 'FOR UPDATE' in connection.queries[0]

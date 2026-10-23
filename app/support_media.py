@@ -361,7 +361,7 @@ class SupportMediaStore:
         """Prepare browser audio for WhatsApp.
 
         Returns ``(content, mime_type, filename, send_as_voice)``. Native
-        Ogg/Opus remains a WhatsApp voice note. If ffmpeg is unavailable but
+        Ogg/Opus is normalized to mono before becoming a voice note. If ffmpeg is unavailable but
         the browser already produced another WhatsApp-supported audio format,
         the recording can still be delivered as a regular audio attachment.
         """
@@ -377,13 +377,8 @@ class SupportMediaStore:
                 f"The voice note is too large. Maximum size is {limit // (1024 * 1024)} MB."
             )
 
-        # Firefox and some browsers can record Ogg/Opus directly. Avoid an
-        # unnecessary ffmpeg dependency when the recording is already a native
-        # WhatsApp voice-note format. The explicit codec marker is important:
-        # arbitrary Ogg containers must still be normalized.
-        if source_mime == "audio/ogg" and "opus" in raw_mime and content.startswith(b"OggS"):
-            return content, "audio/ogg; codecs=opus", "voice-note.ogg", True
-
+        # Browser Ogg/Opus may be stereo. WhatsApp Web can play it while
+        # mobile PTT playback rejects it. Always normalize, even native Ogg.
         ffmpeg_path = str(settings.support_media_ffmpeg_path or "ffmpeg").strip() or "ffmpeg"
         timeout_seconds = max(5.0, float(settings.support_media_transcode_timeout_seconds))
 
@@ -409,6 +404,8 @@ class SupportMediaStore:
                     "voip",
                     "-ac",
                     "1",
+                    "-ar",
+                    "48000",
                     "-b:a",
                     "32k",
                     "-vbr",
@@ -433,7 +430,7 @@ class SupportMediaStore:
                         False,
                     )
                 raise SupportMediaError(
-                    "This browser recorded WebM audio, which requires ffmpeg on the server before WhatsApp can send it."
+                    "This voice recording requires ffmpeg to normalize it for WhatsApp mobile playback."
                 ) from exc
 
             try:

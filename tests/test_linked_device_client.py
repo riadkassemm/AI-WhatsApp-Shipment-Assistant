@@ -184,6 +184,7 @@ def test_media_upload_download_and_send_remain_scoped_to_line(bridge):
             await client.send_media(to="96171111111", media_type="audio", media_id=media_id, phone_number_id="10002")
     asyncio.run(run())
     assert len(requests) == 3
+    assert json.loads(requests[0].content)["mime_type"] == "audio/ogg; codecs=opus"
     assert json.loads(requests[1].content)["audio"] == {"id": MEDIA, "voice": True}
 
 

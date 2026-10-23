@@ -650,6 +650,10 @@ def test_linked_message_status_updates_ticks_and_drops_unknown_receipts(linked_c
         "business_phone_number_id": "90001", "phone_number": "96171111111",
     }
 
+    # Playback is now a distinct supported receipt, never collapsed into read.
+    played = request("POST", endpoint, payload=dict(event, status="played"))
+    assert played.status_code == 200
+    assert seen[-1]["status"] == "played"
     found = False
     # A fresh receipt for a message that is not saved yet is retried by the bridge.
     assert request("POST", endpoint, payload=event).status_code == 503
@@ -658,7 +662,7 @@ def test_linked_message_status_updates_ticks_and_drops_unknown_receipts(linked_c
     response = request("POST", endpoint, payload=stale)
     assert response.status_code == 200 and response.json()["status"] == "ignored"
 
-    for invalid in (dict(event, status="played"), dict(event, from_me=False), dict(event, message_id="wamid.cloud")):
+    for invalid in (dict(event, status="invented"), dict(event, from_me=False), dict(event, message_id="wamid.cloud")):
         assert request("POST", endpoint, payload=invalid).status_code == 400
 
 

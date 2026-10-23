@@ -633,7 +633,8 @@ const notify = () => {};
     assert result.returncode == 0, result.stderr
 
 
-def test_voice_note_survives_ticket_and_message_updates(tmp_path: Path) -> None:
+@pytest.mark.parametrize('outbound', [False, True])
+def test_voice_note_survives_ticket_and_message_updates(tmp_path: Path, outbound: bool) -> None:
     configured_browser = os.environ.get("SUPPORT_TEST_BROWSER")
     browser = shutil.which(configured_browser) if configured_browser else next(
         (path for name in ("google-chrome", "google-chrome-stable", "chromium")
@@ -645,12 +646,12 @@ def test_voice_note_survives_ticket_and_message_updates(tmp_path: Path) -> None:
         pytest.skip("Chrome/Chromium is unavailable")
     player = _HTML[_HTML.index("function createVoiceNotePlayer("): _HTML.index("function addMessage(")]
     reconciliation = _HTML[_HTML.index("function updateAudioMessageRow("): _HTML.index("function renderConversation(")]
-    script = r"""
+    script = 'const outbound = ' + str(outbound).lower() + ';\n' + r"""
 const conversation = document.getElementById('conversation');
 function check(condition, message) { if (!condition) throw Error(message); }
-function messageRow(id, source, caption) {
+function messageRow(id, source, caption, playbackStatus = 'read') {
   const row = document.createElement('article');
-  row.className = 'message-row inbound';
+  row.className = 'message-row ' + (outbound ? 'outbound' : 'inbound');
   row.dataset.messageId = id;
   const avatar = document.createElement('div');
   avatar.className = 'message-avatar';
@@ -662,7 +663,15 @@ function messageRow(id, source, caption) {
   sender.textContent = 'Customer';
   const media = document.createElement('div');
   media.className = 'msg-media';
-  media.append(createVoiceNotePlayer(source, 'Voice note').player);
+  const {player} = createVoiceNotePlayer(source, 'Voice note');
+  const indicator = document.createElement('span');
+  const mic = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  mic.setAttribute('class', 'icon voice-playback' + (playbackStatus === 'played' ? ' confirmed-played' : ''));
+  mic.setAttribute('aria-label', playbackStatus === 'played' ? 'Played by recipient' : 'Playback not confirmed');
+  indicator.title = mic.getAttribute('aria-label');
+  indicator.append(mic);
+  if (outbound) player.prepend(indicator);
+  media.append(player);
   const body = document.createElement('div');
   body.textContent = caption;
   bubble.append(sender, media, body);
@@ -688,6 +697,7 @@ try {
   conversation.append(timeline(original));
   const audio = original.querySelector('audio');
   const speed = original.querySelector('.voice-speed-btn');
+  if (outbound) check(!original.querySelector('.voice-playback').classList.contains('confirmed-played'), 'read implied playback');
   check(audio.playbackRate === 1 && speed.textContent === '1x', 'initial speed');
   speed.click();
   check(audio.playbackRate === 1.5 && speed.textContent === '1.5x', '1.5x speed');
@@ -709,13 +719,21 @@ try {
   check(conversation.querySelector('.voice-speed-btn') === speed, 'claim reset the speed control');
   check(conversation.textContent.includes('updated caption'), 'caption was not updated');
   check(conversation.textContent.includes('New inbound'), 'incoming message was not displayed');
+  if (outbound) check(!original.querySelector('.voice-playback').classList.contains('confirmed-played'), 'ordinary update implied playback');
 
   check(updateConversationKeepingAudio(conversation, timeline(
-    textMessage('Claimed'), messageRow('7', '/media/7', 'updated caption'),
+    textMessage('Claimed'), messageRow('7', '/media/7', 'updated caption', 'played'),
     textMessage('New inbound'), textMessage('Sent reply')
   )), 'send update was reconciled');
   check(conversation.querySelector('audio') === audio, 'send replaced the audio');
   check(audio.isConnected && audio.playbackRate === 2, 'playback state was lost');
+  if (outbound) {
+    const played = original.querySelector('.voice-playback');
+    check(played.classList.contains('confirmed-played'), 'confirmed playback did not update the microphone');
+    check(played.getAttribute('aria-label') === 'Played by recipient', 'playback accessibility label was stale');
+    check(played.parentElement.title === 'Played by recipient', 'playback tooltip was stale');
+    check(original.querySelectorAll('.voice-playback').length === 1, 'duplicate playback indicators');
+  } else check(!original.querySelector('.voice-playback'), 'incoming audio gained a recipient indicator');
   speed.click();
   check(audio.playbackRate === 1 && speed.textContent === '1x', 'speed did not cycle');
   setTimeout(() => {

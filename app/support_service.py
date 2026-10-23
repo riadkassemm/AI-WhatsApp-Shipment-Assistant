@@ -594,7 +594,7 @@ class SupportService:
                 return False
         if event.get("type") in {
             "outbound_message", "message_media_ready", "message_updated",
-            "message_deleted_for_everyone", "message_reaction", "message_status",
+            "message_deleted_for_everyone", "message_reaction", "message_status", "incoming_read",
         } and event.get("message_id") is not None:
             try:
                 message_id = int(event["message_id"])
@@ -1150,10 +1150,11 @@ class SupportService:
         timestamp_ms: int | None,
         business_phone_number_id: str | None,
         phone_number: str | None,
+        failure_code: int | None = None,
     ) -> bool:
         """Record a WhatsApp delivered/read receipt. False when no support row matches."""
         status = str(status or "").lower()
-        if status not in DELIVERY_STATUS_RANK:
+        if status not in {*DELIVERY_STATUS_RANK, "failed"}:
             raise SupportValidationError("Unknown WhatsApp delivery status.")
         try:
             at = datetime.fromtimestamp(int(timestamp_ms) / 1000, tz=timezone.utc).replace(tzinfo=None) if timestamp_ms else datetime.now(timezone.utc).replace(tzinfo=None)
@@ -1163,8 +1164,12 @@ class SupportService:
             str(whatsapp_message_id), status=status, at=at,
             business_phone_number_id=business_phone_number_id or None,
             phone_number=normalize_phone(phone_number) if phone_number else None,
+            **({'failure_code': failure_code} if failure_code is not None else {}),
         )
         if not result:
+            if not str(whatsapp_message_id).startswith('ld:') and business_phone_number_id and phone_number:
+                await support_repository.save_delivery_receipt(str(whatsapp_message_id), status, at,
+                    business_phone_number_id, normalize_phone(phone_number), failure_code)
             return False
         message, changed = result
         if changed:
@@ -1175,6 +1180,18 @@ class SupportService:
                 message=_serialize_support_messages(ticket_id, [message])[0],
             )
         return True
+
+    async def reconcile_delivery_receipts(self):
+        for receipt in await support_repository.pending_delivery_receipts():
+            applied = await self.apply_delivery_status(
+                whatsapp_message_id=receipt['provider_message_id'], status=receipt['status'],
+                timestamp_ms=int(receipt['occurred_at'].replace(tzinfo=timezone.utc).timestamp() * 1000),
+                business_phone_number_id=receipt['line_id'], phone_number=receipt['phone'], failure_code=receipt.get('failure_code'))
+            await support_repository.finish_receipt_check(receipt['id'], applied)
+
+    async def sync_reply_reads(self, message_id=None):
+        from app.support_read_sync import sync_reply_reads
+        await sync_reply_reads(support_repository, whatsapp_client, publish_support_event, message_id)
 
     async def _deliver_outbound(self, ticket, message, *, retry=False):
         updated = await deliver(support_repository, whatsapp_client, support_media_store, ticket, message, retry=retry)
@@ -1308,7 +1325,9 @@ class SupportService:
         if message.get("send_status") not in {"FAILED", "PENDING", "DISPATCHING"}:
             raise SupportConflictError("This delivery cannot be retried safely.")
         if message.get("send_status") == "FAILED" and not message.get("delivery_retry_safe"):
-            raise SupportConflictError("The earlier delivery outcome is uncertain; it cannot be resent.")
+            if str(message.get('error_message') or '').startswith('WhatsApp 131047:'):
+                raise SupportConflictError(message['error_message'])
+            raise SupportConflictError("The earlier delivery cannot be retried in its current state.")
         kind = str(message.get("message_type") or "text")
         if kind not in {"text", "location"} | SUPPORT_MEDIA_MESSAGE_TYPES:
             raise SupportValidationError("This message type cannot be resent.")
@@ -2353,6 +2372,7 @@ class SupportService:
                 "can_reopen": (
                     ticket.get("status") == "RESOLVED" and ticket.get("active_key") is None
                     and may_reopen_customer_ticket(ticket, agent.id, supervisor=agent.is_supervisor)
+                    and not ticket.get('business_number_removed_at')
                     and get_transport(str(ticket.get("business_phone_number_id") or "") or None) != "removed"
                 ),
                 # Viewing a ticket is the source authorization for forwarding.
@@ -2370,7 +2390,7 @@ class SupportService:
                         and ticket.get("active_key") is None
                         and str(ticket.get("status") or "") in {"RESOLVED", "CLOSED"}
                     )
-                ) and get_transport(str(ticket.get("business_phone_number_id") or "") or None) != "removed",
+                ) and not ticket.get('business_number_removed_at') and get_transport(str(ticket.get("business_phone_number_id") or "") or None) != "removed",
                 "can_transfer": (
                     _can_operate(ticket, agent)
                     and ticket.get("current_assignee_id") is not None
@@ -2819,7 +2839,7 @@ class SupportService:
             raise SupportNotFoundError("Ticket not found.")
 
         line_id = str(ticket.get("business_phone_number_id") or "")
-        if line_id and get_transport(line_id) == "removed":
+        if ticket.get('business_number_removed_at') or (line_id and get_transport(line_id) == "removed"):
             raise SupportConflictError("This WhatsApp number has been removed. Its chat history is read-only.")
         active = (
             ticket.get("active_key") is not None
@@ -3324,7 +3344,7 @@ class SupportService:
             ticket, agent.id, supervisor=agent.is_supervisor,
         ):
             raise SupportForbiddenError("Only the last assignee who resolved this ticket, or a Super Admin, may reopen it.")
-        if get_transport(str(ticket.get("business_phone_number_id") or "") or None) == "removed":
+        if ticket.get('business_number_removed_at') or get_transport(str(ticket.get("business_phone_number_id") or "") or None) == "removed":
             raise SupportConflictError("This WhatsApp number has been removed. Its history is read-only.")
         if resolved_at is not None and resolved_at.tzinfo is not None:
             resolved_at = resolved_at.astimezone(timezone.utc).replace(tzinfo=None)

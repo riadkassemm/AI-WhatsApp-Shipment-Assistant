@@ -2424,10 +2424,11 @@ async def receive_message(
 
 
 async def _apply_cloud_delivery_statuses(change: dict, statuses: list) -> None:
-    """Show Meta delivered/read receipts as ticks on support messages."""
+    """Record Meta receipts and actionable rejection codes."""
+    from app.whatsapp_failures import provider_error_code
     line_id = str((change.get("metadata") or {}).get("phone_number_id") or "") or None
     for item in statuses[:100]:
-        if not isinstance(item, dict) or item.get("status") not in {"delivered", "read"} or not item.get("id"):
+        if not isinstance(item, dict) or item.get("status") not in {"delivered", "read", "failed"} or not item.get("id"):
             continue
         try:
             timestamp_ms = int(item.get("timestamp") or 0) * 1000 or None
@@ -2435,10 +2436,12 @@ async def _apply_cloud_delivery_statuses(change: dict, statuses: list) -> None:
                 whatsapp_message_id=str(item["id"]), status=str(item["status"]),
                 timestamp_ms=timestamp_ms, business_phone_number_id=line_id,
                 phone_number=str(item.get("recipient_id") or "") or None,
+                **({'failure_code': provider_error_code(item.get('errors'))} if item['status'] == 'failed' else {}),
             )
         except Exception:
-            # Receipts are cosmetic. Never fail the webhook because of one.
+            # Acknowledge only durable receipt handling; Meta can redeliver on 503.
             logger.warning("WhatsApp delivery status could not be recorded: status=%s", item.get("status"))
+            raise HTTPException(503, "Delivery status storage is temporarily unavailable.") from None
 
 
 async def process_whatsapp_payload(payload: dict, *, source: str = "cloud") -> Response:

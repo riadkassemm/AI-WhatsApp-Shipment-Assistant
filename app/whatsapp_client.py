@@ -16,9 +16,10 @@ logger = logging.getLogger("shipment-bot")
 class WhatsAppSendError(RuntimeError):
     """Outbound send failed. ``delivery_uncertain`` means do not retry blindly."""
 
-    def __init__(self, message: str, *, delivery_uncertain: bool) -> None:
+    def __init__(self, message: str, *, delivery_uncertain: bool, provider_code: int | None = None) -> None:
         super().__init__(message)
         self.delivery_uncertain = delivery_uncertain
+        self.provider_code = provider_code
         self.definitive_failure = not delivery_uncertain
 
 
@@ -125,6 +126,15 @@ class WhatsAppClient:
             return str(value) if value else None
         return None
 
+    async def mark_read(self, *, message_id: str, phone_number_id: str | None, phone: str):
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(self._messages_url(phone_number_id), headers=self._json_headers,
+                json={'messaging_product': 'whatsapp', 'status': 'read', 'message_id': message_id})
+            response.raise_for_status()
+            result = response.json()
+        if result.get('success') is not True:
+            raise WhatsAppSendError('Read receipt was not confirmed.', delivery_uncertain=False)
+
     async def _send_payload(
         self,
         payload: dict,
@@ -143,9 +153,15 @@ class WhatsAppClient:
                 resp.raise_for_status()
             except httpx.HTTPStatusError as exc:
                 status = exc.response.status_code if exc.response is not None else "unknown"
+                from app.whatsapp_failures import provider_error_code
+                try:
+                    code = provider_error_code([exc.response.json().get('error')])
+                except (ValueError, AttributeError, TypeError):
+                    code = None
                 raise WhatsAppSendError(
                     f"WhatsApp rejected the message with HTTP {status}.",
                     delivery_uncertain=not isinstance(status, int) or status >= 500,
+                    provider_code=code,
                 ) from exc
             except httpx.RequestError as exc:
                 raise WhatsAppSendError(
@@ -451,6 +467,10 @@ class RoutedWhatsAppClient:
 
     def __init__(self) -> None:
         self._cloud = WhatsAppClient()
+
+    async def mark_read(self, *, message_id: str, phone_number_id: str | None, phone: str):
+        client, line = self._route(phone_number_id, message_id)
+        return await client.mark_read(message_id=message_id, phone_number_id=line, phone=phone)
 
     def _route(self, phone_number_id: str | None, *references: str | None):
         selected = phone_number_id

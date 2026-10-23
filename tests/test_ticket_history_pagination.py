@@ -268,7 +268,7 @@ class _CaptureCursor:
         self.calls.append((sql, params))
 
     async def fetchone(self) -> dict[str, Any]:
-        return {"total": 0}
+        return {"total": 0, "id": 300}
 
     async def fetchall(self) -> tuple[Any, ...]:
         return ()

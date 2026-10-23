@@ -78,7 +78,7 @@ class LinkedDeviceEvent(BaseModel):
     deleted_timestamp: int | None = Field(default=None, gt=0)
     from_me: bool | None = None
     sender_phone: str | None = Field(default=None, pattern=r"^[0-9]{5,20}$")
-    status: Literal["delivered", "read"] | None = None
+    status: Literal["delivered", "read", "played"] | None = None
 
 
 def _require_manager(agent: SupportAgent) -> None:

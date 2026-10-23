@@ -118,9 +118,9 @@ export function outgoingConfirmationEvent(line, nativeId, senderPhone, clientMes
 export const RECEIPT_STATUSES = {
   [proto.WebMessageInfo.Status.DELIVERY_ACK]: 'delivered',
   [proto.WebMessageInfo.Status.READ]: 'read',
-  [proto.WebMessageInfo.Status.PLAYED]: 'read',
+  [proto.WebMessageInfo.Status.PLAYED]: 'played',
 };
-export const RECEIPT_RANK = { delivered: 1, read: 2 };
+export const RECEIPT_RANK = { delivered: 1, read: 2, played: 3 };
 
 export function messageStatusEvent(line, nativeId, senderPhone, status, timestamp) {
   return {

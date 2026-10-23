@@ -55,6 +55,7 @@ export function createServer(bridge, config) {
       if (request.method !== 'POST') throw new BridgeError(405, 'METHOD_NOT_ALLOWED', 'This endpoint requires POST.');
       const limit = parts[3] === 'media' ? Math.ceil(config.maxMediaBytes * 4 / 3) + 4096 : 64 * 1024;
       const payload = await readJson(request, limit);
+      if (parts.length === 5 && parts[3] === 'messages' && parts[4] === 'read') return send(response, 200, await bridge.markRead(id, payload));
       if (parts.length === 5 && parts[3] === 'messages' && parts[4] === 'status') return send(response, 200, bridge.deliveryStatus(id, payload));
       if (parts.length === 4 && parts[3] === 'connect') return send(response, 200, await bridge.connect(id));
       if (parts.length === 4 && parts[3] === 'disconnect') return send(response, 200, await bridge.disconnect(id));

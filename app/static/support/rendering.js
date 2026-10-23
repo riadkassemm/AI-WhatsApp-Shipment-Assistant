@@ -452,6 +452,8 @@ function createTicketRow(ticket) {
   const meta = document.createElement('div');
   meta.className = 'ticket-row-meta';
   meta.append(conversationStatusBadge(ticket));
+  if (ticket.unread_count) meta.append(createMetaChip(ticket.unread_count + ' unread', 'message'));
+  if (ticket.awaiting_staff_reply) meta.append(createMetaChip('Awaiting staff reply', 'clock'));
   meta.append(createMetaChip(createSupportNumberLabel(ticket, {focusable: false}), 'message', 'channel-pill'));
   if (ticket.current_assignee_name) meta.append(createMetaChip(ticket.current_assignee_name, 'user'));
   else if (ticket.phone_app_replied && ticket.status === 'NEW') {
@@ -1607,6 +1609,14 @@ function addMessage(container, m, extraClass = '') {
         media.append(card);
       } else {
         const {player, audio} = createVoiceNotePlayer(m.media_url, 'Voice note from ' + messageActor(m));
+        if (outbound) {
+          const mic = createIcon('mic', 'icon voice-playback' + (m.delivery_status === 'played' ? ' confirmed-played' : ''));
+          mic.setAttribute('aria-label', m.delivery_status === 'played' ? 'Played by recipient' : 'Playback not confirmed');
+          const indicator = document.createElement('span');
+          indicator.title = mic.getAttribute('aria-label');
+          indicator.append(mic);
+          player.prepend(indicator);
+        }
         const recovery = document.createElement('div');
         recovery.className = 'media-unavailable hidden';
         const recoveryText = document.createElement('span');
@@ -1799,7 +1809,9 @@ function addMessage(container, m, extraClass = '') {
     const failed = document.createElement('span');
     failed.className = 'send-state failed';
     failed.title = m.error_message || 'WhatsApp could not send this message.';
-    failed.append(createIcon('alert', 'icon icon-sm'), document.createTextNode('Not sent'));
+    const failureLabel = String(m.error_message || '').startsWith('WhatsApp 131047:')
+      ? 'Not sent · WhatsApp reply window closed' : 'Not sent';
+    failed.append(createIcon('alert', 'icon icon-sm'), document.createTextNode(failureLabel));
     meta.append(failed);
     if (!extraClass && canResendMessage(m)) {
       const resend = document.createElement('button');
@@ -1850,7 +1862,7 @@ function addMessage(container, m, extraClass = '') {
     }
   } else if (outbound && m.send_status) {
     // WhatsApp-style ticks: one grey when sent, two grey when delivered, two blue when read.
-    const receipt = m.delivery_status === 'read' ? 'read' : m.delivery_status === 'delivered' ? 'delivered' : 'sent';
+    const receipt = ['read', 'played'].includes(m.delivery_status) ? 'read' : m.delivery_status === 'delivered' ? 'delivered' : 'sent';
     const label = receipt === 'read' ? 'Read' : receipt === 'delivered' ? 'Delivered' : 'Sent';
     const sent = document.createElement('span');
     sent.className = 'send-state ticks ' + receipt;
@@ -2090,6 +2102,12 @@ function updateAudioMessageRow(existing, rendered) {
   const renderedBubble = renderedStack.querySelector('.message-bubble');
   const existingMedia = existingBubble.querySelector('.msg-media');
   const renderedMedia = renderedBubble.querySelector('.msg-media');
+
+  // The receipt indicator lives inside the retained player. Refresh this
+  // sibling of the audio controls without disconnecting or resetting playback.
+  const existingPlayback = existingMedia.querySelector('.voice-playback')?.parentElement;
+  const renderedPlayback = renderedMedia.querySelector('.voice-playback')?.parentElement;
+  if (existingPlayback && renderedPlayback) existingPlayback.replaceWith(renderedPlayback);
 
   // Keep the media element and all of its ancestors connected while updating
   // the sender, caption, reactions, and delivery status around it.

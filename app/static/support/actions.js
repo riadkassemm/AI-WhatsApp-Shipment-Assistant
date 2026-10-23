@@ -687,6 +687,14 @@ function renderWhatsAppRegistry(payload) {
       remove.disabled = state.whatsappBusy || state.linkedDeviceBusy;
       remove.onclick = () => removeLinkedDeviceNumber(item.phone_number_id);
       actions.append(remove);
+    } else if (!item.is_enabled) {
+      const remove = document.createElement('button');
+      remove.type = 'button';
+      remove.className = 'btn small danger';
+      remove.textContent = 'Remove saved number';
+      remove.disabled = state.whatsappBusy || state.linkedDeviceBusy;
+      remove.onclick = () => removeSavedWhatsAppNumber(item.phone_number_id);
+      actions.append(remove);
     }
     row.append(copy, actions);
     numberContainer.append(row);
@@ -1022,6 +1030,23 @@ async function setWhatsAppNumberState(phoneNumberId, enabled) {
     const payload = await api('/api/support/whatsapp-numbers/' + encodeURIComponent(phoneNumberId), {method:'PUT', body: JSON.stringify({enabled: Boolean(enabled)})});
     renderWhatsAppRegistry(payload);
     showWhatsAppFeedback('whatsappSuccess', enabled ? 'WhatsApp number added to the app.' : 'WhatsApp number removed from the app.');
+  } catch (error) {
+    showWhatsAppFeedback('whatsappError', error.message);
+  } finally {
+    state.whatsappBusy = false;
+    if (state.whatsappRegistry) renderWhatsAppRegistry(state.whatsappRegistry);
+  }
+}
+
+async function removeSavedWhatsAppNumber(phoneNumberId) {
+  if (!canManageWhatsApp() || state.whatsappBusy || state.linkedDeviceBusy) return;
+  if (!(await confirmDialog({title: 'Remove saved number?', message: 'Permanently remove this inactive Meta number from the app? Existing conversations and their number labels will be kept. Future Meta syncs will not add this entry back. This does not delete the number from your Meta business account.', confirmLabel: 'Remove saved number', tone: 'danger'}))) return;
+  state.whatsappBusy = true;
+  clearWhatsAppFeedback();
+  try {
+    const payload = await api('/api/support/whatsapp-numbers/' + encodeURIComponent(phoneNumberId), {method: 'DELETE'});
+    renderWhatsAppRegistry(payload);
+    showWhatsAppFeedback('whatsappSuccess', 'Saved number removed. Conversation history is preserved.');
   } catch (error) {
     showWhatsAppFeedback('whatsappError', error.message);
   } finally {
