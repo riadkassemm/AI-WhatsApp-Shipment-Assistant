@@ -161,3 +161,82 @@ async def test_content_types_share_failure_retry_and_read_boundary(infrastructur
     assert (await repo.get_message(incoming['id']))['read_at'] is None
     if kind == 'audio':
         assert calls[-1]['voice'] is True
+
+
+@pytest.mark.asyncio
+async def test_reply_resyncs_last_already_read_message_without_reading_newer_or_other_ticket(infrastructure):
+    repo, sql, _ = infrastructure
+    old = await message(repo, incoming=True, key='already-read')
+    await sql('UPDATE support_ticket_messages SET read_at=UTC_TIMESTAMP(6) WHERE id=%s', (old['id'],))
+    original_read_at = (await repo.get_message(old['id']))['read_at']
+    await message(repo, incoming=True, ticket=43, key='other-ticket')
+    reply = await message(repo, key='resync')
+    newer = await message(repo, incoming=True, key='after-reply')
+    token = await repo.claim_delivery(reply['id'])
+    assert await repo.begin_delivery(reply['id'], token)
+    await repo.finish_delivery(reply['id'], token, status='SENT', provider_id='ld:90005:resync')
+    calls = []
+    async def read(**kwargs):
+        calls.append(kwargs)
+    async def publish(*args, **kwargs):
+        pass
+    await sync_reply_reads(repo, SimpleNamespace(mark_read=read), publish)
+    assert [call['message_id'] for call in calls] == ['ld:90005:already-read']
+    assert (await repo.get_message(old['id']))['read_at'] == original_read_at
+    assert (await repo.get_message(newer['id']))['read_at'] is None
+    assert (await repo.get_ticket(43))['unread_count'] == 1
+    assert not (await repo.get_message(reply['id']))['read_sync_pending']
+
+
+@pytest.mark.asyncio
+async def test_cloud_window_rejection_survives_early_receipt_and_blocks_retry(infrastructure, monkeypatch):
+    import app.support_service as module
+    from app.support_auth import SupportAgent
+    from app.support_repository import SupportConflictError
+    repo, sql, _ = infrastructure
+    async def publish(*args, **kwargs):
+        pass
+    monkeypatch.setattr(module, 'publish_support_event', publish)
+    reply = await message(repo, key='window-closed')
+    token = await repo.claim_delivery(reply['id'])
+    assert await repo.begin_delivery(reply['id'], token)
+    args = dict(whatsapp_message_id='wamid.window', status='failed', timestamp_ms=1792750000000,
+                business_phone_number_id='90005', phone_number='155500042')
+    # Generic receipt may arrive before the detailed provider rejection.
+    assert not await module.support_service.apply_delivery_status(**args)
+    assert not await module.support_service.apply_delivery_status(**args, failure_code=131047)
+    inbox = await repo.pending_delivery_receipts()
+    assert len(inbox) == 1 and inbox[0]['failure_code'] == 131047
+    await repo.finish_delivery(reply['id'], token, status='SENT', provider_id='wamid.window')
+    await module.support_service.reconcile_delivery_receipts()
+    failed = await repo.get_message(reply['id'])
+    assert failed['send_status'] == 'FAILED' and not failed['delivery_retry_safe']
+    assert '131047' in failed['error_message'] and '24-hour reply window' in failed['error_message']
+    assert not failed['read_sync_pending']
+    assert not await repo.pending_delivery_receipts()
+    # Duplicate generic callbacks cannot re-enable a rejected retry.
+    await module.support_service.apply_delivery_status(**args)
+    assert not (await repo.get_message(reply['id']))['delivery_retry_safe']
+    assert await repo.claim_delivery(reply['id'], retry=True, expected_token=token) is None
+    with pytest.raises(SupportConflictError, match='131047'):
+        await module.support_service.resend_failed_message(42, reply['id'], agent=SupportAgent(id='7', name='Agent', role='agent'))
+
+
+@pytest.mark.asyncio
+async def test_failure_details_enrich_existing_failure_only_with_correct_scope(infrastructure):
+    repo, _, _ = infrastructure
+    row = await message(repo, key='details')
+    token = await repo.claim_delivery(row['id'])
+    assert await repo.begin_delivery(row['id'], token)
+    await repo.finish_delivery(row['id'], token, status='SENT', provider_id='wamid.details')
+    args = dict(status='failed', at=datetime(2026, 10, 23), business_phone_number_id='90005', phone_number='155500042')
+    failed, changed = await repo.apply_delivery_status('wamid.details', **args)
+    assert changed and failed['delivery_retry_safe']
+    for wrong in ({'business_phone_number_id': '90006'}, {'phone_number': '155500043'}):
+        assert await repo.apply_delivery_status('wamid.details', **(args | wrong), failure_code=131047) is None
+    assert (await repo.get_message(row['id']))['delivery_retry_safe']
+    failed, changed = await repo.apply_delivery_status('wamid.details', **args, failure_code=131047)
+    assert changed and not failed['delivery_retry_safe']
+    assert '131047' in failed['error_message']
+    _, changed = await repo.apply_delivery_status('wamid.details', **args, failure_code=131047)
+    assert not changed

@@ -10,7 +10,7 @@ def add_base_schema(columns):
 
 
 def add_linked_device_schema(columns):
-    columns["support_delivery_receipts"] = {"provider_message_id", "line_id", "status", "checked_at"}
+    columns["support_delivery_receipts"] = {"provider_message_id", "line_id", "status", "checked_at", "failure_code"}
     for path, required_tables in _SUPPORT_SCHEMA_MIGRATIONS:
         if "20261023_agent_statistics" in path or "20261023_quick_reply_pdfs" in path:
             for table, required in required_tables.items():

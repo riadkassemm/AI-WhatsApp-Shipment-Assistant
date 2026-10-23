@@ -181,6 +181,28 @@ async def test_actual_transports_do_not_retry_uncertain_http(infrastructure, mon
 
 
 @pytest.mark.asyncio
+async def test_cloud_reply_window_rejection_is_actionable_without_blind_retry(infrastructure, monkeypatch):
+    import httpx
+    from app.whatsapp_client import WhatsAppClient
+    repo, _, _ = infrastructure
+    calls = []
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(400, json={'error': {'code': 131047, 'message': 'private provider detail'}})
+    actual = httpx.AsyncClient
+    monkeypatch.setattr(httpx, 'AsyncClient', lambda **kwargs: actual(**kwargs, transport=httpx.MockTransport(handler)))
+    row, _ = await create(repo)
+    ticket = await repo.get_ticket(42)
+    transport = WhatsAppClient()
+    result = await deliver(repo, transport, None, ticket, row)
+    assert result['send_status'] == 'FAILED' and not result['delivery_retry_safe']
+    assert '131047' in result['error_message'] and '24-hour' in result['error_message']
+    assert 'private provider detail' not in result['error_message']
+    await deliver(repo, transport, None, ticket, result, retry=True)
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
 async def test_two_service_requests_both_miss_lookup_but_dispatch_once(infrastructure, monkeypatch):
     repo, _, _ = infrastructure
     gate = Barrier(2)

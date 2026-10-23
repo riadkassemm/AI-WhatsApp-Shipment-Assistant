@@ -1809,7 +1809,9 @@ function addMessage(container, m, extraClass = '') {
     const failed = document.createElement('span');
     failed.className = 'send-state failed';
     failed.title = m.error_message || 'WhatsApp could not send this message.';
-    failed.append(createIcon('alert', 'icon icon-sm'), document.createTextNode('Not sent'));
+    const failureLabel = String(m.error_message || '').startsWith('WhatsApp 131047:')
+      ? 'Not sent · WhatsApp reply window closed' : 'Not sent';
+    failed.append(createIcon('alert', 'icon icon-sm'), document.createTextNode(failureLabel));
     meta.append(failed);
     if (!extraClass && canResendMessage(m)) {
       const resend = document.createElement('button');

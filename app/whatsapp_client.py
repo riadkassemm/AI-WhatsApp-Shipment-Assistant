@@ -16,9 +16,10 @@ logger = logging.getLogger("shipment-bot")
 class WhatsAppSendError(RuntimeError):
     """Outbound send failed. ``delivery_uncertain`` means do not retry blindly."""
 
-    def __init__(self, message: str, *, delivery_uncertain: bool) -> None:
+    def __init__(self, message: str, *, delivery_uncertain: bool, provider_code: int | None = None) -> None:
         super().__init__(message)
         self.delivery_uncertain = delivery_uncertain
+        self.provider_code = provider_code
         self.definitive_failure = not delivery_uncertain
 
 
@@ -152,9 +153,15 @@ class WhatsAppClient:
                 resp.raise_for_status()
             except httpx.HTTPStatusError as exc:
                 status = exc.response.status_code if exc.response is not None else "unknown"
+                from app.whatsapp_failures import provider_error_code
+                try:
+                    code = provider_error_code([exc.response.json().get('error')])
+                except (ValueError, AttributeError, TypeError):
+                    code = None
                 raise WhatsAppSendError(
                     f"WhatsApp rejected the message with HTTP {status}.",
                     delivery_uncertain=not isinstance(status, int) or status >= 500,
+                    provider_code=code,
                 ) from exc
             except httpx.RequestError as exc:
                 raise WhatsAppSendError(

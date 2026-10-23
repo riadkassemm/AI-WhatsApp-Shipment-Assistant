@@ -336,6 +336,21 @@ def test_cloud_status_webhooks_record_delivery_and_read(monkeypatch):
     assert seen[0]["business_phone_number_id"] == "1234567890"
 
 
+def test_cloud_failure_webhook_keeps_only_valid_provider_code(monkeypatch):
+    import app.main as main
+    seen = []
+    async def apply(**kwargs):
+        seen.append(kwargs)
+    monkeypatch.setattr(main.support_service, 'apply_delivery_status', apply)
+    statuses = [dict(id='wamid.failure', status='failed', timestamp='1760000000', recipient_id='96171111111',
+                     errors=[{'code': code, 'message': 'private details', 'error_data': {'details': 'secret'}}])
+                for code in (131047, '131047', True, -1)]
+    asyncio.run(main._apply_cloud_delivery_statuses({'metadata': {'phone_number_id': '1234567890'}}, statuses))
+    assert [item['failure_code'] for item in seen] == [131047, None, None, None]
+    assert all(item['business_phone_number_id'] == '1234567890' for item in seen)
+    assert 'private details' not in str(seen) and 'secret' not in str(seen)
+
+
 def _render_status(message: dict[str, Any], agent_id: str = "7", can_reply: bool = True) -> dict[str, Any]:
     start = _HTML.index("function addMessage(")
     end = _HTML.index("function addEvent(")
@@ -410,6 +425,16 @@ def test_failed_messages_offer_resend_only_to_their_sender():
     pending = _render_status({**message, "send_status": "PENDING"})
     assert pending["states"] == [{"className": "send-state pending", "label": "Sending", "text": ""}]
     assert "Send status unknown" not in _HTML
+
+
+def test_closed_reply_window_is_visible_and_has_no_resend_button():
+    from app.whatsapp_failures import failure_policy
+    error, safe = failure_policy(131047)
+    found = _render_status({'id': 5, 'ticket_id': 42, 'direction': 'OUTBOUND', 'sender_type': 'AGENT',
+        'sender_id': '7', 'message_type': 'text', 'body': 'test', 'send_status': 'FAILED',
+        'delivery_retry_safe': safe, 'error_message': error, 'transport_client_id': 'wire-5'})
+    assert found['states'][0]['text'] == 'Not sent · WhatsApp reply window closed'
+    assert 'Resend' not in found['buttons']
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is unavailable")

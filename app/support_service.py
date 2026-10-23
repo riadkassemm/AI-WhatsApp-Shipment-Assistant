@@ -1150,6 +1150,7 @@ class SupportService:
         timestamp_ms: int | None,
         business_phone_number_id: str | None,
         phone_number: str | None,
+        failure_code: int | None = None,
     ) -> bool:
         """Record a WhatsApp delivered/read receipt. False when no support row matches."""
         status = str(status or "").lower()
@@ -1163,11 +1164,12 @@ class SupportService:
             str(whatsapp_message_id), status=status, at=at,
             business_phone_number_id=business_phone_number_id or None,
             phone_number=normalize_phone(phone_number) if phone_number else None,
+            **({'failure_code': failure_code} if failure_code is not None else {}),
         )
         if not result:
             if not str(whatsapp_message_id).startswith('ld:') and business_phone_number_id and phone_number:
                 await support_repository.save_delivery_receipt(str(whatsapp_message_id), status, at,
-                    business_phone_number_id, normalize_phone(phone_number))
+                    business_phone_number_id, normalize_phone(phone_number), failure_code)
             return False
         message, changed = result
         if changed:
@@ -1184,7 +1186,7 @@ class SupportService:
             applied = await self.apply_delivery_status(
                 whatsapp_message_id=receipt['provider_message_id'], status=receipt['status'],
                 timestamp_ms=int(receipt['occurred_at'].replace(tzinfo=timezone.utc).timestamp() * 1000),
-                business_phone_number_id=receipt['line_id'], phone_number=receipt['phone'])
+                business_phone_number_id=receipt['line_id'], phone_number=receipt['phone'], failure_code=receipt.get('failure_code'))
             await support_repository.finish_receipt_check(receipt['id'], applied)
 
     async def sync_reply_reads(self, message_id=None):
@@ -1323,7 +1325,9 @@ class SupportService:
         if message.get("send_status") not in {"FAILED", "PENDING", "DISPATCHING"}:
             raise SupportConflictError("This delivery cannot be retried safely.")
         if message.get("send_status") == "FAILED" and not message.get("delivery_retry_safe"):
-            raise SupportConflictError("The earlier delivery outcome is uncertain; it cannot be resent.")
+            if str(message.get('error_message') or '').startswith('WhatsApp 131047:'):
+                raise SupportConflictError(message['error_message'])
+            raise SupportConflictError("The earlier delivery cannot be retried in its current state.")
         kind = str(message.get("message_type") or "text")
         if kind not in {"text", "location"} | SUPPORT_MEDIA_MESSAGE_TYPES:
             raise SupportValidationError("This message type cannot be resent.")

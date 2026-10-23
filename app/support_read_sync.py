@@ -30,6 +30,15 @@ class ReadSyncRepositoryMixin:
                     WHERE ticket_id=%s AND id<%s AND direction='INBOUND' AND read_at IS NULL
                     AND whatsapp_message_id IS NOT NULL AND deleted_for_everyone_at IS NULL ORDER BY id LIMIT 50""", (job['ticket_id'], job['id']))
                 rows = list(await cur.fetchall())
+                if not rows:
+                    # A previous receipt may have informed the customer without
+                    # clearing our account's linked-phone unread counter. A new
+                    # reply retries that bounded app-state patch as well.
+                    await cur.execute("""SELECT id,whatsapp_message_id FROM support_ticket_messages
+                        WHERE ticket_id=%s AND id<%s AND direction='INBOUND'
+                        AND whatsapp_message_id IS NOT NULL AND deleted_for_everyone_at IS NULL
+                        ORDER BY id DESC LIMIT 1""", (job['ticket_id'], job['id']))
+                    rows = list(await cur.fetchall())
             await conn.commit()
             return rows
 

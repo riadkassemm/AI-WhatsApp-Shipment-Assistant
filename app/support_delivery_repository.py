@@ -158,7 +158,11 @@ class DeliveryRepositoryMixin:
         return changed
 
     async def finish_delivery(self, message_id: int, token: str, *, status: str,
-                              provider_id: str | None = None, error: str | None = None) -> None:
+                              provider_id: str | None = None, error: str | None = None, failure_code: int | None = None) -> None:
+        from app.whatsapp_failures import failure_policy
+        retry_safe = status == 'FAILED'
+        if retry_safe and failure_code is not None:
+            error, retry_safe = failure_policy(failure_code)
         async with self._pool.acquire() as conn:
             async with conn.cursor() as cur:
                 await cur.execute("""
@@ -170,7 +174,7 @@ class DeliveryRepositoryMixin:
                       AND ((%s = 'SENT' AND send_status IN ('DISPATCHING', 'UNCERTAIN'))
                            OR (%s IN ('FAILED', 'UNCERTAIN') AND send_status IN ('PENDING', 'DISPATCHING')
                                AND delivery_claimed_at >= UTC_TIMESTAMP(6) - INTERVAL %s MINUTE))
-                """, (status, provider_id, status, error, status == 'FAILED', message_id, token, status, status, DELIVERY_LEASE_MINUTES))
+                """, (status, provider_id, status, error, retry_safe, message_id, token, status, status, DELIVERY_LEASE_MINUTES))
             await conn.commit()
 
     async def interrupt_delivery(self, message_id: int, token: str) -> None:

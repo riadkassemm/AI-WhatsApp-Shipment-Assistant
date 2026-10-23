@@ -3,14 +3,15 @@ import aiomysql
 
 
 class ReceiptRepositoryMixin:
-    async def save_delivery_receipt(self, provider_id, status, at, line, phone):
+    async def save_delivery_receipt(self, provider_id, status, at, line, phone, failure_code=None):
         if self._pool is None:
             await self.connect()
         async with self._pool.acquire() as conn:
             async with conn.cursor() as cur:
-                await cur.execute("""INSERT IGNORE INTO support_delivery_receipts
-                    (provider_message_id,line_id,phone,status,occurred_at) VALUES (%s,%s,%s,%s,%s)""",
-                    (provider_id, line, phone, status, at))
+                await cur.execute("""INSERT INTO support_delivery_receipts
+                    (provider_message_id,line_id,phone,status,occurred_at,failure_code) VALUES (%s,%s,%s,%s,%s,%s)
+                    ON DUPLICATE KEY UPDATE failure_code=COALESCE(VALUES(failure_code),failure_code)""",
+                    (provider_id, line, phone, status, at, failure_code))
             await conn.commit()
 
     async def pending_delivery_receipts(self):

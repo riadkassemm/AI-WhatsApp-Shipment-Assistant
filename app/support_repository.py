@@ -12,6 +12,7 @@ from app.support_staff_names import attach_current_staff_names
 from app.config import settings
 from app.support_read_sync import ReadSyncRepositoryMixin, attach_conversation_read_state
 from app.support_receipts import ReceiptRepositoryMixin
+from app.whatsapp_failures import failure_policy
 from app.support_delivery_repository import DeliveryRepositoryMixin
 from app.support_models import ACTIVE_TICKET_STATUSES, ALLOWED_TRANSITIONS, may_reopen_customer_ticket
 from app.whatsapp_client import get_transport
@@ -223,6 +224,7 @@ _SUPPORT_SCHEMA_MIGRATIONS: tuple[tuple[str, dict[str, set[str]]], ...] = (
         {"support_ticket_messages": {"delivery_status", "delivered_at", "read_at"}},
     ),
     ("migrations/20261023_reply_read_sync.sql", {"support_ticket_messages": {"read_sync_pending", "read_sync_attempted_at"}, "support_delivery_receipts": {"provider_message_id", "line_id", "status", "checked_at"}}),
+    ("migrations/20261023_whatsapp_failure_codes.sql", {"support_delivery_receipts": {"failure_code"}}),
     ("migrations/20261021_outbound_delivery_ownership.sql", {"support_ticket_messages": {
         "transport_client_id", "sender_scope", "delivery_token", "delivery_claimed_at",
         "delivery_started_at", "delivery_retry_safe",
@@ -1915,6 +1917,7 @@ class SupportRepository(DeliveryRepositoryMixin, ReadSyncRepositoryMixin, Receip
         at: datetime,
         business_phone_number_id: str | None,
         phone_number: str | None,
+        failure_code: int | None = None,
     ) -> tuple[dict[str, Any], bool] | None:
         """Move an outgoing message forward to delivered or read; never backward."""
         if status not in {*DELIVERY_STATUS_RANK, "failed"}:
@@ -1946,12 +1949,15 @@ class SupportRepository(DeliveryRepositoryMixin, ReadSyncRepositoryMixin, Receip
                         return None
                     current = DELIVERY_STATUS_RANK.get(str(row.get("delivery_status") or ""), 0)
                     changed = DELIVERY_STATUS_RANK.get(status, 0) > current
-                    if status == 'failed' and current == 0 and row.get('send_status') != 'FAILED':
-                        await cur.execute("""UPDATE support_ticket_messages SET send_status='FAILED',
-                            delivery_retry_safe=1, read_sync_pending=0,
-                            error_message='WhatsApp reported delivery failed. Retry is available.', updated_at=UTC_TIMESTAMP(6)
-                            WHERE id=%s""", (row['id'],))
-                        changed = True
+                    if status == 'failed' and current == 0:
+                        error, retry_safe = failure_policy(failure_code)
+                        # An old generic callback must not erase a known blocking error.
+                        if failure_code is not None or not str(row.get('error_message') or '').startswith('WhatsApp 131047:'):
+                            changed = row.get('send_status') != 'FAILED' or row.get('error_message') != error or bool(row.get('delivery_retry_safe')) != retry_safe
+                            if changed:
+                                await cur.execute("""UPDATE support_ticket_messages SET send_status='FAILED',
+                                    delivery_retry_safe=%s, read_sync_pending=0,
+                                    error_message=%s, updated_at=UTC_TIMESTAMP(6) WHERE id=%s""", (retry_safe, error, row['id']))
                     elif changed:
                         await cur.execute(
                             """

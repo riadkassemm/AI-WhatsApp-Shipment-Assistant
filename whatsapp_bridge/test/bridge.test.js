@@ -1442,7 +1442,7 @@ test('delivery lookup HTTP route requires bridge auth and never dispatches', asy
 test('PTT preserves Opus and media sends deduplicate with confirmed receipts only', async t => {
   const { bridge, socket, line } = await fixture(t);
   for (const type of ['audio', 'image', 'video', 'document', 'sticker']) {
-    const bytes = type === 'audio' ? Buffer.concat([Buffer.from('OggS'), Buffer.alloc(24), Buffer.from('OpusHead')]) : Buffer.from('fixture');
+    const bytes = type === 'audio' ? Buffer.concat([Buffer.from('OggS'), Buffer.alloc(24), Buffer.from('OpusHead'), Buffer.from([1, 1]), Buffer.alloc(9)]) : Buffer.from('fixture');
     const media = await bridge.uploadMedia(LINE, { content_base64: bytes.toString('base64'), mime_type: type === 'audio' ? 'audio/ogg; codecs=opus' : 'application/octet-stream' });
     const payload = { to: PHONE, type, [type]: { id: media.id, voice: type === 'audio' }, client_message_id: `attachment-${type}` };
     const before = socket.calls.length;
@@ -1472,6 +1472,9 @@ test('invalid PTT fails before relay; read receipts target exact incoming keys a
   const { bridge, socket, line } = await fixture(t);
   const media = await bridge.uploadMedia(LINE, { content_base64: Buffer.from('not opus').toString('base64'), mime_type: 'audio/ogg' });
   await assert.rejects(bridge.send(LINE, {to: PHONE, type: 'audio', audio: {id: media.id, voice: true}, client_message_id: 'bad-voice'}), {code: 'INVALID_VOICE_CODEC'});
+  const stereo = Buffer.concat([Buffer.from('OggS'), Buffer.alloc(24), Buffer.from('OpusHead'), Buffer.from([1, 2]), Buffer.alloc(9)]);
+  const stereoMedia = await bridge.uploadMedia(LINE, {content_base64: stereo.toString('base64'), mime_type: 'audio/ogg; codecs=opus'});
+  await assert.rejects(bridge.send(LINE, {to: PHONE, type: 'audio', audio: {id: stereoMedia.id, voice: true}, client_message_id: 'stereo-voice'}), {code: 'INVALID_VOICE_CODEC'});
   assert.equal(socket.calls.length, 0);
   await line.store.update(data => {
     data.messages.INCOMING = {message: original('INCOMING', false), phone: PHONE};
@@ -1523,4 +1526,64 @@ test('recipient receipt during relay survives a lost ACK and confirms only one d
   assert.deepEqual(bridge.outbox.data.entries.map(entry => entry.event.type), ['outgoing_confirmation', 'message_status']);
   await bridge.receiveUpdate(line, {key: {id: unwrapId(LINE, result.messages[0].id), fromMe: false}, update: {status: proto.WebMessageInfo.Status.READ}});
   assert.equal(line.store.data.messages[unwrapId(LINE, result.messages[0].id)].receipt, 'delivered', 'own-device reads are not recipient read confirmations');
+});
+
+test('dashboard read sync clears staff-device chat counter with the original message range', async t => {
+  const {bridge, line, socket} = await fixture(t);
+  const old = {...original('READ-OLD', false), messageTimestamp: 1700000000};
+  await line.store.update(data => { data.messages['READ-OLD'] = {message: old, phone: PHONE}; });
+  const receipts = [], patches = [];
+  socket.readMessages = async keys => { receipts.push(keys); };
+  socket.chatModify = async (patch, jid) => { patches.push({patch, jid}); };
+  await bridge.markRead(LINE, {message_id: wrapId(LINE, 'READ-OLD'), phone: PHONE});
+  assert.equal(receipts.length, 1);
+  assert.deepEqual(patches, [{jid: old.key.remoteJid, patch: {markRead: true, lastMessages: [{key: old.key, messageTimestamp: 1700000000}]}}]);
+  const {chatModificationToAppPatch} = await import('@whiskeysockets/baileys/lib/Utils/chat-utils.js');
+  const native = chatModificationToAppPatch(patches[0].patch, patches[0].jid);
+  assert.equal(native.syncAction.markChatAsReadAction.read, true);
+  assert.equal(native.syncAction.markChatAsReadAction.messageRange.lastMessageTimestamp, 1700000000);
+  assert.deepEqual(native.syncAction.markChatAsReadAction.messageRange.messages.map(m => m.key.id), ['READ-OLD']);
+  // A newly arrived message (even in the same second) must retain unread state.
+  await line.store.update(data => { data.messages['READ-NEW'] = {message: {...original('READ-NEW', false), messageTimestamp: 1700000000}, phone: PHONE}; });
+  const result = await bridge.markRead(LINE, {message_id: wrapId(LINE, 'READ-OLD'), phone: PHONE});
+  assert.equal(result.chat_state_synced, false);
+  assert.equal(patches.length, 1);
+  assert.equal(line.store.data.messages['READ-NEW'].dashboard_read, undefined);
+  await bridge.markRead(LINE, {message_id: wrapId(LINE, 'READ-NEW'), phone: PHONE});
+  assert.equal(patches.length, 2);
+  assert.equal(patches[1].patch.lastMessages[0].key.id, 'READ-NEW');
+});
+
+test('failed staff-device chat-state sync is retried without extending the read range', async t => {
+  const {bridge, line, socket} = await fixture(t);
+  const incoming = {...original('PATCH-FAIL', false), messageTimestamp: 1700000001};
+  await line.store.update(data => { data.messages['PATCH-FAIL'] = {message: incoming, phone: PHONE}; });
+  socket.readMessages = async () => {};
+  let attempts = 0;
+  socket.chatModify = async patch => {
+    assert.equal(patch.lastMessages[0].messageTimestamp, 1700000001);
+    if (++attempts === 1) throw new Error('App state unavailable');
+  };
+  const payload = {message_id: wrapId(LINE, 'PATCH-FAIL'), phone: PHONE};
+  await assert.rejects(bridge.markRead(LINE, payload), /App state unavailable/);
+  assert.equal((await bridge.markRead(LINE, payload)).chat_state_synced, true);
+  assert.equal(attempts, 2);
+});
+
+test('new incoming message during read submission prevents clearing the staff chat counter', async t => {
+  const {bridge, line, socket} = await fixture(t);
+  await line.store.update(data => { data.messages.OLD = {message: {...original('OLD', false), messageTimestamp: 1700000000}, phone: PHONE}; });
+  let entered, release;
+  const started = new Promise(resolve => { entered = resolve; });
+  const proceed = new Promise(resolve => { release = resolve; });
+  socket.readMessages = async () => { entered(); await proceed; };
+  let patches = 0;
+  socket.chatModify = async () => { patches++; };
+  const task = bridge.markRead(LINE, {message_id: wrapId(LINE, 'OLD'), phone: PHONE});
+  await started;
+  await line.store.update(data => { data.messages.NEW = {message: {...original('NEW', false), messageTimestamp: 1700000001}, phone: PHONE}; });
+  release();
+  assert.equal((await task).chat_state_synced, false);
+  assert.equal(patches, 0);
+  assert.equal(line.store.data.messages.NEW.dashboard_read, undefined);
 });

@@ -70,7 +70,8 @@ async def _deliver_claimed(repository, transport, media_store, ticket, message, 
         safe = not started or (isinstance(exc, WhatsAppSendError) and not exc.delivery_uncertain)
         # Never store raw transport exceptions (which may contain credentials).
         await repository.finish_delivery(message_id, token, status='FAILED' if safe else 'UNCERTAIN',
-                                         error='Not sent; retry is available.' if safe else 'Delivery is uncertain; do not resend.')
+                                         error='Not sent; retry is available.' if safe else 'Delivery is uncertain; do not resend.',
+                                         **({'failure_code': exc.provider_code} if safe and isinstance(exc, WhatsAppSendError) and exc.provider_code else {}))
         return await repository.get_message(message_id)
     # Persistence failure intentionally leaves DISPATCHING; recovery quarantines
     # it. It must never be classified as a provider rejection.

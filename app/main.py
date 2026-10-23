@@ -2424,7 +2424,8 @@ async def receive_message(
 
 
 async def _apply_cloud_delivery_statuses(change: dict, statuses: list) -> None:
-    """Show Meta delivered/read receipts as ticks on support messages."""
+    """Record Meta receipts and actionable rejection codes."""
+    from app.whatsapp_failures import provider_error_code
     line_id = str((change.get("metadata") or {}).get("phone_number_id") or "") or None
     for item in statuses[:100]:
         if not isinstance(item, dict) or item.get("status") not in {"delivered", "read", "failed"} or not item.get("id"):
@@ -2435,6 +2436,7 @@ async def _apply_cloud_delivery_statuses(change: dict, statuses: list) -> None:
                 whatsapp_message_id=str(item["id"]), status=str(item["status"]),
                 timestamp_ms=timestamp_ms, business_phone_number_id=line_id,
                 phone_number=str(item.get("recipient_id") or "") or None,
+                **({'failure_code': provider_error_code(item.get('errors'))} if item['status'] == 'failed' else {}),
             )
         except Exception:
             # Acknowledge only durable receipt handling; Meta can redeliver on 503.

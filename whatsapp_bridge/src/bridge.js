@@ -101,7 +101,7 @@ export class Bridge {
   lineContext(definition) {
     return { ...definition, directory: path.join(this.config.dataDir, definition.line_id),
       display_phone_number: definition.expected_phone, status: 'disconnected', socket: null, ack: null,
-      eventTail: Promise.resolve(), sendTail: Promise.resolve(), reconnectTimer: null };
+      eventTail: Promise.resolve(), sendTail: Promise.resolve(), readTail: Promise.resolve(), reconnectTimer: null };
   }
   async prepareLine(line) {
     try {
@@ -184,6 +184,7 @@ export class Bridge {
         // Finish an already dispatched mutation; prevent subsequent sends and
         // callbacks while this particular number is being unlinked.
         await line.sendTail;
+        await line.readTail;
         if (line.connectPromise) await line.connectPromise;
         if (this.lineStatus(line).is_paired && !line.removalRemoteConfirmed) await this.confirmDeviceUnlink(line);
         this.stopRemovedSocket(line);
@@ -556,11 +557,33 @@ export class Bridge {
   }
   async markRead(id, payload) {
     const line = this.getLine(id);
-    const socket = this.connected(line);
-    const record = this.target(line, payload?.message_id, phoneDigits(payload?.phone), false);
-    if (record.message.key.fromMe) throw new BridgeError(400, 'NOT_INCOMING', 'Only incoming messages can be marked read.');
-    await socket.readMessages([record.message.key]);
-    return { success: true };
+    const task = (line.readTail ?? Promise.resolve()).then(async () => {
+      const socket = this.connected(line);
+      const phone = phoneDigits(payload?.phone);
+      const record = this.target(line, payload?.message_id, phone, false);
+      const key = record.message.key;
+      if (key.fromMe) throw new BridgeError(400, 'NOT_INCOMING', 'Only incoming messages can be marked read.');
+      const timestamp = Number(record.message.messageTimestamp?.toNumber?.() ?? record.message.messageTimestamp);
+      if (!Number.isFinite(timestamp) || timestamp <= 0) throw new BridgeError(409, 'MISSING_READ_BOUNDARY', 'The original message timestamp is unavailable.');
+      await socket.readMessages([key]);
+      // Remember exactly which same-second messages were read. Never substitute
+      // Date.now() or a current chat snapshot for the original message range.
+      await line.store.update(data => { data.messages[key.id].dashboard_read = true; });
+      const newer = Object.values(line.store.data.messages).some(other => {
+        if (other.phone !== phone || other.message?.key?.fromMe || other.message?.key?.id === key.id || other.deleted) return false;
+        const time = Number(other.message?.messageTimestamp?.toNumber?.() ?? other.message?.messageTimestamp);
+        return !Number.isFinite(time) || time > timestamp || (time === timestamp && !other.dashboard_read);
+      });
+      if (!newer) {
+        // readMessages informs the customer; this app-state patch clears the
+        // unread counter on the account's other linked devices. The explicit
+        // key/time range is retained even if an incoming message races the ACK.
+        await socket.chatModify({ markRead: true, lastMessages: [{key: {...key}, messageTimestamp: timestamp}] }, key.remoteJid);
+      }
+      return { success: true, chat_state_synced: !newer };
+    });
+    line.readTail = task.catch(() => {});
+    return task;
   }
   deliveryStatus(id, payload) {
     const line = this.getLine(id);
@@ -907,9 +930,10 @@ export class Bridge {
           if (content.ptt) {
             // Browser recordings are normalized to Ogg/Opus by the API. Never
             // relay an arbitrary codec as PTT, including old uploaded assets.
+            const opusHeader = media.content.subarray(0, 128).indexOf(Buffer.from('OpusHead'));
             if (!media.content.subarray(0, 4).equals(Buffer.from('OggS')) ||
-                !media.content.subarray(0, 128).includes(Buffer.from('OpusHead'))) {
-              throw new BridgeError(400, 'INVALID_VOICE_CODEC', 'Record the voice note again; WhatsApp voice notes require Ogg/Opus.');
+                opusHeader < 0 || media.content[opusHeader + 9] !== 1) {
+              throw new BridgeError(400, 'INVALID_VOICE_CODEC', 'Record the voice note again; WhatsApp voice notes require mono Ogg/Opus.');
             }
             content.mimetype = 'audio/ogg; codecs=opus';
           }
@@ -1178,6 +1202,7 @@ export class Bridge {
       line.ack?.close();
       line.socket?.end(new Error('Bridge shutdown'));
       await line.sendTail;
+      await line.readTail;
       await line.eventTail;
       await line.auth?.store.flush();
       await line.store?.flush();
