@@ -1435,7 +1435,7 @@ body.column-resizing * { cursor: col-resize !important; }
 .statistics-filters{display:flex;flex-wrap:wrap;gap:12px;align-items:end;margin-bottom:16px}
 .statistics-filters .field{flex:1;min-width:140px;margin:0}
 .statistics-filters input,.statistics-filters select,.statistics-filters>.btn{min-height:40px}
-.statistics-totals{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;margin:16px 0}
+.statistics-totals{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin:16px 0}
 .statistics-totals>div{border:1px solid var(--border);border-radius:10px;padding:14px;display:flex;flex-direction:column;gap:8px}
 .statistics-totals strong{font-size:1.35rem}
 .statistics-table-wrap{overflow:auto;margin:16px 0}
@@ -1448,3 +1448,5 @@ body.column-resizing * { cursor: col-resize !important; }
 .composer-shell{position:relative}
 .composer-drop-hint{display:none;position:absolute;inset:0;z-index:5;align-items:center;justify-content:center;border:2px dashed var(--primary);border-radius:var(--radius-sm);background:var(--surface);color:var(--primary-text);font-weight:600;pointer-events:none}
 .composer-shell.drag-active .composer-drop-hint{display:flex}
+
+@media (max-width:700px){.statistics-totals{grid-template-columns:repeat(2,minmax(0,1fr))}}

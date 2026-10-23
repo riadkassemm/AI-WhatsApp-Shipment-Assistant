@@ -14,7 +14,7 @@ from app.support_repository import support_repository
 router = APIRouter(prefix="/statistics", tags=["support-statistics"])
 IDLE_SECONDS = 60
 MAX_GAP_SECONDS = 45
-METRICS = ("active_seconds", "tickets_claimed", "tickets_resolved", "messages_sent")
+METRICS = ("active_seconds", "tickets_claimed", "tickets_resolved", "messages_sent", "tickets_transferred", "tickets_received_by_transfer")
 
 
 def date_bounds(start: date, end: date, zone: str):
@@ -128,13 +128,26 @@ class StatisticsRepository:
                     optional = " AND actor_id=%s" if staff_id is not None else ""
                     args = (start, end, str(staff_id)) if staff_id is not None else (start, end)
                     await cur.execute(f"""SELECT actor_id,event_type,COUNT(DISTINCT ticket_id) AS count
-                        FROM support_ticket_events WHERE event_type IN ('TICKET_CLAIMED','TICKET_RESOLVED')
+                        FROM support_ticket_events WHERE event_type IN ('TICKET_CLAIMED','TICKET_RESOLVED','TICKET_TRANSFERRED')
                         AND actor_type='AGENT' AND created_at>=%s AND created_at<%s {optional}
                         GROUP BY actor_id,event_type""", args)
                     for event in await cur.fetchall():
                         if event["actor_id"] in rows:
-                            metric = "tickets_claimed" if event["event_type"] == "TICKET_CLAIMED" else "tickets_resolved"
+                            metric = {"TICKET_CLAIMED": "tickets_claimed", "TICKET_RESOLVED": "tickets_resolved",
+                                      "TICKET_TRANSFERRED": "tickets_transferred"}[event["event_type"]]
                             rows[event["actor_id"]][metric] = event["count"]
+                    # The recipient is recorded in the transfer event, not the current
+                    # assignee. Invalid/missing legacy details must never invent credit.
+                    await cur.execute("""SELECT recipient_id,COUNT(DISTINCT ticket_id) AS count
+                        FROM (SELECT ticket_id,JSON_UNQUOTE(JSON_EXTRACT(
+                            CASE WHEN JSON_VALID(details_json) THEN details_json ELSE '{}' END,
+                            '$.to_agent_id')) AS recipient_id
+                          FROM support_ticket_events WHERE event_type='TICKET_TRANSFERRED'
+                          AND actor_type='AGENT' AND created_at>=%s AND created_at<%s) transfers
+                        GROUP BY recipient_id""", (start, end))
+                    for transfer in await cur.fetchall():
+                        if transfer["recipient_id"] in rows:
+                            rows[transfer["recipient_id"]]["tickets_received_by_transfer"] = transfer["count"]
                     optional = " AND sender_id=%s" if staff_id is not None else ""
                     await cur.execute(f"""SELECT sender_id,COUNT(*) AS count FROM support_ticket_messages
                         WHERE sender_type='AGENT' AND direction='OUTBOUND' AND send_status='SENT'
@@ -164,6 +177,9 @@ class StatisticsRepository:
                         WHERE sender_type='AGENT' AND direction='OUTBOUND' AND send_status='SENT'
                         AND sender_id IS NOT NULL AND whatsapp_message_id IS NOT NULL""")
                     messages_since = (await cur.fetchone())["since"]
+                    await cur.execute("""SELECT MIN(created_at) AS since FROM support_ticket_events
+                        WHERE event_type='TICKET_TRANSFERRED' AND actor_type='AGENT'""")
+                    transfers_since = (await cur.fetchone())["since"]
                 await conn.commit()
             except BaseException:
                 await conn.rollback()
@@ -178,7 +194,7 @@ class StatisticsRepository:
         return {"agents": agents, "rows": ordered, "totals": {m: round(sum(r[m] for r in ordered), 3) for m in METRICS},
                 "rank_by": rank_by, "direction": "desc" if descending else "asc",
                 "activity_tracking_started_at": stamp(tracking), "ticket_history_since": stamp(tickets_since),
-                "message_history_since": stamp(messages_since), "idle_timeout_seconds": IDLE_SECONDS}
+                "message_history_since": stamp(messages_since), "transfer_history_since": stamp(transfers_since), "idle_timeout_seconds": IDLE_SECONDS}
 
 
 statistics_repository = StatisticsRepository()
@@ -196,7 +212,7 @@ async def activity_heartbeat(pulse: ActivityHeartbeat, agent: SupportAgent = Dep
 async def agent_statistics(
     start: date, end: date, timezone_name: str = "Asia/Beirut",
     agent_id: int | None = Query(default=None, ge=1),
-    rank_by: Literal["active_seconds", "tickets_claimed", "tickets_resolved", "messages_sent"] = "tickets_resolved",
+    rank_by: Literal["active_seconds", "tickets_claimed", "tickets_resolved", "messages_sent", "tickets_transferred", "tickets_received_by_transfer"] = "tickets_resolved",
     direction: Literal["asc", "desc"] = "desc",
     agent: SupportAgent = Depends(get_current_agent),
 ):

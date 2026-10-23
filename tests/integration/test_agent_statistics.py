@@ -150,9 +150,9 @@ async def test_actor_attribution_confirmation_range_filters_and_rankings(infrast
         reverse = await tracker.report(BASE,BASE+timedelta(days=1),None,metric,False)
         assert reverse['rows'][-1]['id'] == winner
         assert report['rank_by'] == metric
-        assert report['totals'] == dict(active_seconds=45, tickets_claimed=3, tickets_resolved=3, messages_sent=3)
+        assert report['totals'] == dict(active_seconds=45, tickets_claimed=3, tickets_resolved=3, messages_sent=3,tickets_transferred=0,tickets_received_by_transfer=0)
     report = await tracker.report(BASE,BASE+timedelta(days=1),7,'tickets_resolved',True)
-    assert report['totals'] == dict(active_seconds=15,tickets_claimed=2,tickets_resolved=1,messages_sent=2)
+    assert report['totals'] == dict(active_seconds=15,tickets_claimed=2,tickets_resolved=1,messages_sent=2,tickets_transferred=0,tickets_received_by_transfer=0)
     assert len(report['rows']) == 1
     empty = await tracker.report(BASE-timedelta(days=60), BASE-timedelta(days=59),None,'tickets_claimed',True)
     assert [r['rank'] for r in empty['rows']] == [1,1]
@@ -215,3 +215,88 @@ async def test_statistics_migration_repeatable_and_legacy_send_date(infrastructu
     report = await stats.StatisticsRepository(repo).report(BASE,BASE+timedelta(days=1),7,'messages_sent',True)
     assert report['totals']['messages_sent'] == 1
     assert report['message_history_since'] == BASE.isoformat()+'Z'
+
+
+@pytest.mark.asyncio
+async def test_transfer_metrics_use_actor_and_recorded_recipient_with_unique_tickets(infrastructure):
+    import json
+    repo, sql, _ = infrastructure
+    await sql("""INSERT INTO staff(id,name,email,email_normalized,password_hash,role,is_active,created_at,updated_at)
+        VALUES (9,'Recipient','c@example.test','c@example.test','unused','agent',1,UTC_TIMESTAMP(6),UTC_TIMESTAMP(6))""")
+    # Manager 8 performs the transfer, although staff 7 owned the ticket.
+    await repo.transfer_ticket(42,actor_id='8',actor_name='Other',target_staff_id=9,expected_assignee_id='7')
+    await sql("UPDATE support_ticket_events SET created_at=%s WHERE event_type='TICKET_TRANSFERRED'",(BASE,))
+    for ticket,actor,recipient,stamp in [
+        (42,'8','9',BASE),  # repeat: same actor and recipient ticket count only once
+        (43,'8',7,BASE),    # numeric JSON ID also supported
+        (41,'7','9',BASE),
+        (43,'7','8',BASE-timedelta(seconds=1)),
+        (42,'7','9',BASE+timedelta(days=1)),  # exclusive end
+        (43,'999','9',BASE), # deleted actor does not erase recipient's credit
+    ]:
+        await sql("""INSERT INTO support_ticket_events(ticket_id,event_type,actor_type,actor_id,details_json,created_at)
+            VALUES (%s,'TICKET_TRANSFERRED','AGENT',%s,%s,%s)""",
+            (ticket,actor,json.dumps({'from_agent_id':'7','to_agent_id':recipient}),stamp))
+    for details in ['not-json','{}','null','{"to_agent_id":"9junk"}']:
+        await sql("""INSERT INTO support_ticket_events(ticket_id,event_type,actor_type,actor_id,details_json,created_at)
+            VALUES (43,'TICKET_TRANSFERRED','AGENT','8',%s,%s)""",(details,BASE))
+    await sql("""INSERT INTO support_ticket_events(ticket_id,event_type,actor_type,actor_id,details_json,created_at)
+        VALUES (41,'TICKET_TRANSFERRED','SYSTEM','8','{"to_agent_id":"8"}',%s)""",(BASE,))
+    await sql("UPDATE support_tickets SET current_assignee_id='8',conversation_origin='STAFF'")
+    tracker=stats.StatisticsRepository(repo)
+    report=await tracker.report(BASE,BASE+timedelta(days=1),None,'tickets_transferred',True)
+    assert [r['id'] for r in report['rows']]==[8,7,9]
+    rows={r['id']:r for r in report['rows']}
+    assert [rows[i]['tickets_transferred'] for i in (7,8,9)]==[1,2,0]
+    assert [rows[i]['tickets_received_by_transfer'] for i in (7,8,9)]==[1,0,3]
+    assert report['totals']['tickets_transferred']==3
+    assert report['totals']['tickets_received_by_transfer']==4
+    assert report['transfer_history_since']==(BASE-timedelta(seconds=1)).isoformat()+'Z'
+    received=await tracker.report(BASE,BASE+timedelta(days=1),None,'tickets_received_by_transfer',True)
+    assert [r['id'] for r in received['rows']]==[9,7,8]
+    ascending=await tracker.report(BASE,BASE+timedelta(days=1),None,'tickets_received_by_transfer',False)
+    assert [r['id'] for r in ascending['rows']]==[8,7,9]
+    filtered=await tracker.report(BASE,BASE+timedelta(days=1),9,'tickets_received_by_transfer',True)
+    assert filtered['totals']['tickets_received_by_transfer']==3 and filtered['totals']['tickets_transferred']==0
+    await sql('UPDATE staff SET is_active=0 WHERE id=9')
+    assert (await tracker.report(BASE,BASE+timedelta(days=1),9,'tickets_received_by_transfer',True))['totals']['tickets_received_by_transfer']==3
+    await sql('UPDATE staff SET deleted_at=UTC_TIMESTAMP(6) WHERE id=9')
+    assert (await tracker.report(BASE,BASE+timedelta(days=1),None,'tickets_received_by_transfer',True))['totals']['tickets_received_by_transfer']==1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('metric',['tickets_transferred','tickets_received_by_transfer'])
+async def test_transfer_metrics_api_and_pdf_permissions(infrastructure,monkeypatch,metric):
+    from io import BytesIO
+    from pypdf import PdfReader
+    import app.support_auth as auth
+    from app.config import settings
+    from app.support_api import router
+    repo, sql, _=infrastructure
+    await sessions(sql)
+    monkeypatch.setattr(stats,'statistics_repository',stats.StatisticsRepository(repo))
+    monkeypatch.setattr(auth,'_schedule_session_touch',lambda _:None)
+    await sql("""INSERT INTO support_ticket_events(ticket_id,event_type,actor_type,actor_id,details_json,created_at)
+        VALUES (42,'TICKET_TRANSFERRED','AGENT','7','{"to_agent_id":"8"}',%s)""",(BASE,))
+    app=FastAPI();app.include_router(router)
+    transport=httpx.MockTransport(httpx.ASGITransport(app=app).handle_async_request)
+    query=f'?start=2026-10-23&end=2026-10-23&timezone_name=UTC&rank_by={metric}'
+    async with httpx.AsyncClient(transport=transport,base_url='http://test') as client:
+        for suffix in ['', '/pdf']:
+            path='/api/support/statistics'+suffix+query
+            client.cookies.clear()
+            assert (await client.get(path)).status_code==401
+            client.cookies.set(settings.support_cookie_name,'token-1')
+            assert (await client.get(path)).status_code==403
+            client.cookies.set(settings.support_cookie_name,'token-3')
+            response=await client.get(path)
+            assert response.status_code==200,response.text
+            if suffix:
+                text=' '.join(' '.join(page.extract_text() for page in PdfReader(BytesIO(response.content)).pages).split())
+                label='Tickets transferred' if metric=='tickets_transferred' else 'Tickets received by transfer'
+                assert f'Ranked by {label}' in text
+            else:
+                report=response.json()
+                assert report['rank_by']==metric
+                assert report['rows'][0]['id']==(7 if metric=='tickets_transferred' else 8)
+                assert report['totals']['tickets_transferred']==report['totals']['tickets_received_by_transfer']==1

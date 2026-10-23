@@ -1,6 +1,7 @@
 const statisticsMetrics = {
   active_seconds: 'Active dashboard time', tickets_claimed: 'Tickets claimed',
   tickets_resolved: 'Tickets resolved', messages_sent: 'Outbound messages sent',
+  tickets_transferred: 'Tickets transferred', tickets_received_by_transfer: 'Tickets received by transfer',
 };
 let statisticsRequest = 0;
 let statisticsAppliedQuery = null;
@@ -46,7 +47,7 @@ function renderAgentStatistics(report) {
     $('statisticsRows').append(tr);
   }
   const since = value => value ? new Date(value).toLocaleString(undefined, {timeZone: report.timezone}) : 'no retained records';
-  $('statisticsCoverage').textContent = 'Active time tracked since ' + since(report.activity_tracking_started_at) + '. No earlier activity time is inferred. Retained ticket audit begins: ' + since(report.ticket_history_since) + '; confirmed staff sends: ' + since(report.message_history_since) + '. Active time excludes hidden, unfocused and idle dashboards (60-second timeout).';
+  $('statisticsCoverage').textContent = 'Active time tracked since ' + since(report.activity_tracking_started_at) + '. No earlier activity time is inferred. Retained ticket audit begins: ' + since(report.ticket_history_since) + '; confirmed staff sends: ' + since(report.message_history_since) + '; transfer audit: ' + since(report.transfer_history_since) + '. Active time excludes hidden, unfocused and idle dashboards (60-second timeout).';
 }
 async function loadAgentStatistics() {
   if (!canViewAgentStatistics()) { clearAgentStatistics(); return; }

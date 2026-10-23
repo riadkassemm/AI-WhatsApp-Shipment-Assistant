@@ -17,7 +17,7 @@ from app.support_statistics import METRICS
 
 FONT = "SupportDejaVu"
 pdfmetrics.registerFont(TTFont(FONT, str(Path(__file__).parent / "fonts" / "DejaVuSans.ttf")))
-LABELS = ("Active dashboard time", "Tickets claimed", "Tickets resolved", "Outbound messages sent")
+LABELS = ("Active dashboard time", "Tickets claimed", "Tickets resolved", "Outbound messages sent", "Tickets transferred", "Tickets received by transfer")
 ROLES = {"agent": "Agent", "admin": "Admin", "supervisor": "Super Admin"}
 
 
@@ -53,7 +53,7 @@ def statistics_pdf(report: dict) -> bytes:
         if not row["is_active"]:
             name += " (inactive)"
         data.append([p(row["rank"]), p(name), *[p(x) for x in values(row)]])
-    table = Table(data, colWidths=[35, 230, 120, 110, 110, 150], repeatRows=1, hAlign="LEFT")
+    table = Table(data, colWidths=[35, 165, 100, 80, 80, 100, 90, 105], repeatRows=1, hAlign="LEFT")
     table.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#e6edf5")),
         ("BACKGROUND", (0, 1), (-1, 1), colors.HexColor("#f0f4f8")),
@@ -64,10 +64,13 @@ def statistics_pdf(report: dict) -> bytes:
     story += [table, Spacer(1, 12)]
     for key, label in [("activity_tracking_started_at", "Active time tracking began"),
                        ("ticket_history_since", "Retained ticket audit begins"),
-                       ("message_history_since", "Confirmed staff sends begin")]:
+                       ("message_history_since", "Confirmed staff sends begin"),
+                       ("transfer_history_since", "Retained transfer audit begins")]:
         story.append(p(f'{label}: {report.get(key) or "no retained records"} (UTC).'))
     story.append(p("Active time excludes idle, hidden and unfocused dashboards; no earlier activity is inferred. "
                    "Tickets count once per staff member in the selected dates; totals sum staff counts. "
+                   "Transferred credits the actor, received credits the recorded recipient; both include tickets and staff chats. "
+                   "Missing recipient records are excluded. "
                    "Messages include confirmed staff sends only, excluding bot/system messages and unidentifiable phone-app replies. "
                    "Deleted staff are excluded; retained conversation history is unchanged."))
 

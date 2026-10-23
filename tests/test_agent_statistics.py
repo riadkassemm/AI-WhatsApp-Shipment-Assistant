@@ -73,11 +73,11 @@ HTMLAnchorElement.prototype.click=function(){downloads.push(this.download)};
 async function fetch(path){exports.push(path);return {ok:true,blob:async()=>new Blob(['%PDF-test'])};}
 
 const report={agents:[{id:7,name:'Alex',role:'agent',is_active:1},{id:8,name:'Morgan',role:'supervisor',is_active:1}],
-rows:[{id:7,name:'Alex',role:'agent',is_active:1,rank:1,active_seconds:7215,tickets_claimed:12,tickets_resolved:10,messages_sent:48},
-{id:8,name:'Morgan',role:'supervisor',is_active:1,rank:2,active_seconds:3600,tickets_claimed:8,tickets_resolved:6,messages_sent:25}],
-totals:{active_seconds:10815,tickets_claimed:20,tickets_resolved:16,messages_sent:73},
+rows:[{id:7,name:'Alex',role:'agent',is_active:1,rank:1,active_seconds:7215,tickets_claimed:12,tickets_resolved:10,messages_sent:48,tickets_transferred:5,tickets_received_by_transfer:3},
+{id:8,name:'Morgan',role:'supervisor',is_active:1,rank:2,active_seconds:3600,tickets_claimed:8,tickets_resolved:6,messages_sent:25,tickets_transferred:2,tickets_received_by_transfer:4}],
+totals:{active_seconds:10815,tickets_claimed:20,tickets_resolved:16,messages_sent:73,tickets_transferred:7,tickets_received_by_transfer:7},
 rank_by:'tickets_resolved',direction:'desc',timezone:'Asia/Beirut',activity_tracking_started_at:'2026-10-23T00:00:00Z',
-ticket_history_since:'2026-09-01T00:00:00Z',message_history_since:'2026-09-01T00:00:00Z'};
+transfer_history_since:'2026-09-01T00:00:00Z',ticket_history_since:'2026-09-01T00:00:00Z',message_history_since:'2026-09-01T00:00:00Z'};
 let resolvePending=null;
 async function api(path) {
  calls.push(path);
@@ -114,6 +114,14 @@ await Promise.resolve();await Promise.resolve();check(calls.at(-1).includes('ran
 check($('statisticsRanking').textContent.includes('Outbound messages sent'),'selected criterion changed');
 document.querySelector('button[data-metric="messages_sent"]').click();
 await Promise.resolve();await Promise.resolve();check(calls.at(-1).includes('direction=asc'),'reverse sort');
+for (const metric of ['tickets_transferred','tickets_received_by_transfer']) {
+ document.querySelector('button[data-metric="'+metric+'"]').click();
+ await Promise.resolve();await Promise.resolve();
+ check(calls.at(-1).includes('rank_by='+metric),'transfer ranking sent');
+ check($('statisticsRanking').textContent.includes(statisticsMetrics[metric]),'transfer ranking label');
+}
+check($('statisticsRows').firstElementChild.children.length===8,'both transfer columns render');
+check($('statisticsTotals').children.length===6,'both transfer totals render');
 report.rows[0].name='<img src=x onerror="alert(1)">';renderAgentStatistics(report);
 check(!$('statisticsRows').querySelector('img'),'staff names render as text');
 resolvePending='wait';const pending=loadAgentStatistics();
@@ -149,7 +157,7 @@ def test_pdf_export_paginates_includes_filters_and_escapes_staff_names():
     from pypdf import PdfReader
     from app.support_statistics_pdf import statistics_pdf, display_text
     row = dict(id='8', name='Morgan <Admin> & Team', role='supervisor', is_active=True,
-               rank=1, active_seconds=3661, tickets_claimed=12, tickets_resolved=10, messages_sent=30)
+               rank=1, active_seconds=3661, tickets_claimed=12, tickets_resolved=10, messages_sent=30,tickets_transferred=5,tickets_received_by_transfer=3)
     report = dict(start='2026-10-01', end='2026-10-23', timezone='Asia/Beirut', agent_id=8,
                   agents=[row], rows=[{**row, 'rank': i} for i in range(1, 101)], totals=row,
                   rank_by='messages_sent', direction='desc')
@@ -159,8 +167,8 @@ def test_pdf_export_paginates_includes_filters_and_escapes_staff_names():
     assert len(reader.pages) > 1
     for expected in ['Agent Statistics', 'Morgan <Admin> & Team', 'Super Admin',
                      'Outbound messages sent', 'Highest first', '2026-10-01', '2026-10-23',
-                     'Asia/Beirut', '1h 1m 1s', 'Deleted staff are excluded']:
-        assert expected in text
+                     'Asia/Beirut', '1h 1m 1s', 'Deleted staff are excluded', 'Tickets transferred', 'Tickets received by transfer']:
+        assert expected in ' '.join(text.split())
     assert all('Rank' in page.extract_text() for page in reader.pages[:-1])
     assert '&lt;' in display_text('<Admin>')
     assert display_text('محمد') != 'محمد'  # Arabic shaping and visual direction

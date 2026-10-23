@@ -544,3 +544,23 @@ name. No conversation ownership, permissions, delivery state or message body is
 changed. Persisted names and audit details remain historical snapshots; if a staff
 account has been deleted, those saved names remain the fallback. Customer names
 and replies sent directly from WhatsApp are not relabeled as staff.
+
+### Transfer statistics
+
+Statistics and PDF exports include **Tickets transferred** and **Tickets received
+by transfer**, with date/staff filters, totals and ranking in either direction.
+Both count distinct ticket IDs per staff member within the selected dates; a
+repeated transfer of the same ticket does not inflate that person's metric.
+Staff chats are included, matching the shared ticket lifecycle audit.
+
+Transferred is attributed to `TICKET_TRANSFERRED.actor_id` (the staff member who
+performed the action), even when an Admin/Super Admin transfers someone else's
+work. Received uses the event's `details_json.to_agent_id`, never the ticket's
+current assignee. Missing/invalid recipient details are excluded from received
+counts without losing an identifiable actor's outgoing credit. Deleted staff are
+excluded from rows/totals, but their transfers can still count for an existing
+recipient. Inactive accounts remain reportable. Consequently totals need not match.
+
+These metrics use retained historical events in the local database; the report
+shows when retained transfer audit starts. No migration, new tracking table or
+remote database connection is required. Admin/Super Admin access is unchanged.
