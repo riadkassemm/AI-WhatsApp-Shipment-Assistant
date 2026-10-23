@@ -125,6 +125,15 @@ class WhatsAppClient:
             return str(value) if value else None
         return None
 
+    async def mark_read(self, *, message_id: str, phone_number_id: str | None, phone: str):
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(self._messages_url(phone_number_id), headers=self._json_headers,
+                json={'messaging_product': 'whatsapp', 'status': 'read', 'message_id': message_id})
+            response.raise_for_status()
+            result = response.json()
+        if result.get('success') is not True:
+            raise WhatsAppSendError('Read receipt was not confirmed.', delivery_uncertain=False)
+
     async def _send_payload(
         self,
         payload: dict,
@@ -451,6 +460,10 @@ class RoutedWhatsAppClient:
 
     def __init__(self) -> None:
         self._cloud = WhatsAppClient()
+
+    async def mark_read(self, *, message_id: str, phone_number_id: str | None, phone: str):
+        client, line = self._route(phone_number_id, message_id)
+        return await client.mark_read(message_id=message_id, phone_number_id=line, phone=phone)
 
     def _route(self, phone_number_id: str | None, *references: str | None):
         selected = phone_number_id

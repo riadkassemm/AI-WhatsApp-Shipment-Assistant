@@ -97,22 +97,30 @@ class DeliveryRepositoryMixin:
                         WHERE id = %s AND send_status = 'DISPATCHING'
                           AND delivery_claimed_at < UTC_TIMESTAMP(6) - INTERVAL %s MINUTE
                     """, (message_id, DELIVERY_LEASE_MINUTES))
+                    await cur.execute("SELECT whatsapp_message_id FROM support_ticket_messages WHERE id=%s FOR UPDATE", (message_id,))
+                    prior = await cur.fetchone()
                     await cur.execute("""
                         UPDATE support_ticket_messages
-                        SET delivery_token = %s, delivery_claimed_at = UTC_TIMESTAMP(6),
+                        SET whatsapp_message_id = NULL, delivery_token = %s, delivery_claimed_at = UTC_TIMESTAMP(6),
                             delivery_started_at = NULL, send_status = 'PENDING',
                             delivery_retry_safe = 0, error_message = NULL
                         WHERE id = %s AND direction = 'OUTBOUND'
-                          AND deleted_for_everyone_at IS NULL AND whatsapp_message_id IS NULL
+                          AND deleted_for_everyone_at IS NULL
+                          AND (whatsapp_message_id IS NULL OR (%s AND send_status='FAILED' AND delivery_retry_safe=1))
                           AND ((send_status = 'PENDING' AND delivery_started_at IS NULL
                                 AND (delivery_token IS NULL OR delivery_claimed_at < UTC_TIMESTAMP(6) - INTERVAL %s MINUTE))
                                OR (%s AND send_status = 'FAILED' AND delivery_retry_safe = 1 AND delivery_token <=> %s))
                           AND (sender_type = 'SYSTEM' OR
                                (sender_type = 'AGENT' AND sender_id = %s AND %s))
-                    """, (token, message_id, DELIVERY_LEASE_MINUTES, retry, expected_token,
+                    """, (token, message_id, retry, DELIVERY_LEASE_MINUTES, retry, expected_token,
                           ticket['current_assignee_id'], bool(ticket['active_key']) and ticket['status'] in
                           ('ASSIGNED', 'IN_PROGRESS', 'WAITING_CUSTOMER', 'WAITING_INTERNAL')))
                     claimed = cur.rowcount == 1
+                    if claimed and prior and prior.get('whatsapp_message_id'):
+                        await cur.execute("""INSERT INTO support_ticket_events
+                            (ticket_id,event_type,actor_type,actor_id,actor_name,details_json,created_at)
+                            VALUES (%s,'DELIVERY_RETRY','SYSTEM',NULL,NULL,JSON_OBJECT('message_id',%s,'failed_provider_id',%s),UTC_TIMESTAMP(6))""",
+                            (ticket['id'], message_id, prior['whatsapp_message_id']))
                 await conn.commit()
             except BaseException:
                 await conn.rollback()
@@ -156,12 +164,13 @@ class DeliveryRepositoryMixin:
                 await cur.execute("""
                     UPDATE support_ticket_messages SET send_status = %s,
                         whatsapp_message_id = COALESCE(%s, whatsapp_message_id),
+                        read_sync_pending = CASE WHEN %s='SENT' AND sender_type='AGENT' THEN 1 ELSE read_sync_pending END,
                         error_message = %s, delivery_retry_safe = %s, updated_at = UTC_TIMESTAMP(6)
                     WHERE id = %s AND delivery_token = %s
                       AND ((%s = 'SENT' AND send_status IN ('DISPATCHING', 'UNCERTAIN'))
                            OR (%s IN ('FAILED', 'UNCERTAIN') AND send_status IN ('PENDING', 'DISPATCHING')
                                AND delivery_claimed_at >= UTC_TIMESTAMP(6) - INTERVAL %s MINUTE))
-                """, (status, provider_id, error, status == 'FAILED', message_id, token, status, status, DELIVERY_LEASE_MINUTES))
+                """, (status, provider_id, status, error, status == 'FAILED', message_id, token, status, status, DELIVERY_LEASE_MINUTES))
             await conn.commit()
 
     async def interrupt_delivery(self, message_id: int, token: str) -> None:

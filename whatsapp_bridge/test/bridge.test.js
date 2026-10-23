@@ -1438,3 +1438,89 @@ test('delivery lookup HTTP route requires bridge auth and never dispatches', asy
   assert.deepEqual(await response.json(), { status: 'unknown' });
   assert.equal(socket.calls.length, 0);
 });
+
+test('PTT preserves Opus and media sends deduplicate with confirmed receipts only', async t => {
+  const { bridge, socket, line } = await fixture(t);
+  for (const type of ['audio', 'image', 'video', 'document', 'sticker']) {
+    const bytes = type === 'audio' ? Buffer.concat([Buffer.from('OggS'), Buffer.alloc(24), Buffer.from('OpusHead')]) : Buffer.from('fixture');
+    const media = await bridge.uploadMedia(LINE, { content_base64: bytes.toString('base64'), mime_type: type === 'audio' ? 'audio/ogg; codecs=opus' : 'application/octet-stream' });
+    const payload = { to: PHONE, type, [type]: { id: media.id, voice: type === 'audio' }, client_message_id: `attachment-${type}` };
+    const before = socket.calls.length;
+    const sent = await bridge.send(LINE, payload);
+    assert.deepEqual(await bridge.send(LINE, payload), sent);
+    assert.equal(socket.calls.length, before + 1);
+    if (type === 'audio') {
+      assert.equal(line.store.data.media[media.id].mime_type, 'audio/ogg; codecs=opus');
+      assert.equal(socket.calls.at(-1).content.mimetype, 'audio/ogg; codecs=opus');
+      assert.equal(socket.calls.at(-1).content.ptt, true);
+    }
+    const key = { id: unwrapId(LINE, sent.messages[0].id), fromMe: true };
+    assert.equal(line.store.data.messages[key.id].receipt, undefined, 'ACK is not delivery');
+    await bridge.receiveUpdate(line, { key, update: { status: proto.WebMessageInfo.Status.DELIVERY_ACK } });
+    await bridge.receiveUpdate(line, { key, update: { status: proto.WebMessageInfo.Status.READ } });
+    assert.equal(line.store.data.messages[key.id].receipt, 'read');
+    if (type === 'audio') {
+      await bridge.receiveUpdate(line, { key, update: { status: proto.WebMessageInfo.Status.PLAYED } });
+      await bridge.receiveUpdate(line, { key, update: { status: proto.WebMessageInfo.Status.READ } });
+      assert.equal(line.store.data.messages[key.id].receipt, 'played');
+      assert.equal(bridge.outbox.data.entries.at(-1).event.status, 'played');
+    }
+  }
+});
+
+test('invalid PTT fails before relay; read receipts target exact incoming keys and enforce scope', async t => {
+  const { bridge, socket, line } = await fixture(t);
+  const media = await bridge.uploadMedia(LINE, { content_base64: Buffer.from('not opus').toString('base64'), mime_type: 'audio/ogg' });
+  await assert.rejects(bridge.send(LINE, {to: PHONE, type: 'audio', audio: {id: media.id, voice: true}, client_message_id: 'bad-voice'}), {code: 'INVALID_VOICE_CODEC'});
+  assert.equal(socket.calls.length, 0);
+  await line.store.update(data => {
+    data.messages.INCOMING = {message: original('INCOMING', false), phone: PHONE};
+    data.messages.NEWER = {message: original('NEWER', false), phone: PHONE};
+  });
+  const read = [];
+  socket.readMessages = async keys => { read.push(keys); };
+  await bridge.markRead(LINE, {message_id: wrapId(LINE, 'INCOMING'), phone: PHONE});
+  assert.deepEqual(read.map(keys => keys.map(key => key.id)), [['INCOMING']]);
+  await assert.rejects(bridge.markRead(LINE, {message_id: wrapId(LINE, 'INCOMING'), phone: '15551234567'}), {code: 'UNKNOWN_MESSAGE'});
+  await assert.rejects(bridge.markRead(LINE, {message_id: wrapId(LINE, 'ORIGINAL'), phone: PHONE}), {code: 'NOT_INCOMING'});
+  socket.readMessages = async () => { throw new Error('Disconnected'); };
+  await assert.rejects(bridge.markRead(LINE, {message_id: wrapId(LINE, 'INCOMING'), phone: PHONE}), /Disconnected/);
+});
+
+test('definitive ACK rejection allows explicit retry; lost ACK never redispatches media', async t => {
+  const {bridge, socket, line} = await fixture(t, 'timeout');
+  const media = await bridge.uploadMedia(LINE, {content_base64: Buffer.from('pdf').toString('base64'), mime_type: 'application/pdf'});
+  const payload = {to: PHONE, type: 'document', document: {id: media.id}, client_message_id: 'media-rejection'};
+  socket.sendMessage = async (jid, content, options) => {
+    socket.calls.push(options);
+    socket.ws.emit('CB:ack,class:message', {attrs: {id: options.messageId, error: '403'}});
+    return {key: {id: options.messageId, fromMe: true}, message: {documentMessage: {}}};
+  };
+  await assert.rejects(bridge.send(LINE, payload), error => error.code === 'WHATSAPP_REJECTED' && error.delivery_uncertain === false);
+  assert.equal(Object.values(line.store.data.messages).some(r => r.client_message_id === payload.client_message_id), false);
+  socket.sendMessage = async (jid, content, options) => {
+    socket.calls.push(options);
+    return {key: {id: options.messageId, fromMe: true}, message: {documentMessage: {}}};
+  };
+  await assert.rejects(bridge.send(LINE, payload), error => error.delivery_uncertain === true);
+  await assert.rejects(bridge.send(LINE, payload), {code: 'DELIVERY_UNCERTAIN'});
+  assert.equal(socket.calls.length, 2);
+});
+
+test('recipient receipt during relay survives a lost ACK and confirms only one dispatch', async t => {
+  const {bridge, socket, line} = await fixture(t, 'timeout');
+  socket.sendMessage = async (jid, content, options) => {
+    socket.calls.push(options);
+    const key = {id: options.messageId, remoteJid: jid, fromMe: true};
+    await bridge.receiveUpdate(line, {key, update: {status: proto.WebMessageInfo.Status.DELIVERY_ACK}});
+    return {key, message: {conversation: content.text}};
+  };
+  const payload = {to: PHONE, type: 'text', text: {body: 'test'}, client_message_id: 'early-receipt'};
+  const result = await bridge.send(LINE, payload);
+  assert.deepEqual(await bridge.send(LINE, payload), result);
+  assert.equal(socket.calls.length, 1);
+  assert.equal(line.store.data.messages[unwrapId(LINE, result.messages[0].id)].receipt, 'delivered');
+  assert.deepEqual(bridge.outbox.data.entries.map(entry => entry.event.type), ['outgoing_confirmation', 'message_status']);
+  await bridge.receiveUpdate(line, {key: {id: unwrapId(LINE, result.messages[0].id), fromMe: false}, update: {status: proto.WebMessageInfo.Status.READ}});
+  assert.equal(line.store.data.messages[unwrapId(LINE, result.messages[0].id)].receipt, 'delivered', 'own-device reads are not recipient read confirmations');
+});

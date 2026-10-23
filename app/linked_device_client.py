@@ -161,6 +161,14 @@ class LinkedDeviceWhatsAppClient:
             raise _send_error("The linked-device bridge returned an invalid response.", uncertain=mutating, retryable=True)
         return data
 
+    async def mark_read(self, *, message_id: str, phone_number_id: str | None, phone: str):
+        line = self._phone_number_id(phone_number_id)
+        self._message_reference(message_id, line)
+        result = await self._json_request('POST', f'/v1/lines/{line}/messages/read',
+            payload={'message_id': message_id, 'phone': phone})
+        if result.get('success') is not True:
+            raise _send_error('Read receipt was not confirmed.', uncertain=False)
+
     async def _send_payload(self, payload: dict, *, label: str, phone_number_id: str | None = None, client_message_id: str | None = None) -> dict:
         line = self._phone_number_id(phone_number_id)
         if payload.get("context"):
@@ -240,7 +248,7 @@ class LinkedDeviceWhatsAppClient:
                 raise WhatsAppMediaError("Linked-device media content or MIME type is invalid.", retryable=False)
             data = await self._json_request("POST", f"/v1/lines/{line}/media", payload={
                 "content_base64": base64.b64encode(content).decode("ascii"),
-                "mime_type": str(mime_type).split(";", 1)[0].strip().lower(),
+                "mime_type": str(mime_type).strip().lower(),
                 "filename": filename,
             })
             media_id = data.get("id")

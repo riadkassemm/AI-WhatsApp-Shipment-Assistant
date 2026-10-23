@@ -212,9 +212,15 @@ def test_delivery_receipts_publish_tick_updates(patched):
         business_phone_number_id="90001", phone_number="96171111111",
     ))
     assert missing is False
+    assert asyncio.run(support_service.apply_delivery_status(
+        whatsapp_message_id="ld:90001:SENT1", status="played", timestamp_ms=None,
+        business_phone_number_id="90001", phone_number="96171111111",
+    )) is True
+    assert repository.message["delivery_status"] == "played"
+    assert events[-1][1]["message"]["delivery_status"] == "played"
     with pytest.raises(SupportValidationError):
         asyncio.run(support_service.apply_delivery_status(
-            whatsapp_message_id="ld:90001:SENT1", status="played", timestamp_ms=None,
+            whatsapp_message_id="ld:90001:SENT1", status="invented", timestamp_ms=None,
             business_phone_number_id=None, phone_number=None,
         ))
 
@@ -338,10 +344,13 @@ def _render_status(message: dict[str, Any], agent_id: str = "7", can_reply: bool
 class Element {
   constructor(tagName) {this.tagName = tagName; this.children = []; this.dataset = {}; this.attributes = {}; this.textContent = ''; this.className = '';}
   append(...children) {this.children.push(...children)}
+  prepend(...children) {this.children.unshift(...children)}
   setAttribute(name, value) {this.attributes[name] = value}
+  getAttribute(name) {return this.attributes[name]}
 }
 const document = {createElement: tagName => new Element(tagName), createTextNode: value => ({textContent: value})};
-const createIcon = name => ({icon: name});
+const createIcon = (name, className) => {const el = new Element('svg'); el.icon = name; el.className = className; return el};
+const createVoiceNotePlayer = () => ({player: new Element('div'), audio: new Element('audio')});
 const initials = () => 'A';
 const messageActor = () => 'Agent';
 const messageClass = () => 'agent';
@@ -357,11 +366,12 @@ const state = JSON.parse(process.argv[2]);
 """ + message_time + _HTML[start:end] + r"""
 const conversation = new Element('div');
 addMessage(conversation, JSON.parse(process.argv[1]));
-const found = {states: [], icons: [], buttons: []};
+const found = {states: [], icons: [], buttons: [], playback: []};
 (function walk(node) {
   if (!node || typeof node !== 'object') return;
   if (String(node.className || '').startsWith('send-state')) found.states.push({className: node.className, label: node.attributes?.['aria-label'] || node.title, text: (node.children || []).map(child => child.textContent || '').join('')});
   if (node.icon) found.icons.push(node.icon);
+  if (node.icon === "mic") found.playback.push({className: node.className, label: node.getAttribute("aria-label")});
   if (node.tagName === 'button') found.buttons.push(node.textContent);
   for (const child of node.children || []) walk(child);
 })(conversation);
@@ -455,3 +465,13 @@ const httpError = (status, detail) => Object.assign(new Error(detail || 'Request
 """
     result = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=15)
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize('status', [None, 'delivered', 'read', 'played'])
+def test_voice_microphone_blue_only_after_confirmed_playback(status):
+    result = _render_status({'id': 5, 'ticket_id': 42, 'direction': 'OUTBOUND', 'sender_type': 'AGENT',
+        'sender_id': '7', 'message_type': 'audio', 'body': 'Voice note', 'media_available': True,
+        'media_url': '/test.ogg', 'send_status': 'SENT', 'delivery_status': status})
+    assert len(result['playback']) == 1
+    assert ('confirmed-played' in result['playback'][0]['className']) is (status == 'played')
+    assert result['playback'][0]['label'] == ('Played by recipient' if status == 'played' else 'Playback not confirmed')

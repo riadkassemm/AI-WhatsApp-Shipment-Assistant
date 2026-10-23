@@ -540,18 +540,27 @@ export class Bridge {
   // Delivered/read receipts become dashboard ticks. Only messages the
   // dashboard knows about are forwarded (its own sends and phone-app messages),
   // never the bot's automatic replies.
-  async receiveReceipt(line, key, status) {
+  async receiveReceipt(line, key, status, timestamp = Date.now()) {
     const record = line.store.data.messages[key.id];
+    if (key.fromMe === false) return; // Own-device reads are not recipient receipts.
     if (!record?.message?.key?.fromMe || !record.phone || record.deleted) return;
     if (!record.client_message_id && !record.mirrored_outgoing) return;
     if ((RECEIPT_RANK[record.receipt] ?? 0) >= RECEIPT_RANK[status]) return;
-    if (record.client_message_id && !record.confirmation_enqueued && !record.pending_send) {
+    if (record.client_message_id && !record.confirmation_enqueued) {
       // A receipt proves WhatsApp accepted a send whose ACK was lost.
       await line.store.update(data => { data.messages[key.id].ack_confirmed = true; });
       await this.enqueueOwnConfirmation(line, key.id);
     }
-    await this.enqueue(messageStatusEvent(line, key.id, record.phone, status, Date.now()));
+    await this.enqueue(messageStatusEvent(line, key.id, record.phone, status, timestamp));
     await line.store.update(data => { if (data.messages[key.id]) data.messages[key.id].receipt = status; });
+  }
+  async markRead(id, payload) {
+    const line = this.getLine(id);
+    const socket = this.connected(line);
+    const record = this.target(line, payload?.message_id, phoneDigits(payload?.phone), false);
+    if (record.message.key.fromMe) throw new BridgeError(400, 'NOT_INCOMING', 'Only incoming messages can be marked read.');
+    await socket.readMessages([record.message.key]);
+    return { success: true };
   }
   deliveryStatus(id, payload) {
     const line = this.getLine(id);
@@ -761,7 +770,7 @@ export class Bridge {
     if (update.messageStubParameters?.[1] && line.store.data.messages[key.id]?.pending_placeholder) {
       await line.store.update(data => { data.messages[key.id].placeholder_request_id = update.messageStubParameters[1]; });
     }
-    if (RECEIPT_STATUSES[update.status]) await this.receiveReceipt(line, key, RECEIPT_STATUSES[update.status]);
+    if (RECEIPT_STATUSES[update.status]) await this.receiveReceipt(line, key, RECEIPT_STATUSES[update.status], millis(update.messageTimestamp));
     // messages.delete is a local chat deletion event and is intentionally never relayed.
     const deleted = update.messageStubType === proto.WebMessageInfo.StubType.REVOKE;
     const edited = Boolean(update.message?.editedMessage);
@@ -790,8 +799,10 @@ export class Bridge {
     if (!payload || typeof payload.content_base64 !== 'string' || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(payload.content_base64)) throw new BridgeError(400, 'INVALID_MEDIA', 'Provide valid base64 media content.');
     const bytes = Buffer.from(payload.content_base64, 'base64');
     if (!bytes.length || bytes.length > this.config.maxMediaBytes) throw new BridgeError(413, 'MEDIA_TOO_LARGE', 'Media must be nonempty and no larger than 25 MiB.');
-    const mime = String(payload.mime_type ?? '').split(';')[0].trim().toLowerCase();
-    if (!/^[a-z0-9][a-z0-9.+-]*\/[a-z0-9][a-z0-9.+-]*$/.test(mime)) throw new BridgeError(400, 'INVALID_MEDIA', 'Provide a valid media MIME type.');
+    const rawMime = String(payload.mime_type ?? '').trim().toLowerCase();
+    const baseMime = rawMime.split(';')[0].trim();
+    const mime = baseMime === 'audio/ogg' && /codecs\s*=\s*opus/.test(rawMime) ? 'audio/ogg; codecs=opus' : baseMime;
+    if (!/^[a-z0-9][a-z0-9.+-]*\/[a-z0-9][a-z0-9.+-]*$/.test(baseMime)) throw new BridgeError(400, 'INVALID_MEDIA', 'Provide a valid media MIME type.');
     const mediaId = `ldmedia:${id}:${crypto.randomUUID()}`;
     const filename = this.mediaPath(line, mediaId);
     await this.writeBytes(filename, bytes);
@@ -891,7 +902,18 @@ export class Bridge {
         const mediaNode = payload[payload.type];
         const media = await this.downloadMedia(id, mediaNode?.id);
         content = { [payload.type]: media.content, mimetype: media.mime_type };
-        if (payload.type === 'audio') content.ptt = Boolean(mediaNode.voice);
+        if (payload.type === 'audio') {
+          content.ptt = Boolean(mediaNode.voice);
+          if (content.ptt) {
+            // Browser recordings are normalized to Ogg/Opus by the API. Never
+            // relay an arbitrary codec as PTT, including old uploaded assets.
+            if (!media.content.subarray(0, 4).equals(Buffer.from('OggS')) ||
+                !media.content.subarray(0, 128).includes(Buffer.from('OpusHead'))) {
+              throw new BridgeError(400, 'INVALID_VOICE_CODEC', 'Record the voice note again; WhatsApp voice notes require Ogg/Opus.');
+            }
+            content.mimetype = 'audio/ogg; codecs=opus';
+          }
+        }
         if (payload.type === 'document') content.fileName = mediaNode.filename || 'attachment';
         if (['image', 'document', 'video'].includes(payload.type) && mediaNode.caption) content.caption = String(mediaNode.caption).slice(0, 1024);
       } else throw new BridgeError(400, 'UNSUPPORTED_TYPE', 'This message type is not supported by the linked-device bridge.');
@@ -914,7 +936,7 @@ export class Bridge {
         // Keep retry keys even if ACK is lost; no success is returned until confirmed.
         await line.store.update(data => { data.messages[nativeId] = { message, phone, timestamp: millis(message.messageTimestamp), text: textBody(message.message), notified: true, pending_send: true,
           ...(clientMessageId ? { client_message_id: clientMessageId } : {}),
-          echo_seen: Boolean(data.messages[nativeId]?.echo_seen), confirmation_enqueued: Boolean(data.messages[nativeId]?.confirmation_enqueued),
+          ack_confirmed: Boolean(data.messages[nativeId]?.ack_confirmed), receipt: data.messages[nativeId]?.receipt, echo_seen: Boolean(data.messages[nativeId]?.echo_seen), confirmation_enqueued: Boolean(data.messages[nativeId]?.confirmation_enqueued),
           ...(MEDIA_TYPES.includes(payload.type) ? { media_id: payload[payload.type].id } : {}) }; });
         await waiter.promise;
         await line.store.update(data => { data.messages[nativeId].pending_send = false; data.messages[nativeId].ack_confirmed = true; });
@@ -922,6 +944,16 @@ export class Bridge {
         return { messages: [{ id: wrapId(id, nativeId) }] };
       } catch (error) {
         waiter.cancel();
+        if (line.store.data.messages[nativeId]?.ack_confirmed || line.store.data.messages[nativeId]?.echo_seen) {
+          await line.store.update(data => { data.messages[nativeId].pending_send = false; });
+          await this.enqueueOwnConfirmation(line, nativeId);
+          return { messages: [{ id: wrapId(id, nativeId) }] };
+        }
+        if (error.code === 'WHATSAPP_REJECTED' && !line.store.data.messages[nativeId]?.receipt) {
+          await line.store.update(data => { delete data.messages[nativeId]; });
+          error.delivery_uncertain = false;
+          throw error;
+        }
         if (staleConnectionError(error)) this.restartStaleSocket(line, socket);
         // A send failure may follow provider delivery. Retain the native ID
         // and source correlation, then await a real WhatsApp echo or callback.

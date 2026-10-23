@@ -82,6 +82,13 @@ function connectSupportEvents() {
       if (state.ticketId) openTicket(state.ticketId, {silent: true, refreshHistory: true}).catch(() => {});
       return;
     }
+    if (type === 'incoming_read') {
+      if (payload.authorized !== true) return;
+      state.ticketPrefetch.delete(String(payload.ticket_id));
+      loadQueue({silent: true}).catch(() => {});
+      if (String(state.ticketId) === String(payload.ticket_id)) openTicket(state.ticketId, {silent: true}).catch(() => {});
+      return;
+    }
     if (type === 'message_status') {
       if (payload.authorized === true && payload.message && state.ticketId && String(state.ticketId) === String(payload.ticket_id || '')) {
         upsertTimelineMessage(payload.message, payload.ticket_id);

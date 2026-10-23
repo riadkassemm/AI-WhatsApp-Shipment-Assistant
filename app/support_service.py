@@ -594,7 +594,7 @@ class SupportService:
                 return False
         if event.get("type") in {
             "outbound_message", "message_media_ready", "message_updated",
-            "message_deleted_for_everyone", "message_reaction", "message_status",
+            "message_deleted_for_everyone", "message_reaction", "message_status", "incoming_read",
         } and event.get("message_id") is not None:
             try:
                 message_id = int(event["message_id"])
@@ -1153,7 +1153,7 @@ class SupportService:
     ) -> bool:
         """Record a WhatsApp delivered/read receipt. False when no support row matches."""
         status = str(status or "").lower()
-        if status not in DELIVERY_STATUS_RANK:
+        if status not in {*DELIVERY_STATUS_RANK, "failed"}:
             raise SupportValidationError("Unknown WhatsApp delivery status.")
         try:
             at = datetime.fromtimestamp(int(timestamp_ms) / 1000, tz=timezone.utc).replace(tzinfo=None) if timestamp_ms else datetime.now(timezone.utc).replace(tzinfo=None)
@@ -1165,6 +1165,9 @@ class SupportService:
             phone_number=normalize_phone(phone_number) if phone_number else None,
         )
         if not result:
+            if not str(whatsapp_message_id).startswith('ld:') and business_phone_number_id and phone_number:
+                await support_repository.save_delivery_receipt(str(whatsapp_message_id), status, at,
+                    business_phone_number_id, normalize_phone(phone_number))
             return False
         message, changed = result
         if changed:
@@ -1175,6 +1178,18 @@ class SupportService:
                 message=_serialize_support_messages(ticket_id, [message])[0],
             )
         return True
+
+    async def reconcile_delivery_receipts(self):
+        for receipt in await support_repository.pending_delivery_receipts():
+            applied = await self.apply_delivery_status(
+                whatsapp_message_id=receipt['provider_message_id'], status=receipt['status'],
+                timestamp_ms=int(receipt['occurred_at'].replace(tzinfo=timezone.utc).timestamp() * 1000),
+                business_phone_number_id=receipt['line_id'], phone_number=receipt['phone'])
+            await support_repository.finish_receipt_check(receipt['id'], applied)
+
+    async def sync_reply_reads(self, message_id=None):
+        from app.support_read_sync import sync_reply_reads
+        await sync_reply_reads(support_repository, whatsapp_client, publish_support_event, message_id)
 
     async def _deliver_outbound(self, ticket, message, *, retry=False):
         updated = await deliver(support_repository, whatsapp_client, support_media_store, ticket, message, retry=retry)

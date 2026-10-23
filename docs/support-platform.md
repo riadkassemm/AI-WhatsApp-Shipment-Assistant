@@ -564,3 +564,44 @@ recipient. Inactive accounts remain reportable. Consequently totals need not mat
 These metrics use retained historical events in the local database; the report
 shows when retained transfer audit starts. No migration, new tracking table or
 remote database connection is required. Admin/Super Admin access is unchanged.
+
+### Delivery receipts and reply-triggered read synchronization
+
+A successful send confirms **WhatsApp server acceptance**, not delivery to the
+recipient. One grey tick means accepted; two grey ticks require a delivery event;
+two blue ticks require a read event. Voice-note microphones turn blue only for a
+separate **played** event. Local dashboard playback does not change this state.
+Read/playback receipts may be unavailable because of recipient privacy settings
+or provider support; Cloud read events never imply playback.
+
+Linked-device PTT recordings retain `audio/ogg; codecs=opus` through upload and
+relay. The bridge rejects non-Opus PTT before dispatch. Text, locations and all
+supported attachment kinds share delivery ownership and ACK handling. Explicit
+provider rejections become failed deliveries eligible for manual retry. Lost
+ACKs/timeouts remain uncertain: they are never automatically resent. A failed
+Cloud attempt's provider ID is preserved in a `DELIVERY_RETRY` audit event before
+an explicit retry acquires a fresh attempt; obsolete callbacks cannot alter the
+new attempt. Delayed Cloud callbacks are stored locally and replayed; unmatched
+callbacks (including bot messages) expire after seven days. Receipt-storage
+failures return HTTP 503 for provider redelivery.
+
+After a confirmed staff reply, the local database queues read receipts for
+incoming messages in the **same ticket**, with IDs preceding that reply's
+immutable message ID. This boundary is retained across retries and late ACKs.
+The reconciliation worker submits individual provider read receipts (normally
+within 30 seconds), then records incoming `read_at`. Failed submissions remain
+queued, survive restarts and retry without resending any message. It never marks
+an entire chat read or includes incoming messages created after the reply.
+
+Queue rows show **unread** (no successful read submission recorded) separately
+from **Awaiting staff reply** (incoming content after the last accepted staff
+reply). Viewing or playing a message does not count as replying. Historical read
+state is unknown until synchronized; the migration does not mark old messages
+read or enqueue historical replies. For linked devices the confirmation boundary
+is successful submission through Baileys `readMessages`, not an independently
+observable acknowledgment from the customer's phone.
+
+Apply `migrations/20261023_reply_read_sync.sql` before restarting the API and
+bridge. It adds two message columns, an index and the local receipt inbox; no
+customer content is modified. No dependency changes are needed. Existing
+unconfirmed voice notes must not be automatically replayed after deployment.

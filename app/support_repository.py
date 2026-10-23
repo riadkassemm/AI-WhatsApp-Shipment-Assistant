@@ -10,6 +10,8 @@ import aiomysql
 
 from app.support_staff_names import attach_current_staff_names
 from app.config import settings
+from app.support_read_sync import ReadSyncRepositoryMixin, attach_conversation_read_state
+from app.support_receipts import ReceiptRepositoryMixin
 from app.support_delivery_repository import DeliveryRepositoryMixin
 from app.support_models import ACTIVE_TICKET_STATUSES, ALLOWED_TRANSITIONS, may_reopen_customer_ticket
 from app.whatsapp_client import get_transport
@@ -220,6 +222,7 @@ _SUPPORT_SCHEMA_MIGRATIONS: tuple[tuple[str, dict[str, set[str]]], ...] = (
         "migrations/20261020_message_delivery_status.sql",
         {"support_ticket_messages": {"delivery_status", "delivered_at", "read_at"}},
     ),
+    ("migrations/20261023_reply_read_sync.sql", {"support_ticket_messages": {"read_sync_pending", "read_sync_attempted_at"}, "support_delivery_receipts": {"provider_message_id", "line_id", "status", "checked_at"}}),
     ("migrations/20261021_outbound_delivery_ownership.sql", {"support_ticket_messages": {
         "transport_client_id", "sender_scope", "delivery_token", "delivery_claimed_at",
         "delivery_started_at", "delivery_retry_safe",
@@ -240,8 +243,8 @@ _SUPPORT_SCHEMA_MIGRATIONS: tuple[tuple[str, dict[str, set[str]]], ...] = (
 
 MAX_QUICK_REPLIES_PER_STAFF = 200
 
-# WhatsApp receipts only move a message forward: sent, then delivered, then read.
-DELIVERY_STATUS_RANK = {"delivered": 1, "read": 2}
+# Confirmed receipts advance monotonically; playback is distinct from reading.
+DELIVERY_STATUS_RANK = {"delivered": 1, "read": 2, "played": 3}
 
 
 def _missing_support_schema_migrations(
@@ -257,7 +260,8 @@ def _missing_support_schema_migrations(
     return missing
 
 
-class SupportRepository(DeliveryRepositoryMixin):
+
+class SupportRepository(DeliveryRepositoryMixin, ReadSyncRepositoryMixin, ReceiptRepositoryMixin):
     @staticmethod
     async def _lock_active_linked_device_line(conn: Any, line_id: str | None) -> None:
         """Serialize new human ownership with linked-device removal preflight."""
@@ -384,6 +388,7 @@ class SupportRepository(DeliveryRepositoryMixin):
                 row = await cur.fetchone()
                 if row:
                     await attach_current_staff_names(cur, [row])
+                    await attach_conversation_read_state(cur, [row])
                 return row
 
     async def delete_history_ticket(self, ticket_id: int) -> dict[str, Any]:
@@ -1912,7 +1917,7 @@ class SupportRepository(DeliveryRepositoryMixin):
         phone_number: str | None,
     ) -> tuple[dict[str, Any], bool] | None:
         """Move an outgoing message forward to delivered or read; never backward."""
-        if status not in DELIVERY_STATUS_RANK:
+        if status not in {*DELIVERY_STATUS_RANK, "failed"}:
             raise ValueError("Unknown delivery status.")
         if self._pool is None:
             await self.connect()
@@ -1940,17 +1945,24 @@ class SupportRepository(DeliveryRepositoryMixin):
                         await conn.rollback()
                         return None
                     current = DELIVERY_STATUS_RANK.get(str(row.get("delivery_status") or ""), 0)
-                    changed = DELIVERY_STATUS_RANK[status] > current
-                    if changed:
+                    changed = DELIVERY_STATUS_RANK.get(status, 0) > current
+                    if status == 'failed' and current == 0 and row.get('send_status') != 'FAILED':
+                        await cur.execute("""UPDATE support_ticket_messages SET send_status='FAILED',
+                            delivery_retry_safe=1, read_sync_pending=0,
+                            error_message='WhatsApp reported delivery failed. Retry is available.', updated_at=UTC_TIMESTAMP(6)
+                            WHERE id=%s""", (row['id'],))
+                        changed = True
+                    elif changed:
                         await cur.execute(
                             """
                             UPDATE support_ticket_messages
                             SET delivery_status = %s,
                                 delivered_at = COALESCE(delivered_at, %s),
-                                read_at = CASE WHEN %s = 'read' THEN COALESCE(read_at, %s) ELSE read_at END,
+                                read_at = CASE WHEN %s IN ('read', 'played') THEN COALESCE(read_at, %s) ELSE read_at END,
                                 -- MariaDB applies assignments left to right: clear the
                                 -- error before send_status changes.
                                 error_message = CASE WHEN send_status = 'SENT' THEN error_message ELSE NULL END,
+                                read_sync_pending = IF(send_status <> 'SENT' AND sender_type='AGENT',1,read_sync_pending),
                                 send_status = 'SENT'
                             WHERE id = %s
                             """,
@@ -2333,6 +2345,7 @@ class SupportRepository(DeliveryRepositoryMixin):
                             """
                             UPDATE support_ticket_messages
                             SET send_status = 'SENT', whatsapp_message_id = %s,
+                                read_sync_pending = IF(sender_type='AGENT',1,read_sync_pending),
                                 whatsapp_timestamp = COALESCE(whatsapp_timestamp, %s),
                                 error_message = NULL, updated_at = UTC_TIMESTAMP(6)
                             WHERE id = %s
@@ -3380,6 +3393,7 @@ class SupportRepository(DeliveryRepositoryMixin):
                 )
                 rows = list(await cur.fetchall())
                 await attach_current_staff_names(cur, rows)
+                await attach_conversation_read_state(cur, rows)
         return {
             "items": rows,
             "page": page,
