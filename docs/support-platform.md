@@ -232,6 +232,30 @@ Visual alerts remain available, desktop notifications are requested silently
 when muted, and voice-note playback is unaffected. If browser storage is blocked,
 the toggle still works for the current page but may not persist after refresh.
 
+## Removing saved Meta numbers
+
+Admins and Super Admins can choose **Remove saved number** beside an inactive
+Meta Cloud entry in WhatsApp numbers. Active entries must first be deactivated
+with **Remove from app**; its existing active-conversation checks still apply.
+Resolve or close remaining active conversations before removing a saved entry.
+Linked-device numbers continue to use **Remove and unlink**.
+
+Removal hides the entry from number management and outbound selection and blocks
+reactivation through the API. Its history is read-only for sending/reopening.
+Historical tickets, messages, and custom number
+labels are preserved. A local retirement timestamp and audit record prevent Meta
+sync, inbound webhooks, or legacy environment seeding from restoring the entry.
+Concurrent removal requests are idempotent; an activation that wins first causes
+removal to be rejected. Removing the saved entry does not unregister the number
+from Meta or close existing conversations. A new linked-device registration uses
+its own line ID and can still be added normally.
+
+Apply `migrations/20261023_removed_meta_numbers.sql` before restarting the API.
+It adds one nullable column to the existing local registry; no rows are removed
+by the migration. Routing fails closed if registry schema validation fails.
+There is no automatic restore action. Rolling back to code that predates this
+feature would expose retired entries again, so retain this change after use.
+
 ## Local development and integration tests
 
 For the persistent dev VPS, use the existing supervised API, bridge, Redis,

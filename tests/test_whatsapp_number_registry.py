@@ -44,6 +44,7 @@ class FakeRepository:
         }
         self.audit_actions: list[str] = []
         self.has_display_name_column = True
+        self.has_removed_at_column = True
 
     async def fetch_all(self, query, params=()):
         if "INFORMATION_SCHEMA.TABLES" in query:
@@ -53,6 +54,8 @@ class FakeRepository:
                 {"table_name": "whatsapp_integration_audit"},
             ]
         if "INFORMATION_SCHEMA.COLUMNS" in query:
+            if params[-1] == 'removed_at':
+                return [{'column_name': 'removed_at'}] if self.has_removed_at_column else []
             return [{"column_name": "display_name"}] if self.has_display_name_column else []
         if "FROM whatsapp_business_accounts" in query:
             return [{"waba_id": "999999999999999", "name": "MIK", "is_active": 1}]
@@ -195,6 +198,18 @@ def test_number_alias_migration_is_additive_and_schema_guard_is_actionable() -> 
     repo.has_display_name_column = False
     with pytest.raises(WhatsAppRegistrySchemaError, match="20261014_whatsapp_number_display_names.sql"):
         asyncio.run(WhatsAppRegistryService(repo).list_payload(actor("admin")))
+
+
+def test_number_removal_schema_guard_is_actionable_and_routing_fails_closed(monkeypatch) -> None:
+    from app.whatsapp_registry import settings
+    repo = FakeRepository()
+    repo.has_removed_at_column = False
+    service = WhatsAppRegistryService(repo)
+    monkeypatch.setattr(settings, 'whatsapp_phone_number_id', repo.number['phone_number_id'])
+    with pytest.raises(WhatsAppRegistrySchemaError, match='20261023_removed_meta_numbers.sql'):
+        asyncio.run(service.list_payload(actor('admin')))
+    assert not asyncio.run(service.is_number_enabled(None))
+    assert not asyncio.run(service.observe_inbound(waba_id=None, phone_number_id=None, display_phone_number=None))
 
 
 def test_number_rename_api_contract_uses_manager_service_and_returns_updated_registry(monkeypatch) -> None:

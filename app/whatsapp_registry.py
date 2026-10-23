@@ -118,6 +118,46 @@ class WhatsAppRegistryRepository:
                 await cur.execute(query, params)
                 return int(cur.rowcount or 0)
 
+    async def remove_saved_meta_number(self, phone_number_id: str, *, actor_id: int) -> None:
+        """Retire an inactive descriptor while retaining historical references."""
+        await self.connect()
+        assert self._pool is not None
+        async with self._pool.acquire() as conn:
+            await conn.begin()
+            try:
+                async with conn.cursor(aiomysql.DictCursor) as cur:
+                    await cur.execute(
+                        "SELECT source,is_enabled,removed_at,waba_id FROM whatsapp_phone_numbers WHERE phone_number_id=%s FOR UPDATE",
+                        (phone_number_id,),
+                    )
+                    row = await cur.fetchone()
+                    if not row or row.get('source') not in {'META_SYNC', 'WEBHOOK', 'LEGACY_ENV'}:
+                        raise WhatsAppRegistryValidationError("Only saved Meta Cloud numbers can be removed here.")
+                    if row.get('is_enabled'):
+                        raise WhatsAppRegistryConflictError("Remove this number from the app before removing its saved entry.")
+                    if not row.get('removed_at'):
+                        # New/reopened conversations take this number lock first
+                        # as well. Never retire a number beneath an active chat.
+                        await cur.execute(
+                            "SELECT id FROM support_tickets WHERE business_phone_number_id=%s AND active_key IS NOT NULL LIMIT 1 FOR UPDATE",
+                            (phone_number_id,),
+                        )
+                        if await cur.fetchone():
+                            raise WhatsAppRegistryConflictError("Resolve or close this number's active conversations before removing its saved entry.")
+                        await cur.execute(
+                            "UPDATE whatsapp_phone_numbers SET removed_at=UTC_TIMESTAMP(6),updated_by_staff_id=%s WHERE phone_number_id=%s",
+                            (actor_id, phone_number_id),
+                        )
+                        await cur.execute(
+                            """INSERT INTO whatsapp_integration_audit (action,actor_staff_id,waba_id,phone_number_id,details_json)
+                               VALUES ('META_NUMBER_REMOVED',%s,%s,%s,%s)""",
+                            (actor_id, row.get('waba_id'), phone_number_id, json.dumps({'history_preserved': True})),
+                        )
+                await conn.commit()
+            except Exception:
+                await conn.rollback()
+                raise
+
     async def prepare_linked_device_removal(
         self, line_id: str, *, actor_id: int, close_active_tickets: bool,
     ) -> int:
@@ -371,6 +411,15 @@ class WhatsAppRegistryService:
                 "WhatsApp number display names are not installed. Apply "
                 "migrations/20261014_whatsapp_number_display_names.sql."
             )
+        columns = await self.repository.fetch_all(
+            """SELECT COLUMN_NAME AS column_name FROM INFORMATION_SCHEMA.COLUMNS
+               WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s AND COLUMN_NAME = %s""",
+            (settings.db_name, "whatsapp_phone_numbers", "removed_at"),
+        )
+        if not columns:
+            raise WhatsAppRegistrySchemaError(
+                "WhatsApp number removal is not installed. Apply migrations/20261023_removed_meta_numbers.sql."
+            )
 
     async def _seed_legacy_number(self) -> None:
         phone_id = str(settings.whatsapp_phone_number_id or "").strip()
@@ -560,6 +609,7 @@ class WhatsAppRegistryService:
                    quality_rating, is_enabled, provider_present, source,
                    last_synced_at, created_at, updated_at
             FROM whatsapp_phone_numbers
+            WHERE removed_at IS NULL
             ORDER BY is_enabled DESC, COALESCE(display_phone_number, phone_number_id)
             """
         )
@@ -587,25 +637,27 @@ class WhatsAppRegistryService:
         await self._seed_legacy_number()
         row = await self.repository.fetch_one(
             """
-            SELECT phone_number_id, waba_id, source, provider_present, display_name
+            SELECT phone_number_id, waba_id, source, provider_present, display_name, removed_at
             FROM whatsapp_phone_numbers
             WHERE phone_number_id = %s
             LIMIT 1
             """,
             (phone_number_id,),
         )
-        if not row or (row.get("source") == "LINKED_DEVICE" and not row.get("provider_present")):
+        if not row or row.get('removed_at') or (row.get("source") == "LINKED_DEVICE" and not row.get("provider_present")):
             raise WhatsAppRegistryValidationError("This WhatsApp number is not available in the app.")
         if row.get("display_name") == name:
             return await self.list_payload(agent)
-        await self.repository.execute(
+        changed = await self.repository.execute(
             """
             UPDATE whatsapp_phone_numbers
             SET display_name = %s, updated_by_staff_id = %s
-            WHERE phone_number_id = %s
+            WHERE phone_number_id = %s AND removed_at IS NULL
             """,
             (name, int(agent.id), phone_number_id),
         )
+        if not changed:
+            raise WhatsAppRegistryConflictError("This saved number changed or was removed. Refresh the list.")
         await self._audit(
             action="WHATSAPP_NUMBER_RENAMED",
             actor_staff_id=int(agent.id),
@@ -618,6 +670,15 @@ class WhatsAppRegistryService:
             agent.id,
             phone_number_id,
         )
+        return await self.list_payload(agent)
+
+    async def remove_saved_number(self, agent: SupportAgent, phone_number_id: str) -> dict[str, Any]:
+        self._require_manager(agent)
+        phone_number_id = _clean_id(phone_number_id, label="phone-number ID")
+        await self._ensure_schema()
+        if get_transport(phone_number_id) != 'cloud':
+            raise WhatsAppRegistryValidationError("Use Remove and unlink for linked-device numbers.")
+        await self.repository.remove_saved_meta_number(phone_number_id, actor_id=int(agent.id))
         return await self.list_payload(agent)
 
     async def prepare_linked_device_removal(
@@ -703,7 +764,7 @@ class WhatsAppRegistryService:
         await self._ensure_schema()
         row = await self.repository.fetch_one(
             """
-            SELECT phone_number_id, waba_id, provider_present, is_enabled, source
+            SELECT phone_number_id, waba_id, provider_present, is_enabled, source, removed_at
             FROM whatsapp_phone_numbers
             WHERE phone_number_id = %s
             LIMIT 1
@@ -714,6 +775,8 @@ class WhatsAppRegistryService:
             raise WhatsAppRegistryValidationError(
                 "This phone number has not been discovered from Meta yet. Sync its WABA first."
             )
+        if row.get('removed_at'):
+            raise WhatsAppRegistryConflictError("This saved number was permanently removed from the app.")
         if enabled and (get_transport(phone_number_id) == "removed" or (
             row.get("source") == "LINKED_DEVICE" and phone_number_id not in configured_linked_device_lines()
         )):
@@ -754,15 +817,21 @@ class WhatsAppRegistryService:
                     f"This number still has {active_count} active support ticket(s). "
                     "Resolve them before removing the number from the app."
                 )
-        await self.repository.execute(
+        changed = await self.repository.execute(
             """
             UPDATE whatsapp_phone_numbers
             SET is_enabled = %s, display_phone_number = COALESCE(%s, display_phone_number),
                 updated_by_staff_id = %s
-            WHERE phone_number_id = %s
+            WHERE phone_number_id = %s AND removed_at IS NULL
             """,
             (1 if enabled else 0, linked_display_number, int(agent.id), phone_number_id),
         )
+        if not changed:
+            current = await self.repository.fetch_one(
+                "SELECT removed_at FROM whatsapp_phone_numbers WHERE phone_number_id=%s", (phone_number_id,),
+            )
+            if not current or current.get('removed_at'):
+                raise WhatsAppRegistryConflictError("This saved number was permanently removed from the app.")
         await self._audit(
             action="WHATSAPP_NUMBER_ENABLED" if enabled else "WHATSAPP_NUMBER_DISABLED",
             actor_staff_id=int(agent.id),
@@ -787,8 +856,8 @@ class WhatsAppRegistryService:
         phone_id = str(phone_number_id or "").strip()
         if not phone_id:
             # Real Meta webhook payloads include metadata.phone_number_id. This
-            # fallback preserves legacy unit/integration payloads only.
-            return bool(str(settings.whatsapp_phone_number_id or "").strip())
+            # legacy fallback must still respect the saved retirement marker.
+            return await self.is_number_enabled(None)
         if get_transport(phone_id) == "removed":
             return False
         try:
@@ -796,7 +865,7 @@ class WhatsAppRegistryService:
             await self._ensure_schema()
             await self._seed_legacy_number()
         except WhatsAppRegistrySchemaError:
-            return phone_id == str(settings.whatsapp_phone_number_id or "").strip()
+            return False
 
         clean_waba: str | None = None
         if waba_id:
@@ -835,14 +904,14 @@ class WhatsAppRegistryService:
         )
         row = await self.repository.fetch_one(
             """
-            SELECT is_enabled, provider_present
+            SELECT is_enabled, provider_present, removed_at
             FROM whatsapp_phone_numbers
             WHERE phone_number_id = %s
             LIMIT 1
             """,
             (phone_id,),
         )
-        return bool(row and row.get("is_enabled") and row.get("provider_present"))
+        return bool(row and not row.get('removed_at') and row.get("is_enabled") and row.get("provider_present"))
 
     async def list_enabled_numbers(self, agent: SupportAgent) -> list[dict[str, Any]]:
         """Return enabled WhatsApp lines safe for normal staff outbound use."""
@@ -853,7 +922,7 @@ class WhatsAppRegistryService:
             """
             SELECT phone_number_id, display_phone_number, display_name, verified_name, source
             FROM whatsapp_phone_numbers
-            WHERE is_enabled = 1 AND provider_present = 1
+            WHERE is_enabled = 1 AND provider_present = 1 AND removed_at IS NULL
             ORDER BY COALESCE(display_phone_number, verified_name, phone_number_id)
             """
         )
@@ -876,10 +945,10 @@ class WhatsAppRegistryService:
             await self._ensure_schema()
             await self._seed_legacy_number()
         except WhatsAppRegistrySchemaError:
-            return phone_id == str(settings.whatsapp_phone_number_id or "").strip()
+            return False
         row = await self.repository.fetch_one(
             """
-            SELECT is_enabled, provider_present, source
+            SELECT is_enabled, provider_present, source, removed_at
             FROM whatsapp_phone_numbers
             WHERE phone_number_id = %s
             LIMIT 1
@@ -887,7 +956,7 @@ class WhatsAppRegistryService:
             (phone_id,),
         )
         return bool(
-            row and row.get("is_enabled") and row.get("provider_present")
+            row and not row.get('removed_at') and row.get("is_enabled") and row.get("provider_present")
             and (row.get("source") != "LINKED_DEVICE" or get_transport(phone_id) == "linked_device")
         )
 

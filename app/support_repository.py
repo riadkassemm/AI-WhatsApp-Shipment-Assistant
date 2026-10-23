@@ -225,6 +225,7 @@ _SUPPORT_SCHEMA_MIGRATIONS: tuple[tuple[str, dict[str, set[str]]], ...] = (
     ),
     ("migrations/20261023_reply_read_sync.sql", {"support_ticket_messages": {"read_sync_pending", "read_sync_attempted_at"}, "support_delivery_receipts": {"provider_message_id", "line_id", "status", "checked_at"}}),
     ("migrations/20261023_whatsapp_failure_codes.sql", {"support_delivery_receipts": {"failure_code"}}),
+    ("migrations/20261023_removed_meta_numbers.sql", {"whatsapp_phone_numbers": {"removed_at"}}),
     ("migrations/20261021_outbound_delivery_ownership.sql", {"support_ticket_messages": {
         "transport_client_id", "sender_scope", "delivery_token", "delivery_claimed_at",
         "delivery_started_at", "delivery_retry_safe",
@@ -265,16 +266,20 @@ def _missing_support_schema_migrations(
 
 class SupportRepository(DeliveryRepositoryMixin, ReadSyncRepositoryMixin, ReceiptRepositoryMixin):
     @staticmethod
-    async def _lock_active_linked_device_line(conn: Any, line_id: str | None) -> None:
-        """Serialize new human ownership with linked-device removal preflight."""
-        if not line_id or get_transport(str(line_id)) not in {"linked_device", "removed"}:
+    async def _lock_available_whatsapp_line(conn: Any, line_id: str | None) -> None:
+        """Serialize new/reopened conversations with number removal."""
+        if not line_id:
             return
         async with conn.cursor(aiomysql.DictCursor) as cur:
             await cur.execute(
-                "SELECT source, is_enabled, provider_present FROM whatsapp_phone_numbers WHERE phone_number_id = %s FOR UPDATE",
+                "SELECT source, is_enabled, provider_present, removed_at FROM whatsapp_phone_numbers WHERE phone_number_id = %s FOR UPDATE",
                 (str(line_id),),
             )
             row = await cur.fetchone()
+            if row and row.get('removed_at'):
+                raise SupportConflictError("This WhatsApp number was permanently removed. Its chat history is read-only.")
+            if get_transport(str(line_id)) not in {"linked_device", "removed"}:
+                return
             if get_transport(str(line_id)) == "removed" or not row or row.get("source") != "LINKED_DEVICE" or not row.get("is_enabled") or not row.get("provider_present"):
                 raise SupportConflictError("This WhatsApp linked-device number is inactive or removed. Link and add it to the app before opening a conversation.")
 
@@ -378,7 +383,7 @@ class SupportRepository(DeliveryRepositoryMixin, ReadSyncRepositoryMixin, Receip
             async with conn.cursor(aiomysql.DictCursor) as cur:
                 await cur.execute(
                     """
-                    SELECT t.*, n.display_name
+                    SELECT t.*, n.display_name, n.removed_at AS business_number_removed_at
                     FROM support_tickets t
                     LEFT JOIN whatsapp_phone_numbers n
                       ON n.phone_number_id = t.business_phone_number_id
@@ -994,7 +999,7 @@ class SupportRepository(DeliveryRepositoryMixin, ReadSyncRepositoryMixin, Receip
         async with self._pool.acquire() as conn:
             await conn.begin()
             try:
-                await self._lock_active_linked_device_line(conn, business_phone_number_id)
+                await self._lock_available_whatsapp_line(conn, business_phone_number_id)
                 async with conn.cursor() as cur:
                     await cur.execute(
                         """
@@ -1129,15 +1134,16 @@ class SupportRepository(DeliveryRepositoryMixin, ReadSyncRepositoryMixin, Receip
             await self.connect()
         assert self._pool is not None
         async with self._pool.acquire() as conn:
-            await conn.begin()
             try:
                 # Determine the immutable channel without taking the ticket
-                # lock. All removal/create paths lock number before ticket.
+                # lock or establishing a transaction snapshot. Removal/create
+                # paths then lock number before ticket and see current state.
                 async with conn.cursor(aiomysql.DictCursor) as channel_cur:
                     await channel_cur.execute("SELECT business_phone_number_id FROM support_tickets WHERE id = %s", (chat_id,))
                     channel = await channel_cur.fetchone()
                 line_id = str((channel or {}).get("business_phone_number_id") or "")
-                await self._lock_active_linked_device_line(conn, line_id)
+                await conn.begin()
+                await self._lock_available_whatsapp_line(conn, line_id)
                 async with conn.cursor(aiomysql.DictCursor) as cur:
                     await cur.execute(
                         "SELECT * FROM support_tickets WHERE id = %s FOR UPDATE",
@@ -1291,7 +1297,7 @@ class SupportRepository(DeliveryRepositoryMixin, ReadSyncRepositoryMixin, Receip
         async with self._pool.acquire() as conn:
             await conn.begin()
             try:
-                await self._lock_active_linked_device_line(conn, business_phone_number_id)
+                await self._lock_available_whatsapp_line(conn, business_phone_number_id)
                 async with conn.cursor() as cur:
                     await cur.execute(
                         """
@@ -3097,7 +3103,7 @@ class SupportRepository(DeliveryRepositoryMixin, ReadSyncRepositoryMixin, Receip
                         raise SupportNotFoundError("Ticket not found.")
                     line_id = str(channel.get("business_phone_number_id") or "")
                     await conn.begin()
-                    await self._lock_active_linked_device_line(conn, line_id)
+                    await self._lock_available_whatsapp_line(conn, line_id)
                     await cur.execute("SELECT * FROM support_tickets WHERE id=%s FOR UPDATE", (ticket_id,))
                     row = await cur.fetchone()
                     if not row:

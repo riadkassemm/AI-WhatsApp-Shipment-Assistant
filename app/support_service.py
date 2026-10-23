@@ -2372,6 +2372,7 @@ class SupportService:
                 "can_reopen": (
                     ticket.get("status") == "RESOLVED" and ticket.get("active_key") is None
                     and may_reopen_customer_ticket(ticket, agent.id, supervisor=agent.is_supervisor)
+                    and not ticket.get('business_number_removed_at')
                     and get_transport(str(ticket.get("business_phone_number_id") or "") or None) != "removed"
                 ),
                 # Viewing a ticket is the source authorization for forwarding.
@@ -2389,7 +2390,7 @@ class SupportService:
                         and ticket.get("active_key") is None
                         and str(ticket.get("status") or "") in {"RESOLVED", "CLOSED"}
                     )
-                ) and get_transport(str(ticket.get("business_phone_number_id") or "") or None) != "removed",
+                ) and not ticket.get('business_number_removed_at') and get_transport(str(ticket.get("business_phone_number_id") or "") or None) != "removed",
                 "can_transfer": (
                     _can_operate(ticket, agent)
                     and ticket.get("current_assignee_id") is not None
@@ -2838,7 +2839,7 @@ class SupportService:
             raise SupportNotFoundError("Ticket not found.")
 
         line_id = str(ticket.get("business_phone_number_id") or "")
-        if line_id and get_transport(line_id) == "removed":
+        if ticket.get('business_number_removed_at') or (line_id and get_transport(line_id) == "removed"):
             raise SupportConflictError("This WhatsApp number has been removed. Its chat history is read-only.")
         active = (
             ticket.get("active_key") is not None
@@ -3343,7 +3344,7 @@ class SupportService:
             ticket, agent.id, supervisor=agent.is_supervisor,
         ):
             raise SupportForbiddenError("Only the last assignee who resolved this ticket, or a Super Admin, may reopen it.")
-        if get_transport(str(ticket.get("business_phone_number_id") or "") or None) == "removed":
+        if ticket.get('business_number_removed_at') or get_transport(str(ticket.get("business_phone_number_id") or "") or None) == "removed":
             raise SupportConflictError("This WhatsApp number has been removed. Its history is read-only.")
         if resolved_at is not None and resolved_at.tzinfo is not None:
             resolved_at = resolved_at.astimezone(timezone.utc).replace(tzinfo=None)

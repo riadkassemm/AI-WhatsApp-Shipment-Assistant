@@ -117,7 +117,7 @@ def test_ready_checks_schema_read_only_with_one_database_connection(dependencies
     assert len(state.connections) == len(state.redis_clients) == 1
     assert state.connections[0].closed and state.redis_clients[0].closed
     assert state.queries[0] == "SELECT 1"
-    assert len(state.queries) == 5
+    assert len(state.queries) == 6
     assert all(query.lstrip().upper().startswith("SELECT ") for query in state.queries)
 
 

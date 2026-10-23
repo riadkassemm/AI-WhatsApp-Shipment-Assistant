@@ -586,6 +586,17 @@ async def update_whatsapp_number_name(
         raise _translate_error(exc) from exc
 
 
+@router.delete("/whatsapp-numbers/{phone_number_id}")
+async def remove_saved_whatsapp_number(
+    phone_number_id: str,
+    agent: SupportAgent = Depends(require_support_csrf),
+) -> dict:
+    try:
+        return await whatsapp_registry_service.remove_saved_number(agent, phone_number_id)
+    except Exception as exc:
+        raise _translate_error(exc) from exc
+
+
 @router.get("/staff")
 async def list_support_staff(
     agent: SupportAgent = Depends(get_current_agent),
