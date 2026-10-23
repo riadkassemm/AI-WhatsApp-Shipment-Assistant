@@ -605,3 +605,7 @@ Apply `migrations/20261023_reply_read_sync.sql` before restarting the API and
 bridge. It adds two message columns, an index and the local receipt inbox; no
 customer content is modified. No dependency changes are needed. Existing
 unconfirmed voice notes must not be automatically replayed after deployment.
+
+For deployments with table-level runtime grants, grant SELECT, INSERT, UPDATE
+and DELETE on `support_delivery_receipts` to the existing local application
+account. The schema preflight checks visibility before release activation.

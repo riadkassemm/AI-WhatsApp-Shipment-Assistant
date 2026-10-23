@@ -168,3 +168,10 @@ for the final commit separately from these local and deployed checks.
 application-table allowlist includes these tables for future moves/backups. The
 original cutover table counts above describe that earlier snapshot. Grant the
 runtime account CRUD on the new tables and retain them in local database backups.
+
+### Delivery receipt inbox
+
+`20261023_reply_read_sync.sql` adds local `support_delivery_receipts` and two
+message read-sync columns. Include the inbox in backups/moves and grant the
+existing application account CRUD on it; table-level grants do not automatically
+cover new tables. Historical read state is not backfilled.
