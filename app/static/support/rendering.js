@@ -2103,6 +2103,12 @@ function updateAudioMessageRow(existing, rendered) {
   const existingMedia = existingBubble.querySelector('.msg-media');
   const renderedMedia = renderedBubble.querySelector('.msg-media');
 
+  // The receipt indicator lives inside the retained player. Refresh this
+  // sibling of the audio controls without disconnecting or resetting playback.
+  const existingPlayback = existingMedia.querySelector('.voice-playback')?.parentElement;
+  const renderedPlayback = renderedMedia.querySelector('.voice-playback')?.parentElement;
+  if (existingPlayback && renderedPlayback) existingPlayback.replaceWith(renderedPlayback);
+
   // Keep the media element and all of its ancestors connected while updating
   // the sender, caption, reactions, and delivery status around it.
   function updateAround(parent, fresh, kept, freshKept) {
