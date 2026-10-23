@@ -234,6 +234,8 @@ the toggle still works for the current page but may not persist after refresh.
 
 ## Removing saved Meta numbers
 
+![Inactive Meta entries with Remove saved number controls, using example numbers](screenshots/meta-number-removal.png)
+
 Admins and Super Admins can choose **Remove saved number** beside an inactive
 Meta Cloud entry in WhatsApp numbers. Active entries must first be deactivated
 with **Remove from app**; its existing active-conversation checks still apply.
