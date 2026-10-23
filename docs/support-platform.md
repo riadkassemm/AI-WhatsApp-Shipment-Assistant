@@ -526,3 +526,21 @@ same Admin/Super Admin permission as the report API; responses are private/no-st
 PDFs are generated in memory, with pagination and an embedded licensed DejaVu font
 for Latin/Arabic names. Install updated `requirements.txt` before restarting the API.
 No database migration is required. Existing downloaded files cannot be revoked.
+
+### Staff name changes
+
+Staff IDs remain the identity and permission source. Ticket/chat assignment and
+initiator labels, staff message/reaction names, reply quotes, search results and
+timeline actor labels resolve the current staff name when read. Statistics,
+transfer choices and account identity use the same account record. AI settings'
+last-saved-by label also resolves the current name on refresh.
+
+Renaming publishes a name-only `staff_profile_updated` event after the database
+commit; authenticated dashboards update cached labels, their own identity and an
+open statistics report. The editing dashboard also updates from the successful
+save response. Read-time resolution repairs existing stale labels without a
+migration and prevents an older in-flight request from restoring an old displayed
+name. No conversation ownership, permissions, delivery state or message body is
+changed. Persisted names and audit details remain historical snapshots; if a staff
+account has been deleted, those saved names remain the fallback. Customer names
+and replies sent directly from WhatsApp are not relabeled as staff.

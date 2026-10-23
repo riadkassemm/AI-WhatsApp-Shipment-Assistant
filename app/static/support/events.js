@@ -1,3 +1,55 @@
+// Update display metadata only: message delivery state, drafts and ownership stay intact.
+function updateCachedStaffName(value, staffId, name) {
+  if (!value || typeof value !== 'object') return;
+  const same = id => id != null && String(id) === String(staffId);
+  for (const prefix of ['current_assignee', 'initiated_by_staff']) {
+    if (same(value[prefix + '_id'])) value[prefix + '_name'] = name;
+  }
+  for (const prefix of ['sender', 'actor', 'reactor']) {
+    if (value[prefix + '_type'] === 'AGENT' && same(value[prefix + '_id'])) value[prefix + '_name'] = name;
+  }
+  if (value.event_type === 'TICKET_TRANSFERRED' && value.details_json) {
+    try {
+      const details = JSON.parse(value.details_json);
+      for (const prefix of ['from_agent', 'to_agent']) if (same(details[prefix + '_id'])) details[prefix + '_name'] = name;
+      value.details_json = JSON.stringify(details);
+    } catch (_) {}
+  }
+  for (const child of Object.values(value)) if (child && typeof child === 'object') updateCachedStaffName(child, staffId, name);
+}
+
+function applyStaffProfileName(staffId, name) {
+  if (!state.authenticated || !staffId || typeof name !== 'string') return;
+  state.ticketPrefetch.clear();
+  if (String(state.agent?.id) === String(staffId)) {
+    state.agent.name = name;
+    setAgentIdentity(state.agent);
+  }
+  for (const value of [state.currentTicketData, state.queueItems, state.previousTicketHistory,
+    state.cachedCurrentMessages, state.globalSearchResults, state.conversationSearchResults,
+    state.forwardConversations, ...state.realtimeMessages.values(), ...state.localMessages.values()]) {
+    updateCachedStaffName(value, staffId, name);
+  }
+  for (const item of [...state.staffItems, ...state.transferTargets]) if (String(item.id) === String(staffId)) item.name = name;
+  for (const option of $('transferTarget').options) {
+    const target = state.transferTargets.find(item => String(item.id) === option.value);
+    if (target) option.textContent = target.name + ' · ' + staffRoleLabel(target.role);
+  }
+  if (canManageStaff()) renderStaffAccounts(state.staffItems);
+  renderQueue();
+  const data = state.currentTicketData;
+  if (data) {
+    renderTicketHeader(data.ticket);
+    renderContext(data.ticket, data.context || {}, data.shipment || null, data.customer_identity || null, data.permissions || {});
+    renderReadOnlyState(data);
+    renderConversation(data, {preserveAudio: true});
+    state.timelineSignature = timelineSignature(data);
+    const reply = (data.messages || []).find(message => Number(message.id) === state.replyTarget?.id);
+    if (reply) { state.replyTarget.actor = messageActor(reply); renderReplyDraft(); }
+  }
+  if (state.activeModal === 'agentStatisticsModal') loadAgentStatistics();
+}
+
 function disconnectSupportEvents() {
   if (state.supportEventSource) {
     state.supportEventSource.close();
@@ -14,6 +66,10 @@ function connectSupportEvents() {
     let payload = {};
     try { payload = JSON.parse(event.data || '{}'); } catch (_) { return; }
     const type = String(payload.type || '');
+    if (type === 'staff_profile_updated') {
+      if (payload.authorized === true) applyStaffProfileName(payload.staff_id, payload.name);
+      return;
+    }
     if (type === 'ticket_queues_changed') {
       if (payload.authorized !== true) return;
       state.ticketPrefetch.clear();

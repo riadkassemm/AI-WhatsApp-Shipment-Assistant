@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import aiomysql
 
+from app.support_staff_names import attach_current_staff_names
 from app.config import settings
 from app.support_auth import SupportAgent
 
@@ -262,6 +263,8 @@ class AIControlRepository:
                     """
                 )
                 row = await cur.fetchone()
+                if row:
+                    await attach_current_staff_names(cur, [row])
         if not row:
             raise AIControlError(
                 "AI control settings are not initialized. Apply the AI settings migration."

@@ -1386,6 +1386,7 @@ async function updateStaffAccount(event) {
   setButtonBusy($('editStaffSubmitBtn'), true, 'Saving…');
   try {
     const data = await api('/api/support/staff/' + encodeURIComponent(state.editingStaffId), {method:'PATCH', body: JSON.stringify(payload)});
+    applyStaffProfileName(data.staff.id, data.staff.name);
     const sessionRevoked = Boolean(data.staff.current_session_revoked);
     resetEditStaffForm();
     setStaffView('list');
