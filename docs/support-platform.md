@@ -739,3 +739,13 @@ are not rewritten or resent; record a new voice note after this fix.
 For deployments with table-level runtime grants, grant SELECT, INSERT, UPDATE
 and DELETE on `support_delivery_receipts` to the existing local application
 account. The schema preflight checks visibility before release activation.
+
+### Starting chats: inconclusive number lookups
+
+Linked-device number checks are advisory. Baileys filters negative contact results,
+so an empty/missing lookup cannot prove a phone is unregistered. Such responses
+preserve the validated international number and allow the normal send pipeline to
+handle provider acceptance, failures, and receipts. This does not mark messages as
+delivered or bypass delivery claims/retry rules. A positive phone JID can canonicalize
+the number; a numeric `@lid` identifier must never replace the dialable phone.
+Invalid country codes still fail local validation. No schema migration is needed.

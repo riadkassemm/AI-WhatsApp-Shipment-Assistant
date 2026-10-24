@@ -281,7 +281,7 @@ class LinkedDeviceWhatsAppClient:
         )
         whatsapp_phone = str(data.get("whatsapp_phone") or "")
         return {
-            "exists": data.get("exists") is True,
+            "exists": data.get("exists") if isinstance(data.get("exists"), bool) else None,
             "whatsapp_phone": whatsapp_phone if whatsapp_phone.isdigit() else phone,
         }
 

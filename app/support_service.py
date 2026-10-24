@@ -1677,8 +1677,9 @@ class SupportService:
         """International digits for a staff-entered number on one WhatsApp line.
 
         Local numbers are read in the line's country. On linked-device lines,
-        WhatsApp is asked whether the number has an account, so a chat is never
-        started with a number that cannot receive it.
+        A positive linked-device lookup can canonicalize the phone. Incomplete
+        lookups cannot establish that a number is unregistered; the normal send
+        pipeline remains responsible for confirmed delivery/failure handling.
         """
         try:
             phone = to_whatsapp_digits(raw_phone, default_region=region_for_number(line_display_phone))
@@ -1694,7 +1695,7 @@ class SupportService:
                 "WhatsApp number lookup unavailable: line_id=%s exception_type=%s", line_id, type(exc).__name__
             )
             return phone
-        if not result["exists"]:
+        if result["exists"] is False:
             raise SupportValidationError(
                 "This number is not on WhatsApp. Check the number and its country code."
             )
