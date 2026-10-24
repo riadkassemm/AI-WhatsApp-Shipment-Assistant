@@ -9,6 +9,7 @@ from typing import Any
 import aiomysql
 
 from app.support_staff_names import attach_current_staff_names
+from app.quick_reply_identity import quick_reply_identity
 from app.config import settings
 from app.support_read_sync import ReadSyncRepositoryMixin, attach_conversation_read_state
 from app.support_receipts import ReceiptRepositoryMixin
@@ -238,6 +239,9 @@ _SUPPORT_SCHEMA_MIGRATIONS: tuple[tuple[str, dict[str, set[str]]], ...] = (
     }),
     ("migrations/20261024_quick_reply_locations.sql", {
         "support_quick_replies": {"location_latitude", "location_longitude", "location_name", "location_address"},
+    }),
+    ("migrations/20261024_quick_reply_pdf_digests.sql", {
+        "support_quick_replies": {"attachment_sha256"},
     }),
     ("migrations/20261023_agent_statistics.sql", {
         "support_statistics_metadata": {"activity_tracking_started_at"},
@@ -562,9 +566,9 @@ class SupportRepository(DeliveryRepositoryMixin, ReadSyncRepositoryMixin, Receip
                             (location['latitude'], location['longitude'], location['name'], location['address'], reply_id, int(staff_id)))
                     if attachment:
                         await cur.execute("""UPDATE support_quick_replies
-                            SET attachment_key=%s,attachment_filename=%s,attachment_size=%s
+                            SET attachment_key=%s,attachment_filename=%s,attachment_size=%s,attachment_sha256=%s
                             WHERE id=%s AND staff_id=%s""",
-                            (attachment['attachment_key'],attachment['attachment_filename'],attachment['attachment_size'],reply_id,int(staff_id)))
+                            (attachment['attachment_key'],attachment['attachment_filename'],attachment['attachment_size'],attachment.get('attachment_sha256'),reply_id,int(staff_id)))
                     await cur.execute(
                         f"SELECT {self._QUICK_REPLY_COLUMNS} FROM support_quick_replies WHERE id = %s AND staff_id = %s",
                         (reply_id, int(staff_id)),
@@ -587,6 +591,7 @@ class SupportRepository(DeliveryRepositoryMixin, ReadSyncRepositoryMixin, Receip
             await conn.begin()
             try:
                 async with conn.cursor(aiomysql.DictCursor) as cur:
+                    await cur.execute("SELECT id FROM staff WHERE id=%s FOR UPDATE", (staff_id,))
                     await cur.execute("SELECT attachment_key, location_latitude FROM support_quick_replies WHERE id=%s AND staff_id=%s FOR UPDATE", (reply_id,staff_id))
                     current = await cur.fetchone()
                     if current is None:
@@ -635,6 +640,7 @@ class SupportRepository(DeliveryRepositoryMixin, ReadSyncRepositoryMixin, Receip
             await conn.begin()
             try:
                 async with conn.cursor(aiomysql.DictCursor) as cur:
+                    await cur.execute("SELECT id FROM staff WHERE id=%s FOR UPDATE", (staff_id,))
                     await cur.execute("SELECT attachment_key, location_latitude FROM support_quick_replies WHERE id=%s AND staff_id=%s FOR UPDATE", (reply_id,staff_id))
                     old = await cur.fetchone()
                     if old is None:
@@ -642,9 +648,9 @@ class SupportRepository(DeliveryRepositoryMixin, ReadSyncRepositoryMixin, Receip
                     if old.get("location_latitude") is not None:
                         raise SupportConflictError("A location quick reply cannot be replaced with a PDF.")
                     await cur.execute("""UPDATE support_quick_replies SET title=%s,body=%s,
-                        attachment_key=%s,attachment_filename=%s,attachment_size=%s,updated_at=UTC_TIMESTAMP(6)
+                        attachment_key=%s,attachment_filename=%s,attachment_size=%s,attachment_sha256=%s,updated_at=UTC_TIMESTAMP(6)
                         WHERE id=%s AND staff_id=%s""",
-                        (title,body,attachment['attachment_key'],attachment['attachment_filename'],attachment['attachment_size'],reply_id,staff_id))
+                        (title,body,attachment['attachment_key'],attachment['attachment_filename'],attachment['attachment_size'],attachment.get('attachment_sha256'),reply_id,staff_id))
                     await cur.execute(f"SELECT {self._QUICK_REPLY_COLUMNS} FROM support_quick_replies WHERE id=%s AND staff_id=%s", (reply_id,staff_id))
                     row = await cur.fetchone()
                 await conn.commit()
@@ -660,6 +666,7 @@ class SupportRepository(DeliveryRepositoryMixin, ReadSyncRepositoryMixin, Receip
             await conn.begin()
             try:
                 async with conn.cursor(aiomysql.DictCursor) as cur:
+                    await cur.execute("SELECT id FROM staff WHERE id=%s FOR UPDATE", (staff_id,))
                     await cur.execute("SELECT attachment_key FROM support_quick_replies WHERE id=%s AND staff_id=%s FOR UPDATE", (reply_id,staff_id))
                     row = await cur.fetchone()
                     if row is None:
@@ -682,12 +689,27 @@ class SupportRepository(DeliveryRepositoryMixin, ReadSyncRepositoryMixin, Receip
                     WHERE is_active=1 AND deleted_at IS NULL ORDER BY id""")
                 return list(await cur.fetchall())
 
+    async def unhashed_quick_reply_pdfs(self, recipients: list[int]) -> list[str]:
+        """Internal metadata for legacy files; do disk reads outside transactions."""
+        if self._pool is None:
+            await self.connect()
+        if not recipients:
+            return []
+        async with self._pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                placeholders = ','.join(['%s'] * len(recipients))
+                await cur.execute(f"""SELECT DISTINCT attachment_key FROM support_quick_replies
+                    WHERE staff_id IN ({placeholders}) AND attachment_key IS NOT NULL
+                    AND attachment_sha256 IS NULL""", recipients)
+                return [row['attachment_key'] for row in await cur.fetchall()]
+
     async def create_quick_reply_copies(
         self, actor_id: int, recipients: list[int], *, title: str | None, body: str,
         location: dict | None = None, attachments: dict[int, dict] | None = None,
         source_reply: dict | None = None,
+        legacy_pdf_digests: dict[str, str] | None = None,
     ) -> list[dict[str, Any]]:
-        """All recipients succeed together; use the same staff lock as saves/deletion."""
+        """Skip identical replies atomically; all missing copies succeed together."""
         if self._pool is None:
             await self.connect()
         recipients = sorted(set(recipients))
@@ -714,22 +736,45 @@ class SupportRepository(DeliveryRepositoryMixin, ReadSyncRepositoryMixin, Receip
                             raise SupportNotFoundError("Quick reply not found.")
                         if current != source_reply:
                             raise SupportConflictError("This saved reply changed. Reopen Quick replies and select it again.")
+                    missing = []
                     for staff_id in recipients:
                         target = staff.get(staff_id) or {}
                         if not target.get('is_active') or target.get('deleted_at'):
                             raise SupportConflictError("A selected staff account is no longer active. Refresh the staff selection.")
-                        await cur.execute("SELECT COUNT(*) AS total FROM support_quick_replies WHERE staff_id=%s", (staff_id,))
-                        if int((await cur.fetchone())['total']) >= MAX_QUICK_REPLIES_PER_STAFF:
+                        # Current locking reads see the preceding concurrent commit,
+                        # even under REPEATABLE READ. Every mutation locks staff first.
+                        await cur.execute(f"""SELECT staff_id,attachment_sha256,{self._QUICK_REPLY_COLUMNS}
+                            FROM support_quick_replies WHERE staff_id=%s ORDER BY id FOR UPDATE""", (staff_id,))
+                        existing = list(await cur.fetchall())
+                        for reply in existing:
+                            key = reply.get('attachment_key')
+                            digest = (legacy_pdf_digests or {}).get(key)
+                            if not reply['attachment_sha256'] and digest:
+                                await cur.execute("""UPDATE support_quick_replies SET attachment_sha256=%s
+                                    WHERE id=%s AND staff_id=%s AND attachment_key=%s AND attachment_sha256 IS NULL""",
+                                    (digest, reply['id'], staff_id, key))
+                                reply['attachment_sha256'] = digest
+                        pin = location or {}
+                        candidate = {'title': title, 'body': body, **(attachments or {}).get(staff_id, {}),
+                                     **{f'location_{key}': value for key, value in pin.items()}}
+                        identity = quick_reply_identity(candidate)
+                        duplicate = next((reply for reply in existing if identity is not None
+                                          and quick_reply_identity(reply) == identity), None)
+                        if duplicate is not None:
+                            rows.append({**duplicate, 'already_exists': True})
+                            continue
+                        if len(existing) >= MAX_QUICK_REPLIES_PER_STAFF:
                             raise SupportConflictError(f"Staff account {staff_id} has reached the {MAX_QUICK_REPLIES_PER_STAFF}-reply limit. No copies were added.")
-                    for staff_id in recipients:
+                        missing.append(staff_id)
+                    for staff_id in missing:
                         pdf = (attachments or {}).get(staff_id, {})
                         pin = location or {}
                         await cur.execute("""INSERT INTO support_quick_replies
-                            (staff_id,title,body,attachment_key,attachment_filename,attachment_size,
+                            (staff_id,title,body,attachment_key,attachment_filename,attachment_size,attachment_sha256,
                              location_latitude,location_longitude,location_name,location_address,created_at,updated_at)
-                            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,UTC_TIMESTAMP(6),UTC_TIMESTAMP(6))""",
+                            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,UTC_TIMESTAMP(6),UTC_TIMESTAMP(6))""",
                             (staff_id,title,body,pdf.get('attachment_key'),pdf.get('attachment_filename'),pdf.get('attachment_size'),
-                             pin.get('latitude'),pin.get('longitude'),pin.get('name'),pin.get('address')))
+                             pdf.get('attachment_sha256'),pin.get('latitude'),pin.get('longitude'),pin.get('name'),pin.get('address')))
                         await cur.execute(f"SELECT staff_id,{self._QUICK_REPLY_COLUMNS} FROM support_quick_replies WHERE id=%s AND staff_id=%s",
                                           (cur.lastrowid,staff_id))
                         rows.append(await cur.fetchone())

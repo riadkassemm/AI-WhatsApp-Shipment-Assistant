@@ -38,14 +38,14 @@ const fmt=()=>'12:00',messageOccurredAt=()=>'2026-10-24T12:00:00Z';
 function labelMessageAction(button,action,label){button.dataset.action=action;button.setAttribute('aria-label',label);}
 let replies=[{id:1,title:'Hours',body:'Open daily'}, {id:2,title:'Guide',body:'',attachment_filename:'Guide.pdf'},
   {id:3,title:'Main office',body:'',location:{latitude:33.89,longitude:35.5,name:'Main office',address:'Reception desk'}}];
-let rejectSave=false;
+let rejectSave=false, skippedCount=0;
 async function api(path,options){
   calls.push([path,options]);
   if(path.endsWith('/recipients'))return {items:[{id:7,name:'Staff One',role:'agent'},{id:8,name:'<img src=x> Manager',role:'supervisor'}]};
   if(!options)return {items:replies};
   if(rejectSave)throw Error('Save rejected');
   const fields=options.body instanceof FormData?JSON.parse(options.body.get('assignment')):JSON.parse(options.body);
-  if(path.includes('/assign'))return {saved_count:fields.all_staff?2:fields.recipient_ids.length,item:null};
+  if(path.includes('/assign'))return {saved_count:(fields.all_staff?2:fields.recipient_ids.length)-skippedCount,skipped_count:skippedCount,item:null};
   const saved={id:4,...fields};replies.push(saved);return saved;
 }
 '''
@@ -103,8 +103,9 @@ check($('quickReplyContentFields').classList.contains('hidden')&&$('quickReplySh
 check($('quickReplyRecipients').querySelectorAll('input').length===1&&$('quickReplyRecipients').querySelector('input').value==='7','owner excluded from share targets');
 count=calls.length;await saveQuickReply({preventDefault(){}});check(calls.length===count,'saved reply assignment needs recipients');
 $('quickReplyRecipients').querySelector('input').checked=true;rejectSave=true;await saveQuickReply({preventDefault(){}});
-check(state.quickReplySharing===2&&$('quickReplyRecipients').querySelector('input').checked,'failed share keeps selection');rejectSave=false;
+check(state.quickReplySharing===2&&$('quickReplyRecipients').querySelector('input').checked,'failed share keeps selection');rejectSave=false;skippedCount=1;
 await saveQuickReply({preventDefault(){}});
+check(notifications.at(-1)==='Quick reply added for 0 staff members. 1 already had it and were skipped.','duplicate sharing reports skipped rather than added');skippedCount=0;
 assigned=calls.filter(c=>c[0]==='/api/support/quick-replies/2/assign').at(-1);
 check(JSON.stringify(JSON.parse(assigned[1].body))==='{"recipient_ids":[7],"all_staff":false}','saved share submits only source ID and audience, not file or content');
 check(JSON.stringify(state.quickReplies)===before&&state.quickReplySharing===null,'sharing does not duplicate or edit owner replies');

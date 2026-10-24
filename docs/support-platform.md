@@ -559,20 +559,29 @@ accounts and click **Add to staff**, or choose **All other active staff**. Text,
 PDFs, and locations are copied directly from the saved reply; no retyping or PDF
 upload is needed. This also works for replies saved before this control existed.
 The manager's original is excluded from the recipients and stays unchanged.
-Each use adds new independent copies, so select only staff who need the reply;
-it does not deduplicate earlier assignments or enroll future accounts automatically.
+Sharing skips recipients who already have the same title and content, including
+older copies and concurrent assignments. The result reports added and skipped
+counts. Text compares the message; locations compare coordinates (stored to seven
+decimal places), pin name, and address; PDFs compare filename, caption, and SHA-256
+of the actual file bytes. An edited/renamed copy is distinct and is never overwritten.
+Deleting a copy allows it to be assigned again. Existing duplicate rows are preserved;
+this prevents new copies during distribution, without merging private replies or
+automatically enrolling future accounts. Individual **Only me** saves remain independent.
 Regular agents cannot use this action or its API. The server rechecks source
 ownership and rejects the operation if that reply changed or was deleted during
-copy preparation. No additional migration is needed for this sharing control.
+copy preparation.
 
 ![Add an existing reply to staff, using synthetic examples](screenshots/quick-reply-share.png)
 
-Bulk saves are transactional: all selected recipients succeed together. Staff
-rows are locked in ID order, rechecking manager permissions, recipient status,
-and the 200-reply limit before inserts. If any recipient fails validation, no
+Bulk saves are transactional: all missing copies succeed together. Staff
+rows are locked in ID order, rechecking manager permissions and recipient status.
+Duplicate checks use current locking reads before the 200-reply limit, so an
+account already holding the reply can be skipped even when full. Create/edit/delete
+operations use the same staff-first lock order. If any recipient fails validation, no
 copies are added. PDF copies use separate private files so deleting one cannot
-break another. Unknown commit outcomes retain those files; refresh/check recipient
-lists before manually repeating an ambiguous save. Assignments are not automatically
+break another. Unused prepared PDFs are removed after a confirmed duplicate skip.
+Unknown commit outcomes retain those files; retrying an unchanged distribution
+checks existing copies before inserting, including after a lost commit acknowledgement. Assignments are not automatically
 retried and do not send messages to customers.
 
 Apply `migrations/20261024_quick_reply_locations.sql` to the local application
@@ -580,6 +589,13 @@ database before API startup. It adds four nullable location columns, can be
 reapplied, and requires no new table grants or dependencies. Back up PDFs and the
 database together as before. Older application versions cannot display location
 replies correctly; use the matching application release when rolling back.
+
+Also apply `migrations/20261024_quick_reply_pdf_digests.sql` before deploying.
+It adds a nullable PDF digest column and is safe to reapply. Legacy PDFs are hashed
+on demand outside database transactions during distribution; only matching current
+file keys are cached under the recipient locks. Unavailable legacy files cannot
+prove equality, so a usable incoming PDF is added without deleting the broken entry.
+No external storage calls or customer sends are involved.
 
 ![Locations tab with synthetic example pins](screenshots/quick-reply-locations.png)
 ![Location assignment to selected staff with synthetic examples](screenshots/quick-reply-assignment.png)

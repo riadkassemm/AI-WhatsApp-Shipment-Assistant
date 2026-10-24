@@ -2714,6 +2714,16 @@ class SupportService:
         recipients = sorted(active if all_staff else set(recipient_ids))
         if not recipients or not set(recipients) <= active:
             raise SupportValidationError("Select active staff accounts. Refresh the staff list if an account changed.")
+        legacy_pdf_digests = {}
+        if content is not None:
+            # Old copies have independent random file keys. Compare actual bytes,
+            # not filenames; cache digests only after locking their current rows.
+            for key in await support_repository.unhashed_quick_reply_pdfs(recipients):
+                try:
+                    existing_content = await asyncio.to_thread(quick_reply_media_store.read, key)
+                except SupportMediaError:
+                    continue  # An unavailable PDF is not a usable duplicate.
+                legacy_pdf_digests[key] = hashlib.sha256(existing_content).hexdigest()
         attachments = {}
         try:
             if content is not None:
@@ -2729,15 +2739,21 @@ class SupportService:
         try:
             rows = await support_repository.create_quick_reply_copies(
                 int(agent.id), recipients, title=clean_title, body=clean_body, attachments=attachments,
-                source_reply=source_reply, **extra)
+                source_reply=source_reply, legacy_pdf_digests=legacy_pdf_digests, **extra)
         except (SupportConflictError, SupportNotFoundError):
             for attachment in attachments.values():
                 await self._remove_quick_reply_pdf(attachment['attachment_key'])
             raise
         # Unknown commit outcomes retain files, just like an individual PDF save.
+        used_keys = {row.get('attachment_key') for row in rows}
+        for attachment in attachments.values():
+            if attachment['attachment_key'] not in used_keys:
+                await self._remove_quick_reply_pdf(attachment['attachment_key'])
         own = next((row for row in rows if int(row['staff_id']) == int(agent.id)), None)
-        logger.info("Support quick reply assigned: actor_id=%s recipient_ids=%s count=%s", agent.id, recipients, len(rows))
-        return {"saved_count": len(rows), "item": _quick_reply_payload(own) if own else None}
+        skipped = sum(bool(row.get('already_exists')) for row in rows)
+        saved = len(rows) - skipped
+        logger.info("Support quick reply assigned: actor_id=%s recipient_ids=%s added=%s skipped=%s", agent.id, recipients, saved, skipped)
+        return {"saved_count": saved, "skipped_count": skipped, "item": _quick_reply_payload(own) if own else None}
 
     async def share_quick_reply(
         self, agent: SupportAgent, reply_id: int, *, recipient_ids: list[int], all_staff: bool = False,

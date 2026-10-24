@@ -925,8 +925,11 @@ Each list is private to one staff account, Super Admins and Admins included. The
 To reuse saved replies for newly created accounts, Admins/Super Admins can click
 **Add to staff** beside Edit/Delete, select staff, and confirm. Existing PDFs copy
 without another upload. This uses `POST /api/support/quick-replies/{id}/assign`
-and leaves the manager's original unchanged. Copies remain independent; automatic
-enrollment of future accounts is not enabled.
+and leaves the manager's original unchanged. Recipients who already have the same
+title and content are skipped, including during concurrent sharing; the result
+shows added/skipped counts. Edited copies stay independent. Apply
+`migrations/20261024_quick_reply_pdf_digests.sql` before deploying this check.
+Automatic enrollment of future accounts is not enabled.
 
 Apply the additive migration before deploying this version (the schema guard reports it as missing otherwise):
 

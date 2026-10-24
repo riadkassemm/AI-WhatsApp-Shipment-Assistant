@@ -89,16 +89,16 @@ async def test_assignment_roles_csrf_selection_and_private_copies(infrastructure
         assert (await client.post(path+'/assign', json=request)).status_code == 403
         client.headers['X-CSRF-Token'] = 'csrf'
         assert {row['id'] for row in (await client.get(path+'/recipients')).json()['items']} == {7,8}
-        for role in ('supervisor', 'admin'):
+        for index, role in enumerate(('supervisor', 'admin')):
             await sql('UPDATE staff SET role=%s WHERE id=8', (role,))
             response = await client.post(path+'/assign', json=request)
             assert response.status_code == 201, response.text
-            assert response.json() == {'saved_count':1,'item':None}
+            assert response.json() == {'saved_count':1-index,'skipped_count':index,'item':None}
         assert (await client.get(path)).json() == {'items':[]}
         # Both manager roles may add copies, without reading recipients' private lists.
         client.cookies.set(settings.support_cookie_name, 'token-7')
         rows = (await client.get(path)).json()['items']
-        assert len(rows) == 2 and all(row['location'] == PIN for row in rows)
+        assert len(rows) == 1 and rows[0]['location'] == PIN
         assert (await client.put(path+'/'+str(rows[0]['id']), json={'title':'My pin','location':PIN})).status_code == 200
         client.cookies.set(settings.support_cookie_name, 'token-8')
         for invalid in ({}, {'recipient_ids':[999]}, {'recipient_ids':[7], 'all_staff':True}):
@@ -162,19 +162,23 @@ async def test_deactivation_or_manager_demotion_before_assignment_rolls_back(inf
 
 
 @pytest.mark.asyncio
-async def test_concurrent_assignments_respect_per_staff_limit(infrastructure, monkeypatch):
+@pytest.mark.parametrize('identical', [True, False])
+async def test_concurrent_assignments_deduplicate_and_respect_limit(infrastructure, monkeypatch, identical):
     repo, sql, _ = infrastructure
     import app.support_repository as repository_module
     monkeypatch.setattr(repository_module, 'MAX_QUICK_REPLIES_PER_STAFF', 1)
     start = asyncio.Event()
-    async def save():
+    async def save(title):
         await start.wait()
-        return await service.support_service.assign_quick_reply(MANAGER,title='Office',body='',location=PIN,recipient_ids=[8,7,7])
-    first, second = asyncio.create_task(save()), asyncio.create_task(save())
+        return await service.support_service.assign_quick_reply(MANAGER,title=title,body='',location=PIN,recipient_ids=[8,7,7])
+    first, second = asyncio.create_task(save('Office')), asyncio.create_task(save('Office' if identical else 'Another office'))
     start.set()
     results = await asyncio.gather(first, second, return_exceptions=True)
-    assert sum(isinstance(result, dict) for result in results) == 1
-    assert sum(isinstance(result, SupportConflictError) for result in results) == 1
+    assert sum(isinstance(result, dict) for result in results) == (2 if identical else 1)
+    assert sum(isinstance(result, SupportConflictError) for result in results) == (0 if identical else 1)
+    if identical:
+        assert sorted(result['saved_count'] for result in results) == [0,2]
+        assert sorted(result['skipped_count'] for result in results) == [0,2]
     assert len(await sql('SELECT * FROM support_quick_replies')) == 2
 
 
@@ -195,6 +199,10 @@ async def test_ambiguous_batch_commit_retains_each_referenced_pdf(infrastructure
         owner = AGENT if row['staff_id'] == 7 else MANAGER
         assert (await service.support_service.get_quick_reply_pdf(owner,row['id']))[0] == PDF
     assert len(list((tmp_path/'quick-replies').glob('*.pdf'))) == 2
+    monkeypatch.setattr(repo, 'create_quick_reply_copies', original)
+    retried = await service.support_service.assign_quick_reply(MANAGER,title='Guide',body='',recipient_ids=[7,8],content=PDF,filename='Guide.pdf')
+    assert retried['saved_count'] == 0 and retried['skipped_count'] == 2
+    assert len(list((tmp_path/'quick-replies').glob('*.pdf'))) == 2
 
 
 @pytest.mark.asyncio
@@ -212,7 +220,7 @@ async def test_reuse_existing_text_pdf_and_location_for_fresh_staff(infrastructu
         for source in (text,pin,pdf):
             response = await client.post(f"/api/support/quick-replies/{source['id']}/assign",json={'recipient_ids':[new_id]})
             assert response.status_code == 201, response.text
-            assert response.json() == {'saved_count':1,'item':None}
+            assert response.json() == {'saved_count':1,'skipped_count':0,'item':None}
         copies = await repo.list_quick_replies(new_id)
         assert len(copies) == 3
         assert len(await repo.list_quick_replies(8)) == 3
@@ -244,10 +252,11 @@ async def test_share_existing_authorization_csrf_scope_and_all_excludes_owner(in
         client.cookies.set(settings.support_cookie_name,'token-7')
         assert (await client.post(url,json={'recipient_ids':[7]})).status_code == 403
         client.cookies.set(settings.support_cookie_name,'token-8')
-        for role in ('supervisor','admin'):
+        for index, role in enumerate(('supervisor','admin')):
             await sql('UPDATE staff SET role=%s WHERE id=8',(role,))
             response = await client.post(url,json={'all_staff':True})
-            assert response.status_code == 201 and response.json()['saved_count'] == 1
+            assert response.status_code == 201 and response.json()['saved_count'] == 1-index
+            assert response.json()['skipped_count'] == index
         assert len(await repo.list_quick_replies(8)) == 1, 'All excludes the source owner'
 
 
@@ -275,3 +284,86 @@ async def test_share_source_change_rejects_stale_copies_and_cleans_files(infrast
         await task
     assert not await repo.list_quick_replies(7)
     assert len(list((tmp_path/'quick-replies').glob('*.pdf'))) == (1 if change == 'edit' else 0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('kind', ['text', 'location', 'pdf'])
+async def test_existing_copies_are_skipped_even_at_capacity(infrastructure, monkeypatch, tmp_path, kind):
+    repo, sql, _ = infrastructure
+    monkeypatch.setattr(settings, 'support_media_directory', str(tmp_path))
+    args = {'title': 'Shared reply', 'body': 'Hello' if kind == 'text' else ''}
+    if kind == 'location':
+        args['location'] = {**PIN, 'latitude': 33.89123456}
+    if kind == 'pdf':
+        args.update(content=PDF, filename='Guide.pdf')
+    assigned = await service.support_service.assign_quick_reply(MANAGER, **args, all_staff=True, recipient_ids=[])
+    source = assigned['item']
+    # Simulate pre-migration copies: random file keys and no stored digest.
+    await sql('UPDATE support_quick_replies SET attachment_sha256=NULL')
+    before = await sql('SELECT id,staff_id,title,body,attachment_key,updated_at FROM support_quick_replies ORDER BY id')
+    import app.support_repository as repository_module
+    monkeypatch.setattr(repository_module, 'MAX_QUICK_REPLIES_PER_STAFF', 1)
+    result = await service.support_service.share_quick_reply(MANAGER, source['id'], recipient_ids=[7,7])
+    assert result == {'saved_count':0, 'skipped_count':1, 'item':None}
+    assert await sql('SELECT id,staff_id,title,body,attachment_key,updated_at FROM support_quick_replies ORDER BY id') == before
+    # All-staff distribution safely skips old accounts while adding a new one.
+    new_id = await auth.staff_repository.create_staff(name='New',email='new@example.test',email_normalized='new@example.test',password_hash='unused',role='agent')
+    result = await service.support_service.share_quick_reply(MANAGER, source['id'], all_staff=True, recipient_ids=[])
+    assert result == {'saved_count':1, 'skipped_count':1, 'item':None}
+    assert len(await repo.list_quick_replies(new_id)) == 1
+    assert len(list((tmp_path/'quick-replies').glob('*.pdf'))) == (3 if kind == 'pdf' else 0)
+    await sql(Path('migrations/20261024_quick_reply_pdf_digests.sql').read_text())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('kind', ['text', 'location', 'pdf'])
+async def test_concurrent_shares_add_only_one_copy_and_cleanup_files(infrastructure, monkeypatch, tmp_path, kind):
+    repo, sql, _ = infrastructure
+    monkeypatch.setattr(settings, 'support_media_directory', str(tmp_path))
+    if kind == 'pdf':
+        source = await service.support_service.save_quick_reply_pdf(MANAGER,title='Guide',body='',content=PDF,filename='Guide.pdf')
+    else:
+        source = await service.support_service.create_quick_reply(MANAGER,title='Reply',body='Hello' if kind == 'text' else '',location=PIN if kind == 'location' else None)
+    original = repo.create_quick_reply_copies
+    both_prepared = asyncio.Event()
+    prepared_count = 0
+    async def prepared(*args, **kwargs):
+        nonlocal prepared_count
+        # Both requests finish preparing files/legacy fingerprints before either
+        # starts the serialized DB decision. No timing-dependent sleeps.
+        prepared_count += 1
+        if prepared_count == 2:
+            both_prepared.set()
+        await asyncio.wait_for(both_prepared.wait(), 5)
+        return await original(*args, **kwargs)
+    monkeypatch.setattr(repo, 'create_quick_reply_copies', prepared)
+    async def share():
+        return await service.support_service.share_quick_reply(MANAGER, source['id'], recipient_ids=[7])
+    results = await asyncio.wait_for(asyncio.gather(share(), share()), 10)
+    assert sorted(result['saved_count'] for result in results) == [0,1]
+    assert sorted(result['skipped_count'] for result in results) == [0,1]
+    assert len(await repo.list_quick_replies(7)) == 1
+    assert len(list((tmp_path/'quick-replies').glob('*.pdf'))) == (2 if kind == 'pdf' else 0)
+
+
+@pytest.mark.asyncio
+async def test_pdf_equality_uses_bytes_and_preserves_customized_copies(infrastructure, monkeypatch, tmp_path):
+    repo, sql, _ = infrastructure
+    monkeypatch.setattr(settings, 'support_media_directory', str(tmp_path))
+    source = await service.support_service.save_quick_reply_pdf(MANAGER,title='Guide',body='',content=PDF,filename='Guide.pdf')
+    personal = await service.support_service.save_quick_reply_pdf(AGENT,title='Guide',body='',content=PDF+b'%different',filename='Guide.pdf')
+    await sql('UPDATE support_quick_replies SET attachment_sha256=NULL')
+    result = await service.support_service.share_quick_reply(MANAGER,source['id'],recipient_ids=[7])
+    assert result['saved_count'] == 1 and result['skipped_count'] == 0
+    assert (await service.support_service.get_quick_reply_pdf(AGENT,personal['id']))[0] == PDF+b'%different'
+    copy = next(row for row in await repo.list_quick_replies(7) if row['id'] != personal['id'])
+    # Delete permits a subsequent assignment; renaming/customizing does not get overwritten.
+    await service.support_service.delete_quick_reply(AGENT,copy['id'])
+    result = await service.support_service.share_quick_reply(MANAGER,source['id'],recipient_ids=[7])
+    assert result['saved_count'] == 1
+    copy = next(row for row in await repo.list_quick_replies(7) if row['id'] != personal['id'])
+    await service.support_service.update_quick_reply(AGENT,copy['id'],title='Personal guide',body='My caption')
+    result = await service.support_service.share_quick_reply(MANAGER,source['id'],recipient_ids=[7])
+    assert result['saved_count'] == 1
+    assert (await repo.get_quick_reply(7,copy['id']))['title'] == 'Personal guide'
+    assert len(list((tmp_path/'quick-replies').glob('*.pdf'))) == 4

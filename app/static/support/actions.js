@@ -116,6 +116,13 @@ function quickReplyKind(reply) {
   return reply?.location ? 'location' : reply?.attachment_filename ? 'pdf' : 'text';
 }
 
+function quickReplyAssignmentNotice(result) {
+  const added = Number(result.saved_count || 0);
+  const skipped = Number(result.skipped_count || 0);
+  return 'Quick reply added for ' + added + ' staff members.' +
+    (skipped ? ' ' + skipped + ' already had it and were skipped.' : '');
+}
+
 function canAssignQuickReplies() {
   return ['admin', 'supervisor'].includes(state.agent?.role);
 }
@@ -401,7 +408,7 @@ async function showQuickReplyAssignment(reply) {
   $('quickReplyAudienceMe').disabled = true;
   $('quickReplyAudience').value = 'selected';
   text($('quickReplyAudienceAll'), 'All other active staff');
-  text($('quickReplyAudienceHint'), 'Adds an independent copy for each recipient. Select new staff to avoid adding another copy for someone who already has it. Your saved reply stays unchanged.');
+  text($('quickReplyAudienceHint'), 'Staff who already have the same title and content are skipped. Your saved reply stays unchanged.');
   text($('saveQuickReplyBtn'), 'Add to staff');
   $('quickReplyAudience').focus();
   await updateQuickReplyAudience();
@@ -423,7 +430,7 @@ async function shareSavedQuickReply() {
       method: 'POST', body: JSON.stringify({recipient_ids: recipients, all_staff: all})
     });
     if (!state.authenticated || request !== state.quickRepliesRequest) return;
-    notify('Quick reply added for ' + result.saved_count + ' staff members.');
+    notify(quickReplyAssignmentNotice(result));
     succeeded = true;
   } catch (error) {
     if (request === state.quickRepliesRequest) showQuickRepliesError(error.message);
@@ -553,7 +560,7 @@ async function saveQuickReply(event) {
       state.quickReplyEditing = saved.id;
       state.quickReplyTab = quickReplyKind(saved);
     }
-    notify(audience !== 'me' ? 'Quick reply saved for ' + result.saved_count + ' staff members.' : editing === 'new' ? 'Quick reply saved.' : 'Quick reply updated.');
+    notify(audience !== 'me' ? quickReplyAssignmentNotice(result) : editing === 'new' ? 'Quick reply saved.' : 'Quick reply updated.');
   } catch (error) {
     if (request === state.quickRepliesRequest) showQuickRepliesError(error.message);
     return;

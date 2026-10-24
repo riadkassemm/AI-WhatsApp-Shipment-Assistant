@@ -1,4 +1,5 @@
 """Immutable PDF files for owner-scoped quick replies, outside the public web root."""
+import hashlib
 import os
 import re
 import uuid
@@ -34,7 +35,8 @@ class QuickReplyMediaStore:
         except BaseException:
             path.unlink(missing_ok=True)
             raise
-        return {'attachment_key': key, 'attachment_filename': name, 'attachment_size': len(content)}
+        return {'attachment_key': key, 'attachment_filename': name, 'attachment_size': len(content),
+                'attachment_sha256': hashlib.sha256(content).hexdigest()}
 
     def read(self, key: str) -> bytes:
         try:
