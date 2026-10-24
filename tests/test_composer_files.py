@@ -70,7 +70,7 @@ state.ticketId=42;openDialog('quickRepliesModal');task=attachQuickReplyPdf(saved
 check(state.pendingMedia.kind==='document'&&message.value===saved.body,'saved PDF and caption populate composer');
 check(!state.activeModal&&!calls.length,'PDF is previewed, not sent automatically');
 clearMediaDraft();message.value='';
-showQuickReplyForm(null);$('quickReplyPdf').files=transfer([pdf]).files;updateQuickReplyCount();
+state.quickReplyTab='pdf';showQuickReplyForm(null);$('quickReplyPdf').files=transfer([pdf]).files;updateQuickReplyCount();
 check($('quickReplyBody').maxLength===1024,'PDF caption limit');
 $('quickReplyTitle').value='Shipping guide';$('quickReplyBody').value='';await saveQuickReply({preventDefault(){}});
 check(calls.length===1&&calls[0][0]==='/api/support/quick-replies/pdf','PDF save uses upload API');

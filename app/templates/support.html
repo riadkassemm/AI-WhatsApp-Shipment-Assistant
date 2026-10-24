@@ -462,12 +462,18 @@ __SUPPORT_STYLE__
 <section class="modal-backdrop hidden" id="quickRepliesModal" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="quickRepliesTitle" aria-describedby="quickRepliesSubtitle">
   <div class="modal-card quick-replies-card" role="document" tabindex="-1">
     <div class="modal-head">
-      <div><h2 id="quickRepliesTitle">Quick replies</h2><div class="modal-subtitle" id="quickRepliesSubtitle">Copy a saved message or attach a saved PDF to the chat. Only you can see your quick replies.</div></div>
+      <div><h2 id="quickRepliesTitle">Quick replies</h2><div class="modal-subtitle" id="quickRepliesSubtitle">Copy text, attach a PDF, or preview a saved location. Only you can see your quick replies.</div></div>
       <button class="icon-btn modal-close" id="closeQuickRepliesBtn" type="button" aria-label="Close quick replies"><svg class="icon" aria-hidden="true"><use href="#icon-x"></use></svg></button>
     </div>
     <div class="modal-body">
       <div class="staff-feedback error-box" id="quickRepliesError" role="alert" aria-live="assertive"></div>
       <div id="quickRepliesListView">
+        <div class="quick-reply-tabs" role="tablist" aria-label="Quick reply types">
+          <button id="quickReplyTabText" class="btn active" type="button" role="tab" aria-selected="true" aria-controls="quickRepliesPanel">Text</button>
+          <button id="quickReplyTabPdf" class="btn" type="button" role="tab" aria-selected="false" aria-controls="quickRepliesPanel" tabindex="-1">PDF</button>
+          <button id="quickReplyTabLocation" class="btn" type="button" role="tab" aria-selected="false" aria-controls="quickRepliesPanel" tabindex="-1">Locations</button>
+        </div>
+        <div id="quickRepliesPanel" role="tabpanel" aria-labelledby="quickReplyTabText">
         <div class="quick-replies-toolbar">
           <div class="search-field">
             <svg class="icon" aria-hidden="true"><use href="#icon-search"></use></svg>
@@ -477,22 +483,44 @@ __SUPPORT_STYLE__
           <button class="btn primary" id="addQuickReplyBtn" type="button"><svg class="icon" aria-hidden="true"><use href="#icon-plus"></use></svg>New reply</button>
         </div>
         <div class="quick-reply-list" id="quickRepliesList" role="list" aria-label="Your quick replies" aria-busy="false"></div>
+        </div>
       </div>
       <form class="hidden" id="quickReplyForm" novalidate>
         <div class="field">
-          <label for="quickReplyTitle">Title <span class="field-optional">(optional)</span></label>
+          <label id="quickReplyTitleLabel" for="quickReplyTitle">Title (optional)</label>
           <input id="quickReplyTitle" type="text" maxlength="80" autocomplete="off" placeholder="For example: Delivery times" />
         </div>
-        <div class="field">
+        <div class="field" id="quickReplyBodyField">
           <label for="quickReplyBody">Message / PDF caption</label>
           <textarea id="quickReplyBody" class="message-preference-textarea" rows="5" maxlength="4096" dir="auto"></textarea>
           <div class="field-hint message-preference-hint"><span id="quickReplyBodyHint">Copied exactly as written.</span><span id="quickReplyBodyCount">0 / 4096</span></div>
         </div>
-        <div class="field">
-          <label for="quickReplyPdf">PDF file <span class="field-optional">(optional)</span></label>
+        <div class="field" id="quickReplyPdfField">
+          <label for="quickReplyPdf">PDF file</label>
           <input id="quickReplyPdf" type="file" accept="application/pdf,.pdf" />
           <div class="field-hint" id="quickReplyPdfHint">Save a PDF to attach it to future replies. A caption is optional.</div>
         </div>
+        <div id="quickReplyLocationFields" class="hidden">
+          <div class="field">
+            <label for="quickReplyMapsUrl">Google Maps pin link or coordinates (optional)</label>
+            <input id="quickReplyMapsUrl" type="text" maxlength="2048" placeholder="https://www.google.com/maps?q=33.89,35.50" />
+            <div class="field-hint">Paste a full pin link or “latitude, longitude”, or enter both coordinates below. Open shortened links first. Links containing only a place name or map view need coordinates.</div>
+          </div>
+          <div class="location-grid">
+            <div class="field"><label for="quickReplyLatitude">Latitude</label><input id="quickReplyLatitude" type="number" step="any" min="-90" max="90" placeholder="33.89" /></div>
+            <div class="field"><label for="quickReplyLongitude">Longitude</label><input id="quickReplyLongitude" type="number" step="any" min="-180" max="180" placeholder="35.50" /></div>
+          </div>
+          <div class="field"><label for="quickReplyAddress">Address (optional)</label><input id="quickReplyAddress" type="text" maxlength="1000" /></div>
+        </div>
+        <fieldset id="quickReplyAssignment" class="quick-reply-assignment hidden">
+          <legend>Save for</legend>
+          <div class="field">
+          <label for="quickReplyAudience" class="sr-only">Recipients</label>
+          <select id="quickReplyAudience"><option value="me">Only me</option><option value="selected">Selected staff</option><option value="all">All active staff</option></select>
+          </div>
+          <div id="quickReplyRecipients" class="quick-reply-recipients hidden" role="group" aria-label="Select staff"></div>
+          <div class="field-hint">Each recipient gets their own copy to edit or delete. All active staff includes you; new accounts added later are not included.</div>
+        </fieldset>
         <div class="modal-actions"><button class="btn" id="cancelQuickReplyBtn" type="button">Cancel</button><button class="btn primary" id="saveQuickReplyBtn" type="submit"><svg class="icon" aria-hidden="true"><use href="#icon-check"></use></svg>Save reply</button></div>
       </form>
     </div>

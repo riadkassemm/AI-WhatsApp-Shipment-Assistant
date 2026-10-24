@@ -16,8 +16,10 @@ Outbound sends now use database delivery claims. Uncertain outcomes are blocked
 from resend; a provider timeout does not mean the customer did not receive it.
 
 Staff can drag supported attachments onto the chatbox or paste an image, review its preview,
-and click **Send**. **Quick replies** can also save private PDFs with optional captions
-for reuse. See [attachments and PDF quick replies](docs/support-platform.md#droppedpasted-attachments-and-pdf-quick-replies).
+and click **Send**. **Quick replies** has Text, PDF, and Locations tabs. Save named
+locations from chat messages or coordinates, then preview before sending. Admins
+and Super Admins can add independent reply copies for selected staff or all active
+staff. See [attachments and PDF quick replies](docs/support-platform.md#droppedpasted-attachments-and-pdf-quick-replies).
 
 Admins and supervisors can open **Statistics** for staff activity, ticket claims/resolutions,
 confirmed outbound sends, date/agent filters and a sortable team leaderboard.
@@ -916,9 +918,9 @@ The reset does not change previously sent messages or ticket history. If the pre
 
 ## Quick replies
 
-The **Quick replies** button (lightning icon) in the reply composer opens the signed-in staff member's saved messages. Selecting one copies it to the clipboard so it can be pasted into the chat; the dialog can also search, add, edit, and delete replies. Quick replies are never sent automatically.
+The **Quick replies** button (lightning icon) opens **Text**, **PDF**, and **Locations** tabs. Text copies to the clipboard; PDFs and locations open a preview before sending. Save a chat location with its pin action, or choose Locations → New reply and enter coordinates/a supported Google Maps pin link. Admins and Super Admins can create copies for selected staff or all active staff. Each recipient owns their copy; changes do not propagate. Quick replies are never sent automatically. See [saved locations and staff assignment](docs/support-platform.md#quick-reply-tabs-saved-locations-and-staff-assignment) for permissions, map-link limits, and migration `20261024_quick_reply_locations.sql`.
 
-Each list is private to one staff account, Supervisors and Admins included. The routes are `GET/POST /api/support/quick-replies` and `PUT/DELETE /api/support/quick-replies/{id}`. They always use the session's staff ID, and every query is filtered by `staff_id`, so another account's reply returns `404`. A reply has an optional title (up to 80 characters) and a message (up to 4096 characters). Each account can keep up to 200 replies. Replies are stored in MariaDB, so they follow the staff member across sessions and devices, and the dashboard forgets the list on sign-out.
+Each list is private to one staff account, Super Admins and Admins included. The owner routes are `GET/POST /api/support/quick-replies` and `PUT/DELETE /api/support/quick-replies/{id}`; another account's reply returns `404`. Manager-only `POST /api/support/quick-replies/assign` (or `/assign/pdf` for uploads) adds new copies for selected recipients without revealing their existing replies. Text replies have an optional title (up to 80 characters) and a message (up to 4096 characters); locations require a name and valid coordinates. Each account can keep up to 200 replies. Replies are stored in MariaDB, so they follow the staff member across sessions and devices, and the dashboard forgets the list on sign-out.
 
 Apply the additive migration before deploying this version (the schema guard reports it as missing otherwise):
 

@@ -497,15 +497,16 @@ videos and PDFs, using the configured media size limits. Unsupported/empty files
 multiple-file drops, read-only conversations, message editing and active voice
 recordings are rejected. Dropping over an existing attachment does not replace it.
 
-In **Quick replies → New reply**, choose an optional **PDF file**. A saved PDF can
+In **Quick replies → PDF → New reply**, choose a **PDF file**. A saved PDF can
 have a title and a caption (up to 1024 characters); its caption may be empty.
 Select **Attach PDF** to load it into the current writable conversation, review
 the preview, then send normally. Send or clear an existing draft first. Text-only
 quick replies continue to copy their message. Search also matches PDF filenames.
 Edit to change the title/caption or replace the PDF; Delete removes the saved
 reply and its private file. Already-sent conversation attachments are independent.
-All saved replies remain private to their owner, including against admins and
-supervisors. Each PDF counts toward the existing 200-reply limit per staff member.
+All saved replies remain private to their owner. Admins and Super Admins can add
+copies for recipients as described below, without reading their existing replies.
+Each PDF counts toward the existing 200-reply limit per staff member.
 
 Apply `migrations/20261023_quick_reply_pdfs.sql` to the local application database
 before deploying. It adds three nullable metadata columns to `support_quick_replies`
@@ -519,6 +520,55 @@ a successfully saved PDF. Such failures/crashes can leave unreferenced files: du
 maintenance with uploads stopped, compare filenames against `attachment_key` before
 removing unreferenced files; never remove referenced files by age alone. Refresh the
 quick-reply list after a failed save before saving another copy.
+
+### Quick reply tabs, saved locations, and staff assignment
+
+**Quick replies** has **Text**, **PDF**, and **Locations** tabs. Search filters the
+selected tab by title, message, PDF filename, or location address/coordinates.
+Choose a tab before **New reply**. Existing text/PDF replies keep their content
+and ownership; they appear in the appropriate tab automatically.
+
+On a visible location message in a chat, ticket, or shared history, choose the
+pin-shaped **Save location to quick replies** action. Give it a name, adjust the
+coordinates/address if needed, and save. Deleted messages have no save action.
+Alternatively, create a location in the Locations tab using latitude/longitude
+or a Google Maps pin URL containing coordinates. Coordinates `(0, 0)` are valid.
+Short links must be opened in Google Maps first; copy the expanded pin URL or the
+coordinates. Place-name searches, directions, and viewport-only URLs are rejected
+instead of guessing the pin. URLs are parsed locally, never fetched; no Maps API
+key or geocoding service is needed. Supported coordinate search links follow
+[Google's Maps URL format](https://developers.google.com/maps/documentation/urls/get-started).
+
+Selecting a saved location opens the existing **Send location** preview. Staff
+must click Send; saving or previewing never sends to WhatsApp. Existing ticket
+permissions and delivery ownership still apply. A staff member may save a visible
+historical pin without acquiring permission to send in that conversation.
+
+When creating any quick reply, Admins and Super Admins can choose **Only me**,
+**Selected staff** (checkboxes), or **All active staff**. Both management roles
+can assign to any active staff account, including each other. All includes the
+creator and the active accounts found when the request starts; future accounts
+are not automatically included. Each recipient receives an independent copy and
+can edit/delete it privately. Later edits do not propagate between copies.
+Recipients see new copies when opening Quick replies again. Existing private
+replies are never exposed to the assigning manager.
+
+Bulk saves are transactional: all selected recipients succeed together. Staff
+rows are locked in ID order, rechecking manager permissions, recipient status,
+and the 200-reply limit before inserts. If any recipient fails validation, no
+copies are added. PDF copies use separate private files so deleting one cannot
+break another. Unknown commit outcomes retain those files; refresh/check recipient
+lists before manually repeating an ambiguous save. Assignments are not automatically
+retried and do not send messages to customers.
+
+Apply `migrations/20261024_quick_reply_locations.sql` to the local application
+database before API startup. It adds four nullable location columns, can be
+reapplied, and requires no new table grants or dependencies. Back up PDFs and the
+database together as before. Older application versions cannot display location
+replies correctly; use the matching application release when rolling back.
+
+![Locations tab with synthetic example pins](screenshots/quick-reply-locations.png)
+![Location assignment to selected staff with synthetic examples](screenshots/quick-reply-assignment.png)
 
 The ticket action and confirmation button now say **Resolve**. Resolution behavior
 (including returning the customer to AI) is unchanged.

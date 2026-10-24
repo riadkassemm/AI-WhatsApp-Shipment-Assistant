@@ -1453,3 +1453,16 @@ body.column-resizing * { cursor: col-resize !important; }
 
 .voice-playback { color: #89949e; }
 .voice-playback.confirmed-played { color: #168bd2; }
+
+/* Quick reply categories and manager distribution. */
+.quick-reply-tabs { display: flex; gap: 6px; margin-bottom: 14px; border-bottom: 1px solid var(--border); padding-bottom: 10px; }
+.quick-reply-tabs .active { color: var(--primary-text); background: var(--primary-soft); border-color: var(--primary); }
+.quick-reply-assignment { margin: 14px 0 0; padding: 12px; border: 1px solid var(--border); border-radius: var(--radius-md); min-width: 0; }
+.quick-reply-assignment legend { padding: 0 6px; font-weight: 600; }
+.quick-reply-assignment select { width: 100%; }
+.quick-reply-recipients { max-height: 180px; overflow-y: auto; margin-top: 10px; }
+.quick-reply-recipient { display: flex; gap: 10px; align-items: center; padding: 7px 3px; cursor: pointer; }
+.quick-reply-recipient input { flex: 0 0 auto; width: auto; }
+.quick-reply-recipient span { overflow-wrap: anywhere; }
+
+.message-action-btn[data-action="save-location"] { --glyph: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 21s6-5.3 6-11a6 6 0 1 0-12 0c0 5.7 6 11 6 11Z'/%3E%3Ccircle cx='12' cy='10' r='2'/%3E%3C/svg%3E"); }

@@ -347,6 +347,9 @@ def test_quick_reply_routes_require_session_and_csrf_for_changes() -> None:
         ("PUT", "/api/support/quick-replies/{reply_id}"),
         ("DELETE", "/api/support/quick-replies/{reply_id}"),
         ("POST", "/api/support/quick-replies/pdf"),
+        ("GET", "/api/support/quick-replies/recipients"),
+        ("POST", "/api/support/quick-replies/assign"),
+        ("POST", "/api/support/quick-replies/assign/pdf"),
         ("PUT", "/api/support/quick-replies/{reply_id}/pdf"),
         ("GET", "/api/support/quick-replies/{reply_id}/pdf"),
     }
@@ -377,7 +380,7 @@ class Element {
     this.tagName = tag; this.children = []; this.attributes = {}; this.dataset = {}; this.listeners = {};
     this.className = ''; this.value = ''; this.style = {}; this._text = '';
     const classes = new Set();
-    this.classList = {add: name => classes.add(name), remove: name => classes.delete(name), contains: name => classes.has(name)};
+    this.classList = {toggle: (name, force) => force ? classes.add(name) : classes.delete(name), add: name => classes.add(name), remove: name => classes.delete(name), contains: name => classes.has(name)};
   }
   get textContent() { return this._text + this.children.map(child => child.textContent).join(''); }
   set textContent(value) { this._text = String(value); this.children = []; }

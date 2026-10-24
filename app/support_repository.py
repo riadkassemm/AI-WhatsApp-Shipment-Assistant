@@ -236,6 +236,9 @@ _SUPPORT_SCHEMA_MIGRATIONS: tuple[tuple[str, dict[str, set[str]]], ...] = (
     ("migrations/20261023_quick_reply_pdfs.sql", {
         "support_quick_replies": {"attachment_key", "attachment_filename", "attachment_size"},
     }),
+    ("migrations/20261024_quick_reply_locations.sql", {
+        "support_quick_replies": {"location_latitude", "location_longitude", "location_name", "location_address"},
+    }),
     ("migrations/20261023_agent_statistics.sql", {
         "support_statistics_metadata": {"activity_tracking_started_at"},
         "support_agent_heartbeats": {"staff_id", "session_id", "tab_id", "sequence_number", "last_seen_at", "active_until"},
@@ -501,7 +504,7 @@ class SupportRepository(DeliveryRepositoryMixin, ReadSyncRepositoryMixin, Receip
 
     # Quick replies are private to one staff account. Every query is scoped by
     # staff_id, so another account's reply behaves exactly like a missing one.
-    _QUICK_REPLY_COLUMNS = "id, title, body, created_at, updated_at, attachment_key, attachment_filename, attachment_size"
+    _QUICK_REPLY_COLUMNS = "id, title, body, created_at, updated_at, attachment_key, attachment_filename, attachment_size, location_latitude, location_longitude, location_name, location_address"
 
     async def list_quick_replies(self, staff_id: int) -> list[dict[str, Any]]:
         if self._pool is None:
@@ -520,7 +523,7 @@ class SupportRepository(DeliveryRepositoryMixin, ReadSyncRepositoryMixin, Receip
                 )
                 return list(await cur.fetchall())
 
-    async def create_quick_reply(self, staff_id: int, *, title: str | None, body: str, attachment: dict | None = None) -> dict[str, Any]:
+    async def create_quick_reply(self, staff_id: int, *, title: str | None, body: str, attachment: dict | None = None, location: dict | None = None) -> dict[str, Any]:
         if self._pool is None:
             await self.connect()
         assert self._pool is not None
@@ -552,6 +555,11 @@ class SupportRepository(DeliveryRepositoryMixin, ReadSyncRepositoryMixin, Receip
                         (int(staff_id), title, body),
                     )
                     reply_id = int(cur.lastrowid)
+                    if location:
+                        await cur.execute("""UPDATE support_quick_replies
+                            SET location_latitude=%s,location_longitude=%s,location_name=%s,location_address=%s
+                            WHERE id=%s AND staff_id=%s""",
+                            (location['latitude'], location['longitude'], location['name'], location['address'], reply_id, int(staff_id)))
                     if attachment:
                         await cur.execute("""UPDATE support_quick_replies
                             SET attachment_key=%s,attachment_filename=%s,attachment_size=%s
@@ -571,7 +579,7 @@ class SupportRepository(DeliveryRepositoryMixin, ReadSyncRepositoryMixin, Receip
         return row
 
     async def update_quick_reply(
-        self, staff_id: int, reply_id: int, *, title: str | None, body: str
+        self, staff_id: int, reply_id: int, *, title: str | None, body: str, location: dict | None = None
     ) -> dict[str, Any]:
         if self._pool is None:
             await self.connect()
@@ -579,13 +587,21 @@ class SupportRepository(DeliveryRepositoryMixin, ReadSyncRepositoryMixin, Receip
             await conn.begin()
             try:
                 async with conn.cursor(aiomysql.DictCursor) as cur:
-                    await cur.execute("SELECT attachment_key FROM support_quick_replies WHERE id=%s AND staff_id=%s FOR UPDATE", (reply_id,staff_id))
+                    await cur.execute("SELECT attachment_key, location_latitude FROM support_quick_replies WHERE id=%s AND staff_id=%s FOR UPDATE", (reply_id,staff_id))
                     current = await cur.fetchone()
                     if current is None:
                         raise SupportNotFoundError("Quick reply not found.")
+                    is_location = current.get('location_latitude') is not None
+                    if is_location != (location is not None):
+                        raise SupportConflictError("The quick reply type changed. Close the editor and open it again.")
+                    if location:
+                        await cur.execute("""UPDATE support_quick_replies
+                            SET location_latitude=%s,location_longitude=%s,location_name=%s,location_address=%s
+                            WHERE id=%s AND staff_id=%s""",
+                            (location['latitude'], location['longitude'], location['name'], location['address'], reply_id, staff_id))
                     if current.get('attachment_key') and len(body) > 1024:
                         raise SupportConflictError("This reply now contains a PDF. Limit its caption to 1024 characters.")
-                    if not current.get('attachment_key') and not body.strip():
+                    if not current.get('attachment_key') and not is_location and not body.strip():
                         raise SupportConflictError("A text quick reply needs a message.")
                     await cur.execute("""UPDATE support_quick_replies
                         SET title = %s, body = %s, updated_at = UTC_TIMESTAMP(6)
@@ -619,10 +635,12 @@ class SupportRepository(DeliveryRepositoryMixin, ReadSyncRepositoryMixin, Receip
             await conn.begin()
             try:
                 async with conn.cursor(aiomysql.DictCursor) as cur:
-                    await cur.execute("SELECT attachment_key FROM support_quick_replies WHERE id=%s AND staff_id=%s FOR UPDATE", (reply_id,staff_id))
+                    await cur.execute("SELECT attachment_key, location_latitude FROM support_quick_replies WHERE id=%s AND staff_id=%s FOR UPDATE", (reply_id,staff_id))
                     old = await cur.fetchone()
                     if old is None:
                         raise SupportNotFoundError("Quick reply not found.")
+                    if old.get("location_latitude") is not None:
+                        raise SupportConflictError("A location quick reply cannot be replaced with a PDF.")
                     await cur.execute("""UPDATE support_quick_replies SET title=%s,body=%s,
                         attachment_key=%s,attachment_filename=%s,attachment_size=%s,updated_at=UTC_TIMESTAMP(6)
                         WHERE id=%s AND staff_id=%s""",
@@ -651,6 +669,63 @@ class SupportRepository(DeliveryRepositoryMixin, ReadSyncRepositoryMixin, Receip
                         raise SupportNotFoundError("Quick reply not found.")
                 await conn.commit()
                 return row.get('attachment_key')
+            except BaseException:
+                await conn.rollback()
+                raise
+
+    async def quick_reply_recipients(self) -> list[dict[str, Any]]:
+        if self._pool is None:
+            await self.connect()
+        async with self._pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute("""SELECT id, name, role FROM staff
+                    WHERE is_active=1 AND deleted_at IS NULL ORDER BY id""")
+                return list(await cur.fetchall())
+
+    async def create_quick_reply_copies(
+        self, actor_id: int, recipients: list[int], *, title: str | None, body: str,
+        location: dict | None = None, attachments: dict[int, dict] | None = None,
+    ) -> list[dict[str, Any]]:
+        """All recipients succeed together; use the same staff lock as saves/deletion."""
+        if self._pool is None:
+            await self.connect()
+        recipients = sorted(set(recipients))
+        if not recipients:
+            raise SupportConflictError("Select at least one active staff member.")
+        lock_ids = sorted(set(recipients + [actor_id]))
+        rows = []
+        async with self._pool.acquire() as conn:
+            await conn.begin()
+            try:
+                async with conn.cursor(aiomysql.DictCursor) as cur:
+                    placeholders = ','.join(['%s'] * len(lock_ids))
+                    await cur.execute(f"""SELECT id, role, is_active, deleted_at FROM staff
+                        WHERE id IN ({placeholders}) ORDER BY id FOR UPDATE""", lock_ids)
+                    staff = {int(row['id']): row for row in await cur.fetchall()}
+                    actor = staff.get(actor_id) or {}
+                    if actor.get('role') not in {'admin', 'supervisor'} or not actor.get('is_active') or actor.get('deleted_at'):
+                        raise SupportConflictError("Your account permissions changed. Sign in again before assigning quick replies.")
+                    for staff_id in recipients:
+                        target = staff.get(staff_id) or {}
+                        if not target.get('is_active') or target.get('deleted_at'):
+                            raise SupportConflictError("A selected staff account is no longer active. Refresh the staff selection.")
+                        await cur.execute("SELECT COUNT(*) AS total FROM support_quick_replies WHERE staff_id=%s", (staff_id,))
+                        if int((await cur.fetchone())['total']) >= MAX_QUICK_REPLIES_PER_STAFF:
+                            raise SupportConflictError(f"Staff account {staff_id} has reached the {MAX_QUICK_REPLIES_PER_STAFF}-reply limit. No copies were added.")
+                    for staff_id in recipients:
+                        pdf = (attachments or {}).get(staff_id, {})
+                        pin = location or {}
+                        await cur.execute("""INSERT INTO support_quick_replies
+                            (staff_id,title,body,attachment_key,attachment_filename,attachment_size,
+                             location_latitude,location_longitude,location_name,location_address,created_at,updated_at)
+                            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,UTC_TIMESTAMP(6),UTC_TIMESTAMP(6))""",
+                            (staff_id,title,body,pdf.get('attachment_key'),pdf.get('attachment_filename'),pdf.get('attachment_size'),
+                             pin.get('latitude'),pin.get('longitude'),pin.get('name'),pin.get('address')))
+                        await cur.execute(f"SELECT staff_id,{self._QUICK_REPLY_COLUMNS} FROM support_quick_replies WHERE id=%s AND staff_id=%s",
+                                          (cur.lastrowid,staff_id))
+                        rows.append(await cur.fetchone())
+                await conn.commit()
+                return rows
             except BaseException:
                 await conn.rollback()
                 raise
