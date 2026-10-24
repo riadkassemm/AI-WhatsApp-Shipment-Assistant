@@ -553,6 +553,20 @@ can edit/delete it privately. Later edits do not propagate between copies.
 Recipients see new copies when opening Quick replies again. Existing private
 replies are never exposed to the assigning manager.
 
+For accounts created later, Admins and Super Admins can use the **Add to staff**
+people icon beside Edit/Delete on any of their saved replies. Select the new staff
+accounts and click **Add to staff**, or choose **All other active staff**. Text,
+PDFs, and locations are copied directly from the saved reply; no retyping or PDF
+upload is needed. This also works for replies saved before this control existed.
+The manager's original is excluded from the recipients and stays unchanged.
+Each use adds new independent copies, so select only staff who need the reply;
+it does not deduplicate earlier assignments or enroll future accounts automatically.
+Regular agents cannot use this action or its API. The server rechecks source
+ownership and rejects the operation if that reply changed or was deleted during
+copy preparation. No additional migration is needed for this sharing control.
+
+![Add an existing reply to staff, using synthetic examples](screenshots/quick-reply-share.png)
+
 Bulk saves are transactional: all selected recipients succeed together. Staff
 rows are locked in ID order, rechecking manager permissions, recipient status,
 and the 200-reply limit before inserts. If any recipient fails validation, no

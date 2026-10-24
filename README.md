@@ -922,6 +922,12 @@ The **Quick replies** button (lightning icon) opens **Text**, **PDF**, and **Loc
 
 Each list is private to one staff account, Super Admins and Admins included. The owner routes are `GET/POST /api/support/quick-replies` and `PUT/DELETE /api/support/quick-replies/{id}`; another account's reply returns `404`. Manager-only `POST /api/support/quick-replies/assign` (or `/assign/pdf` for uploads) adds new copies for selected recipients without revealing their existing replies. Text replies have an optional title (up to 80 characters) and a message (up to 4096 characters); locations require a name and valid coordinates. Each account can keep up to 200 replies. Replies are stored in MariaDB, so they follow the staff member across sessions and devices, and the dashboard forgets the list on sign-out.
 
+To reuse saved replies for newly created accounts, Admins/Super Admins can click
+**Add to staff** beside Edit/Delete, select staff, and confirm. Existing PDFs copy
+without another upload. This uses `POST /api/support/quick-replies/{id}/assign`
+and leaves the manager's original unchanged. Copies remain independent; automatic
+enrollment of future accounts is not enabled.
+
 Apply the additive migration before deploying this version (the schema guard reports it as missing otherwise):
 
 ```bash

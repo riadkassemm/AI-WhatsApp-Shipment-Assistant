@@ -195,3 +195,83 @@ async def test_ambiguous_batch_commit_retains_each_referenced_pdf(infrastructure
         owner = AGENT if row['staff_id'] == 7 else MANAGER
         assert (await service.support_service.get_quick_reply_pdf(owner,row['id']))[0] == PDF
     assert len(list((tmp_path/'quick-replies').glob('*.pdf'))) == 2
+
+
+@pytest.mark.asyncio
+async def test_reuse_existing_text_pdf_and_location_for_fresh_staff(infrastructure, monkeypatch, tmp_path):
+    repo, sql, _ = infrastructure
+    monkeypatch.setattr(settings, 'support_media_directory', str(tmp_path))
+    text = await service.support_service.create_quick_reply(MANAGER,title='Hours',body='Open daily')
+    pin = await service.support_service.create_quick_reply(MANAGER,title='Office',body='',location=PIN)
+    pdf = await service.support_service.save_quick_reply_pdf(MANAGER,title='Guide',body='Read this',content=PDF,filename='Guide.pdf')
+    # The source replies predate the new account; no re-entry or PDF upload is needed.
+    new_id = await auth.staff_repository.create_staff(name='New staff',email='new@example.test',email_normalized='new@example.test',password_hash='unused',role='agent')
+    async with await client_for(sql, monkeypatch) as client:
+        client.cookies.set(settings.support_cookie_name,'token-8')
+        client.headers['X-CSRF-Token'] = 'csrf'
+        for source in (text,pin,pdf):
+            response = await client.post(f"/api/support/quick-replies/{source['id']}/assign",json={'recipient_ids':[new_id]})
+            assert response.status_code == 201, response.text
+            assert response.json() == {'saved_count':1,'item':None}
+        copies = await repo.list_quick_replies(new_id)
+        assert len(copies) == 3
+        assert len(await repo.list_quick_replies(8)) == 3
+        assert not await repo.list_quick_replies(7)
+        by_title = {row['title']:row for row in copies}
+        assert by_title['Office']['location_latitude'] == (await repo.get_quick_reply(8,pin['id']))['location_latitude']
+        assert by_title['Hours']['body'] == 'Open daily'
+        assert by_title['Guide']['attachment_key'] != (await repo.get_quick_reply(8,pdf['id']))['attachment_key']
+        await service.support_service.delete_quick_reply(MANAGER,pdf['id'])
+        recipient = SupportAgent(id=str(new_id),name='New staff',role='agent')
+        assert (await service.support_service.get_quick_reply_pdf(recipient,by_title['Guide']['id']))[0] == PDF
+
+
+@pytest.mark.asyncio
+async def test_share_existing_authorization_csrf_scope_and_all_excludes_owner(infrastructure, monkeypatch):
+    repo, sql, _ = infrastructure
+    own = await service.support_service.create_quick_reply(MANAGER,title='Greeting',body='Hi')
+    private = await service.support_service.create_quick_reply(AGENT,title='Private',body='Private text')
+    async with await client_for(sql, monkeypatch) as client:
+        url = f"/api/support/quick-replies/{own['id']}/assign"
+        assert (await client.post(url,json={'recipient_ids':[7]})).status_code == 401
+        client.cookies.set(settings.support_cookie_name,'token-8')
+        assert (await client.post(url,json={'recipient_ids':[7]})).status_code == 403
+        client.headers['X-CSRF-Token'] = 'csrf'
+        assert (await client.post(f"/api/support/quick-replies/{private['id']}/assign",json={'recipient_ids':[7]})).status_code == 404
+        assert (await client.post(url,json={'recipient_ids':[7],'body':'Override'})).status_code == 422
+        for payload in ({}, {'recipient_ids':[8]}, {'recipient_ids':[999]}, {'recipient_ids':[7],'all_staff':True}):
+            assert (await client.post(url,json=payload)).status_code == 422
+        client.cookies.set(settings.support_cookie_name,'token-7')
+        assert (await client.post(url,json={'recipient_ids':[7]})).status_code == 403
+        client.cookies.set(settings.support_cookie_name,'token-8')
+        for role in ('supervisor','admin'):
+            await sql('UPDATE staff SET role=%s WHERE id=8',(role,))
+            response = await client.post(url,json={'all_staff':True})
+            assert response.status_code == 201 and response.json()['saved_count'] == 1
+        assert len(await repo.list_quick_replies(8)) == 1, 'All excludes the source owner'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('change', ['edit','delete'])
+async def test_share_source_change_rejects_stale_copies_and_cleans_files(infrastructure, monkeypatch, tmp_path, change):
+    repo, sql, _ = infrastructure
+    monkeypatch.setattr(settings,'support_media_directory',str(tmp_path))
+    source = await service.support_service.save_quick_reply_pdf(MANAGER,title='Guide',body='',content=PDF,filename='Guide.pdf')
+    original = repo.create_quick_reply_copies
+    entered, release = asyncio.Event(), asyncio.Event()
+    async def pause(*args, **kwargs):
+        entered.set(); await release.wait()
+        return await original(*args, **kwargs)
+    monkeypatch.setattr(repo,'create_quick_reply_copies',pause)
+    task = asyncio.create_task(service.support_service.share_quick_reply(MANAGER,source['id'],recipient_ids=[7]))
+    await asyncio.wait_for(entered.wait(),5)
+    if change == 'edit':
+        await service.support_service.update_quick_reply(MANAGER,source['id'],title='Changed',body='New caption')
+    else:
+        await service.support_service.delete_quick_reply(MANAGER,source['id'])
+    release.set()
+    from app.support_repository import SupportNotFoundError
+    with pytest.raises(SupportConflictError if change == 'edit' else SupportNotFoundError):
+        await task
+    assert not await repo.list_quick_replies(7)
+    assert len(list((tmp_path/'quick-replies').glob('*.pdf'))) == (1 if change == 'edit' else 0)

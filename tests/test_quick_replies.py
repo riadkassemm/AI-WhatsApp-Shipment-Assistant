@@ -350,6 +350,7 @@ def test_quick_reply_routes_require_session_and_csrf_for_changes() -> None:
         ("GET", "/api/support/quick-replies/recipients"),
         ("POST", "/api/support/quick-replies/assign"),
         ("POST", "/api/support/quick-replies/assign/pdf"),
+        ("POST", "/api/support/quick-replies/{reply_id}/assign"),
         ("PUT", "/api/support/quick-replies/{reply_id}/pdf"),
         ("GET", "/api/support/quick-replies/{reply_id}/pdf"),
     }

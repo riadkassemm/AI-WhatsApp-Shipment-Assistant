@@ -87,6 +87,7 @@ const state = {
   quickRepliesBusy: false,
   quickRepliesRequest: 0,
   quickReplyEditing: null,
+  quickReplySharing: null,
   quickReplyTab: "text",
   quickReplyKind: "text",
   quickReplyRecipients: [],

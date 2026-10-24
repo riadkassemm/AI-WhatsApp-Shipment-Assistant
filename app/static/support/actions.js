@@ -140,6 +140,7 @@ async function updateQuickReplyAudience() {
     state.quickReplyRecipients = data.items || [];
     $('quickReplyRecipients').replaceChildren();
     for (const staff of state.quickReplyRecipients) {
+      if (state.quickReplySharing && String(staff.id) === String(state.agent?.id)) continue;
       const label = document.createElement('label');
       label.className = 'quick-reply-recipient';
       const checkbox = document.createElement('input');
@@ -201,6 +202,7 @@ function resetQuickReplies() {
   state.quickRepliesBusy = false;
   state.quickRepliesRequest += 1;
   state.quickReplyEditing = null;
+  state.quickReplySharing = null;
   state.quickReplyTab = 'text';
   state.quickReplyKind = 'text';
   state.quickReplyRecipients = [];
@@ -269,6 +271,15 @@ function quickReplyRow(reply) {
   remove.append(createIcon('trash', 'icon icon-sm'));
   remove.addEventListener('click', () => deleteQuickReply(reply));
   actions.append(edit, remove);
+  if (canAssignQuickReplies()) {
+    const share = document.createElement('button');
+    share.type = 'button'; share.className = 'icon-btn';
+    share.setAttribute('aria-label', 'Add to staff: ' + label);
+    share.dataset.tooltip = 'Add to staff';
+    share.append(createIcon('users', 'icon icon-sm'));
+    share.addEventListener('click', () => showQuickReplyAssignment(reply));
+    actions.append(share);
+  }
 
   row.append(copy, actions);
   return row;
@@ -326,6 +337,7 @@ function showQuickReplyList() {
   if (state.quickRepliesBusy) return;
   const editing = state.quickReplyEditing;
   state.quickReplyEditing = null;
+  state.quickReplySharing = null;
   showQuickRepliesError('');
   $('quickReplyForm').classList.add('hidden');
   $('quickRepliesListView').classList.remove('hidden');
@@ -340,6 +352,13 @@ function showQuickReplyList() {
 
 function showQuickReplyForm(reply, draft = null) {
   if (state.quickRepliesBusy) return;
+  state.quickReplySharing = null;
+  $('quickReplyContentFields').classList.remove('hidden');
+  $('quickReplyShareSummary').classList.add('hidden');
+  $('quickReplyAudienceMe').disabled = false;
+  text($('quickReplyAudienceAll'), 'All active staff');
+  text($('quickReplyAudienceHint'), 'Each recipient gets their own copy to edit or delete. All active staff includes you; new accounts added later are not included.');
+  text($('saveQuickReplyBtn'), 'Save reply');
   state.quickReplyEditing = reply ? reply.id : 'new';
   state.quickReplyKind = reply ? quickReplyKind(reply) : state.quickReplyTab || 'text';
   const kind = state.quickReplyKind;
@@ -367,6 +386,54 @@ function showQuickReplyForm(reply, draft = null) {
   $('quickRepliesListView').classList.add('hidden');
   $('quickReplyForm').classList.remove('hidden');
   $(reply && kind !== 'location' ? 'quickReplyBody' : 'quickReplyTitle').focus();
+}
+
+async function showQuickReplyAssignment(reply) {
+  if (!canAssignQuickReplies() || state.quickRepliesBusy) return;
+  showQuickReplyForm(reply);
+  state.quickReplySharing = reply.id;
+  $('quickReplyContentFields').classList.add('hidden');
+  $('quickReplyShareSummary').classList.remove('hidden');
+  text($('quickReplyShareSummary'), quickReplyLabel(reply) + ' · ' + ({text: 'Text', pdf: 'PDF', location: 'Location'})[quickReplyKind(reply)]);
+  text($('quickRepliesTitle'), 'Add saved reply to staff');
+  text($('quickRepliesSubtitle'), 'Choose staff to receive a copy of this saved reply.');
+  $('quickReplyAssignment').classList.remove('hidden');
+  $('quickReplyAudienceMe').disabled = true;
+  $('quickReplyAudience').value = 'selected';
+  text($('quickReplyAudienceAll'), 'All other active staff');
+  text($('quickReplyAudienceHint'), 'Adds an independent copy for each recipient. Select new staff to avoid adding another copy for someone who already has it. Your saved reply stays unchanged.');
+  text($('saveQuickReplyBtn'), 'Add to staff');
+  $('quickReplyAudience').focus();
+  await updateQuickReplyAudience();
+}
+
+async function shareSavedQuickReply() {
+  if (!canAssignQuickReplies() || !state.quickReplySharing || state.quickRepliesBusy) return;
+  const all = $('quickReplyAudience').value === 'all';
+  const recipients = all ? [] : Array.from($('quickReplyRecipients').querySelectorAll('input:checked'), input => Number(input.value));
+  if (!all && (state.quickReplyRecipientsLoading || !recipients.length)) { showQuickRepliesError('Select at least one staff member.'); return; }
+  const request = state.quickRepliesRequest;
+  const source = state.quickReplySharing;
+  state.quickRepliesBusy = true;
+  setButtonBusy($('saveQuickReplyBtn'), true, 'Adding…');
+  showQuickRepliesError('');
+  let succeeded = false;
+  try {
+    const result = await api('/api/support/quick-replies/' + encodeURIComponent(source) + '/assign', {
+      method: 'POST', body: JSON.stringify({recipient_ids: recipients, all_staff: all})
+    });
+    if (!state.authenticated || request !== state.quickRepliesRequest) return;
+    notify('Quick reply added for ' + result.saved_count + ' staff members.');
+    succeeded = true;
+  } catch (error) {
+    if (request === state.quickRepliesRequest) showQuickRepliesError(error.message);
+  } finally {
+    if (request === state.quickRepliesRequest) {
+      state.quickRepliesBusy = false;
+      setButtonBusy($('saveQuickReplyBtn'), false);
+    }
+  }
+  if (succeeded) showQuickReplyList();
 }
 
 async function openQuickRepliesModal() {
@@ -439,6 +506,7 @@ async function attachQuickReplyPdf(reply) {
 async function saveQuickReply(event) {
   event.preventDefault();
   if (!state.authenticated || state.quickRepliesBusy || !state.quickReplyEditing) return;
+  if (state.quickReplySharing) { await shareSavedQuickReply(); return; }
   const isLocation = state.quickReplyKind === 'location';
   const body = isLocation ? '' : $('quickReplyBody').value;
   const file = $('quickReplyPdf').files?.[0];

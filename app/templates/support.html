@@ -486,6 +486,8 @@ __SUPPORT_STYLE__
         </div>
       </div>
       <form class="hidden" id="quickReplyForm" novalidate>
+        <div id="quickReplyShareSummary" class="form-note hidden"></div>
+        <div id="quickReplyContentFields">
         <div class="field">
           <label id="quickReplyTitleLabel" for="quickReplyTitle">Title (optional)</label>
           <input id="quickReplyTitle" type="text" maxlength="80" autocomplete="off" placeholder="For example: Delivery times" />
@@ -512,14 +514,15 @@ __SUPPORT_STYLE__
           </div>
           <div class="field"><label for="quickReplyAddress">Address (optional)</label><input id="quickReplyAddress" type="text" maxlength="1000" /></div>
         </div>
+        </div>
         <fieldset id="quickReplyAssignment" class="quick-reply-assignment hidden">
           <legend>Save for</legend>
           <div class="field">
           <label for="quickReplyAudience" class="sr-only">Recipients</label>
-          <select id="quickReplyAudience"><option value="me">Only me</option><option value="selected">Selected staff</option><option value="all">All active staff</option></select>
+          <select id="quickReplyAudience"><option id="quickReplyAudienceMe" value="me">Only me</option><option value="selected">Selected staff</option><option id="quickReplyAudienceAll" value="all">All active staff</option></select>
           </div>
           <div id="quickReplyRecipients" class="quick-reply-recipients hidden" role="group" aria-label="Select staff"></div>
-          <div class="field-hint">Each recipient gets their own copy to edit or delete. All active staff includes you; new accounts added later are not included.</div>
+          <div class="field-hint" id="quickReplyAudienceHint">Each recipient gets their own copy to edit or delete. All active staff includes you; new accounts added later are not included.</div>
         </fieldset>
         <div class="modal-actions"><button class="btn" id="cancelQuickReplyBtn" type="button">Cancel</button><button class="btn primary" id="saveQuickReplyBtn" type="submit"><svg class="icon" aria-hidden="true"><use href="#icon-check"></use></svg>Save reply</button></div>
       </form>

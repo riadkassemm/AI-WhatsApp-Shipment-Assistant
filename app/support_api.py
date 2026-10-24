@@ -215,6 +215,13 @@ class QuickReplyAssignment(QuickReplyRequest):
     all_staff: bool = False
 
 
+class ShareQuickReplyRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    recipient_ids: list[int] = Field(default_factory=list, max_length=1000)
+    all_staff: bool = False
+
+
 class AIScheduleRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -538,6 +545,17 @@ async def assign_quick_reply_pdf(
         raise _translate_error(exc) from exc
     finally:
         await file.close()
+
+
+@router.post("/quick-replies/{reply_id}/assign", status_code=status.HTTP_201_CREATED)
+async def share_quick_reply(
+    payload: ShareQuickReplyRequest, reply_id: int = Path(gt=0),
+    agent: SupportAgent = Depends(require_support_csrf),
+) -> dict:
+    try:
+        return await support_service.share_quick_reply(agent, reply_id, **payload.model_dump())
+    except Exception as exc:
+        raise _translate_error(exc) from exc
 
 
 @router.put("/quick-replies/{reply_id}/pdf")

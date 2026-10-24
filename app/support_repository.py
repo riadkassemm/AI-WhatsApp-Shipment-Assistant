@@ -685,6 +685,7 @@ class SupportRepository(DeliveryRepositoryMixin, ReadSyncRepositoryMixin, Receip
     async def create_quick_reply_copies(
         self, actor_id: int, recipients: list[int], *, title: str | None, body: str,
         location: dict | None = None, attachments: dict[int, dict] | None = None,
+        source_reply: dict | None = None,
     ) -> list[dict[str, Any]]:
         """All recipients succeed together; use the same staff lock as saves/deletion."""
         if self._pool is None:
@@ -705,6 +706,14 @@ class SupportRepository(DeliveryRepositoryMixin, ReadSyncRepositoryMixin, Receip
                     actor = staff.get(actor_id) or {}
                     if actor.get('role') not in {'admin', 'supervisor'} or not actor.get('is_active') or actor.get('deleted_at'):
                         raise SupportConflictError("Your account permissions changed. Sign in again before assigning quick replies.")
+                    if source_reply is not None:
+                        await cur.execute(f"""SELECT {self._QUICK_REPLY_COLUMNS} FROM support_quick_replies
+                            WHERE id=%s AND staff_id=%s FOR UPDATE""", (source_reply['id'], actor_id))
+                        current = await cur.fetchone()
+                        if current is None:
+                            raise SupportNotFoundError("Quick reply not found.")
+                        if current != source_reply:
+                            raise SupportConflictError("This saved reply changed. Reopen Quick replies and select it again.")
                     for staff_id in recipients:
                         target = staff.get(staff_id) or {}
                         if not target.get('is_active') or target.get('deleted_at'):

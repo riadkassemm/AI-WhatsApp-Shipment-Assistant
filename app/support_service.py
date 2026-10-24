@@ -2700,6 +2700,7 @@ class SupportService:
         self, agent: SupportAgent, *, title: str | None, body: str | None,
         recipient_ids: list[int], all_staff: bool = False, location: dict | None = None,
         content: bytes | None = None, filename: str | None = None,
+        source_reply: dict | None = None,
     ) -> dict:
         if not agent.is_supervisor:
             raise SupportForbiddenError("Only Admins and Super Admins can assign quick replies.")
@@ -2727,7 +2728,8 @@ class SupportService:
             raise
         try:
             rows = await support_repository.create_quick_reply_copies(
-                int(agent.id), recipients, title=clean_title, body=clean_body, attachments=attachments, **extra)
+                int(agent.id), recipients, title=clean_title, body=clean_body, attachments=attachments,
+                source_reply=source_reply, **extra)
         except (SupportConflictError, SupportNotFoundError):
             for attachment in attachments.values():
                 await self._remove_quick_reply_pdf(attachment['attachment_key'])
@@ -2736,6 +2738,33 @@ class SupportService:
         own = next((row for row in rows if int(row['staff_id']) == int(agent.id)), None)
         logger.info("Support quick reply assigned: actor_id=%s recipient_ids=%s count=%s", agent.id, recipients, len(rows))
         return {"saved_count": len(rows), "item": _quick_reply_payload(own) if own else None}
+
+    async def share_quick_reply(
+        self, agent: SupportAgent, reply_id: int, *, recipient_ids: list[int], all_staff: bool = False,
+    ) -> dict:
+        if not agent.is_supervisor:
+            raise SupportForbiddenError("Only Admins and Super Admins can assign quick replies.")
+        if bool(recipient_ids) == bool(all_staff):
+            raise SupportValidationError("Choose selected staff or all active staff.")
+        # Read only the manager's own saved reply, including existing legacy copies.
+        source = await support_repository.get_quick_reply(int(agent.id), reply_id)
+        recipients = [int(row['id']) for row in await support_repository.quick_reply_recipients()] if all_staff else recipient_ids
+        recipients = sorted(set(recipients) - {int(agent.id)})
+        if not recipients:
+            raise SupportValidationError("Select at least one other active staff member.")
+        content = None
+        if source.get('attachment_key'):
+            try:
+                content = await asyncio.to_thread(quick_reply_media_store.read, source['attachment_key'])
+            except SupportMediaError as exc:
+                raise SupportValidationError(str(exc)) from exc
+        result = await self.assign_quick_reply(
+            agent, title=source.get('title'), body=source.get('body'), recipient_ids=recipients,
+            location=_quick_reply_payload(source).get('location'), content=content,
+            filename=source.get('attachment_filename'), source_reply=source,
+        )
+        logger.info("Support saved reply shared: actor_id=%s source_id=%s count=%s", agent.id, reply_id, result['saved_count'])
+        return result
 
     async def save_quick_reply_pdf(
         self, agent: SupportAgent, *, title: str | None, body: str | None,

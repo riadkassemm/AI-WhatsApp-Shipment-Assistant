@@ -93,6 +93,23 @@ assigned=calls.find(c=>c[0]==='/api/support/quick-replies/assign/pdf');check(ass
 selectQuickReplyTab('location');showQuickReplyForm(null);$('quickReplyTitle').value='Try again';$('quickReplyLatitude').value='1';$('quickReplyLongitude').value='2';rejectSave=true;
 await saveQuickReply({preventDefault(){}});check(state.quickReplyEditing==='new'&&$('quickReplyTitle').value==='Try again'&&$('quickRepliesError').textContent==='Save rejected','failed save preserves draft');rejectSave=false;
 state.quickReplies=replies;showQuickReplyList();selectQuickReplyTab('location');
+state.agent.role='agent';renderQuickReplies();
+check(!$('quickRepliesList').querySelector('[aria-label^="Add to staff:"]'),'regular staff cannot share saved replies');
+state.agent.role='admin';renderQuickReplies();
+check($('quickRepliesList').querySelector('[aria-label^="Add to staff:"]'),'Admin has share icon beside existing actions');
+const before=JSON.stringify(state.quickReplies);
+await showQuickReplyAssignment(replies[1]);
+check($('quickReplyContentFields').classList.contains('hidden')&&$('quickReplyShareSummary').textContent.includes('PDF'),'saved PDF assignment requires no upload');
+check($('quickReplyRecipients').querySelectorAll('input').length===1&&$('quickReplyRecipients').querySelector('input').value==='7','owner excluded from share targets');
+count=calls.length;await saveQuickReply({preventDefault(){}});check(calls.length===count,'saved reply assignment needs recipients');
+$('quickReplyRecipients').querySelector('input').checked=true;rejectSave=true;await saveQuickReply({preventDefault(){}});
+check(state.quickReplySharing===2&&$('quickReplyRecipients').querySelector('input').checked,'failed share keeps selection');rejectSave=false;
+await saveQuickReply({preventDefault(){}});
+assigned=calls.filter(c=>c[0]==='/api/support/quick-replies/2/assign').at(-1);
+check(JSON.stringify(JSON.parse(assigned[1].body))==='{"recipient_ids":[7],"all_staff":false}','saved share submits only source ID and audience, not file or content');
+check(JSON.stringify(state.quickReplies)===before&&state.quickReplySharing===null,'sharing does not duplicate or edit owner replies');
+showQuickReplyForm(replies[1]);check(!$('quickReplyContentFields').classList.contains('hidden')&&state.quickReplySharing===null,'normal edit works after sharing');
+showQuickReplyList();selectQuickReplyTab('location');
 document.body.dataset.result='passed';$('sessionLoading').classList.add('hidden');
 __SCREENSHOT_FORM__
 })().catch(error=>{document.body.dataset.result='FAILED: '+error.message});
@@ -100,6 +117,8 @@ __SCREENSHOT_FORM__
     form = ''
     if os.environ.get('SUPPORT_QUICK_REPLY_SCREENSHOT_FORM'):
         form = "showQuickReplyForm(null);$('quickReplyTitle').value='Main office';$('quickReplyLatitude').value='33.89';$('quickReplyLongitude').value='35.5';$('quickReplyAddress').value='Reception desk';$('quickReplyAudience').value='selected';await updateQuickReplyAudience();$('quickReplyRecipients').querySelector('input').checked=true;$('quickReplyRecipients').querySelectorAll('span')[1].textContent='Office manager · Super Admin';"
+    if os.environ.get('SUPPORT_QUICK_REPLY_SCREENSHOT_SHARE'):
+        form = "await showQuickReplyAssignment(replies[2]);$('quickReplyRecipients').querySelector('input').checked=true;"
     script = setup + 'function createIcon(' + icons + 'const QUICK_REPLIES_LIST_SUBTITLE = ' + quick + bindings + message + links + copying + assertions.replace('__SCREENSHOT_FORM__', form)
     html = _configure(_TEMPLATE.replace('__SUPPORT_STYLE__', '<style>'+_ASSETS['support.css']+'</style>').replace('__SUPPORT_THEME__', '').replace('__SUPPORT_SCRIPTS__', '<script>'+script+'</script>'))
     path = tmp_path/'quick-replies.html'; path.write_text(html)
