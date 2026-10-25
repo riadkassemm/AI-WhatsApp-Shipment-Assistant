@@ -468,7 +468,7 @@ function playNewConversationSound() {
 function notifyNewCustomerActivity(message) {
   const body = message || 'New customer conversation requires attention.';
   playNewConversationSound();
-  document.title = '● Shipment Support';
+  document.title = '● MIK Support';
   if ('setAppBadge' in navigator) navigator.setAppBadge(1).catch(() => {});
   if ('Notification' in window && Notification.permission === 'granted') {
     try { new Notification('Shipment Support', {body, tag: 'shipment-support', renotify: true, silent: state.notificationSoundsMuted}); } catch (_) {}
@@ -476,7 +476,7 @@ function notifyNewCustomerActivity(message) {
 }
 
 function clearAttentionIndicator() {
-  document.title = 'Shipment Support';
+  document.title = 'MIK Support';
   if ('clearAppBadge' in navigator) navigator.clearAppBadge().catch(() => {});
 }
 

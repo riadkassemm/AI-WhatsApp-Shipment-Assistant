@@ -3522,7 +3522,7 @@ class SupportRepository(DeliveryRepositoryMixin, ReadSyncRepositoryMixin, Receip
                         LEFT(reason, 300) AS reason,
                         LEFT(ai_summary, 500) AS ai_summary,
                         tracking_reference, requested_action, current_language,
-                        communication_style, status,
+                        communication_style, status, support_tickets.active_key,
                         current_assignee_id, current_assignee_name,
                         support_tickets.created_at, support_tickets.updated_at,
                         last_activity_at, assigned_at, resolved_at, closed_at,

@@ -10,7 +10,8 @@ def test_notification_mute_in_browser(tmp_path):
     from app.support_ui import _HTML
     browser = shutil.which(os.environ.get('SUPPORT_TEST_BROWSER', 'chromium'))
     assert browser, 'Install the configured test browser'
-    functions = _HTML[_HTML.index('function readNotificationSoundPreference('):_HTML.index('function clearAttentionIndicator(')]
+    functions = _HTML[_HTML.index('function readNotificationSoundPreference('):_HTML.index('function staffRoleLabel(')]
+    assert '<title>MIK Support</title>' in _HTML
     button = re.search(r'<button[^>]*id="notificationSoundBtn".*?</button>', _HTML, re.S).group()
     icons = re.search(r'<svg class="sr-only".*?</svg>', _HTML, re.S).group()
     script = r'''
@@ -35,6 +36,9 @@ const state={notificationSoundsMuted:false,notificationUnlocked:true,notificatio
   if(readNotificationSoundPreference() || button.getAttribute('aria-pressed')!=='false') throw Error('Wrong default');
   notifyNewCustomerActivity('New ticket');
   if(tones!==3 || notices[0].silent!==false) throw Error('Enabled sound failed');
+  if(document.title!=='● MIK Support') throw Error('Notification reverted the tab name');
+  clearAttentionIndicator();
+  if(document.title!=='MIK Support') throw Error('Clearing attention reverted the tab name');
   button.click();
   if(!readNotificationSoundPreference() || button.getAttribute('aria-pressed')!=='true' || state.notificationSoundGain.gain.value!==0) throw Error('Mute did not persist/silence scheduled tones');
   if(button.textContent.trim()!=='Sound muted') throw Error('Muted label missing');
