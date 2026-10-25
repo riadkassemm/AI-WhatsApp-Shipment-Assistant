@@ -14,10 +14,12 @@ from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 from app.support_statistics import METRICS
+from app.support_timing import TIMING_METRICS
 
 FONT = "SupportDejaVu"
 pdfmetrics.registerFont(TTFont(FONT, str(Path(__file__).parent / "fonts" / "DejaVuSans.ttf")))
 LABELS = ("Active dashboard time", "Tickets claimed", "Tickets resolved", "Outbound messages sent", "Tickets transferred", "Tickets received by transfer")
+TIMING_LABELS = ("Average handling time", "Median handling time", "Average resolver time", "Median resolver time")
 ROLES = {"agent": "Agent", "admin": "Admin", "supervisor": "Super Admin"}
 
 
@@ -45,14 +47,14 @@ def statistics_pdf(report: dict) -> bytes:
     story = [Paragraph("Agent Statistics", title),
              p(f'{report["start"]} through {report["end"]} · {report["timezone"]}'),
              p(f'Staff filter: {selected}'),
-             p(f'Ranked by {LABELS[METRICS.index(report["rank_by"])]} · {direction}'), Spacer(1, 12)]
+             p(f'Ranked by {dict(zip((*METRICS, *TIMING_METRICS), (*LABELS, *TIMING_LABELS)))[report["rank_by"]]} · {direction}'), Spacer(1, 12)]
     data = [[p(x) for x in ("Rank", "Staff", *LABELS)]]
     data.append([p(""), p("Totals for selected staff"), *[p(x) for x in values(report["totals"])]])
     for row in report["rows"]:
         name = row["name"] + " · " + ROLES.get(row["role"], row["role"])
         if not row["is_active"]:
             name += " (inactive)"
-        data.append([p(row["rank"]), p(name), *[p(x) for x in values(row)]])
+        data.append([p(row["rank"] if row["rank"] is not None else "—"), p(name), *[p(x) for x in values(row)]])
     table = Table(data, colWidths=[35, 165, 100, 80, 80, 100, 90, 105], repeatRows=1, hAlign="LEFT")
     table.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#e6edf5")),
@@ -62,6 +64,19 @@ def statistics_pdf(report: dict) -> bytes:
         ("TOPPADDING", (0, 0), (-1, -1), 7), ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
     ]))
     story += [table, Spacer(1, 12)]
+    def duration(value):
+        if value is None:
+            return "unknown"
+        seconds = int(value)
+        return f"{seconds // 3600}h {seconds % 3600 // 60}m {seconds % 60}s"
+    timing = [[p(x) for x in ("Staff", *TIMING_LABELS, "Handling / resolver samples")]]
+    for row in [dict(report.get('timing_totals', {}), name='Selected team'), *report['rows']]:
+        timing.append([p(row['name']), *[p(duration(row.get(key))) for key in TIMING_METRICS],
+                       p(f"{row.get('handling_samples', 0)} / {row.get('resolution_samples', 0)}")])
+    timing_table = Table(timing, colWidths=[165, 115, 115, 115, 115, 130], repeatRows=1)
+    timing_table.setStyle(TableStyle([('VALIGN',(0,0),(-1,-1),'TOP'), ('GRID',(0,0),(-1,-1),.3,colors.lightgrey)]))
+    story += [timing_table, Spacer(1,12), p('Timing uses complete responsibility periods ending in the selected dates. Transfers stop the previous owner’s period. Resolver time includes only the final period owned by the resolving staff member. Waiting time is included; open periods and resolved gaps are excluded. Team averages weight samples. Missing history is not inferred.')]
+
     for key, label in [("activity_tracking_started_at", "Active time tracking began"),
                        ("ticket_history_since", "Retained ticket audit begins"),
                        ("message_history_since", "Confirmed staff sends begin"),

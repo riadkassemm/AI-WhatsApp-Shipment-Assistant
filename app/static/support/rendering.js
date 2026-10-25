@@ -3008,6 +3008,9 @@ async function openTicket(id, {silent = false, refreshQueue = false, refreshHist
     const detailPath = detailBase + id + (detailParams.toString() ? ('?' + detailParams.toString()) : '');
     const data = await (takeTicketPrefetch(detailPath) || api(detailPath));
     if (requestId !== state.ticketRequest || String(state.ticketId) !== String(id)) return;
+    if (!silent) api('/api/support/statistics/tickets/' + id + '/view', {
+      method: 'POST', body: JSON.stringify({request_id: crypto.randomUUID()})
+    }).catch(() => {});
     if (needPreviousHistory && Array.isArray(data.previous_ticket_history)) {
       state.previousTicketHistory = state.previousHistoryExpanded
         ? mergePreviousHistoryThreads(state.previousTicketHistory, data.previous_ticket_history)

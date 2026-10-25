@@ -1207,3 +1207,9 @@ Remove the test line from the app, resolving its active tickets first if needed.
 If the local user service was installed, stop its automatic startup with `systemctl --user disable --now whatsapp-support-bridge.service`.
 
 Restoring a project backup restores application code and its saved configuration. It does not undo messages already edited/deleted on WhatsApp, restore database data, or reverse a business number's provider registration change. Moving the business number is a separate deployment step after the test number succeeds.
+
+Agent Statistics also includes transfer-aware handling/resolver averages and medians,
+review indicators, and manager-only read-only conversation investigation. See
+[responsibility timing and investigation](docs/support-platform.md#responsibility-timing-and-read-only-investigation)
+for period definitions, audit coverage, permissions and the required additive
+`20261025_statistics_investigation.sql` migration.

@@ -243,6 +243,10 @@ _SUPPORT_SCHEMA_MIGRATIONS: tuple[tuple[str, dict[str, set[str]]], ...] = (
     ("migrations/20261024_quick_reply_pdf_digests.sql", {
         "support_quick_replies": {"attachment_sha256"},
     }),
+    ("migrations/20261025_statistics_investigation.sql", {
+        "support_ticket_events": {"audit_key"},
+        "support_statistics_metadata": {"ticket_activity_tracking_started_at"},
+    }),
     ("migrations/20261023_agent_statistics.sql", {
         "support_statistics_metadata": {"activity_tracking_started_at"},
         "support_agent_heartbeats": {"staff_id", "session_id", "tab_id", "sequence_number", "last_seen_at", "active_until"},

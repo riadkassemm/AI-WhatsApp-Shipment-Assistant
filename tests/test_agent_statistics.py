@@ -78,10 +78,18 @@ rows:[{id:7,name:'Alex',role:'agent',is_active:1,rank:1,active_seconds:7215,tick
 totals:{active_seconds:10815,tickets_claimed:20,tickets_resolved:16,messages_sent:73,tickets_transferred:7,tickets_received_by_transfer:7},
 rank_by:'tickets_resolved',direction:'desc',timezone:'Asia/Beirut',activity_tracking_started_at:'2026-10-23T00:00:00Z',
 transfer_history_since:'2026-09-01T00:00:00Z',ticket_history_since:'2026-09-01T00:00:00Z',message_history_since:'2026-09-01T00:00:00Z'};
+for(const row of report.rows)Object.assign(row,{average_handling_seconds:600,median_handling_seconds:480,average_resolution_seconds:900,median_resolution_seconds:720,handling_samples:12,resolution_samples:8});
+report.timing_totals={average_handling_seconds:600,median_handling_seconds:480,average_resolution_seconds:900,median_resolution_seconds:720};
 let resolvePending=null;
+const renderedInvestigation=[];
+function addMessage(container,message,mode){renderedInvestigation.push(mode);const p=document.createElement('p');p.textContent=message.body;container.append(p);}
+const investigationDetail={ticket:{ticket_reference:'TEST-42'},periods:[{agent_id:'7',agent_name:'Alex',started_at:'2026-10-23T10:00:00Z',ended_at:'2026-10-23T10:05:00Z',end_reason:'transferred',valid:true,seconds:300}],
+ original_claimant_id:'7',original_claimant_name:'Alex',issues:[],messages:[{id:1,body:'Synthetic customer message',sender_type:'CUSTOMER',direction:'INBOUND',send_status:'RECEIVED'}],events:[{id:1,event_type:'TICKET_TRANSFERRED',actor_name:'Alex',created_at:'2026-10-23T10:05:00Z',details_json:'{}'}],next_message_before:1,next_event_before:1};
 async function api(path) {
  calls.push(path);
  if(resolvePending==='wait') return new Promise(resolve=>{resolvePending=resolve});
+ if(path.startsWith('/api/support/statistics/tickets/'))return investigationDetail;
+ if(path.startsWith('/api/support/statistics/tickets?'))return {items:[{id:42,ticket_reference:'TEST-42',customer_name:'Example',status:'RESOLVED',flags:[],issues:[]}],next_before:42};
  const query=new URL('http://test'+path).searchParams;
  return {...report,rank_by:query.get('rank_by'),direction:query.get('direction')};
 }
@@ -120,8 +128,21 @@ for (const metric of ['tickets_transferred','tickets_received_by_transfer']) {
  check(calls.at(-1).includes('rank_by='+metric),'transfer ranking sent');
  check($('statisticsRanking').textContent.includes(statisticsMetrics[metric]),'transfer ranking label');
 }
-check($('statisticsRows').firstElementChild.children.length===8,'both transfer columns render');
-check($('statisticsTotals').children.length===6,'both transfer totals render');
+check($('statisticsRows').firstElementChild.children.length===12,'transfer and timing columns render');
+check($('statisticsTotals').children.length===10,'transfer and timing totals render');
+for(const metric of ['average_handling_seconds','median_resolution_seconds']){
+ $('statisticsMetric').value=metric;await loadAgentStatistics();
+ check($('statisticsRanking').textContent.includes(statisticsMetrics[metric]),'timing ranking uses selected criterion');
+}
+state.ticketId=99;
+await browseStatisticsTickets();check(calls.at(-1).includes('agent_id=7'),'investigation uses applied staff filter');
+await investigateStatisticsTicket(42);
+check(state.ticketId===99&&renderedInvestigation[0]==='investigation','investigation never opens operational ticket');
+check($('investigationEvents').textContent.includes('TICKET_TRANSFERRED')&&$('investigationPeriods').textContent.includes('Alex'),'audit and responsibility shown');
+await investigateStatisticsTicket(42,'messages');check(calls.at(-1).includes('before_message=1'),'message pagination');
+await investigateStatisticsTicket(42,'events');check(calls.at(-1).includes('before_event=1'),'audit pagination');
+check(!calls.some(path=>path.includes('/view')||path.includes('/read')||path.startsWith('/api/support/tickets/')),'investigation makes no operational calls');
+$('statisticsFlaggedOnly').checked=true;await browseStatisticsTickets();check(calls.at(-1).includes('flagged_only=true'),'review indicator filter');
 report.rows[0].name='<img src=x onerror="alert(1)">';renderAgentStatistics(report);
 check(!$('statisticsRows').querySelector('img'),'staff names render as text');
 resolvePending='wait';const pending=loadAgentStatistics();
@@ -136,8 +157,10 @@ $('statisticsAgent').value='';$('statisticsMetric').value='tickets_resolved';$('
 resolvePending=null;await loadAgentStatistics();
 $('statisticsError').textContent='';
 document.body.dataset.statisticsTest='passed';
+if('__INVESTIGATION_SCREENSHOT__'==='yes'){await browseStatisticsTickets();await investigateStatisticsTicket(42);$('statisticsInvestigation').scrollIntoView();}
 })().catch(error=>{document.body.dataset.statisticsTest='FAILED: '+error.message;});
 '''
+    assertions = assertions.replace('__INVESTIGATION_SCREENSHOT__', 'yes' if os.environ.get('SUPPORT_INVESTIGATION_SCREENSHOT') else 'no')
     html = (_TEMPLATE.replace('__SUPPORT_STYLE__','<style>'+_ASSETS['support.css']+'</style>')
             .replace('__SUPPORT_THEME__','').replace('__SUPPORT_SCRIPTS__','<script>'+setup+_ASSETS['statistics.js']+assertions+'</script>'))
     path=tmp_path/'statistics.html';path.write_text(html)
@@ -169,7 +192,7 @@ def test_pdf_export_paginates_includes_filters_and_escapes_staff_names():
                      'Outbound messages sent', 'Highest first', '2026-10-01', '2026-10-23',
                      'Asia/Beirut', '1h 1m 1s', 'Deleted staff are excluded', 'Tickets transferred', 'Tickets received by transfer']:
         assert expected in ' '.join(text.split())
-    assert all('Rank' in page.extract_text() for page in reader.pages[:-1])
+    assert all('Rank' in page.extract_text() or 'Average handling time' in ' '.join(page.extract_text().split()) for page in reader.pages[:-1])
     assert '&lt;' in display_text('<Admin>')
     assert display_text('محمد') != 'محمد'  # Arabic shaping and visual direction
     assert statistics_pdf({**report, 'rows': [{**row, 'name': 'محمد أحمد'}]}).startswith(b'%PDF-')
