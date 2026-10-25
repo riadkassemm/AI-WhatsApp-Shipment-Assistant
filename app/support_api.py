@@ -191,12 +191,35 @@ class ContactEditRequest(BaseModel):
     phone: str = Field(default="", max_length=64)
 
 
+class QuickReplyLocation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    latitude: float | None = Field(default=None, ge=-90, le=90, allow_inf_nan=False)
+    longitude: float | None = Field(default=None, ge=-180, le=180, allow_inf_nan=False)
+    name: str = Field(default="", max_length=255)
+    address: str = Field(default="", max_length=1000)
+    maps_url: str = Field(default="", max_length=2048)
+
+
 class QuickReplyRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     # Generous transport limits; support_service applies the exact rules with clear messages.
     title: str = Field(default="", max_length=1000)
     body: str = Field(default="", max_length=20000)
+    location: QuickReplyLocation | None = None
+
+
+class QuickReplyAssignment(QuickReplyRequest):
+    recipient_ids: list[int] = Field(default_factory=list, max_length=1000)
+    all_staff: bool = False
+
+
+class ShareQuickReplyRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    recipient_ids: list[int] = Field(default_factory=list, max_length=1000)
+    all_staff: bool = False
 
 
 class AIScheduleRequest(BaseModel):
@@ -433,7 +456,7 @@ async def create_quick_reply(
     agent: SupportAgent = Depends(require_support_csrf),
 ) -> dict:
     try:
-        return await support_service.create_quick_reply(agent, title=payload.title, body=payload.body)
+        return await support_service.create_quick_reply(agent, **payload.model_dump())
     except Exception as exc:
         raise _translate_error(exc) from exc
 
@@ -445,7 +468,7 @@ async def update_quick_reply(
     agent: SupportAgent = Depends(require_support_csrf),
 ) -> dict:
     try:
-        return await support_service.update_quick_reply(agent, reply_id, title=payload.title, body=payload.body)
+        return await support_service.update_quick_reply(agent, reply_id, **payload.model_dump())
     except Exception as exc:
         raise _translate_error(exc) from exc
 
@@ -483,6 +506,56 @@ async def create_quick_reply_pdf(
     agent: SupportAgent = Depends(require_support_csrf),
 ) -> dict:
     return await _save_quick_reply_pdf_upload(file, title, body, agent)
+
+
+@router.get("/quick-replies/recipients")
+async def quick_reply_recipients(agent: SupportAgent = Depends(get_current_agent)) -> dict:
+    try:
+        return await support_service.quick_reply_recipients(agent)
+    except Exception as exc:
+        raise _translate_error(exc) from exc
+
+
+@router.post("/quick-replies/assign", status_code=status.HTTP_201_CREATED)
+async def assign_quick_reply(payload: QuickReplyAssignment, agent: SupportAgent = Depends(require_support_csrf)) -> dict:
+    try:
+        return await support_service.assign_quick_reply(agent, **payload.model_dump())
+    except Exception as exc:
+        raise _translate_error(exc) from exc
+
+
+@router.post("/quick-replies/assign/pdf", status_code=status.HTTP_201_CREATED)
+async def assign_quick_reply_pdf(
+    file: UploadFile = File(...), assignment: str = Form(max_length=40000),
+    agent: SupportAgent = Depends(require_support_csrf),
+) -> dict:
+    try:
+        if not agent.is_supervisor:
+            raise SupportForbiddenError("Only Admins and Super Admins can assign quick replies.")
+        from pydantic import ValidationError
+        try:
+            payload = QuickReplyAssignment.model_validate_json(assignment)
+        except ValidationError:
+            raise SupportValidationError("Invalid quick reply or staff selection.") from None
+        content = await file.read(max_media_bytes("document") + 1)
+        if len(content) > max_media_bytes("document"):
+            raise SupportValidationError("The PDF document is too large.")
+        return await support_service.assign_quick_reply(agent, **payload.model_dump(), content=content, filename=file.filename)
+    except Exception as exc:
+        raise _translate_error(exc) from exc
+    finally:
+        await file.close()
+
+
+@router.post("/quick-replies/{reply_id}/assign", status_code=status.HTTP_201_CREATED)
+async def share_quick_reply(
+    payload: ShareQuickReplyRequest, reply_id: int = Path(gt=0),
+    agent: SupportAgent = Depends(require_support_csrf),
+) -> dict:
+    try:
+        return await support_service.share_quick_reply(agent, reply_id, **payload.model_dump())
+    except Exception as exc:
+        raise _translate_error(exc) from exc
 
 
 @router.put("/quick-replies/{reply_id}/pdf")

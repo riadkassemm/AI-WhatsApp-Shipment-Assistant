@@ -32,6 +32,7 @@ from app.support_media import (
     support_media_store,
 )
 from app.quick_reply_media import quick_reply_media_store
+from app.quick_reply_locations import normalize_location
 from app.support_delivery import deliver
 from app.support_events import publish_support_event
 from app.support_repository import (
@@ -130,6 +131,9 @@ def _quick_reply_payload(row: dict[str, Any] | None) -> dict[str, Any]:
     return {
         **({"attachment_filename": normalized["attachment_filename"], "attachment_size": normalized["attachment_size"]}
            if normalized.get("attachment_key") else {}),
+        **({"location": {"latitude": float(row["location_latitude"]), "longitude": float(row["location_longitude"]),
+                         "name": row.get("location_name") or "", "address": row.get("location_address") or ""}}
+           if row and row.get("location_latitude") is not None else {}),
         "id": int(normalized.get("id") or 0),
         "title": str(normalized.get("title") or ""),
         "body": str(normalized.get("body") or ""),
@@ -1673,8 +1677,9 @@ class SupportService:
         """International digits for a staff-entered number on one WhatsApp line.
 
         Local numbers are read in the line's country. On linked-device lines,
-        WhatsApp is asked whether the number has an account, so a chat is never
-        started with a number that cannot receive it.
+        A positive linked-device lookup can canonicalize the phone. Incomplete
+        lookups cannot establish that a number is unregistered; the normal send
+        pipeline remains responsible for confirmed delivery/failure handling.
         """
         try:
             phone = to_whatsapp_digits(raw_phone, default_region=region_for_number(line_display_phone))
@@ -1690,7 +1695,7 @@ class SupportService:
                 "WhatsApp number lookup unavailable: line_id=%s exception_type=%s", line_id, type(exc).__name__
             )
             return phone
-        if not result["exists"]:
+        if result["exists"] is False:
             raise SupportValidationError(
                 "This number is not on WhatsApp. Check the number and its country code."
             )
@@ -2656,21 +2661,127 @@ class SupportService:
         return {"items": [_quick_reply_payload(row) for row in rows]}
 
     async def create_quick_reply(
-        self, agent: SupportAgent, *, title: str | None, body: str | None
+        self, agent: SupportAgent, *, title: str | None, body: str | None, location: dict | None = None
     ) -> dict[str, Any]:
-        clean_title, clean_body = _normalize_quick_reply(title, body)
-        row = await support_repository.create_quick_reply(int(agent.id), title=clean_title, body=clean_body)
+        clean_title, clean_body = _normalize_quick_reply(title, body, pdf=location is not None)
+        extra = self._quick_reply_location_fields(location, clean_title, clean_body)
+        row = await support_repository.create_quick_reply(int(agent.id), title=clean_title, body=clean_body, **extra)
         reply = _quick_reply_payload(row)
         logger.info("Support quick reply created: staff_id=%s quick_reply_id=%s", agent.id, reply["id"])
         return reply
 
     async def update_quick_reply(
-        self, agent: SupportAgent, reply_id: int, *, title: str | None, body: str | None
+        self, agent: SupportAgent, reply_id: int, *, title: str | None, body: str | None, location: dict | None = None
     ) -> dict[str, Any]:
         existing = await support_repository.get_quick_reply(int(agent.id), reply_id)
-        clean_title, clean_body = _normalize_quick_reply(title, body, pdf=bool(existing.get('attachment_key')))
-        row = await support_repository.update_quick_reply(int(agent.id), reply_id, title=clean_title, body=clean_body)
+        if location is not None and existing.get('attachment_key'):
+            raise SupportValidationError("A PDF quick reply cannot be changed to a location.")
+        clean_title, clean_body = _normalize_quick_reply(title, body, pdf=bool(existing.get('attachment_key')) or location is not None)
+        extra = self._quick_reply_location_fields(location, clean_title, clean_body)
+        row = await support_repository.update_quick_reply(int(agent.id), reply_id, title=clean_title, body=clean_body, **extra)
         return _quick_reply_payload(row)
+
+    @staticmethod
+    def _quick_reply_location_fields(location: dict | None, title: str | None, body: str) -> dict:
+        if location is None:
+            return {}
+        if body:
+            raise SupportValidationError("Use the address field for a location, instead of a text message.")
+        try:
+            return {"location": normalize_location(location, title)}
+        except ValueError as exc:
+            raise SupportValidationError(str(exc)) from exc
+
+    async def quick_reply_recipients(self, agent: SupportAgent) -> dict:
+        if not agent.is_supervisor:
+            raise SupportForbiddenError("Only Admins and Super Admins can assign quick replies.")
+        return {"items": await support_repository.quick_reply_recipients()}
+
+    async def assign_quick_reply(
+        self, agent: SupportAgent, *, title: str | None, body: str | None,
+        recipient_ids: list[int], all_staff: bool = False, location: dict | None = None,
+        content: bytes | None = None, filename: str | None = None,
+        source_reply: dict | None = None,
+    ) -> dict:
+        if not agent.is_supervisor:
+            raise SupportForbiddenError("Only Admins and Super Admins can assign quick replies.")
+        if bool(recipient_ids) == bool(all_staff):
+            raise SupportValidationError("Choose selected staff or all active staff.")
+        if content is not None and location is not None:
+            raise SupportValidationError("Choose a PDF or a location, not both.")
+        clean_title, clean_body = _normalize_quick_reply(title, body, pdf=content is not None or location is not None)
+        extra = self._quick_reply_location_fields(location, clean_title, clean_body)
+        active = {int(row['id']) for row in await support_repository.quick_reply_recipients()}
+        recipients = sorted(active if all_staff else set(recipient_ids))
+        if not recipients or not set(recipients) <= active:
+            raise SupportValidationError("Select active staff accounts. Refresh the staff list if an account changed.")
+        legacy_pdf_digests = {}
+        if content is not None:
+            # Old copies have independent random file keys. Compare actual bytes,
+            # not filenames; cache digests only after locking their current rows.
+            for key in await support_repository.unhashed_quick_reply_pdfs(recipients):
+                try:
+                    existing_content = await asyncio.to_thread(quick_reply_media_store.read, key)
+                except SupportMediaError:
+                    continue  # An unavailable PDF is not a usable duplicate.
+                legacy_pdf_digests[key] = hashlib.sha256(existing_content).hexdigest()
+        attachments = {}
+        try:
+            if content is not None:
+                for staff_id in recipients:
+                    # Independent immutable files preserve owner-only replacement/deletion.
+                    attachments[staff_id] = await asyncio.to_thread(quick_reply_media_store.save, content, filename)
+        except BaseException as exc:
+            for attachment in attachments.values():
+                await self._remove_quick_reply_pdf(attachment['attachment_key'])
+            if isinstance(exc, SupportMediaError):
+                raise SupportValidationError(str(exc)) from exc
+            raise
+        try:
+            rows = await support_repository.create_quick_reply_copies(
+                int(agent.id), recipients, title=clean_title, body=clean_body, attachments=attachments,
+                source_reply=source_reply, legacy_pdf_digests=legacy_pdf_digests, **extra)
+        except (SupportConflictError, SupportNotFoundError):
+            for attachment in attachments.values():
+                await self._remove_quick_reply_pdf(attachment['attachment_key'])
+            raise
+        # Unknown commit outcomes retain files, just like an individual PDF save.
+        used_keys = {row.get('attachment_key') for row in rows}
+        for attachment in attachments.values():
+            if attachment['attachment_key'] not in used_keys:
+                await self._remove_quick_reply_pdf(attachment['attachment_key'])
+        own = next((row for row in rows if int(row['staff_id']) == int(agent.id)), None)
+        skipped = sum(bool(row.get('already_exists')) for row in rows)
+        saved = len(rows) - skipped
+        logger.info("Support quick reply assigned: actor_id=%s recipient_ids=%s added=%s skipped=%s", agent.id, recipients, saved, skipped)
+        return {"saved_count": saved, "skipped_count": skipped, "item": _quick_reply_payload(own) if own else None}
+
+    async def share_quick_reply(
+        self, agent: SupportAgent, reply_id: int, *, recipient_ids: list[int], all_staff: bool = False,
+    ) -> dict:
+        if not agent.is_supervisor:
+            raise SupportForbiddenError("Only Admins and Super Admins can assign quick replies.")
+        if bool(recipient_ids) == bool(all_staff):
+            raise SupportValidationError("Choose selected staff or all active staff.")
+        # Read only the manager's own saved reply, including existing legacy copies.
+        source = await support_repository.get_quick_reply(int(agent.id), reply_id)
+        recipients = [int(row['id']) for row in await support_repository.quick_reply_recipients()] if all_staff else recipient_ids
+        recipients = sorted(set(recipients) - {int(agent.id)})
+        if not recipients:
+            raise SupportValidationError("Select at least one other active staff member.")
+        content = None
+        if source.get('attachment_key'):
+            try:
+                content = await asyncio.to_thread(quick_reply_media_store.read, source['attachment_key'])
+            except SupportMediaError as exc:
+                raise SupportValidationError(str(exc)) from exc
+        result = await self.assign_quick_reply(
+            agent, title=source.get('title'), body=source.get('body'), recipient_ids=recipients,
+            location=_quick_reply_payload(source).get('location'), content=content,
+            filename=source.get('attachment_filename'), source_reply=source,
+        )
+        logger.info("Support saved reply shared: actor_id=%s source_id=%s count=%s", agent.id, reply_id, result['saved_count'])
+        return result
 
     async def save_quick_reply_pdf(
         self, agent: SupportAgent, *, title: str | None, body: str | None,
@@ -2678,7 +2789,9 @@ class SupportService:
     ) -> dict[str, Any]:
         clean_title, clean_body = _normalize_quick_reply(title, body, pdf=True)
         if reply_id is not None:
-            await support_repository.get_quick_reply(int(agent.id), reply_id)
+            existing = await support_repository.get_quick_reply(int(agent.id), reply_id)
+            if existing.get('location_latitude') is not None:
+                raise SupportConflictError("A location quick reply cannot be replaced with a PDF.")
         try:
             attachment = await asyncio.to_thread(quick_reply_media_store.save, content, filename)
         except SupportMediaError as exc:

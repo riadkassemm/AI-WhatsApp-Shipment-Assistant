@@ -482,3 +482,18 @@ def test_new_tickets_use_the_dashboard_name_for_the_same_registered_customer(mon
             source_whatsapp_message_id=None, source_message_text=None,
         ))
     assert created["customer_name"] == expected
+
+
+@pytest.mark.parametrize('lookup_value', [None, {}, 'false'])
+def test_inconclusive_bridge_lookup_preserves_phone_without_claiming_absence(monkeypatch, lookup_value):
+    client = LinkedDeviceWhatsAppClient()
+    async def request(*args, **kwargs):
+        return {'exists': lookup_value}
+    monkeypatch.setattr(client, '_phone_number_id', lambda line: line)
+    monkeypatch.setattr(client, '_json_request', request)
+    result = asyncio.run(client.check_number('96181123456', phone_number_id='90012'))
+    assert result == {'exists': None, 'whatsapp_phone': '96181123456'}
+    async def lookup(*args, **kwargs):
+        return result
+    run = _line_number(monkeypatch, transport='linked_device', lookup=lookup)
+    assert run('96181123456') == '96181123456'

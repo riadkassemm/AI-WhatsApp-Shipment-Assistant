@@ -1149,7 +1149,7 @@ test('media on an unresolvable WhatsApp host is downloaded through the default m
   assert.deepEqual(calls, [null]);
 });
 
-test('number lookup reports whether a phone number has WhatsApp before a chat is started', async t => {
+test('number lookup confirms accounts but treats empty responses as inconclusive', async t => {
   const { bridge, socket } = await fixture(t);
   const asked = [];
   socket.onWhatsApp = async jid => {
@@ -1157,7 +1157,7 @@ test('number lookup reports whether a phone number has WhatsApp before a chat is
     return jid.startsWith('96176612345@') ? [{ jid: '96176612345@s.whatsapp.net', exists: true }] : [];
   };
   assert.deepEqual(await bridge.checkNumber(LINE, { phone: '+961 76 612 345' }), { phone: '96176612345', exists: true, whatsapp_phone: '96176612345' });
-  assert.deepEqual(await bridge.checkNumber(LINE, { phone: '76612345' }), { phone: '76612345', exists: false, whatsapp_phone: '76612345' });
+  assert.deepEqual(await bridge.checkNumber(LINE, { phone: '76612345' }), { phone: '76612345', exists: null, whatsapp_phone: '76612345' });
   assert.deepEqual(asked, ['96176612345@s.whatsapp.net', '76612345@s.whatsapp.net']);
   await assert.rejects(bridge.checkNumber(LINE, { phone: 'not a number' }), error => error.code === 'INVALID_PHONE');
   assert.equal(socket.calls.length, 0, 'a lookup never sends a message');
@@ -1586,4 +1586,15 @@ test('new incoming message during read submission prevents clearing the staff ch
   assert.equal((await task).chat_state_synced, false);
   assert.equal(patches, 0);
   assert.equal(line.store.data.messages.NEW.dashboard_read, undefined);
+});
+
+test('incomplete number lookups and numeric LIDs never reject or redirect a phone', async t => {
+  const { bridge, socket } = await fixture(t);
+  for (const response of [undefined, null, [], {}, [{ exists: false }]]) {
+    socket.onWhatsApp = async () => response;
+    assert.deepEqual(await bridge.checkNumber(LINE, { phone: PHONE }), { phone: PHONE, exists: null, whatsapp_phone: PHONE });
+  }
+  socket.onWhatsApp = async () => [{ exists: true, jid: '123456789012345@lid' }];
+  assert.deepEqual(await bridge.checkNumber(LINE, { phone: PHONE }), { phone: PHONE, exists: true, whatsapp_phone: PHONE });
+  assert.equal(socket.calls.length, 0, 'lookups never send test messages');
 });

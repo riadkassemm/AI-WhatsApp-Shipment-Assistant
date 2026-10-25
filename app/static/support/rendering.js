@@ -1740,6 +1740,14 @@ function addMessage(container, m, extraClass = '') {
     copyImage.onclick = () => copyImageToClipboard(m.media_url);
     actions.append(copyImage);
   }
+  if (kind === 'location' && !deleted && m.location_latitude != null && m.location_longitude != null) {
+    const saveLocation = document.createElement('button');
+    saveLocation.type = 'button'; saveLocation.className = 'btn message-action-btn';
+    saveLocation.textContent = 'Save location';
+    labelMessageAction(saveLocation, 'save-location', 'Save location to quick replies');
+    saveLocation.onclick = () => saveLocationQuickReply(m);
+    actions.append(saveLocation);
+  }
   if (m.id && (!extraClass || canChangeWhatsAppMessage(m, 'everyone'))) {
     const remove = document.createElement('button');
     remove.type = 'button'; remove.className = 'btn message-action-btn'; remove.textContent = 'Delete';

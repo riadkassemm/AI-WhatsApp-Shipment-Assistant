@@ -502,8 +502,8 @@ export class Bridge {
     return this.lineStatus(line);
   }
 
-  // Asks WhatsApp whether a number has an account, so staff cannot start a chat
-  // with a number that is missing its country code or is not on WhatsApp.
+  // Baileys filters out negative contacts. An empty/absent response therefore
+  // cannot distinguish an unregistered number from an incomplete lookup.
   async checkNumber(id, payload) {
     const line = this.getLine(id);
     const socket = this.connected(line);
@@ -513,9 +513,11 @@ export class Bridge {
     const timeout = new Promise((_, reject) => { timer = setTimeout(() => reject(new BridgeError(504, 'LOOKUP_TIMEOUT', 'WhatsApp did not answer the number lookup in time.')), 10_000); });
     let results;
     try { results = await Promise.race([lookup, timeout]); } finally { clearTimeout(timer); }
-    const match = (results ?? []).find(item => item?.exists);
-    const jidPhone = match ? String(match.jid ?? '').split('@')[0].split(':')[0] : '';
-    return { phone, exists: Boolean(match), whatsapp_phone: /^\d{5,15}$/.test(jidPhone) ? jidPhone : phone };
+    const match = (Array.isArray(results) ? results : []).find(item => item?.exists === true);
+    const jid = String(match?.jid ?? '');
+    // Numeric LIDs are private account identifiers, not dialable phone numbers.
+    const jidPhone = jid.endsWith('@s.whatsapp.net') ? jid.split('@')[0].split(':')[0] : '';
+    return { phone, exists: match ? true : null, whatsapp_phone: /^\d{5,15}$/.test(jidPhone) ? jidPhone : phone };
   }
   connected(line) {
     if (line.removing) throw new BridgeError(503, 'LINE_REMOVING', 'This WhatsApp number is being removed.');
