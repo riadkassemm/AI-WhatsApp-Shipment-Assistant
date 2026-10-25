@@ -50,6 +50,29 @@ async def test_real_transfer_resolution_and_reopen_periods(infrastructure):
     detail = await InvestigationRepository(stats.StatisticsRepository(repo)).investigate(41,MANAGER)
     assert [p['seconds'] for p in detail['periods']] == [300,600,300]
     assert detail['periods'][-1]['cycle_resolution_seconds'] == 300
+    assert detail['periods'][-1]['resolver_name'] == 'Other'
+
+
+@pytest.mark.asyncio
+async def test_agent_review_includes_message_participation_and_current_owner_names(infrastructure):
+    repo, sql, _ = infrastructure
+    await sql('UPDATE support_tickets SET created_at=%s', (BASE,))
+    message, _ = await repo.add_ticket_message(ticket_id=42, sender_type='AGENT', sender_id='8',
+        sender_name='Other', direction='OUTBOUND', body='Synthetic manager reply',
+        send_status='SENT', whatsapp_message_id='test-review-reply')
+    await sql('UPDATE support_ticket_messages SET created_at=%s WHERE id=%s', (BASE, message['id']))
+    investigation = InvestigationRepository(stats.StatisticsRepository(repo))
+    result = await investigation.tickets(BASE, BASE+timedelta(days=1), 8, None, False)
+    ticket = next(item for item in result['items'] if item['id'] == 42)
+    assert ticket['current_assignee_name'] == 'Agent'
+    assert ticket['whatsapp_phone'] == '155500042'
+    assert not any(item['id'] == 42 for item in (await investigation.tickets(
+        BASE+timedelta(days=1), BASE+timedelta(days=2), 8, None, False))['items'])
+    # Renames are current display names; no assignment change or audit fabrication.
+    await sql("UPDATE staff SET name='Renamed agent' WHERE id=7")
+    result = await investigation.tickets(BASE, BASE+timedelta(days=1), 8, None, False)
+    assert next(item for item in result['items'] if item['id'] == 42)['current_assignee_name'] == 'Renamed agent'
+    assert (await repo.get_ticket(42))['current_assignee_id'] == '7'
 
 
 @pytest.mark.asyncio

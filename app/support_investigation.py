@@ -12,7 +12,8 @@ AUDIT_EVENTS = (*LIFECYCLE_EVENTS, 'CONVERSATION_VIEWED', 'INCOMING_MARKED_READ'
 
 
 async def ticket_batch(cur, start, end, before=None, limit=250):
-    await cur.execute("""SELECT id,ticket_reference,customer_name,status,active_key,conversation_origin,current_assignee_id
+    await cur.execute("""SELECT id,ticket_reference,customer_name,whatsapp_phone,status,active_key,conversation_origin,
+        current_assignee_id,current_assignee_name
         FROM support_tickets t WHERE t.id<%s AND t.created_at<%s AND
         (t.active_key IS NOT NULL OR t.updated_at>=%s OR EXISTS
          (SELECT 1 FROM support_ticket_events e WHERE e.ticket_id=t.id AND e.created_at>=%s AND e.created_at<%s))
@@ -107,12 +108,16 @@ class InvestigationRepository:
                         matching = [p for p in projection['periods'] if (staff_id is None or p['agent_id'] == str(staff_id))
                                     and (period_in_range(p, start, end) or (p['ended_at'] is None and p['started_at'] < end))]
                         acted = any(str(e.get('actor_id')) == str(staff_id) and start <= e['created_at'] < end for e in audit)
-                        if staff_id is not None and not matching and not acted:
+                        sent = any(str(m.get('sender_id')) == str(staff_id) and start <= m['sent_at'] < end
+                                   for m in messages[ticket['id']])
+                        if staff_id is not None and not matching and not acted and not sent:
                             continue
                         flags = review_indicators(projection['periods'], audit, messages[ticket['id']], start, as_of, staff_id)
                         flags = [dict(flag, agent_name=names[flag['agent_id']]) for flag in flags if flag['agent_id'] in names]
                         if flagged_only and not flags:
                             continue
+                        if str(ticket.get('current_assignee_id')) in names:
+                            ticket['current_assignee_name'] = names[str(ticket['current_assignee_id'])]
                         result.append(dict(ticket, flags=flags, **projection))
                     await cur.execute('SELECT ticket_activity_tracking_started_at FROM support_statistics_metadata WHERE id=1')
                     tracking = (await cur.fetchone())['ticket_activity_tracking_started_at']
@@ -155,7 +160,8 @@ class InvestigationRepository:
                 raise
         messages = await self.statistics.repository._attach_message_reactions(messages)
         for period in projection['periods']:
-            period['agent_name'] = names.get(period['agent_id'], 'Former staff #' + period['agent_id'])
+            period['agent_name'] = names.get(period['agent_id'], 'Former staff member')
+            period['resolver_name'] = names.get(period['resolver_id'], 'Former staff member') if period.get('resolver_id') else None
         return dict(ticket=_safe_ticket_row(ticket), **projection,
                     original_claimant_name=names.get(projection['original_claimant_id']),
                     messages=_serialize_support_messages(ticket_id, list(reversed(messages[:100]))),

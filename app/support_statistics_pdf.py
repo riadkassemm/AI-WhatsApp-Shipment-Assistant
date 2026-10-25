@@ -19,7 +19,7 @@ from app.support_timing import TIMING_METRICS
 FONT = "SupportDejaVu"
 pdfmetrics.registerFont(TTFont(FONT, str(Path(__file__).parent / "fonts" / "DejaVuSans.ttf")))
 LABELS = ("Active dashboard time", "Tickets claimed", "Tickets resolved", "Outbound messages sent", "Tickets transferred", "Tickets received by transfer")
-TIMING_LABELS = ("Average handling time", "Median handling time", "Average resolver time", "Median resolver time")
+TIMING_LABELS = ("Average handling time", "Median handling time", "Average resolution time", "Median resolution time")
 ROLES = {"agent": "Agent", "admin": "Admin", "supervisor": "Super Admin"}
 
 
@@ -75,7 +75,7 @@ def statistics_pdf(report: dict) -> bytes:
                        p(f"{row.get('handling_samples', 0)} / {row.get('resolution_samples', 0)}")])
     timing_table = Table(timing, colWidths=[165, 115, 115, 115, 115, 130], repeatRows=1)
     timing_table.setStyle(TableStyle([('VALIGN',(0,0),(-1,-1),'TOP'), ('GRID',(0,0),(-1,-1),.3,colors.lightgrey)]))
-    story += [timing_table, Spacer(1,12), p('Timing uses complete responsibility periods ending in the selected dates. Transfers stop the previous owner’s period. Resolver time includes only the final period owned by the resolving staff member. Waiting time is included; open periods and resolved gaps are excluded. Team averages weight samples. Missing history is not inferred.')]
+    story += [timing_table, Spacer(1,12), p('Timing uses complete responsibility periods ending in the selected dates. Transfers stop the previous owner’s period. Resolution time includes only the final period owned by the resolving staff member. Waiting time is included; open periods and resolved gaps are excluded. Team averages weight samples. Missing history is not inferred.')]
 
     for key, label in [("activity_tracking_started_at", "Active time tracking began"),
                        ("ticket_history_since", "Retained ticket audit begins"),

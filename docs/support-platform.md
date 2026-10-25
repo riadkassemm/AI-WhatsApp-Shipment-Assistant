@@ -779,10 +779,22 @@ Hover a staff row for sample counts; unknown timing displays `—`.
   unknown and excluded where affected. System auto-resolution has no employee
   resolver credit. Deleted staff remain in audit history but not the leaderboard.
 
-Choose **Investigate tickets** or **Review indicators only** using the applied
-filters. Each result opens responsibility periods, complete paginated audit, and
-paginated messages in the same statistics dialog. Message sender/type, creation
-time and delivery state remain visible. This manager-only GET path performs no
+Select a **staff member's name in the ranking table** to open their performance
+summary and tickets for the applied dates. This review includes their assignments,
+recorded activities and staff-sent messages, including manager replies to another
+employee's ticket. **Show review indicators only** narrows that employee's list;
+changing employees clears the previous selection. Back buttons preserve the
+ranking, dates and ticket list.
+
+Open a ticket to switch between **Conversation**, **Activity timeline**, and
+**Who handled it**. Activity uses plain-language descriptions and staff names,
+never internal event codes, identifiers or JSON. Exact event times are available
+on hover; timestamps follow the report timezone. Earlier activity and messages
+have separate pagination. Unknown activity types remain visible as a generic
+activity entry instead of exposing raw details. Detailed counting/coverage notes
+are collapsed under **How to read these statistics**. The presentation does not
+alter the retained audit or timing calculations. Message sender, creation time
+and delivery state remain visible. This manager-only GET path performs no
 identity enrichment, read synchronization, assignment change, activity audit write,
 provider calls, or operational ticket opening. It respects per-user message hiding
 and global deletion; deleted content is not reconstructed. Media uses existing
@@ -821,4 +833,4 @@ tables or lifecycle redesign. Reapplication preserves that date. The earlier
 statistics migration now names its insert columns so it remains repeatable after
 this additive extension. Reports load evidence in batches, investigate 50 candidate
 conversations per page, and paginate messages/events separately in pages of 100.
-An indicator-filtered page may be empty but have a **More** button.
+An employee- or indicator-filtered page may be empty but have a **More conversations** button.
