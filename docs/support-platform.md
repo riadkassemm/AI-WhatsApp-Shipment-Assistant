@@ -749,3 +749,88 @@ handle provider acceptance, failures, and receipts. This does not mark messages 
 delivered or bypass delivery claims/retry rules. A positive phone JID can canonicalize
 the number; a numeric `@lid` identifier must never replace the dialable phone.
 Invalid country codes still fail local validation. No schema migration is needed.
+
+### Responsibility timing and read-only investigation
+
+**Agent Statistics** now includes average/median handling time and resolver time,
+with the same dates, staff filter, sortable leaderboard and PDF export. These are
+elapsed clock durations (waiting/off-hours included), not active dashboard time.
+Hover a staff row for sample counts; unknown timing displays `—`.
+
+- A claim assigns immediately; a transfer immediately stops the old owner's period
+  and starts the recorded recipient's. Manager transfers credit the transfer actor
+  in existing counts, but responsibility timing credits the recorded owners.
+- Every completed responsibility period ending within the selected dates is one
+  handling sample, even if it began before the range. Open periods are shown in
+  investigation but excluded from averages. Team averages/medians pool samples;
+  they are not averages of employee averages.
+- Resolver time is the final uninterrupted period owned by the resolving employee.
+  Earlier periods, including earlier periods of that same employee, remain separate
+  handling samples. A manager resolving another owner's ticket without reassignment
+  gets the existing resolution count but no invented resolver duration.
+- Resolution ends the cycle. Reopening starts another cycle, excluding the resolved
+  gap. Customer-ticket reopen by Admin/Super Admin assigns that manager; eligible
+  agents retain ownership. Staff chats begin assigned to their starter, reopen with
+  the replying staff member, and close separately: their periods count as handling,
+  not customer-ticket resolution samples. Cycle totals in investigation run from
+  recorded initial claim/start/reopen through resolution across all transfers.
+- Timing is reconstructed from retained transactional lifecycle events, never from
+  the ticket's overwritten `assigned_at`. Missing/inconsistent history is labeled
+  unknown and excluded where affected. System auto-resolution has no employee
+  resolver credit. Deleted staff remain in audit history but not the leaderboard.
+
+Select a **staff member's name in the ranking table** to open their performance
+summary and tickets for the applied dates. This review includes their assignments,
+recorded activities and staff-sent messages, including manager replies to another
+employee's ticket. **Show review indicators only** narrows that employee's list;
+changing employees clears the previous selection. Back buttons preserve the
+ranking, dates and ticket list.
+
+Open a ticket to switch between **Conversation**, **Activity timeline**, and
+**Who handled it**. Activity uses plain-language descriptions and staff names,
+never internal event codes, identifiers or JSON. Exact event times are available
+on hover; timestamps follow the report timezone. Earlier activity and messages
+have separate pagination. Unknown activity types remain visible as a generic
+activity entry instead of exposing raw details. Detailed counting/coverage notes
+are collapsed under **How to read these statistics**. The presentation does not
+alter the retained audit or timing calculations. Message sender, creation time
+and delivery state remain visible. This manager-only GET path performs no
+identity enrichment, read synchronization, assignment change, activity audit write,
+provider calls, or operational ticket opening. It respects per-user message hiding
+and global deletion; deleted content is not reconstructed. Media uses existing
+protected conversation rendering. Closing statistics returns to the existing chat.
+
+Views use `CONVERSATION_VIEWED` in the existing ticket audit, with a unique request
+key scoped to staff and conversation; retries are deduplicated. Only explicit
+successful operational opens are logged, not polling, SSE refreshes, prefetches or
+manager investigation. Client time/actor overrides are rejected; timestamps come
+from MariaDB. Browser view reporting is best effort and is evidence of a reported
+open, not proof a human read the text. Existing claim/transfer/reopen/status/resolve
+transactions and message rows supply other activity; no duplicate send audit is
+inserted. A confirmed reply-bounded read adds one `INCOMING_MARKED_READ` event for
+each newly read incoming message, attributed to the original reply sender and
+marked `reply_sync`. There is currently no manual clear-unread/mark-read action:
+opening a conversation does not send read receipts. Phone-only reads cannot be
+attributed to an employee and are not guessed. Read state and response state stay
+separate.
+
+Review prompts use explicit thresholds: resolution under 60 seconds, handling
+under 30 seconds, at least three outgoing transfers on the same ticket, or at
+least three opens during a responsibility period of at least five minutes without
+a response attempt. Resolved-without-response means no confirmed reply attributable
+to that owner; pending/uncertain sends suppress that prompt. Short text and any
+supported attachment count as responses. Transfer-ended periods are not flagged
+as unanswered or unresolved. Automatic `reply_sync` reads are excluded from
+read-without-response prompts. These are review indicators, **not misconduct
+findings**; inspect the conversation, failures and handoffs. Historical views/reads
+are unavailable before the displayed tracking start. Deleted messages/history,
+unidentified phone-app senders and incomplete audits limit retrospective analysis.
+
+Apply `migrations/20261025_statistics_investigation.sql` to the local database before
+restarting the API. It adds a nullable unique audit key to the existing event table
+and an immutable activity-tracking start in existing statistics metadata; no new
+tables or lifecycle redesign. Reapplication preserves that date. The earlier
+statistics migration now names its insert columns so it remains repeatable after
+this additive extension. Reports load evidence in batches, investigate 50 candidate
+conversations per page, and paginate messages/events separately in pages of 100.
+An employee- or indicator-filtered page may be empty but have a **More conversations** button.

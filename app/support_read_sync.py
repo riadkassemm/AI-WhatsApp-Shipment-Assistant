@@ -44,11 +44,27 @@ class ReadSyncRepositoryMixin:
 
     async def confirm_incoming_read(self, job, target):
         async with self._pool.acquire() as conn:
-            async with conn.cursor() as cur:
-                await cur.execute("""UPDATE support_ticket_messages SET read_at=COALESCE(read_at,UTC_TIMESTAMP(6))
-                    WHERE id=%s AND ticket_id=%s AND id<%s AND direction='INBOUND'
-                    AND whatsapp_message_id=%s""", (target['id'], job['ticket_id'], job['id'], target['whatsapp_message_id']))
-            await conn.commit()
+            await conn.begin()
+            try:
+                async with conn.cursor() as cur:
+                    await cur.execute("""UPDATE support_ticket_messages SET read_at=UTC_TIMESTAMP(6)
+                        WHERE id=%s AND ticket_id=%s AND id<%s AND direction='INBOUND' AND read_at IS NULL
+                        AND whatsapp_message_id=%s""", (target['id'], job['ticket_id'], job['id'], target['whatsapp_message_id']))
+                    if cur.rowcount:
+                        # Attribute confirmed read-sync to the reply's original actor,
+                        # never the current assignee. Retries cannot duplicate this audit.
+                        await cur.execute("""INSERT INTO support_ticket_events
+                            (ticket_id,event_type,actor_type,actor_id,actor_name,details_json,created_at,audit_key)
+                            SELECT ticket_id,'INCOMING_MARKED_READ','AGENT',sender_id,sender_name,
+                                JSON_OBJECT('mode','reply_sync','reply_id',id,'message_id',%s),UTC_TIMESTAMP(6),%s
+                            FROM support_ticket_messages WHERE id=%s AND ticket_id=%s AND sender_type='AGENT'
+                                AND sender_id IS NOT NULL AND send_status='SENT'
+                            ON DUPLICATE KEY UPDATE audit_key=VALUES(audit_key)""",
+                            (target['id'], f"read:{target['id']}", job['id'], job['ticket_id']))
+                await conn.commit()
+            except BaseException:
+                await conn.rollback()
+                raise
 
     async def complete_read_sync(self, job):
         async with self._pool.acquire() as conn:

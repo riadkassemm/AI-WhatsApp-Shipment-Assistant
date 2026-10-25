@@ -86,6 +86,6 @@ const justNow = new Date(Date.now() - 5000).toISOString().replace('Z', '');
 const label = relativeTime(justNow);
 assert.doesNotMatch(label, /hr|hour/, label);
 """
-    env = {**os.environ, "TZ": "Asia/Beirut"}
+    env = {**os.environ, "TZ": "Etc/GMT-3"}
     result = subprocess.run(["node", "-e", script], text=True, capture_output=True, timeout=10, env=env)
     assert result.returncode == 0, result.stderr

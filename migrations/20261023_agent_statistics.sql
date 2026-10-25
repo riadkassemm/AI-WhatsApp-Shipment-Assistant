@@ -3,7 +3,7 @@ CREATE TABLE IF NOT EXISTS support_statistics_metadata (
     id TINYINT NOT NULL PRIMARY KEY,
     activity_tracking_started_at DATETIME(6) NOT NULL
 ) ENGINE=InnoDB;
-INSERT IGNORE INTO support_statistics_metadata VALUES (1, UTC_TIMESTAMP(6));
+INSERT IGNORE INTO support_statistics_metadata (id, activity_tracking_started_at) VALUES (1, UTC_TIMESTAMP(6));
 
 CREATE TABLE IF NOT EXISTS support_agent_heartbeats (
     staff_id BIGINT NOT NULL,
