@@ -668,15 +668,16 @@ test('a quick WhatsApp app revoke keeps a redacted original before the deletion 
     type: proto.Message.ProtocolMessage.Type.REVOKE, key: { id: 'PHONE-QUICK' }, timestampMs: Date.now() + 1,
   } } };
   await bridge.receive(line, revoked);
-  assert.deepEqual(bridge.outbox.data.entries.map(item => item.event.type), ['outgoing_message', 'message_deleted_for_everyone']);
-  const marker = bridge.outbox.data.entries[0].event.payload.entry[0].changes[0].value;
-  assert.deepEqual(marker.messages[0], { id: `ld:${LINE}:PHONE-QUICK`, from: PHONE,
-    timestamp: String(sent.messageTimestamp), type: 'unsupported' });
-  assert.deepEqual(marker.contacts, []);
+  assert.deepEqual(bridge.outbox.data.entries.map(item => item.event.type), ['message_tombstone']);
+  const marker = bridge.outbox.data.entries[0].event;
+  assert.equal(marker.message_id, `ld:${LINE}:PHONE-QUICK`);
+  assert.equal(marker.timestamp, sent.messageTimestamp * 1000);
+  assert.equal(marker.from_me, true);
+  assert.equal(marker.payload, undefined);
   assert.equal(JSON.stringify(bridge.outbox.data).includes('Private text that was revoked'), false);
   assert.equal(line.store.data.messages['PHONE-QUICK'].message.message, undefined);
   await bridge.deliverCallbacks();
-  assert.deepEqual(delivered.map(event => event.type), ['outgoing_message', 'message_deleted_for_everyone']);
+  assert.deepEqual(delivered.map(event => event.type), ['message_tombstone']);
   assert.equal(JSON.stringify(delivered).includes('Private text that was revoked'), false);
 });
 
@@ -1597,4 +1598,115 @@ test('incomplete number lookups and numeric LIDs never reject or redirect a phon
   socket.onWhatsApp = async () => [{ exists: true, jid: '123456789012345@lid' }];
   assert.deepEqual(await bridge.checkNumber(LINE, { phone: PHONE }), { phone: PHONE, exists: true, whatsapp_phone: PHONE });
   assert.equal(socket.calls.length, 0, 'lookups never send test messages');
+});
+
+test('multi-megabyte PDF uploads dispatch exact bytes once and enforce canonical bounded base64', async t => {
+  const { bridge, socket, config } = await fixture(t);
+  for (const size of [3914050, config.maxMediaBytes]) {
+    const content = Buffer.alloc(size, 37);
+    const uploaded = await bridge.uploadMedia(LINE, { content_base64: content.toString('base64'), mime_type: 'application/pdf', filename: 'test.pdf' });
+    const payload = { to: PHONE, type: 'document', document: { id: uploaded.id, filename: 'test.pdf' }, client_message_id: `pdf-${size}` };
+    const before = socket.calls.length;
+    const sent = await bridge.send(LINE, payload);
+    assert.deepEqual(await bridge.send(LINE, payload), sent);
+    assert.equal(socket.calls.length, before + 1);
+    assert.deepEqual(socket.calls.at(-1).content.document, content);
+  }
+  for (const encoded of ['!!!!', 'abcd\n===', 'a===', 'ab==', 'abc', null, {}, 'YWJj====']) {
+    await assert.rejects(bridge.uploadMedia(LINE, { content_base64: encoded, mime_type: 'application/pdf' }), error => error.code === 'INVALID_MEDIA');
+  }
+  for (const content of [Buffer.alloc(0), Buffer.alloc(config.maxMediaBytes + 1)]) {
+    await assert.rejects(bridge.uploadMedia(LINE, { content_base64: content.toString('base64'), mime_type: 'application/pdf' }), error => error.code === 'MEDIA_TOO_LARGE');
+  }
+  assert.equal(socket.calls.length, 2);
+});
+
+test('old orphan phone revokes reconcile durably without resetting sessions; transient failures retry', async t => {
+  let available = false;
+  const delivered = [];
+  const { bridge, line, socket } = await fixture(t, 'ack', { fetch: async (_url, options) => {
+    delivered.push(JSON.parse(options.body));
+    return new Response(null, { status: available ? 200 : 503 });
+  } });
+  await line.store.update(data => {
+    data.messages.ORIGINAL.deleted = true;
+    data.messages.ORIGINAL.callbacks_scrubbed = true;
+    data.messages.ORIGINAL.last_mutation_timestamp = Date.now();
+    delete data.messages.ORIGINAL.message.message;
+    data.messages.ORIGINAL.text = null;
+  });
+  await bridge.enqueue({ event_id: 'old-revoke', type: 'message_deleted_for_everyone', line_id: LINE,
+    message_id: `ld:${LINE}:ORIGINAL`, timestamp: Date.now(), from_me: true, sender_phone: PHONE });
+  await bridge.outbox.update(data => { data.entries[0].attempts = 4100; });
+  await bridge.recoverPending();
+  assert.equal(bridge.outbox.data.entries[0].event.type, 'message_tombstone');
+  assert.equal(bridge.outbox.data.entries[0].event.original_timestamp_known, true);
+  await bridge.deliverCallbacks();
+  assert.equal(bridge.outbox.data.entries.length, 1);
+  available = true;
+  await bridge.outbox.update(data => { data.entries[0].next_try = 0; });
+  await bridge.deliverCallbacks();
+  assert.equal(bridge.outbox.data.entries.length, 0);
+  await bridge.recoverPending();
+  assert.equal(bridge.outbox.data.entries.length, 0);
+  assert.equal(line.socket, socket);
+  assert.equal(socket.calls.length, 0);
+  assert.equal(delivered.length, 2);
+});
+
+test('outbound revoke before original never retains deleted content and later reconciles the real send time', async t => {
+  const { bridge, line } = await fixture(t, 'ack', { fetch: async () => new Response(null, { status: 200 }) });
+  await bridge.applyEvent(line, { event_id: 'revoke-first', type: 'message_deleted_for_everyone', line_id: LINE,
+    message_id: `ld:${LINE}:LATE`, timestamp: Date.now(), from_me: true, sender_phone: PHONE });
+  assert.equal(bridge.outbox.data.entries[0].event.original_timestamp_known, false);
+  await bridge.deliverCallbacks();
+  const late = { ...original('LATE'), message: { contactMessage: { displayName: 'Deleted contact', vcard: 'secret' } } };
+  await bridge.receive(line, late);
+  assert.equal(bridge.outbox.data.entries[0].event.timestamp, late.messageTimestamp * 1000);
+  assert.equal(bridge.outbox.data.entries[0].event.original_timestamp_known, true);
+  assert.equal(JSON.stringify(line.store.data).includes('secret'), false);
+  assert.equal(JSON.stringify(bridge.outbox.data).includes('secret'), false);
+});
+
+test('HTTP PDF upload accepts the reported size and serves the identical bytes', async t => {
+  const { bridge, config } = await fixture(t);
+  const server = createServer(bridge, config);
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => { server.close(resolve); server.closeAllConnections(); }));
+  const base = `http://127.0.0.1:${server.address().port}/v1/lines/${LINE}/media`;
+  const headers = { Authorization: `Bearer ${SECRET}`, 'Content-Type': 'application/json' };
+  const bytes = Buffer.alloc(3914050, 37);
+  const response = await fetch(base, { method: 'POST', headers, body: JSON.stringify({ content_base64: bytes.toString('base64'), mime_type: 'application/pdf', filename: 'large.pdf' }) });
+  assert.equal(response.status, 200);
+  const { id } = await response.json();
+  const download = await fetch(`${base}/${encodeURIComponent(id)}`, { headers });
+  assert.equal(download.status, 200);
+  assert.deepEqual(Buffer.from(await download.arrayBuffer()), bytes);
+});
+
+test('late original reconciliation survives a crash while the old callback is in flight', async t => {
+  let entered, release;
+  const enteredPromise = new Promise(resolve => { entered = resolve; });
+  const released = new Promise(resolve => { release = resolve; });
+  const callbacks = [];
+  const { bridge, line } = await fixture(t, 'ack', { fetch: async (_url, options) => {
+    callbacks.push(JSON.parse(options.body));
+    if (callbacks.length === 1) { entered(); await released; }
+    return new Response(null, { status: 200 });
+  } });
+  await bridge.applyEvent(line, { event_id: 'race-revoke', type: 'message_deleted_for_everyone', line_id: LINE,
+    message_id: `ld:${LINE}:RACE`, timestamp: Date.now(), from_me: true, sender_phone: PHONE });
+  const delivering = bridge.deliverCallbacks();
+  await enteredPromise;
+  const purge = bridge.purgeDeletedContent.bind(bridge);
+  bridge.purgeDeletedContent = async () => { throw new Error('Crash before callback write'); };
+  await assert.rejects(bridge.receive(line, original('RACE')), /Crash before callback write/);
+  bridge.purgeDeletedContent = purge;
+  await bridge.recoverPending();
+  assert.equal(bridge.outbox.data.entries.length, 2);
+  release();
+  await delivering;
+  assert.deepEqual(callbacks.map(event => event.original_timestamp_known), [false, true]);
+  assert.equal(bridge.outbox.data.entries.length, 0);
+  assert.equal(line.store.data.messages.RACE.message.message, undefined);
 });

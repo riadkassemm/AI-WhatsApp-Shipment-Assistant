@@ -834,3 +834,36 @@ statistics migration now names its insert columns so it remains repeatable after
 this additive extension. Reports load evidence in batches, investigate 50 candidate
 conversations per page, and paginate messages/events separately in pages of 100.
 An employee- or indicator-filtered page may be empty but have a **More conversations** button.
+
+### Linked-device attachments and deletion recovery
+
+The bridge validates base64 uploads with a bounded decode and canonical round-trip,
+not a repeated regex (which could exhaust Node's stack on valid multi-megabyte
+PDFs). Both the encoded request and decoded bytes remain size-limited. Uploads
+only prepare media; delivery ownership is checked again before the provider send.
+A failed upload is safe to retry using the existing message's **Retry** action.
+Uncertain dispatches retain the existing reconciliation policy: never blindly
+resend them. Failure logs identify the ticket/message, preparation/upload/dispatch
+phase, exception class and retry safety without logging content or credentials.
+
+“Updates pending” counts durable callbacks still awaiting the application, not
+WhatsApp connection or recipient-delivery status. Temporary API/database failures
+retain backoff retries; independent lines continue processing. Missing reaction
+targets are separately reported as background history work.
+
+Phone-originated revokes now use content-free deletion callbacks containing the
+original send time. If an original message never reached the app, recovery creates
+a deleted placeholder only in a matching existing conversation. It does not open
+or reopen tickets, attribute phone sends to an employee, or replay chatbot work.
+If the original time is unknown, the bridge retains its durable revoked-message
+record; a late original supplies the correct timestamp without restoring content.
+Messages outside support history are acknowledged without inventing a ticket.
+Dashboard send confirmations and operation IDs retain their existing ordering.
+
+On upgrade, the normal recovery worker rewrites legacy orphan phone-revoke
+callbacks, including retained dead letters. No queue clearing, unpairing, database
+migration or manual state edit is needed. Deploy the API before restarting the
+bridge; keep the existing state directory. The bridge restart loads the new code
+and reconnects existing sessions without logging them out. Ordinary transient
+failures may still briefly show pending updates; permanent callback failures
+remain visible for diagnosis rather than being hidden.

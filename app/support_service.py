@@ -1030,20 +1030,20 @@ class SupportService:
         return True
 
     async def sync_linked_device_tombstone(self, event: dict[str, Any]) -> bool:
-        """Store a revoked customer message without exposing content to the AI flow."""
+        """Store a content-free revoke without opening a conversation or replaying AI."""
         line_id = str(event.get("line_id") or "")
         peer = str(event.get("sender_phone") or "")
         provider_id = str(event.get("message_id") or "")
         event_id = str(event.get("event_id") or "")
         if (
-            event.get("type") != "message_tombstone" or event.get("from_me") is not False
+            event.get("type") != "message_tombstone" or not isinstance(event.get("from_me"), bool)
             or get_transport(line_id) != "linked_device"
             or not is_linked_device_message(provider_id, line_id)
             or not re.fullmatch(r"[0-9]{5,20}", peer)
             or not event_id or len(event_id) > 128
             or event.get("payload") is not None or event.get("body") is not None
         ):
-            raise SupportValidationError("Invalid linked-device inbound tombstone.")
+            raise SupportValidationError("Invalid linked-device tombstone.")
         try:
             sent_ms = _provider_change_timestamp(event.get("timestamp"))
             deleted_ms = _provider_change_timestamp(
@@ -1052,25 +1052,33 @@ class SupportService:
             )
             sent_at = datetime.fromtimestamp(sent_ms / 1000, tz=timezone.utc).replace(tzinfo=None)
         except (TypeError, ValueError, OverflowError, OSError) as exc:
-            raise SupportValidationError("Invalid linked-device inbound tombstone timestamp.") from exc
+            raise SupportValidationError("Invalid linked-device tombstone timestamp.") from exc
 
         # The original inbound webhook may already be acknowledged but still
         # queued behind another turn. Mark its provider ID before looking up the
         # ticket so that queued work cannot later expose revoked content to AI.
-        await conversation_store.mark_inbound_revoked(provider_id)
+        outbound = event["from_me"]
+        direction = "OUTBOUND" if outbound else "INBOUND"
+        sender_type = "AGENT" if outbound else "CUSTOMER"
+        if not outbound:
+            await conversation_store.mark_inbound_revoked(provider_id)
 
         existing = await support_repository.get_message_by_whatsapp_id(provider_id)
         if existing:
             ticket = await support_repository.get_ticket(int(existing["ticket_id"]))
             if (
-                not ticket or existing.get("direction") != "INBOUND"
-                or str(existing.get("sender_type") or "").upper() != "CUSTOMER"
+                not ticket or existing.get("direction") != direction
+                or (not outbound and str(existing.get("sender_type") or "").upper() != sender_type)
                 or str(ticket.get("business_phone_number_id") or "") != line_id
                 or normalize_phone(str(ticket.get("whatsapp_phone") or "")) != peer
             ):
                 raise SupportValidationError("The deleted message belongs to another conversation.")
             message, created = existing, False
         else:
+            if not event.get("original_timestamp_known", True):
+                # The bridge retains the revoke and reconciles a late original.
+                # Never attribute it using the deletion timestamp.
+                return True
             ticket = await support_repository.find_ticket_at_whatsapp_timestamp(peer, line_id, sent_at)
             if not ticket:
                 # A routine chatbot message can be revoked too. Without a
@@ -1078,15 +1086,15 @@ class SupportService:
                 # new ticket solely because the customer deleted that message.
                 return True
             message, created = await support_repository.add_ticket_message(
-                ticket_id=int(ticket["id"]), sender_type="CUSTOMER",
-                direction="INBOUND", body="[Deleted WhatsApp message]",
+                ticket_id=int(ticket["id"]), sender_type=sender_type, sender_name="WhatsApp app" if outbound else None,
+                direction=direction, body="[Deleted WhatsApp message]",
                 whatsapp_message_id=provider_id,
                 whatsapp_timestamp=str(sent_ms // 1000), message_type="unsupported",
-                send_status="RECEIVED",
+                send_status="SENT" if outbound else "RECEIVED",
                 require_active=(ticket.get("active_key") is not None and ticket.get("status") in ACTIVE_TICKET_STATUSES),
                 expected_phone=peer, expected_line_id=line_id,
             )
-            if int(message.get("ticket_id") or 0) != int(ticket["id"]) or message.get("direction") != "INBOUND":
+            if int(message.get("ticket_id") or 0) != int(ticket["id"]) or message.get("direction") != direction:
                 raise SupportValidationError("The deleted message belongs to another conversation.")
 
         message, changed = await support_repository.apply_message_change_event(
@@ -1097,7 +1105,7 @@ class SupportService:
             self._purge_deleted_message_media(int(ticket["id"]), int(message["id"]))
         if created:
             await publish_support_event(
-                "customer_message", ticket_id=int(ticket["id"]),
+                "outbound_message" if outbound else "customer_message", ticket_id=int(ticket["id"]),
                 customer_name=ticket.get("customer_name"), customer_phone=peer,
                 message_id=int(message["id"]),
                 message=_serialize_support_messages(int(ticket["id"]), [message])[0],

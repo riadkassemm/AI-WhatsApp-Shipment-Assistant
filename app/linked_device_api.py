@@ -76,6 +76,7 @@ class LinkedDeviceEvent(BaseModel):
     body: str | None = Field(default=None, max_length=4096)
     timestamp: int | None = Field(default=None, gt=0)
     deleted_timestamp: int | None = Field(default=None, gt=0)
+    original_timestamp_known: bool = Field(default=True, strict=True)
     from_me: bool | None = None
     sender_phone: str | None = Field(default=None, pattern=r"^[0-9]{5,20}$")
     status: Literal["delivered", "read", "played"] | None = None
@@ -296,12 +297,12 @@ async def receive_linked_device_event(request: Request):
 
     if event.type == "message_tombstone":
         if (
-            event.from_me is not False or not event.timestamp
+            event.from_me is None or not event.timestamp
             or not event.sender_phone or not _PHONE.fullmatch(event.sender_phone)
             or not is_linked_device_message(event.message_id, event.line_id)
             or event.payload is not None or event.body is not None
         ):
-            raise HTTPException(400, "Invalid linked device inbound tombstone.")
+            raise HTTPException(400, "Invalid linked device tombstone.")
         try:
             line_enabled = await whatsapp_registry_service.observe_inbound(
                 waba_id=None, phone_number_id=event.line_id,

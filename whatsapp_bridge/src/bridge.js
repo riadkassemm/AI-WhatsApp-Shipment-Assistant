@@ -673,6 +673,19 @@ export class Bridge {
       const recoveredTombstones = [];
       const keep = (item, wasDeadLetter = false) => {
         if (!targetsMessage(item.event)) return true;
+        if (item.event.type === 'message_deleted_for_everyone' && !item.event.operation_id && deletedRecord?.message?.key?.fromMe === true && !deletedRecord.client_message_id) {
+          // Phone-originated originals may never have reached the app. Deliver
+          // the deletion and its original routing time together, rather than
+          // retrying a mutation of a database row that cannot appear.
+          item.event = messageTombstoneEvent(line, nativeId, deletedRecord.phone,
+            deletedRecord.timestamp, deletedTimestamp, true, Boolean(deletedRecord.message.messageTimestamp));
+          item.next_try = 0;
+          if (wasDeadLetter) {
+            recoveredTombstones.push({ event: item.event, attempts: 0, next_try: 0, created_at: Date.now() });
+            return false;
+          }
+          return true;
+        }
         if (['message_deleted_for_everyone', 'outgoing_confirmation', 'message_tombstone'].includes(item.event.type)) return true;
         if (['message', 'message_snapshot'].includes(item.event.type) && item.event.from_me === false) {
           // Never route the revoked original through the normal customer/AI
@@ -687,24 +700,33 @@ export class Bridge {
           return true;
         }
         if (item.event.type === 'outgoing_message') {
-          // The backend needs the original provider ID before it can apply the
-          // revoke. Keep only a content-free marker, ahead of the delete event.
-          for (const entry of item.event.payload?.entry ?? []) for (const change of entry.changes ?? []) {
-            const value = change.value;
-            if (!value) continue;
-            value.contacts = [];
-            value.messages = (value.messages ?? []).map(message => message.id === wrapped ?
-              { id: message.id, from: message.from, timestamp: message.timestamp, type: 'unsupported' } : message);
-          }
+          item.event = messageTombstoneEvent(line, nativeId, deletedRecord.phone,
+            item.event.timestamp, deletedTimestamp, true);
           item.next_try = 0;
+          if (wasDeadLetter) {
+            recoveredTombstones.push({ event: item.event, attempts: 0, next_try: 0, created_at: Date.now() });
+            return false;
+          }
           return true;
         }
         return false;
       };
-      data.entries = data.entries.filter(item => keep(item, false));
+      const seen = new Set();
+      data.entries = data.entries.filter(item => {
+        if (!keep(item, false) || seen.has(item.event.event_id)) return false;
+        seen.add(item.event.event_id);
+        return true;
+      });
       data.dead_letters = (data.dead_letters ?? []).filter(item => keep(item, true));
       for (const item of recoveredTombstones.reverse()) {
         if (!data.entries.some(entry => entry.event.event_id === item.event.event_id)) data.entries.unshift(item);
+      }
+      if (deletedRecord?.pending_original_tombstone) {
+        const event = messageTombstoneEvent(line, nativeId, deletedRecord.phone,
+          deletedRecord.timestamp, deletedTimestamp, true);
+        if (!data.entries.some(item => item.event.event_id === event.event_id)) {
+          data.entries.push({ event, attempts: 0, next_try: 0, created_at: Date.now() });
+        }
       }
       // A revoke can arrive before the original upsert, or after its callback
       // was delivered. The backend accepts this idempotent content-free marker
@@ -721,7 +743,7 @@ export class Bridge {
     line.restoreNativeEvents?.purgeTarget?.(nativeId);
     await this.removePendingMedia(line);
     await line.store.update(data => {
-      if (data.messages[nativeId]?.deleted) data.messages[nativeId].callbacks_scrubbed = true;
+      if (data.messages[nativeId]?.deleted) Object.assign(data.messages[nativeId], { callbacks_scrubbed: true, tombstone_version: 2, pending_original_tombstone: false });
     });
   }
   async removePendingMedia(line) {
@@ -743,6 +765,23 @@ export class Bridge {
       // A relayed operation is confirmed only by its ACK, never by a local echo.
       if (ownOperation) return;
       if (phone) await this.applyEvent(line, mutation);
+      return;
+    }
+    if (existing?.deleted) {
+      // Never resurrect content, including late contact cards. If a revoke
+      // preceded its original, recover the real send time without guessing a
+      // conversation from the deletion time.
+      if (!existing.message.messageTimestamp && message.messageTimestamp && phone === existing.phone && Boolean(key.fromMe) === Boolean(existing.message.key.fromMe)) {
+        await line.store.update(data => {
+          data.messages[key.id].message.messageTimestamp = message.messageTimestamp;
+          data.messages[key.id].timestamp = millis(message.messageTimestamp);
+          if (key.fromMe && !existing.client_message_id) {
+            data.messages[key.id].pending_original_tombstone = true;
+            data.messages[key.id].callbacks_scrubbed = false;
+          }
+        });
+      }
+      await this.purgeDeletedContent(line, wrapId(line.line_id, key.id));
       return;
     }
     const content = normalizeMessageContent(message.message);
@@ -821,8 +860,13 @@ export class Bridge {
     const line = this.getLine(id);
     if (line.removing) throw new BridgeError(503, 'LINE_REMOVING', 'This WhatsApp number is being removed.');
     if (!line.store?.data) throw new BridgeError(503, 'LINE_STORAGE_UNAVAILABLE', 'Check this line session storage before uploading media.');
-    if (!payload || typeof payload.content_base64 !== 'string' || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(payload.content_base64)) throw new BridgeError(400, 'INVALID_MEDIA', 'Provide valid base64 media content.');
-    const bytes = Buffer.from(payload.content_base64, 'base64');
+    const encoded = payload?.content_base64;
+    if (typeof encoded !== 'string' || encoded.length % 4 !== 0) throw new BridgeError(400, 'INVALID_MEDIA', 'Provide valid base64 media content.');
+    // Bound allocation first. Repeated regex groups overflow V8's stack on
+    // normal multi-megabyte attachments; Buffer's decoder alone is permissive.
+    if (encoded.length > Math.ceil(this.config.maxMediaBytes / 3) * 4) throw new BridgeError(413, 'MEDIA_TOO_LARGE', 'Media exceeds the upload limit.');
+    const bytes = Buffer.from(encoded, 'base64');
+    if (bytes.toString('base64') !== encoded) throw new BridgeError(400, 'INVALID_MEDIA', 'Provide valid base64 media content.');
     if (!bytes.length || bytes.length > this.config.maxMediaBytes) throw new BridgeError(413, 'MEDIA_TOO_LARGE', 'Media must be nonempty and no larger than 25 MiB.');
     const rawMime = String(payload.mime_type ?? '').trim().toLowerCase();
     const baseMime = rawMime.split(';')[0].trim();
@@ -1094,7 +1138,7 @@ export class Bridge {
       try {
         // Recover a crash between the durable tombstone and content/media purge.
         for (const [nativeId, record] of Object.entries(line.store.data.messages)) {
-          if (record.deleted && (record.callbacks_scrubbed === false || record.message?.message || record.media_id ||
+          if (record.deleted && (record.callbacks_scrubbed === false || (record.message?.key?.fromMe === true && !record.client_message_id && record.tombstone_version !== 2) || record.message?.message || record.media_id ||
               Object.values(line.store.data.operations).some(operation => operation.target_id === nativeId && operation.kind === 'edit' && (operation.payload || operation.body || operation.event)))) {
             await this.purgeDeletedContent(line, wrapId(line.line_id, nativeId));
           }
