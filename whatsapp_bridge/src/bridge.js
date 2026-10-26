@@ -1133,12 +1133,33 @@ export class Bridge {
     this.deliverCallbacks().catch(this.onError);
   }
   async recoverPending() {
+    // A history pass may outlast the timer interval on a busy line. Do not
+    // multiply disk writes or replay the same work with overlapping passes.
+    if (this.recoveryTask) return this.recoveryTask;
+    this.recoveryTask = this.recoverPendingOnce().finally(() => { this.recoveryTask = null; });
+    return this.recoveryTask;
+  }
+  async recoverPendingOnce() {
+    // Reconcile retained revokes before slower history normalization on any
+    // line. Do not rewrite every historical deleted record during an upgrade.
+    const retained = [...this.outbox.data.entries, ...(this.outbox.data.dead_letters ?? [])];
+    for (const { event } of retained) {
+      if (event.type !== 'message_deleted_for_everyone' || event.operation_id) continue;
+      const line = this.lines.get(event.line_id);
+      if (!line?.store?.data || line.status === 'error' || line.removing) continue;
+      try {
+        const record = line.store.data.messages[unwrapId(line.line_id, event.message_id)];
+        if (record?.deleted && record.message?.key?.fromMe === true && !record.client_message_id && record.tombstone_version !== 2) {
+          await this.purgeDeletedContent(line, event.message_id);
+        }
+      } catch (error) { this.onError(error); }
+    }
     for (const line of this.lines.values()) {
       if (!line.store?.data || line.status === 'error' || line.removing) continue;
       try {
         // Recover a crash between the durable tombstone and content/media purge.
         for (const [nativeId, record] of Object.entries(line.store.data.messages)) {
-          if (record.deleted && (record.callbacks_scrubbed === false || (record.message?.key?.fromMe === true && !record.client_message_id && record.tombstone_version !== 2) || record.message?.message || record.media_id ||
+          if (record.deleted && (record.callbacks_scrubbed === false || record.message?.message || record.media_id ||
               Object.values(line.store.data.operations).some(operation => operation.target_id === nativeId && operation.kind === 'edit' && (operation.payload || operation.body || operation.event)))) {
             await this.purgeDeletedContent(line, wrapId(line.line_id, nativeId));
           }

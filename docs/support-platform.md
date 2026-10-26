@@ -861,7 +861,8 @@ Messages outside support history are acknowledged without inventing a ticket.
 Dashboard send confirmations and operation IDs retain their existing ordering.
 
 On upgrade, the normal recovery worker rewrites legacy orphan phone-revoke
-callbacks, including retained dead letters. No queue clearing, unpairing, database
+callbacks, including retained dead letters, before slower history normalization.
+Overlapping recovery timer runs share one pass to avoid duplicate work. No queue clearing, unpairing, database
 migration or manual state edit is needed. Deploy the API before restarting the
 bridge; keep the existing state directory. The bridge restart loads the new code
 and reconnects existing sessions without logging them out. Ordinary transient

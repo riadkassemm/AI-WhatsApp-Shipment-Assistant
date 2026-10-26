@@ -1710,3 +1710,32 @@ test('late original reconciliation survives a crash while the old callback is in
   assert.equal(bridge.outbox.data.entries.length, 0);
   assert.equal(line.store.data.messages.RACE.message.message, undefined);
 });
+
+test('recovery prioritizes retained revokes over slow history and coalesces overlapping timer passes', async t => {
+  const { bridge, line } = await fixture(t);
+  await line.store.update(data => {
+    data.messages.ORIGINAL.deleted = true;
+    data.messages.ORIGINAL.callbacks_scrubbed = true;
+    delete data.messages.ORIGINAL.message.message;
+  });
+  await bridge.enqueue({ event_id: 'priority-revoke', type: 'message_deleted_for_everyone', line_id: LINE,
+    message_id: `ld:${LINE}:ORIGINAL`, timestamp: Date.now(), from_me: true, sender_phone: PHONE });
+  let entered, release;
+  const enteredPromise = new Promise(resolve => { entered = resolve; });
+  const released = new Promise(resolve => { release = resolve; });
+  let passes = 0;
+  const removeMedia = bridge.removePendingMedia.bind(bridge);
+  bridge.removePendingMedia = async current => {
+    // The first call is in the priority revoke; the second begins history.
+    if (++passes === 2) { entered(); await released; }
+    return removeMedia(current);
+  };
+  const first = bridge.recoverPending();
+  await enteredPromise;
+  assert.equal(bridge.outbox.data.entries[0].event.type, 'message_tombstone');
+  const overlapping = bridge.recoverPending();
+  release();
+  await Promise.all([first, overlapping]);
+  assert.equal(passes, 2);
+  assert.equal(bridge.recoveryTask, null);
+});
