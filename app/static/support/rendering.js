@@ -1153,11 +1153,10 @@ function messageReactionBar(message) {
 // Quote navigation leaves the selected ticket, composer, and media drafts intact.
 let replyNavigationRequest = 0;
 let replyHighlightTimer = null;
-function highlightReplyMessage(messageId) {
-  const conversation = $('conversation');
+function highlightReplyMessage(messageId, conversation = $('conversation')) {
   const target = conversation.querySelector('[data-message-id="' + Number(messageId) + '"]');
   if (!target) return false;
-  conversation.querySelectorAll('.reply-target').forEach(row => row.classList.remove('reply-target'));
+  document.querySelectorAll('.reply-target').forEach(row => row.classList.remove('reply-target'));
   clearTimeout(replyHighlightTimer);
   // Restart the animation when the same quote is clicked again.
   void target.offsetWidth;
@@ -1167,22 +1166,25 @@ function highlightReplyMessage(messageId) {
     conversation.scrollTop - (conversation.clientHeight - target.clientHeight) / 2;
   conversation.scrollTo({top: Math.max(0, center), behavior: reduced ? 'auto' : 'smooth'});
   replyHighlightTimer = setTimeout(() => target.classList.remove('reply-target'), 2400);
-  updateScrollLatestButton();
+  if (conversation.id === 'conversation') updateScrollLatestButton();
   return true;
 }
 
 async function navigateToReply(reply, button) {
   const request = ++replyNavigationRequest;
-  if (reply.id && highlightReplyMessage(reply.id)) return;
-  if (!reply.source_message_id || !state.currentTicketData) {
+  const review = button.closest('#investigationMessages');
+  const container = review || $('conversation');
+  if (reply.id && highlightReplyMessage(reply.id, container)) return;
+  if (!reply.source_message_id || (!review && !state.currentTicketData)) {
     notify('Original message is unavailable.', 'error');
     return;
   }
-  const ticketId = state.ticketId;
-  const epoch = state.historySelectionEpoch;
-  const isCurrent = () => request === replyNavigationRequest && state.authenticated &&
-    String(state.ticketId) === String(ticketId) && state.historySelectionEpoch === epoch;
-  const base = historyDetailBase();
+  const ticketId = review ? investigationTicket : state.ticketId;
+  const epoch = review ? investigationRequest : state.historySelectionEpoch;
+  const isCurrent = () => request === replyNavigationRequest && state.authenticated && (review
+    ? investigationStillAllowed(epoch) && String(investigationTicket) === String(ticketId)
+    : String(state.ticketId) === String(ticketId) && state.historySelectionEpoch === epoch);
+  const base = review ? '/api/support/tickets/' + ticketId : historyDetailBase();
   button.dataset.replyRequest = String(request);
   button.setAttribute('aria-busy', 'true');
   button.classList.add('reply-loading');
@@ -1210,6 +1212,28 @@ async function navigateToReply(reply, button) {
     if (!isCurrent()) return;
     if (!messages.some(message => Number(message.id) === targetId)) {
       throw new Error('Original message is unavailable.');
+    }
+    if (review) {
+      // The manager's read-only review uses the same renderer but must never
+      // navigate or mutate the operational ticket behind the review panel.
+      const group = document.createElement('div');
+      if (previous) {
+        const heading = document.createElement('p');
+        heading.className = 'form-note';
+        heading.textContent = 'Referenced conversation · ' + (result.ticket.ticket_reference || targetTicketId);
+        group.append(heading);
+      }
+      for (const message of messages) {
+        if (!review.querySelector('[data-message-id="' + Number(message.id) + '"]')) addMessage(group, message, 'investigation');
+      }
+      group.querySelectorAll('.message-actions').forEach(element => element.remove());
+      review.prepend(group);
+      if (!previous && investigationMessageBefore && Number(messages[0]?.id) < Number(investigationMessageBefore)) {
+        investigationMessageBefore = hasMore ? Number(messages[0].id) : null;
+        $('investigationOlderMessages').classList.toggle('hidden', !investigationMessageBefore);
+      }
+      highlightReplyMessage(targetId, review);
+      return;
     }
     const data = state.currentTicketData;
     if (previous) {

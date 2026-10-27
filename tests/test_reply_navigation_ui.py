@@ -22,6 +22,8 @@ const state={authenticated:true,ticketId:42,historySelectionEpoch:1,previousTick
  selectedMessages:new Map(),previousHistoryExpanded:false,conversationSelectionPointer:null};
 const notices=[],calls=[];
 const notify=t=>notices.push(t),updateScrollLatestButton=()=>{},updateSharedHistoryShortcut=()=>{};
+let investigationTicket=60,investigationRequest=1,investigationMessageBefore=850;
+const investigationStillAllowed=request=>request===investigationRequest;
 const MESSAGE_ROLE_LABELS={CUSTOMER:'Customer'},messagePreview=m=>m.body||m.message_type||'Message';
 const messageClass=()=>'customer',messageActor=()=>'Customer',initials=()=>'CU';
 const canChangeWhatsAppMessage=()=>false,messageReactionBar=()=>null;
@@ -106,6 +108,19 @@ check(!state.cachedCurrentMessages.some(m=>m.id===999),'new click cancels old lo
 responder=()=>{throw Error('Connection interrupted');};
 const errorButton=document.createElement('button');await navigateToReply({source_message_id:300},errorButton);
 check(notices.pop()==='Connection interrupted'&&!errorButton.hasAttribute('aria-busy'),'errors clear loading and allow retry');
+// Manager review navigation uses its own scroll container and leaves live chat alone.
+const review=document.createElement('div');review.id='investigationMessages';document.body.append(review);
+const olderButton=document.createElement('button');olderButton.id='investigationOlderMessages';document.body.append(olderButton);
+addMessage(review,{id:900,body:'Review reply',reply_to:{source_message_id:900,body:'Earlier message'}},'investigation');
+const cachedBefore=JSON.stringify(state.cachedCurrentMessages), ticketBefore=state.ticketId;
+responder=()=>({ticket:{id:60},message_id:800,messages:[{id:800,body:'Review original'},{id:900}],messages_has_more:false});
+await navigateToReply({source_message_id:900},review.querySelector('.message-quote'));
+check(calls.at(-1).includes('/tickets/60/'),'review resolves its own ticket');
+check(review.querySelector('[data-message-id="800"]').classList.contains('reply-target'),'review target highlighted in review pane');
+check(!c.querySelector('[data-message-id="800"]')&&state.ticketId===ticketBefore&&JSON.stringify(state.cachedCurrentMessages)===cachedBefore,'review leaves operational conversation untouched');
+check(!review.firstChild.querySelector('.message-actions'),'loaded review messages stay read-only');
+check(investigationMessageBefore===null&&olderButton.classList.contains('hidden'),'review pagination does not duplicate loaded pages');
+review.remove();
 // Reduced-motion users get immediate scrolling with a visible temporary outline.
 window.matchMedia=()=>({matches:true});let scrollOptions;const scroll=c.scrollTo.bind(c);c.scrollTo=options=>{scrollOptions=options;scroll(options);};
 highlightReplyMessage(7);check(scrollOptions.behavior==='auto','reduced motion respected');
