@@ -250,7 +250,7 @@ def test_dashboard_page_gets_the_configured_video_limit(monkeypatch) -> None:
     assert b"__VIDEO_MAX_BYTES__" not in response.body
     from app.support_ui import support_asset
     assert b"Number('12345')" in asyncio.run(support_asset("media.js")).body
-    assert 'accept="image/jpeg,image/png,image/webp,application/pdf,video/mp4,video/3gpp"' in _HTML
+    assert 'accept="image/jpeg,image/png,image/webp,application/pdf,video/mp4,video/3gpp,audio/mpeg,audio/mp4,audio/aac,audio/amr,audio/ogg"' in _HTML
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is unavailable")
@@ -274,12 +274,13 @@ assert.match(calls[1][1], /Review the preview/);
 calls.length = 0;
 input.files = [{name: 'big.mp4', type: 'video/mp4', size: 40 * 1024 * 1024}];
 imageSelected();
-assert.deepEqual(calls, [['error', 'This file exceeds the 16 MB limit.']]);
+assert.deepEqual(calls[0], ['error', 'This file exceeds the 16 MB limit.']);
+assert.deepEqual(calls[1], ['status', '0 of 1 attachments added. Review the file errors.']);
 assert.equal(input.value, '');
 calls.length = 0;
 input.files = [{name: 'clip.mov', type: 'video/quicktime', size: 10}];
 imageSelected();
-assert.match(calls[0][1], /MP4\/3GP video/);
+assert.match(calls[0][1], /MP4\/3GP/);
 """
     result = subprocess.run(["node", "-e", script], text=True, capture_output=True, timeout=10)
     assert result.returncode == 0, result.stderr

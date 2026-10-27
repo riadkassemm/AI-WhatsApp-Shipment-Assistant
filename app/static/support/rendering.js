@@ -1317,13 +1317,14 @@ async function enterImageEditor() {
   finally { $('editMediaBtn').disabled = false; }
 }
 
-async function editPendingImage() {
-  const draft = state.pendingMedia;
+async function editPendingImage(id = state.pendingMedia?.id) {
+  const draft = state.pendingMediaItems.find(item => item.id === id);
   if (!draft || draft.kind !== 'image' || state.busy || state.imageEditor) return;
   if (!window.ChatImageEditor) { notify('Image editor is unavailable. Reload and try again.', 'error'); return; }
   openMediaViewer({kind: 'image', src: draft.url, title: 'Edit image', subtitle: draft.file.name || 'Image to send'});
   try {
     await startImageEditor(draft.file, 'draft');
+    state.imageEditor.draftId = draft.id;
   } catch (error) {
     notify(error.message || 'Image could not be edited.', 'error');
   }
@@ -1332,7 +1333,7 @@ async function editPendingImage() {
 async function applyDraftImageEdits() {
   const editor = state.imageEditor;
   if (!editor || editor.sending) return;
-  const draft = state.pendingMedia;
+  const draft = state.pendingMediaItems.find(item => item.id === editor.draftId);
   if (!draft || draft.kind !== 'image') { notify('The attached image was removed, so the edits cannot be applied.', 'error'); return; }
   editor.sending = true;
   setButtonBusy($('editorSendBtn'), true, 'Applying…');
@@ -1344,7 +1345,7 @@ async function applyDraftImageEdits() {
     $('imageEditorToolbar').classList.add('hidden');
     $('mediaViewerBody').classList.remove('editing');
     await closeMediaViewer();
-    setPendingMedia('image', file);
+    setPendingMedia('image', file, {replaceId: draft.id});
     notify('Edits applied. Add a caption if you like, then send.');
     focusMessageComposer();
   } catch (error) {
@@ -1811,6 +1812,17 @@ function addMessage(container, m, extraClass = '') {
     labelMessageAction(forward, 'forward', 'Forward');
     forward.onclick = () => openForwardModal(m);
     actions.append(forward);
+    const select = document.createElement('button');
+    select.type = 'button'; select.className = 'btn message-action-btn'; select.textContent = 'Select';
+    labelMessageAction(select, 'select', 'Select messages');
+    select.onclick = () => selectChatMessage(m);
+    actions.append(select);
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox'; checkbox.className = 'message-select'; checkbox.dataset.messageId = String(m.id);
+    checkbox.checked = Boolean(state.selectedMessages?.has(String(m.id)));
+    checkbox.setAttribute('aria-label', 'Select message ' + m.id);
+    checkbox.onchange = () => selectChatMessage(m, checkbox.checked);
+    row.prepend(checkbox);
   }
   if (actions.children.length) meta.append(actions);
   if (m.send_status === 'FAILED') {
@@ -2956,6 +2968,7 @@ async function openTicket(id, {silent = false, refreshQueue = false, refreshHist
   const isNewSelection = String(state.ticketId || '') !== String(id || '');
   if (!isNewSelection && silent && !refreshHistory && state.previousHistoryPending) return;
   if (isNewSelection) {
+    clearMessageSelection();
     state.pendingConversationRender = null;
     state.currentTicketData = null;
     setComposerEnabled(false);

@@ -25,7 +25,8 @@ function cancelVoiceRecording() {
 }
 
 function clearMediaDraft() {
-  if (state.pendingMedia && state.pendingMedia.url) URL.revokeObjectURL(state.pendingMedia.url);
+  for (const draft of state.pendingMediaItems) if (draft.url) URL.revokeObjectURL(draft.url);
+  state.pendingMediaItems = [];
   state.pendingMedia = null;
   $('mediaDraft').classList.add('hidden');
   $('mediaDraft').replaceChildren();
@@ -37,93 +38,117 @@ function clearMediaDraft() {
   updateComposerControls();
 }
 
-function renderMediaDraft() {
-  const container = $('mediaDraft');
-  container.replaceChildren();
-  const draft = state.pendingMedia;
-  if (!draft) {
-    container.classList.add('hidden');
-    return;
-  }
-  container.className = 'media-draft ' + draft.kind;
-  const preview = document.createElement('div');
-  preview.className = 'media-draft-preview';
-  if (draft.kind === 'image' || draft.kind === 'sticker') {
-    const img = document.createElement('img');
-    img.src = draft.url;
-    img.alt = draft.kind === 'sticker' ? 'Selected sticker preview' : 'Selected image preview';
-    preview.append(img);
-  } else if (draft.kind === 'video') {
-    const video = document.createElement('video');
-    video.src = draft.url;
-    video.muted = true;
-    video.preload = 'metadata';
-    video.playsInline = true;
-    video.setAttribute('aria-label', 'Selected video preview');
-    preview.append(video);
-  } else if (draft.kind === 'audio') {
-    preview.append(createVoiceNotePlayer(draft.url, 'Voice note preview').player);
-  } else {
-    preview.append(createIcon('file', 'icon icon-lg'));
-  }
-  const info = document.createElement('div');
-  info.className = 'media-draft-info';
-  const name = document.createElement('div');
-  name.className = 'media-draft-name';
-  name.textContent = draft.kind === 'image'
-    ? (draft.file.name || 'Selected image')
-    : draft.kind === 'video'
-      ? (draft.file.name || 'Selected video')
-    : draft.kind === 'sticker'
-      ? (draft.file.name || 'WhatsApp sticker')
-    : draft.kind === 'document'
-      ? (draft.file.name || 'PDF document')
-      : 'Voice note ready';
-  const size = document.createElement('div');
-  size.className = 'media-draft-size';
-  size.textContent = formatBytes(draft.file.size);
-  info.append(name, size);
-  const actions = document.createElement('div');
-  actions.className = 'media-draft-actions';
-  const remove = document.createElement('button');
-  remove.type = 'button';
-  remove.className = 'btn small';
-  remove.append(createIcon('trash', 'icon icon-sm'), document.createTextNode('Remove'));
-  remove.onclick = clearMediaDraft;
-  if (draft.kind === 'image') {
-    const edit = document.createElement('button');
-    edit.type = 'button';
-    edit.className = 'btn small';
-    edit.append(createIcon('edit', 'icon icon-sm'), document.createTextNode('Edit'));
-    edit.onclick = editPendingImage;
-    actions.append(edit);
-  }
-  actions.append(remove);
-  container.append(preview, info, actions);
+const MAX_COMPOSER_ATTACHMENTS = 20;
+const MAX_COMPOSER_BYTES = 100 * 1024 * 1024;
 
-  if (draft.kind === 'image' || draft.kind === 'document' || draft.kind === 'video') {
-    const label = draft.kind === 'image' ? 'image' : draft.kind === 'video' ? 'video' : 'PDF';
-    $('message').maxLength = 1024;
-    $('message').placeholder = 'Add a' + (label === 'image' ? 'n ' : ' ') + label + ' caption (optional)';
-    text($('composerHelp'), 'The ' + label + ' and optional caption will be sent as a public WhatsApp reply.');
-  } else if (draft.kind === 'audio') {
-    $('message').value = '';
-    $('message').placeholder = 'Voice note ready to send';
-    text($('composerHelp'), 'Review the recording, then send it as a public WhatsApp voice note.');
-  } else {
-    $('message').value = '';
-    $('message').placeholder = 'Sticker ready to send';
-    text($('composerHelp'), 'The WebP sticker will be sent as a public WhatsApp reply.');
+function removeMediaDraft(id) {
+  const draft = state.pendingMediaItems.find(item => item.id === id);
+  if (draft?.url) URL.revokeObjectURL(draft.url);
+  state.pendingMediaItems = state.pendingMediaItems.filter(item => item.id !== id);
+  state.pendingMedia = state.pendingMediaItems[0] || null;
+  if (!state.pendingMedia) clearMediaDraft();
+  else renderMediaDraft();
+}
+
+function renderMediaDraft() {
+  const list = $('mediaDraft');
+  list.replaceChildren();
+  state.pendingMedia = state.pendingMediaItems[0] || null;
+  list.className = 'media-draft-list' + (state.pendingMedia ? '' : ' hidden');
+  for (const draft of state.pendingMediaItems) {
+    const container = document.createElement('div');
+    container.className = 'media-draft ' + draft.kind;
+    container.dataset.draftId = draft.id;
+    const preview = document.createElement('div');
+    preview.className = 'media-draft-preview';
+    if (draft.kind === 'image' || draft.kind === 'sticker') {
+      const img = document.createElement('img');
+      img.src = draft.url;
+      img.alt = draft.kind === 'sticker' ? 'Selected sticker preview' : 'Selected image preview';
+      preview.append(img);
+    } else if (draft.kind === 'video') {
+      const video = document.createElement('video');
+      video.src = draft.url;
+      video.muted = true;
+      video.preload = 'metadata';
+      video.playsInline = true;
+      video.setAttribute('aria-label', 'Selected video preview');
+      preview.append(video);
+    } else if (draft.kind === 'audio') {
+      preview.append(createVoiceNotePlayer(draft.url, 'Voice note preview').player);
+    } else {
+      preview.append(createIcon('file', 'icon icon-lg'));
+    }
+    const info = document.createElement('div');
+    info.className = 'media-draft-info';
+    const name = document.createElement('div');
+    name.className = 'media-draft-name';
+    name.textContent = draft.kind === 'image'
+      ? (draft.file.name || 'Selected image')
+      : draft.kind === 'video'
+        ? (draft.file.name || 'Selected video')
+      : draft.kind === 'sticker'
+        ? (draft.file.name || 'WhatsApp sticker')
+      : draft.kind === 'document'
+        ? (draft.file.name || 'PDF document')
+        : (draft.file.name || 'Voice note ready');
+    const size = document.createElement('div');
+    size.className = 'media-draft-size';
+    size.textContent = formatBytes(draft.file.size);
+    info.append(name, size);
+    if (draft.caption) {
+      const savedCaption = document.createElement('div'); savedCaption.textContent = draft.caption; info.append(savedCaption);
+    }
+    const actions = document.createElement('div');
+    actions.className = 'media-draft-actions';
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'btn small';
+    remove.append(createIcon('trash', 'icon icon-sm'), document.createTextNode('Remove'));
+    remove.disabled = state.busy;
+    remove.onclick = () => { if (!state.busy) removeMediaDraft(draft.id); };
+    if (draft.kind === 'image') {
+      const edit = document.createElement('button');
+      edit.type = 'button';
+      edit.className = 'btn small';
+      edit.append(createIcon('edit', 'icon icon-sm'), document.createTextNode('Edit'));
+      edit.disabled = state.busy || Boolean(draft.submission);
+      edit.onclick = () => editPendingImage(draft.id);
+      actions.append(edit);
+    }
+    actions.append(remove);
+    container.append(preview, info, actions);
+
+    if (draft.submission) {
+      const pending = document.createElement('span');
+      pending.textContent = 'Checking previous send on next attempt';
+      info.append(pending);
+    }
+    list.append(container);
   }
+  const captionable = state.pendingMediaItems.some(item => ['image', 'document', 'video'].includes(item.kind));
+  $('message').maxLength = captionable ? 1024 : 4096;
+  $('message').placeholder = captionable ? 'Caption for first image, video or PDF (optional)' : 'Attachments ready to send';
+  text($('composerHelp'), state.pendingMediaItems.length + ' attachment(s). Review before sending. Each is sent separately in order.');
   updateComposerCount();
   updateComposerControls();
 }
 
-function setPendingMedia(kind, file) {
-  clearMediaDraft();
-  const url = URL.createObjectURL(file);
-  state.pendingMedia = {kind, file, url};
+function setPendingMedia(kind, file, {replaceId = null} = {}) {
+  if (replaceId) {
+    const existing = state.pendingMediaItems.find(item => item.id === replaceId);
+    if (!existing || existing.submission) return false;
+    URL.revokeObjectURL(existing.url);
+    Object.assign(existing, {kind, file, url: URL.createObjectURL(file)});
+  } else {
+    if (state.pendingMediaItems.length >= MAX_COMPOSER_ATTACHMENTS ||
+        state.pendingMediaItems.reduce((sum, item) => sum + item.file.size, 0) + file.size > MAX_COMPOSER_BYTES) {
+      showError('Attach up to 20 files, with a combined size of 100 MB.'); return false;
+    }
+    state.pendingMediaItems.push({kind, file, url: URL.createObjectURL(file), id: crypto.randomUUID()});
+  }
   renderMediaDraft();
+  return true;
 }
 
 function setComposerEnabled(enabled) {
@@ -162,13 +187,13 @@ function updateComposerControls() {
   const canSend = enabled && !recording && (Boolean(draft) || hasBody);
 
   $('imageBtn').disabled = !enabled || recording || Boolean(state.editTarget);
-  $('voiceBtn').disabled = !enabled || Boolean(state.editTarget);
+  $('voiceBtn').disabled = !enabled || Boolean(state.editTarget) || Boolean(draft);
   $('locationBtn').disabled = !enabled || recording || Boolean(state.editTarget);
   $('voiceBtn').setAttribute('aria-pressed', recording ? 'true' : 'false');
   $('voiceBtn').setAttribute('aria-label', recording ? 'Stop voice recording' : 'Record a voice note');
   $('voiceBtn').setAttribute('data-tooltip', recording ? 'Stop recording' : 'Record voice note');
   setIcon($('voiceBtn'), recording ? 'square' : 'mic');
-  $('message').disabled = !enabled || recording || Boolean(draft && draft.kind === 'audio');
+  $('message').disabled = !enabled || recording || Boolean(draft?.submission) || Boolean(draft && !state.pendingMediaItems.some(item => ['image', 'document', 'video'].includes(item.kind)));
   $('sendBtn').disabled = !canSend;
   for (const replyButton of document.querySelectorAll('.message-reply-btn')) {
     replyButton.disabled = !enabled;
@@ -186,7 +211,7 @@ function updateComposerControls() {
   }
   const label = $('sendBtn').querySelector('.send-label');
   if (label) label.textContent = state.editTarget ? 'Save' : draft
-    ? (draft.kind === 'image' ? 'Send image' : draft.kind === 'video' ? 'Send video' : draft.kind === 'sticker' ? 'Send sticker' : draft.kind === 'document' ? 'Send PDF' : 'Send voice')
+    ? (state.pendingMediaItems.length > 1 ? 'Send ' + state.pendingMediaItems.length + ' attachments' : draft.kind === 'image' ? 'Send image' : draft.kind === 'video' ? 'Send video' : draft.kind === 'sticker' ? 'Send sticker' : draft.kind === 'document' ? 'Send PDF' : 'Send voice')
     : 'Send';
 }
 
@@ -199,7 +224,7 @@ function recordingMimeType() {
 }
 
 async function startVoiceRecording() {
-  if (!state.composerEnabled || state.busy || state.mediaRecorder) return;
+  if (!state.composerEnabled || state.busy || state.mediaRecorder || state.pendingMedia) return;
   showError('');
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || typeof MediaRecorder === 'undefined') {
     showError('Voice recording is not supported by this browser.');
@@ -343,37 +368,38 @@ function canAttachToComposer() {
   return Boolean(state.ticketId && state.composerEnabled && !state.busy && !state.mediaRecorder && !state.editTarget);
 }
 
-function attachComposerFile(file, {replace = false} = {}) {
+function attachComposerFile(file) {
   if (!canAttachToComposer()) { showError('Open a conversation you can reply to before attaching a file.'); return false; }
-  if (state.pendingMedia && !replace) { showError('Send or remove the current attachment first.'); return false; }
   const types = {'jpg':'image/jpeg', 'jpeg':'image/jpeg', 'png':'image/png', 'webp':'image/webp',
-    'pdf':'application/pdf', 'mp4':'video/mp4', '3gp':'video/3gpp'};
+    'pdf':'application/pdf', 'mp4':'video/mp4', '3gp':'video/3gpp',
+    'mp3':'audio/mpeg', 'm4a':'audio/mp4', 'aac':'audio/aac', 'amr':'audio/amr', 'ogg':'audio/ogg'};
   if (!file.type || file.type === 'application/octet-stream') {
     const type = types[String(file.name || '').split('.').pop().toLowerCase()];
     if (type) file = new File([file], file.name, {type});
   }
   if (!Object.values(types).includes(file.type)) {
-    showError('Use a JPEG/PNG image, MP4/3GP video, WebP sticker, or PDF document.'); return false;
+    showError('Use JPEG/PNG, WebP, MP4/3GP, PDF, or supported audio (MP3/M4A/AAC/AMR/OGG).'); return false;
   }
   if (!file.size) { showError('This file is empty.'); return false; }
-  const kind = file.type === 'application/pdf' ? 'document' : file.type === 'image/webp' ? 'sticker' : file.type.startsWith('video/') ? 'video' : 'image';
-  const limits = {image: Number('__IMAGE_MAX_BYTES__'), document: Number('__DOCUMENT_MAX_BYTES__'), sticker: Number('__STICKER_MAX_BYTES__'), video: VIDEO_MAX_BYTES};
+  const kind = file.type === 'application/pdf' ? 'document' : file.type === 'image/webp' ? 'sticker' : file.type.startsWith('video/') ? 'video' : file.type.startsWith('audio/') ? 'audio' : 'image';
+  const limits = {image: Number('__IMAGE_MAX_BYTES__'), document: Number('__DOCUMENT_MAX_BYTES__'), sticker: Number('__STICKER_MAX_BYTES__'), video: VIDEO_MAX_BYTES, audio: Number('__AUDIO_MAX_BYTES__')};
   if (file.size > limits[kind]) { showError('This file exceeds the ' + formatBytes(limits[kind]) + ' limit.'); return false; }
-  setPendingMedia(kind, file);
+  if (!setPendingMedia(kind, file)) return false;
   $('message').focus();
   setAppStatus('Attachment ready. Review the preview, then click Send.');
   return true;
 }
 
 function imageSelected() {
-  const file = $('imageInput').files && $('imageInput').files[0];
-  if (file && !attachComposerFile(file, {replace: true})) $('imageInput').value = '';
+  composerFilesReceived(Array.from($('imageInput').files || []));
+  $('imageInput').value = '';
 }
 
 function composerFilesReceived(files) {
   if (state.activeModal) return;
-  if (files.length !== 1) { showError('Attach one file at a time.'); return; }
-  attachComposerFile(files[0]);
+  let accepted = 0;
+  for (const file of files) if (attachComposerFile(file)) accepted++;
+  if (accepted < files.length) setAppStatus(accepted + ' of ' + files.length + ' attachments added. Review the file errors.');
 }
 
 function transferHasFiles(transfer) {
@@ -392,7 +418,7 @@ function installComposerFileInput() {
   zone.addEventListener('dragover', event => {
     if (!transferHasFiles(event.dataTransfer)) return;
     event.preventDefault();
-    event.dataTransfer.dropEffect = canAttachToComposer() && !state.activeModal && !state.pendingMedia ? 'copy' : 'none';
+    event.dataTransfer.dropEffect = canAttachToComposer() && !state.activeModal ? 'copy' : 'none';
   });
   zone.addEventListener('dragleave', () => { if (--depth <= 0) clear(); });
   zone.addEventListener('drop', event => {
@@ -418,40 +444,53 @@ function installComposerFileInput() {
 }
 
 async function sendMediaMessage() {
-  const draft = state.pendingMedia;
-  if (!draft || !state.ticketId || state.busy) return;
+  if (!state.pendingMedia || !state.ticketId || state.busy || !state.composerEnabled) return;
+  const ticketId = state.ticketId;
+  const items = [...state.pendingMediaItems];
+  const caption = $('message').value.trim();
+  const firstCaption = items.find(item => ['image', 'document', 'video'].includes(item.kind));
   state.busy = true;
   setWorkspaceBusy(true);
-  setButtonBusy($('sendBtn'), true, draft.kind === 'image' ? 'Sending image…' : draft.kind === 'video' ? 'Sending video…' : draft.kind === 'sticker' ? 'Sending sticker…' : draft.kind === 'document' ? 'Sending PDF…' : 'Sending voice…');
   showError('');
-  const form = new FormData();
-  form.append('media_type', draft.kind);
-  form.append('client_message_id', crypto.randomUUID());
-  if (['image', 'document', 'video'].includes(draft.kind)) form.append('caption', $('message').value.trim());
-  if (state.replyTarget) form.append('reply_to_message_id', String(state.replyTarget.id));
-  form.append('file', draft.file, draft.file.name || (draft.kind === 'image' ? 'image' : draft.kind === 'video' ? 'video.mp4' : draft.kind === 'sticker' ? 'sticker.webp' : draft.kind === 'document' ? 'document.pdf' : 'voice-note'));
-  let refresh = false;
-  let succeeded = false;
+  renderMediaDraft();
+  let completed = 0;
+  let failure = '';
   try {
-    await api('/api/support/tickets/' + state.ticketId + '/media', {method:'POST', body: form});
-    $('message').value = '';
-    clearMediaDraft();
+    for (const draft of items) {
+      // Keep an immutable request and key after ambiguous HTTP failures. A
+      // repeat checks the existing delivery instead of creating another send.
+      draft.submission ||= {caption: draft.caption || (draft === firstCaption ? caption : ''), replyId: state.replyTarget?.id || null};
+      const form = new FormData();
+      form.append('media_type', draft.kind);
+      form.append('client_message_id', draft.id);
+      if (['image', 'document', 'video'].includes(draft.kind)) form.append('caption', draft.submission.caption);
+      if (draft.submission.replyId) form.append('reply_to_message_id', String(draft.submission.replyId));
+      form.append('file', draft.file, draft.file.name || 'attachment');
+      setButtonBusy($('sendBtn'), true, 'Sending ' + (completed + 1) + ' of ' + items.length + '…');
+      const result = await api('/api/support/tickets/' + ticketId + '/media', {method: 'POST', body: form});
+      const message = result.message;
+      if (!message?.id) throw new Error('Could not confirm this attachment. Click Send again to check the same attempt.');
+      removeMediaDraft(draft.id);
+      completed++;
+      if (draft === firstCaption && !draft.caption) $('message').value = '';
+      if (!['SENT', 'DELIVERED', 'READ', 'PLAYED'].includes(message.send_status)) {
+        throw new Error('Sending paused. Check this attachment’s delivery status in the conversation before continuing.');
+      }
+    }
     clearReplyTarget();
-    notify(draft.kind === 'image' ? 'Image sent to the customer.' : draft.kind === 'video' ? 'Video sent to the customer.' : draft.kind === 'sticker' ? 'Sticker sent to the customer.' : draft.kind === 'document' ? 'PDF sent to the customer.' : 'Voice note sent to the customer.');
-    refresh = true;
-    succeeded = true;
+    notify(completed === 1 ? 'Attachment sent.' : completed + ' attachments sent.');
   } catch (error) {
-    showError(error.message);
-    notify(error.message, 'error');
-    refresh = true;
+    failure = error.message;
   } finally {
     state.busy = false;
     setButtonBusy($('sendBtn'), false);
     setWorkspaceBusy(false);
-    updateComposerCount();
+    if (state.pendingMedia) renderMediaDraft();
+    if (String(state.ticketId) === String(ticketId)) {
+      await openTicket(ticketId, {silent: true, refreshQueue: true});
+      if (failure) showError(failure);
+    }
   }
-  if (refresh) await openTicket(state.ticketId, {silent: true, refreshQueue: true});
-  if (succeeded) focusMessageComposer();
 }
 
 async function sendMessage() {

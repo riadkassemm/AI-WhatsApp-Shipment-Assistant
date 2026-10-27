@@ -26,6 +26,7 @@ SUPPORT_UI_VERSION = hashlib.sha256(
 def _configure(source: str) -> str:
     return (source.replace("__POLL_MS__", str(max(1, settings.support_queue_poll_seconds) * 1000))
             .replace("__CSRF_COOKIE__", settings.support_csrf_cookie_name)
+            .replace("__AUDIO_MAX_BYTES__", str(max(1, settings.support_audio_max_bytes)))
             .replace("__VIDEO_MAX_BYTES__", str(max(1, settings.support_video_max_bytes)))
             .replace("__IMAGE_MAX_BYTES__", str(max(1, settings.support_image_max_bytes)))
             .replace("__DOCUMENT_MAX_BYTES__", str(max(1, settings.support_document_max_bytes)))

@@ -18,7 +18,7 @@ def test_drop_paste_previews_and_pdf_quick_replies(tmp_path):
     setup='''
 const $=id=>document.getElementById(id);
 const state={authenticated:true,agent:{id:'7'},ticketId:42,composerEnabled:true,busy:false,
-quickReplies:[],quickRepliesLoaded:true,quickRepliesBusy:false,quickRepliesRequest:0,quickReplyEditing:null};
+pendingMediaItems:[],selectedMessages:new Map(),quickReplies:[],quickRepliesLoaded:true,quickRepliesBusy:false,quickRepliesRequest:0,quickReplyEditing:null};
 const errors=[],calls=[];
 const showError=message=>errors.push(message);
 const text=(element,value)=>{element.textContent=value};
@@ -48,7 +48,7 @@ let event=drop([pdf]);check(event.defaultPrevented,'file drop cannot navigate');
 check(state.pendingMedia.kind==='document'&&state.pendingMedia.file.name===pdf.name,'PDF drop stages draft');
 check(!$('mediaDraft').classList.contains('hidden')&&$('mediaDraft').textContent.includes(pdf.name),'real preview is visible');
 check(!calls.length,'drop never auto-sends');
-drop([png]);check(state.pendingMedia.file.name===pdf.name,'existing attachment is not overwritten');
+drop([png]);check(state.pendingMedia.file.name===pdf.name&&state.pendingMediaItems.length===2,'new attachments append without overwriting');
 clearMediaDraft();
 const paste=new ClipboardEvent('paste',{bubbles:true,cancelable:true,clipboardData:transfer([png])});message.dispatchEvent(paste);
 check(paste.defaultPrevented&&state.pendingMedia.kind==='image','image clipboard creates preview');
@@ -56,7 +56,8 @@ check($('mediaDraft').querySelector('img'),'image preview rendered');
 clearMediaDraft();state.composerEnabled=false;drop([pdf]);check(!state.pendingMedia,'read-only ticket cannot accept files');
 state.composerEnabled=true;state.editTarget={};drop([pdf]);check(!state.pendingMedia,'editing does not attach');
 state.editTarget=null;state.mediaRecorder={};drop([pdf]);check(!state.pendingMedia,'recording does not attach');state.mediaRecorder=null;
-drop([png,pdf]);check(!state.pendingMedia,'multiple files rejected without discarding any');
+drop([png,pdf]);check(state.pendingMediaItems.length===2,'multiple files queued together');
+check($('mediaDraft').children.length===2,'one preview for each queued file');clearMediaDraft();
 drop([new File(['x'],'script.exe',{type:'application/x-msdownload'})]);check(!state.pendingMedia,'unsupported type rejected');
 check(!attachComposerFile(new File([],'empty.pdf',{type:'application/pdf'})),'empty file rejected');
 check(!attachComposerFile(new File([new Uint8Array(6*1024*1024)],'large.png',{type:'image/png'})),'size limit enforced before upload');
@@ -64,7 +65,7 @@ const outside=new DragEvent('drop',{bubbles:true,cancelable:true,dataTransfer:tr
 const dragText=new DataTransfer();dragText.setData('text/plain','hello');const plainDrop=new DragEvent('drop',{bubbles:true,cancelable:true,dataTransfer:dragText});zone.dispatchEvent(plainDrop);check(!plainDrop.defaultPrevented,'text drag preserved');
 const saved={id:4,title:'Shipping guide',body:'Please see our shipping guide.',attachment_filename:pdf.name,attachment_size:50};
 state.quickReplies=[saved];
-message.value='Existing draft';await attachQuickReplyPdf(saved);check(!pendingFetch,'saved PDF cannot overwrite text draft');message.value='';
+message.value='Existing draft';let adding=attachQuickReplyPdf(saved);pendingFetch(response());await adding;check(message.value==='Existing draft'&&state.pendingMedia.caption===saved.body,'saved PDF preserves text and its own caption');clearMediaDraft();message.value='';
 let task=attachQuickReplyPdf(saved);state.ticketId=43;pendingFetch(response());await task;check(!state.pendingMedia,'late PDF cannot go to another customer');
 state.ticketId=42;openDialog('quickRepliesModal');task=attachQuickReplyPdf(saved);pendingFetch(response());await task;
 check(state.pendingMedia.kind==='document'&&message.value===saved.body,'saved PDF and caption populate composer');
