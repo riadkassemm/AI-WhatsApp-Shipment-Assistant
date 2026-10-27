@@ -129,7 +129,8 @@ def _normalize_quick_reply(title: str | None, body: str | None, *, pdf: bool = F
 def _quick_reply_payload(row: dict[str, Any] | None) -> dict[str, Any]:
     normalized = _normalize_row(row) or {}
     return {
-        **({"attachment_filename": normalized["attachment_filename"], "attachment_size": normalized["attachment_size"]}
+        **({"attachment_filename": normalized["attachment_filename"], "attachment_size": normalized["attachment_size"],
+            "attachment_mime_type": normalized.get("attachment_mime_type") or "application/pdf"}
            if normalized.get("attachment_key") else {}),
         **({"location": {"latitude": float(row["location_latitude"]), "longitude": float(row["location_longitude"]),
                          "name": row.get("location_name") or "", "address": row.get("location_address") or ""}}
@@ -1878,7 +1879,7 @@ class SupportService:
         source_ticket_id: int,
         source_message_id: int,
         destination_ticket_id: int,
-        agent: SupportAgent,
+        agent: SupportAgent, client_message_id: str | None = None,
     ) -> dict[str, Any]:
         source_ticket = await support_repository.get_ticket(source_ticket_id)
         if not source_ticket:
@@ -1902,7 +1903,7 @@ class SupportService:
             raise SupportValidationError("Choose a different destination conversation.")
 
         kind = str(source.get("message_type") or "text").lower()
-        client_id = f"forward:{source_message_id}:{uuid.uuid4()}"
+        client_id = f"forward:{source_ticket_id}:{source_message_id}:{client_message_id or uuid.uuid4()}"
         if kind == "location":
             if source.get("location_latitude") is None or source.get("location_longitude") is None:
                 raise SupportValidationError("This location message cannot be forwarded.")
@@ -1956,6 +1957,7 @@ class SupportService:
             await support_repository.add_event(
                 destination_ticket_id,
                 event_type="MESSAGE_FORWARDED",
+                audit_key=f"forward:{forwarded['id']}",
                 actor_type="AGENT",
                 actor_id=agent.id,
                 actor_name=agent.name,
@@ -1998,7 +2000,7 @@ class SupportService:
         source_message_id: int,
         phone_number: str,
         customer_name: str | None,
-        agent: SupportAgent,
+        agent: SupportAgent, client_message_id: str | None = None,
     ) -> dict[str, Any]:
         source_ticket = await support_repository.get_ticket(source_ticket_id)
         if not source_ticket:
@@ -2068,7 +2070,7 @@ class SupportService:
             source_ticket_id=source_ticket_id,
             source_message_id=source_message_id,
             destination_ticket_id=int(destination["id"]),
-            agent=agent,
+            agent=agent, client_message_id=client_message_id,
         )
         await publish_support_event(
             "staff_chat_reopened" if reopened else "staff_chat_updated",
@@ -2709,7 +2711,7 @@ class SupportService:
         self, agent: SupportAgent, *, title: str | None, body: str | None,
         recipient_ids: list[int], all_staff: bool = False, location: dict | None = None,
         content: bytes | None = None, filename: str | None = None,
-        source_reply: dict | None = None,
+        source_reply: dict | None = None, mime_type: str = "application/pdf",
     ) -> dict:
         if not agent.is_supervisor:
             raise SupportForbiddenError("Only Admins and Super Admins can assign quick replies.")
@@ -2738,7 +2740,7 @@ class SupportService:
             if content is not None:
                 for staff_id in recipients:
                     # Independent immutable files preserve owner-only replacement/deletion.
-                    attachments[staff_id] = await asyncio.to_thread(quick_reply_media_store.save, content, filename)
+                    attachments[staff_id] = await asyncio.to_thread(quick_reply_media_store.save, content, filename, mime_type)
         except BaseException as exc:
             for attachment in attachments.values():
                 await self._remove_quick_reply_pdf(attachment['attachment_key'])
@@ -2786,7 +2788,7 @@ class SupportService:
         result = await self.assign_quick_reply(
             agent, title=source.get('title'), body=source.get('body'), recipient_ids=recipients,
             location=_quick_reply_payload(source).get('location'), content=content,
-            filename=source.get('attachment_filename'), source_reply=source,
+            filename=source.get('attachment_filename'), source_reply=source, mime_type=source.get("attachment_mime_type") or "application/pdf",
         )
         logger.info("Support saved reply shared: actor_id=%s source_id=%s count=%s", agent.id, reply_id, result['saved_count'])
         return result
@@ -2794,6 +2796,7 @@ class SupportService:
     async def save_quick_reply_pdf(
         self, agent: SupportAgent, *, title: str | None, body: str | None,
         content: bytes, filename: str | None, reply_id: int | None = None,
+        mime_type: str = "application/pdf",
     ) -> dict[str, Any]:
         clean_title, clean_body = _normalize_quick_reply(title, body, pdf=True)
         if reply_id is not None:
@@ -2801,7 +2804,7 @@ class SupportService:
             if existing.get('location_latitude') is not None:
                 raise SupportConflictError("A location quick reply cannot be replaced with a PDF.")
         try:
-            attachment = await asyncio.to_thread(quick_reply_media_store.save, content, filename)
+            attachment = await asyncio.to_thread(quick_reply_media_store.save, content, filename, mime_type)
         except SupportMediaError as exc:
             raise SupportValidationError(str(exc)) from exc
         # On ambiguous DB failure retain the immutable file: a commit might have
@@ -2818,10 +2821,10 @@ class SupportService:
         await self._remove_quick_reply_pdf(old_key)
         return _quick_reply_payload(row)
 
-    async def get_quick_reply_pdf(self, agent: SupportAgent, reply_id: int) -> tuple[bytes, str]:
+    async def get_quick_reply_pdf(self, agent: SupportAgent, reply_id: int, *, image: bool = False) -> tuple[bytes, str]:
         row = await support_repository.get_quick_reply(int(agent.id), reply_id)
-        if not row.get('attachment_key'):
-            raise SupportNotFoundError("PDF quick reply not found.")
+        if not row.get('attachment_key') or (str(row.get("attachment_mime_type") or "application/pdf").startswith("image/") != image):
+            raise SupportNotFoundError("Attachment quick reply not found.")
         content = await asyncio.to_thread(quick_reply_media_store.read, row['attachment_key'])
         return content, row['attachment_filename']
 

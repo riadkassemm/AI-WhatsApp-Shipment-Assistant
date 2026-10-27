@@ -13,7 +13,7 @@ def add_linked_device_schema(columns):
     columns.setdefault('whatsapp_phone_numbers', set()).add('removed_at')
     columns["support_delivery_receipts"] = {"provider_message_id", "line_id", "status", "checked_at", "failure_code"}
     for path, required_tables in _SUPPORT_SCHEMA_MIGRATIONS:
-        if "20261025_statistics_investigation" in path or "20261023_agent_statistics" in path or "20261023_quick_reply_pdfs" in path or "20261024_quick_reply_" in path:
+        if "20261027_quick_reply_images" in path or "20261025_statistics_investigation" in path or "20261023_agent_statistics" in path or "20261023_quick_reply_pdfs" in path or "20261024_quick_reply_" in path:
             for table, required in required_tables.items():
                 columns.setdefault(table, set()).update(required)
     columns['support_ticket_messages'].add('replacement_for_message_id')

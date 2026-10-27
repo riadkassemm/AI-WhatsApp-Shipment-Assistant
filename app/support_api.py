@@ -128,11 +128,13 @@ class ForwardMessageRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     destination_ticket_id: int = Field(ge=1)
+    client_message_id: str | None = Field(default=None, min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_-]+$")
 
 
 class ForwardContactRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    client_message_id: str | None = Field(default=None, min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_-]+$")
     phone_number: str = Field(min_length=8, max_length=32)
     customer_name: str | None = Field(default=None, max_length=191)
 
@@ -581,6 +583,68 @@ async def quick_reply_pdf(reply_id: int = Path(gt=0), agent: SupportAgent = Depe
         raise _translate_error(exc) from exc
 
 
+async def _save_quick_reply_image_upload(file, title, body, agent, reply_id=None):
+    try:
+        if file.content_type not in {"image/jpeg", "image/png"}:
+            raise SupportValidationError("Choose a JPEG or PNG image.")
+        content = await file.read(max_media_bytes("image") + 1)
+        return await support_service.save_quick_reply_pdf(agent, title=title, body=body,
+            content=content, filename=file.filename, reply_id=reply_id, mime_type=file.content_type)
+    except Exception as exc:
+        raise _translate_error(exc) from exc
+    finally:
+        await file.close()
+
+
+@router.post("/quick-replies/image", status_code=201)
+async def create_quick_reply_image(file: UploadFile = File(...), title: str = Form(default="", max_length=80),
+    body: str = Form(default="", max_length=1024), agent: SupportAgent = Depends(require_support_csrf)) -> dict:
+    return await _save_quick_reply_image_upload(file, title, body, agent)
+
+
+@router.put("/quick-replies/{reply_id}/image")
+async def replace_quick_reply_image(reply_id: int = Path(gt=0), file: UploadFile = File(...),
+    title: str = Form(default="", max_length=80), body: str = Form(default="", max_length=1024),
+    agent: SupportAgent = Depends(require_support_csrf)) -> dict:
+    return await _save_quick_reply_image_upload(file, title, body, agent, reply_id)
+
+
+@router.post("/quick-replies/assign/image", status_code=201)
+async def assign_quick_reply_image(file: UploadFile = File(...), assignment: str = Form(max_length=40000),
+    agent: SupportAgent = Depends(require_support_csrf)) -> dict:
+    try:
+        if not agent.is_supervisor:
+            raise SupportForbiddenError("Only Admins and Super Admins can assign quick replies.")
+        if file.content_type not in {"image/jpeg", "image/png"}:
+            raise SupportValidationError("Choose a JPEG or PNG image.")
+        from pydantic import ValidationError
+        try:
+            payload = QuickReplyAssignment.model_validate_json(assignment)
+        except ValidationError:
+            raise SupportValidationError("Invalid quick reply or staff selection.") from None
+        content = await file.read(max_media_bytes("image") + 1)
+        return await support_service.assign_quick_reply(agent, **payload.model_dump(), content=content,
+            filename=file.filename, mime_type=file.content_type)
+    except Exception as exc:
+        raise _translate_error(exc) from exc
+    finally:
+        await file.close()
+
+
+@router.get("/quick-replies/{reply_id}/image")
+async def quick_reply_image(reply_id: int = Path(gt=0), agent: SupportAgent = Depends(get_current_agent)) -> Response:
+    from urllib.parse import quote
+    try:
+        content, filename = await support_service.get_quick_reply_pdf(agent, reply_id, image=True)
+        mime = "image/png" if content.startswith(b"\x89PNG") else "image/jpeg"
+        return Response(content, media_type=mime, headers={
+            "Content-Disposition": "inline; filename*=UTF-8''" + quote(filename, safe=''),
+            "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff", "Content-Security-Policy": "sandbox",
+        })
+    except Exception as exc:
+        raise _translate_error(exc) from exc
+
+
 @router.get("/ai-settings")
 async def get_ai_settings(
     _agent: SupportAgent = Depends(get_current_agent),
@@ -968,7 +1032,7 @@ async def forward_ticket_message(
         return {"message": await support_service.forward_message(
             source_ticket_id=ticket_id,
             source_message_id=message_id,
-            destination_ticket_id=request.destination_ticket_id,
+            destination_ticket_id=request.destination_ticket_id, client_message_id=request.client_message_id,
             agent=agent,
         )}
     except Exception as exc:
@@ -988,7 +1052,7 @@ async def forward_ticket_message_to_contact(
             source_message_id=message_id,
             phone_number=request.phone_number,
             customer_name=request.customer_name,
-            agent=agent,
+            agent=agent, client_message_id=request.client_message_id,
         )
     except Exception as exc:
         raise _translate_error(exc) from exc

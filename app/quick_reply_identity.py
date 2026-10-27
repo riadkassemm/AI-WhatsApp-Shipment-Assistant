@@ -9,7 +9,7 @@ def quick_reply_identity(row: dict) -> tuple | None:
         # A missing/unreadable legacy file is not proof of identical content.
         if not digest:
             return None
-        return ('pdf', *base, row.get('attachment_filename'), digest)
+        return (row.get('attachment_mime_type') or 'application/pdf', *base, row.get('attachment_filename'), digest)
     if row.get('location_latitude') is not None:
         def coordinate(value):
             return Decimal(str(value)).quantize(Decimal('0.0000001'), rounding=ROUND_HALF_UP)
