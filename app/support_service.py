@@ -489,9 +489,17 @@ def _serialize_support_messages(
             continue
         reply_id = str(item.get("reply_to_whatsapp_message_id") or "").strip()
         target = message_by_whatsapp_id.get(reply_id)
+        if not reply_id:
+            continue
+        # Keep off-page references navigable without exposing hidden message text.
         if target is None:
+            item["reply_to"] = {
+                "source_message_id": item.get("id"), "source_ticket_id": ticket_id,
+                "body": "Earlier message",
+            }
             continue
         item["reply_to"] = {
+            "source_message_id": item.get("id"), "source_ticket_id": ticket_id,
             "id": target.get("id"),
             "sender_type": target.get("sender_type"),
             "sender_name": target.get("sender_name"),
@@ -2262,6 +2270,61 @@ class SupportService:
                 history_ticket_id, page[-limit:], media_context_ticket_id=ticket_id,
             ),
             "messages_has_more": len(page) > limit,
+        }
+
+    async def reply_destination(
+        self, ticket_id: int, source_message_id: int, agent: SupportAgent,
+    ) -> dict[str, Any]:
+        """Resolve a quote within the authorized conversation/history context.
+
+        No read, assignment, or activity state is changed by navigation.
+        """
+        current = await support_repository.get_ticket(ticket_id)
+        if not current:
+            raise SupportNotFoundError("Ticket not found.")
+        if not await _can_view_ticket(current, agent):
+            raise SupportForbiddenError("You cannot view this conversation.")
+        source = await support_repository.get_message(source_message_id)
+        if not source:
+            raise SupportNotFoundError("Original message is unavailable.")
+        source_ticket = await support_repository.get_ticket(int(source["ticket_id"]))
+        if not source_ticket or (
+            int(source_ticket["id"]) != ticket_id
+            and not await _historical_ticket_accessible(source_ticket, current, agent)
+        ):
+            raise SupportNotFoundError("Original message is unavailable.")
+        visible_source = await support_repository.list_messages_around(
+            int(source_ticket["id"]), source_message_id, before=0, after=0, user_id=agent.id,
+        )
+        reference = str(source.get("reply_to_whatsapp_message_id") or "").strip()
+        if not visible_source or source.get("deleted_for_everyone_at") or not reference:
+            raise SupportNotFoundError("Original message is unavailable.")
+        target = await support_repository.get_message_by_whatsapp_id(reference)
+        target_ticket = await support_repository.get_ticket(int(target["ticket_id"])) if target else None
+        # A provider reference alone is not authorization. Replies cannot expose
+        # another customer/line, active private ticket, or locally hidden message.
+        if not target_ticket or not _same_customer_phone(target_ticket, source_ticket) or (
+            str(target_ticket.get("business_phone_number_id") or "")
+            != str(source_ticket.get("business_phone_number_id") or "")
+        ) or (
+            int(target_ticket["id"]) != ticket_id
+            and not await _historical_ticket_accessible(target_ticket, current, agent)
+        ):
+            raise SupportNotFoundError("Original message is unavailable.")
+        target_id = int(target["id"])
+        target_ticket_id = int(target_ticket["id"])
+        if not await support_repository.list_messages_around(
+            target_ticket_id, target_id, before=0, after=0, user_id=agent.id,
+        ):
+            raise SupportNotFoundError("Original message is unavailable.")
+        page = await support_repository.list_messages(target_ticket_id, limit=151, user_id=agent.id)
+        return {
+            "message_id": target_id,
+            "ticket": _history_ticket_summary(target_ticket),
+            "messages": _serialize_support_messages(
+                target_ticket_id, page[-150:], media_context_ticket_id=ticket_id,
+            ),
+            "messages_has_more": len(page) > 150,
         }
 
     async def messages_page(
