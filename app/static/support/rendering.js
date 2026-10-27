@@ -1257,7 +1257,14 @@ function renderReplyQuote(parent, reply) {
   quote.setAttribute('aria-label', 'Go to original message');
   quote.onclick = event => {
     event.stopPropagation();
-    if (!selectedConversationText()) navigateToReply(reply, quote);
+    const selection = window.getSelection();
+    // Drag-selecting quote text is still copyable. A normal click or keyboard
+    // activation clears an older selection so deferred rendering cannot hide
+    // the requested destination.
+    if (event.detail && selection && !selection.isCollapsed &&
+        quote.contains(selection.anchorNode) && quote.contains(selection.focusNode)) return;
+    if (selectedConversationText()) selection.removeAllRanges();
+    navigateToReply(reply, quote);
   };
   const actor = document.createElement('strong');
   actor.textContent = reply.sender_name || MESSAGE_ROLE_LABELS[String(reply.sender_type || '').toUpperCase()] || 'Message';

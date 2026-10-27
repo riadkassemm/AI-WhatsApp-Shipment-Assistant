@@ -13,6 +13,7 @@ def test_reply_navigation_browser(tmp_path):
     navigation = rendering[rendering.index('// Quote navigation leaves'):rendering.index('function applyMediaZoom(')]
     merge = rendering[rendering.index('function mergeTimelineMessages('):rendering.index('function changeCachedMessage(')]
     add_message = rendering[rendering.index('function addMessage('):rendering.index('// Compact message toolbar:')]
+    selection = rendering[rendering.index('function selectedConversationText('):rendering.index('function beginConversationSelection(')]
     history = rendering[rendering.index('async function loadEarlierConversations('):rendering.index('async function loadOlderConversationMessages(')]
     script = r'''
 const $=id=>document.getElementById(id);
@@ -20,7 +21,7 @@ const state={authenticated:true,ticketId:42,historySelectionEpoch:1,previousTick
  cachedCurrentMessages:[],currentTicketData:{ticket:{id:42},permissions:{can_reply:false,can_forward:false}},
  selectedMessages:new Map(),previousHistoryExpanded:false,conversationSelectionPointer:null};
 const notices=[],calls=[];
-const notify=t=>notices.push(t),selectedConversationText=()=>'',updateScrollLatestButton=()=>{},updateSharedHistoryShortcut=()=>{};
+const notify=t=>notices.push(t),updateScrollLatestButton=()=>{},updateSharedHistoryShortcut=()=>{};
 const MESSAGE_ROLE_LABELS={CUSTOMER:'Customer'},messagePreview=m=>m.body||m.message_type||'Message';
 const messageClass=()=>'customer',messageActor=()=>'Customer',initials=()=>'CU';
 const canChangeWhatsAppMessage=()=>false,messageReactionBar=()=>null;
@@ -39,7 +40,7 @@ function renderConversation(data){
  for(const m of data.messages||[])addMessage(c,m);
 }
 function deferred(){let resolve;const promise=new Promise(r=>resolve=r);return {promise,resolve};}
-''' + merge + navigation + add_message + history + r'''
+''' + merge + selection + navigation + add_message + history + r'''
 (async()=>{
 const c=$('conversation');
 // Exercise the actual shared renderer for each supported original AND reply type.
@@ -54,6 +55,17 @@ for(const kind of ['text','image','audio','document','video','sticker','location
  quote.click();
  check(c.querySelector('[data-message-id="1"]').classList.contains('reply-target'),'highlight original '+kind);
  check(calls.length===0,'loaded target needs no API');
+ // Existing text selection must not block a keyboard/programmatic activation.
+ const range=document.createRange();range.selectNodeContents(c.querySelector('.message-body'));
+ window.getSelection().removeAllRanges();window.getSelection().addRange(range);
+ quote.click();check(!selectedConversationText(),'navigation clears an unrelated text selection');
+ // Dragging within a quote keeps copy available and does not jump.
+ c.querySelector('[data-message-id="1"]').classList.remove('reply-target');
+ range.selectNodeContents(quote.querySelector('span'));window.getSelection().addRange(range);
+ quote.dispatchEvent(new MouseEvent('click',{bubbles:true,detail:1}));
+ check(selectedConversationText()&&!c.querySelector('.reply-target'),'drag-selected quote remains copyable');
+ window.getSelection().removeAllRanges();
+
 }
 // Off-page original, including fallback quote with no local target ID.
 state.cachedCurrentMessages=[{id:300,body:'Latest',reply_to:{source_message_id:300,body:'Earlier message'}}];
