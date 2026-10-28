@@ -192,6 +192,45 @@ recovery command below after inspecting the abandoned worker.
    evidence. Do not clear the marker, change its client ID, or force a SQL reset.
    The original attempt and its audit record are retained.
 
+### Linked-device connection recovery
+
+Sends require an open WebSocket, a validated WhatsApp session, and the current
+connection generation. A close event blocks new sends immediately, before queued
+session writes finish. Readiness is checked again after attachment preparation
+and durable reservation, immediately before invoking the provider. Disconnected
+requests return `NOT_CONNECTED` with `delivery_uncertain=false`; staff can retry
+after reconnection. The bridge does not automatically replay customer messages.
+
+Once `sendMessage` or `relayMessage` is invoked, interruption is conservatively
+uncertain unless WhatsApp explicitly rejects it. Submission is bounded at
+120 seconds; the normal 20-second ACK timer starts after the provider call
+returns, so attachment preparation does not consume the ACK window. These bounds
+release bridge queues; the API's shorter HTTP timeout may report uncertainty first.
+Original native IDs remain reserved. Duplicate message client IDs return saved
+confirmation or uncertainty and never create a second submission. Existing
+explicit edit/delete retries retain the original protocol ID and payload.
+
+Recovery is isolated per line and uses one reconnect attempt/timer, with 1–60
+second exponential backoff (a restart-required handshake can use 250 ms when
+no reconnect is already scheduled).
+A connection must remain ready for a minute before a later disconnect resets
+backoff. Obsolete open/close/error events cannot change a replacement's readiness;
+logout, removal, shutdown, and storage failures suppress network retries.
+
+A positive ACK for a reserved message ID on the current authenticated transport
+is saved, even when its original waiter expired. Confirmation callbacks are
+coalesced; existing receipt/echo reconciliation remains available. An ACK proves
+acceptance only, never delivery, reading, or playback. Listeners, waiters, and
+reconnect timers are retired on replacement/shutdown. Structured bridge logs
+include line, generation, opaque native ID, transition/recovery reason, ACK timeout,
+and provider status codes; they exclude bodies, credentials, and raw provider
+exceptions. Missing ACKs alone do not identify an external cause.
+
+No migration or historical-record repair is needed. A future approved deployment
+needs a normal bridge restart to load this code; retain all saved pairing state.
+Do not resend the October 28 uncertain attempts in Tripoli Office: their
+replacements already have delivery confirmations.
+
 ### Uncertain delivery actions
 
 ![Uncertain-message actions and a tracked new copy, using synthetic test data](images/support-uncertain-delivery.png)
