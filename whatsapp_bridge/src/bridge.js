@@ -85,6 +85,7 @@ export class Bridge {
         if (autoConnect && line.store.data.enabled) await this.connect(line.line_id);
       } catch (error) {
         this.onError(error);
+        line.session?.dispose();
         line.ack?.close();
         line.socket?.end(new Error('Failed to initialize this linked-device line'));
         line.socket = null;
@@ -191,6 +192,8 @@ export class Bridge {
         if (this.lineStatus(line).is_paired && !line.removalRemoteConfirmed) await this.confirmDeviceUnlink(line);
         this.stopRemovedSocket(line);
         await line.eventTail;
+        await line.ackTail;
+        await Promise.allSettled(line.confirmationTasks.values());
         await line.auth?.store.flush();
         await line.store.flush();
         // Only a remote-confirmed removal (or an unpaired line) enters the
@@ -410,6 +413,9 @@ export class Bridge {
         this.blockConnection(line, socket, 'persistence_failed');
         line.status = 'error';
         line.error = 'Could not safely save or synchronize the WhatsApp session. Reconnect after checking bridge storage.';
+        clearTimeout(line.reconnectTimer);
+        line.reconnectTimer = null;
+        session.dispose();
         line.ack?.close();
         socket.end(new Error('Linked-device event persistence failed'));
         if (line.socket === socket) line.socket = null;
@@ -458,6 +464,7 @@ export class Bridge {
         line.error = 'The linked phone does not match this configured line. Disconnect it and pair the expected phone.';
         await line.store.update(data => { data.enabled = false; });
         if (line.session !== session) return;
+        session.dispose();
         line.ack.close();
         socket.end(new Error('Unexpected linked-device phone'));
         line.socket = null;
@@ -470,6 +477,7 @@ export class Bridge {
         line.error = 'This WhatsApp number is already linked to another line. Unlink this device and pair a different number.';
         await line.store.update(data => { data.enabled = false; });
         if (line.session !== session) return;
+        session.dispose();
         line.ack.close();
         line.socket = null;
         delete line.qr;
@@ -500,6 +508,8 @@ export class Bridge {
       delete line.qr_data_url;
       const reason = update.lastDisconnect?.error?.output?.statusCode;
       if (reason === DisconnectReason.loggedOut) {
+        clearTimeout(line.reconnectTimer);
+        line.reconnectTimer = null;
         line.status = 'logged_out';
         line.error = 'This linked device was logged out. Connect and scan a new QR code.';
         const auth = line.auth;

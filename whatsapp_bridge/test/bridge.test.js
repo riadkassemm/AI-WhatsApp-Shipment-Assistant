@@ -1979,3 +1979,16 @@ test('HTTP recovery errors distinguish non-submission and never log raw provider
   assert.ok(logs.some(item=>JSON.parse(item).event==='request_failed'));
   const text=logs.join('\n');for(const secret of ['PRIVATE-BODY',SECRET,PHONE])assert.equal(text.includes(secret),false);
 });
+
+test('a current session persistence failure cleans callbacks and halts reconnect', async t => {
+  const {bridge,line,socket}=await fixture(t);
+  line.auth.saveCreds=async()=>{throw Error('Synthetic persistence failure');};
+  await socket.eventHandler({'creds.update':{}});
+  assert.equal(line.status,'error');assert.equal(line.socket,null);assert.equal(line.reconnectTimer,null);
+  assert.equal(socket.ws.listenerCount('close'),0);
+  assert.equal(socket.ws.listenerCount('CB:ack,class:message'),0);
+  assert.equal(socket.unsubscribeCount,1);
+  assert.equal(line.ack.waiting.size,0);
+  await assert.rejects(bridge.send(LINE,recoveryPayload('storage-error')),{code:'NOT_CONNECTED'});
+  assert.equal(socket.calls.length,0);
+});
