@@ -225,3 +225,22 @@ async def test_filters_use_active_directory_even_without_ticket_history(infrastr
             'support_numbers': [{'id':'90011','name':'Active'}]}
     await sql("UPDATE staff SET deleted_at=UTC_TIMESTAMP(6) WHERE id=8")
     assert (await repo.list_tickets(view='history', agent_id='8', can_view_all=True))['filter_options']['staff'] == []
+
+@pytest.mark.asyncio
+async def test_count_only_reuses_access_and_filter_rules_without_loading_rows(infrastructure, monkeypatch):
+    import app.support_repository as repository_module
+    repo, sql, _ = infrastructure
+    await incoming(sql, 42)
+    expected = {}
+    for role in [False, True]:
+        for view in ['unassigned','mine','watching','active','waiting','history','chats']:
+            args = dict(view=view, agent_id='7', can_view_all=role, support_number='90005', include_filter_options=False)
+            expected[(role,view)] = (await repo.list_tickets(**args))['total']
+    async def forbidden(*args, **kwargs):
+        raise AssertionError('Count-only path must not load messages/read state/names/filter options')
+    for name in ['attach_current_staff_names','attach_conversation_read_state','attach_dashboard_unread']:
+        monkeypatch.setattr(repository_module, name, forbidden)
+    monkeypatch.setattr(repo, 'queue_filter_options', forbidden)
+    for (role,view), total in expected.items():
+        result = await repo.list_tickets(view=view, agent_id='7', can_view_all=role, support_number='90005', count_only=True)
+        assert result == {'total':total}

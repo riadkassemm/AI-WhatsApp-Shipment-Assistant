@@ -3419,6 +3419,7 @@ class SupportRepository(DashboardRepositoryMixin, DeliveryRepositoryMixin, ReadS
         chat_status: str = "all",
         query: str = "",
         include_filter_options: bool = True,
+        count_only: bool = False,
     ) -> dict[str, Any]:
         page = max(page, 1)
         page_size = max(1, min(page_size, 500))
@@ -3541,6 +3542,9 @@ class SupportRepository(DashboardRepositoryMixin, DeliveryRepositoryMixin, ReadS
                 )
                 count_row = await cur.fetchone()
                 total = int((count_row or {}).get("total", 0))
+
+                if count_only:
+                    return {"total": total}
 
                 list_params = [*params, page_size, offset]
                 await cur.execute(

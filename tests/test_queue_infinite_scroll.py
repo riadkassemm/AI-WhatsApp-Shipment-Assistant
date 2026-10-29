@@ -22,6 +22,7 @@ def test_queue_appends_pages_on_scroll_and_refresh_keeps_loaded_rows() -> None:
     end = _HTML.index("async function pollUnassignedActivity(")
     script = r"""
 const assert = require('node:assert/strict');
+const document = {hidden:false};
 const QUEUE_MAX_REQUEST_SIZE = 500;
 const tickets = Array.from({length: 120}, (_, index) => ({id: index + 1}));
 const requests = [];

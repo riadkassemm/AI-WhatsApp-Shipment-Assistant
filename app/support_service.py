@@ -2025,6 +2025,7 @@ class SupportService:
                 page=1,
                 page_size=1,
                 include_filter_options=False,
+                count_only=True,
             )
             for view in views
         ), return_exceptions=True)

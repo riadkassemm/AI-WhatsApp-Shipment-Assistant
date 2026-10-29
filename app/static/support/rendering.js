@@ -62,6 +62,7 @@ function clearTicketWorkspace() {
 }
 
 function showLogin() {
+  stopDashboardRefresh();
   state.dashboardReadBoundaries.clear();
   state.chatNotificationIds.clear();
   resetQueueFilters();
@@ -139,6 +140,7 @@ function showDashboard() {
   configureStaffAccess();
   startSupportActivity();
   connectSupportEvents();
+  startDashboardRefresh();
 }
 
 async function restoreSupportWorkspace() {
@@ -228,21 +230,25 @@ function updateQueueCount(view, total) {
 }
 
 async function refreshAllQueueCounts() {
-  if (!state.authenticated) return;
-  if (state.queueCountsBusy) { state.queueCountsPending = true; return; }
-  state.queueCountsBusy = true;
-  try {
-    const data = await api('/api/support/queue-counts');
-    for (const [view, total] of Object.entries(data.counts || {})) updateQueueCount(view, total);
-  } catch (_) {
-    // Individual queue loading remains authoritative; count refresh is best-effort.
-  } finally {
-    state.queueCountsBusy = false;
-    if (state.queueCountsPending) {
-      state.queueCountsPending = false;
-      window.setTimeout(() => refreshAllQueueCounts(), 100);
+  if (!state.authenticated || document.hidden) return;
+  const context = JSON.stringify([dashboardRequestEpoch, state.agent?.id, state.agent?.role]);
+  if (queueCountsCache?.context === context && Date.now() - queueCountsCache.at < 3000) return;
+  if (queueCountsFlight?.context === context) return queueCountsFlight.task;
+  const revision = queueCountsRevision;
+  const task = (async () => {
+    try {
+      const data = await api('/api/support/queue-counts');
+      if (!state.authenticated || context !== JSON.stringify([dashboardRequestEpoch, state.agent?.id, state.agent?.role])) return;
+      for (const [view, total] of Object.entries(data.counts || {})) updateQueueCount(view, total);
+      if (revision === queueCountsRevision) queueCountsCache = {context, at: Date.now()};
+    } catch (_) { /* Queue rows remain authoritative; the next refresh retries. */ }
+    finally {
+      if (queueCountsFlight?.task === task) queueCountsFlight = null;
+      if (revision !== queueCountsRevision && state.authenticated) dashboardRefresh.request('counts');
     }
-  }
+  })();
+  queueCountsFlight = {context, task};
+  return task;
 }
 
 function updateQueueSummary(visibleCount = null) {
@@ -483,15 +489,6 @@ function createTicketRow(ticket) {
   row.onclick = () => ticket.search_message_id
     ? openSearchResult({ticket_id: ticket.id, message_id: ticket.search_message_id, conversation_origin: ticket.conversation_origin}, state.query)
     : openTicket(ticket.id, {conversationOrigin: ticket.conversation_origin});
-  // Start loading as soon as the pointer rests on (or presses) a row, so the
-  // conversation is usually ready by the time the click lands.
-  let hoverTimer = null;
-  row.addEventListener('pointerenter', event => {
-    if (event.pointerType !== 'mouse') return;
-    hoverTimer = setTimeout(() => prefetchTicketDetail(ticket.id, ticket.conversation_origin), TICKET_HOVER_PREFETCH_DELAY_MS);
-  });
-  row.addEventListener('pointerleave', () => { clearTimeout(hoverTimer); hoverTimer = null; });
-  row.addEventListener('pointerdown', () => prefetchTicketDetail(ticket.id, ticket.conversation_origin));
   return row;
 }
 
@@ -700,7 +697,7 @@ async function loadMoreQueue() {
 }
 
 async function loadQueue({silent = false} = {}) {
-  if (!state.authenticated) return;
+  if (!state.authenticated || (silent && document.hidden)) return;
   const requestId = ++state.queueRequest;
   const queue = $('queue');
   const previousScrollTop = queue.scrollTop;
@@ -3020,38 +3017,6 @@ function moveConversationSearch(delta) {
   jumpToConversationSearchResult(next);
 }
 
-const TICKET_PREFETCH_TTL_MS = 5000;
-const TICKET_HOVER_PREFETCH_DELAY_MS = 120;
-
-function ticketOpenPath(id, conversationOrigin) {
-  // Mirrors the request openTicket makes for a newly selected conversation.
-  const origin = conversationOrigin || (state.view === 'chats' ? 'STAFF' : 'CUSTOMER');
-  const base = String(origin).toUpperCase() === 'STAFF' ? '/api/support/chats/' : '/api/support/tickets/';
-  return base + id + '?include_previous_history=true';
-}
-
-function prefetchTicketDetail(id, conversationOrigin) {
-  if (!id || String(id) === String(state.ticketId || '')) return;
-  const path = ticketOpenPath(id, conversationOrigin);
-  const now = Date.now();
-  for (const [key, entry] of state.ticketPrefetch) {
-    if (now - entry.at > TICKET_PREFETCH_TTL_MS) state.ticketPrefetch.delete(key);
-  }
-  if (state.ticketPrefetch.has(path)) return;
-  // Settle into a result object so an unused prefetch never raises an
-  // unhandled rejection; a failed prefetch is simply retried by openTicket.
-  const result = api(path).then(data => ({ok: true, data}), () => ({ok: false}));
-  state.ticketPrefetch.set(path, {at: now, result});
-}
-
-function takeTicketPrefetch(path) {
-  const entry = state.ticketPrefetch.get(path);
-  if (!entry) return null;
-  state.ticketPrefetch.delete(path);
-  if (Date.now() - entry.at > TICKET_PREFETCH_TTL_MS) return null;
-  return entry.result.then(outcome => outcome.ok ? outcome.data : api(path));
-}
-
 function showTicketOpening(id) {
   // Answer the tap immediately: show the selected ticket's header from its queue
   // row and a conversation placeholder while the full details load.
@@ -3078,6 +3043,7 @@ function showTicketOpening(id) {
 }
 
 async function openTicket(id, {silent = false, refreshQueue = false, refreshHistory = false, aroundMessageId = null, preserveSearch = false, conversationOrigin = null, restoring = false} = {}) {
+  if (silent && document.hidden) return;
   const isNewSelection = String(state.ticketId || '') !== String(id || '');
   if (!isNewSelection && silent && !refreshHistory && state.previousHistoryPending) return;
   if (isNewSelection) {
@@ -3133,7 +3099,7 @@ async function openTicket(id, {silent = false, refreshQueue = false, refreshHist
     if (aroundMessageId) detailParams.set('around_message_id', String(aroundMessageId));
     if (needPreviousHistory) detailParams.set('include_previous_history', 'true');
     const detailPath = detailBase + id + (detailParams.toString() ? ('?' + detailParams.toString()) : '');
-    const data = await (takeTicketPrefetch(detailPath) || api(detailPath));
+    const data = await api(detailPath);
     if (requestId !== state.ticketRequest || String(state.ticketId) !== String(id)) return;
     if (!silent) api('/api/support/statistics/tickets/' + id + '/view', {
       method: 'POST', body: JSON.stringify({request_id: crypto.randomUUID()})
