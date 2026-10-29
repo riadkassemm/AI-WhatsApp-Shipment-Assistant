@@ -5,10 +5,11 @@ import { mkdtemp, rm, stat, readFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import { proto, makeEventBuffer, DisconnectReason } from '@whiskeysockets/baileys';
 import processMessage from '@whiskeysockets/baileys/lib/Utils/process-message.js';
 import pino from 'pino';
+import { readJournal } from '../src/journal-store.js';
 import { Bridge } from '../src/bridge.js';
 import { readConfig, wrapId, unwrapId, validateLineManifest } from '../src/config.js';
 import { inboundEvent, outgoingEvent, mutationEvent } from '../src/events.js';
@@ -462,7 +463,7 @@ test('edits dispatch encrypted protocol relay, wait for real ACK and persist ide
   assert.equal(bridge.outbox.data.entries[0].event.timestamp, result.timestamp);
   assert.deepEqual(await bridge.mutate(LINE, `ld:${LINE}:ORIGINAL`, 'edit', payload), result);
   assert.equal(socket.calls.length, 1);
-  const persisted = JSON.parse(await readFile(path.join(dataDir, LINE, 'state.json'), 'utf8'));
+  const {data: persisted} = await readJournal(path.join(dataDir, LINE, 'state.json'), () => ({}));
   assert.equal(persisted.operations[payload.operation_id].status, 'confirmed');
   assert.equal((await stat(path.join(dataDir, LINE, 'state.json'))).mode & 0o777, 0o600);
   await assert.rejects(bridge.mutate(LINE, `ld:${LINE}:ORIGINAL`, 'edit', { ...payload, body: 'Different' }), error => error.code === 'OPERATION_CONFLICT');
@@ -1244,16 +1245,18 @@ test('concurrent duplicate sends reuse one durable provider ID', async t => {
 });
 
 test('durable uncertain reservation blocks dispatch after restart', async t => {
-  const { bridge, line, socket } = await fixture(t);
-  await line.store.update(data => {
-    data.messages.CRASHED = { phone: PHONE, client_message_id: 'lost-worker', pending_send: true,
-      message: { key: { id: 'CRASHED', remoteJid: `${PHONE}@s.whatsapp.net`, fromMe: true } } };
-  });
+  const { bridge, line, config } = await fixture(t, 'timeout');
   const payload = { to: PHONE, type: 'text', text: { body: 'do not duplicate' }, client_message_id: 'lost-worker' };
   await assert.rejects(bridge.send(LINE, payload), error => error.delivery_uncertain === true);
+  const nativeId = line.store.data.send_requests[createHash('sha256').update('lost-worker').digest('hex')].native_id;
+  await bridge.close();
+  const socket = mockSocket();
+  const resumed = await new Bridge(config, {makeSocket: () => socket, onError: () => {}, log: () => {}}).initialize({autoConnect: false});
+  t.after(() => resumed.close());
+  await assert.rejects(resumed.send(LINE, payload), error => error.delivery_uncertain === true);
   assert.equal(socket.calls.length, 0);
-  await line.store.update(data => { data.messages.CRASHED.ack_confirmed = true; });
-  assert.deepEqual(await bridge.send(LINE, payload), { messages: [{ id: wrapId(LINE, 'CRASHED') }] });
+  await resumed.getLine(LINE).store.update(data => {data.messages[nativeId].ack_confirmed = true;});
+  assert.deepEqual(await resumed.send(LINE, payload), {messages: [{id: wrapId(LINE, nativeId)}]});
   assert.equal(socket.calls.length, 0);
 });
 
@@ -1412,6 +1415,7 @@ test('delivery lookup reads durable evidence without sending and enforces recipi
   const { bridge, line, socket } = await fixture(t);
   await line.store.update(data => {
     data.messages.ORIGINAL.client_message_id = 'lookup';
+    data.send_requests[createHash('sha256').update('lookup').digest('hex')] = {native_id:'ORIGINAL',fingerprint:null};
     data.messages.ORIGINAL.pending_send = false;
     data.messages.ORIGINAL.delivery_uncertain = true;
   });
@@ -1513,6 +1517,8 @@ test('definitive ACK rejection allows explicit retry; lost ACK never redispatche
   };
   await assert.rejects(bridge.send(LINE, payload), error => error.code === 'WHATSAPP_REJECTED' && error.delivery_uncertain === false);
   assert.equal(Object.values(line.store.data.messages).some(r => r.client_message_id === payload.client_message_id), false);
+  await assert.rejects(bridge.send(LINE, {...payload, document:{...payload.document,caption:'different'}}), {code:'CLIENT_ID_CONFLICT'});
+  assert.equal(socket.calls.length,1);
   socket.sendMessage = async (jid, content, options) => {
     socket.calls.push(options);
     return {key: {id: options.messageId, fromMe: true}, message: {documentMessage: {}}};
@@ -1991,4 +1997,70 @@ test('a current session persistence failure cleans callbacks and halts reconnect
   assert.equal(line.ack.waiting.size,0);
   await assert.rejects(bridge.send(LINE,recoveryPayload('storage-error')),{code:'NOT_CONNECTED'});
   assert.equal(socket.calls.length,0);
+});
+
+const gate = () => {let resolve;const promise=new Promise(r=>{resolve=r});return {promise,resolve};};
+test('durable ACK returns before callback maintenance and duplicate payloads cannot reuse the key', {timeout:5000}, async t=>{
+  const {bridge,line,socket}=await fixture(t);
+  const entered=gate(),release=gate();const enqueue=bridge.enqueue.bind(bridge);
+  bridge.enqueue=async event=>{entered.resolve();await release.promise;return enqueue(event)};
+  const payload={to:PHONE,type:'text',text:{body:'synthetic'},client_message_id:'callback-delay'};
+  try {
+    const sending=bridge.send(LINE,payload);await entered.promise;
+    const result=await sending;
+    assert.equal(bridge.deliveryStatus(LINE,{client_message_id:payload.client_message_id,phone:PHONE}).status,'confirmed');
+    assert.deepEqual(await bridge.send(LINE,payload),result);
+    await assert.rejects(bridge.send(LINE,{...payload,text:{body:'different'}}),e=>e.code==='CLIENT_ID_CONFLICT');
+    assert.equal(socket.calls.length,1);
+    // No need to await an unrelated outbox write to acknowledge the durable result.
+    assert.equal(line.store.data.messages[result.messages[0].id.split(':').at(-1)].ack_confirmed,true);
+  } finally {release.resolve();}
+});
+
+test('HTTP client timeout after ACK reconciles the original durable send while provider return is delayed', {timeout:5000}, async t=>{
+  const {bridge,line,socket,config}=await fixture(t,'timeout');
+  const entered=gate(),release=gate();const send=socket.sendMessage;
+  socket.sendMessage=async(...args)=>{
+    const result=await send(...args);
+    socket.ws.emit('CB:ack,class:message',{attrs:{id:args[2].messageId}});
+    entered.resolve();await release.promise;return result;
+  };
+  const server=createServer(bridge,config);await new Promise(r=>server.listen(0,'127.0.0.1',r));
+  t.after(()=>new Promise(r=>{server.close(r);server.closeAllConnections()}));
+  const controller=new AbortController();
+  const payload={to:PHONE,type:'text',text:{body:'synthetic'},client_message_id:'http-deadline'};
+  const request=fetch(`http://127.0.0.1:${server.address().port}/v1/lines/${LINE}/messages`,{
+    method:'POST',headers:{Authorization:`Bearer ${SECRET}`,'Content-Type':'application/json'},body:JSON.stringify(payload),signal:controller.signal});
+  const rejected=assert.rejects(request,e=>e.name==='AbortError');
+  try {
+    await entered.promise;await line.ackTail;
+    assert.equal(bridge.deliveryStatus(LINE,{client_message_id:payload.client_message_id,phone:PHONE}).status,'confirmed');
+    controller.abort();await rejected;
+  } finally {release.resolve();}
+  await line.sendTail;
+  const existing=await bridge.send(LINE,payload);
+  assert.equal(existing.messages.length,1);assert.equal(socket.calls.length,1);
+});
+
+test('a later lower receipt queued concurrently cannot regress a confirmed read',async t=>{
+  const {bridge,line}=await fixture(t);
+  const payload={to:PHONE,type:'text',text:{body:'synthetic'},client_message_id:'receipt-race'};
+  const result=await bridge.send(LINE,payload),id=result.messages[0].id.split(':').at(-1);
+  const entered=gate(),release=gate();const block=line.store.update(async()=>{entered.resolve();await release.promise});
+  await entered.promise;
+  const key=line.store.data.messages[id].message.key;
+  const read=bridge.receiveReceipt(line,key,'read',Date.now());
+  const delivered=bridge.receiveReceipt(line,key,'delivered',Date.now());
+  release.resolve();await Promise.all([block,read,delivered]);
+  assert.equal(line.store.data.messages[id].receipt,'read');
+});
+
+test('reservation storage failure prevents submission and does not publish a false result',async t=>{
+  const {bridge,line,socket}=await fixture(t);
+  const append=line.store.append;line.store.append=async()=>{throw Error('synthetic storage failure')};
+  await assert.rejects(bridge.send(LINE,{to:PHONE,type:'text',text:{body:'synthetic'},client_message_id:'disk-error'}));
+  assert.equal(socket.calls.length,0);
+  assert.equal(bridge.deliveryStatus(LINE,{client_message_id:'disk-error',phone:PHONE}).status,'unknown');
+  // Restore only the fixture for teardown; real storage failure requires restart.
+  line.store.append=append;line.store.failed=false;
 });

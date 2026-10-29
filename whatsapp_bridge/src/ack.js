@@ -14,7 +14,7 @@ export class AckTracker {
       if (!node.attrs.error) onConfirmation(node.attrs.id);
       if (!pending) return;
       if (node.attrs.error) pending.reject(new BridgeError(502, 'WHATSAPP_REJECTED', 'WhatsApp rejected this message operation.'));
-      else pending.resolve();
+      else pending.resolve(Date.now());
     };
     socket.ws.on('CB:ack,class:message', this.onAck);
   }
@@ -25,6 +25,7 @@ export class AckTracker {
     if (this.waiting.has(id)) throw new BridgeError(409, 'DUPLICATE_WAIT', 'This acknowledgment is already pending.');
     let timer;
     let settled = false;
+    let confirmedAt = null;
     const startTimer = () => {
       if (timer || settled) return;
       timer = setTimeout(() => {
@@ -34,12 +35,12 @@ export class AckTracker {
     };
     const promise = new Promise((resolve, reject) => {
       const settle = fn => value => { settled = true; clearTimeout(timer); this.waiting.delete(id); fn(value); };
-      this.waiting.set(id, { resolve: settle(resolve), reject: settle(reject) });
+      this.waiting.set(id, { resolve: settle(value => {confirmedAt = value; resolve();}), reject: settle(reject) });
     });
     if (!deferred) startTimer();
     // sendMessage can fail before this promise is awaited.
     promise.catch(() => {});
-    return { promise, startTimer, cancel: () => this.waiting.get(id)?.reject(new BridgeError(503, 'SEND_FAILED', 'Message relay failed.')) };
+    return { promise, startTimer, get confirmedAt() {return confirmedAt;}, cancel: () => this.waiting.get(id)?.reject(new BridgeError(503, 'SEND_FAILED', 'Message relay failed.')) };
   }
   interrupt() {
     this.closed = true;
