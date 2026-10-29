@@ -8,6 +8,7 @@ from typing import Any
 
 import aiomysql
 
+from app.support_idempotency import verify_send_fingerprint
 from app.support_dashboard_repository import DashboardRepositoryMixin, attach_dashboard_unread, queue_filters
 from app.support_staff_names import attach_current_staff_names
 from app.quick_reply_identity import quick_reply_identity
@@ -255,6 +256,7 @@ _SUPPORT_SCHEMA_MIGRATIONS: tuple[tuple[str, dict[str, set[str]]], ...] = (
         "support_agent_activity": {"staff_id", "activity_day", "started_at", "ended_at"},
         "support_ticket_messages": {"statistics_sent_at"},
     }),
+    ("migrations/20261029_support_send_fingerprints.sql", {"support_ticket_messages": {"request_fingerprint"}}),
     ("migrations/20261029_support_dashboard_reads.sql", {"support_dashboard_reads": {"ticket_id", "staff_id", "last_message_id", "updated_at"}}),
     ("migrations/20261029_support_number_profile_deletion.sql", {"support_tickets": {"business_display_name", "business_number_retired_at"}}),
 )
@@ -1560,6 +1562,7 @@ class SupportRepository(DashboardRepositoryMixin, DeliveryRepositoryMixin, ReadS
         sender_name: str | None = None,
         whatsapp_message_id: str | None = None,
         client_message_id: str | None = None,
+        request_fingerprint: str | None = None,
         whatsapp_timestamp: str | None = None,
         message_type: str = "text",
         reply_to_whatsapp_message_id: str | None = None,
@@ -1587,10 +1590,12 @@ class SupportRepository(DashboardRepositoryMixin, DeliveryRepositoryMixin, ReadS
         if whatsapp_message_id:
             existing = await self.get_message_by_whatsapp_id(whatsapp_message_id)
             if existing:
+                verify_send_fingerprint(existing, request_fingerprint)
                 return existing, False
         if client_message_id:
             existing = await self.get_message_by_client_id(client_message_id, ticket_id=ticket_id, sender_type=sender_type, sender_id=sender_id)
             if existing:
+                verify_send_fingerprint(existing, request_fingerprint)
                 return existing, False
 
         async with self._pool.acquire() as conn:
@@ -1650,6 +1655,7 @@ class SupportRepository(DashboardRepositoryMixin, DeliveryRepositoryMixin, ReadS
                             (ticket_id, sender_type, str(sender_id or ""), client_message_id))
                         existing = await cur.fetchone()
                         if existing:
+                            verify_send_fingerprint(existing, request_fingerprint)
                             await conn.commit()
                             return existing, False
 
@@ -1671,6 +1677,7 @@ class SupportRepository(DashboardRepositoryMixin, DeliveryRepositoryMixin, ReadS
                             whatsapp_message_id,
                             client_message_id,
                             transport_client_id,
+                            request_fingerprint,
                             whatsapp_timestamp,
                             send_status,
                             error_message,
@@ -1681,7 +1688,7 @@ class SupportRepository(DashboardRepositoryMixin, DeliveryRepositoryMixin, ReadS
                             updated_at
                         ) VALUES (
                             %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                            %s, %s, %s, %s,
+                            %s, %s, %s, %s, %s,
                             UTC_TIMESTAMP(6), UTC_TIMESTAMP(6)
                         )
                         """,
@@ -1701,6 +1708,7 @@ class SupportRepository(DashboardRepositoryMixin, DeliveryRepositoryMixin, ReadS
                             whatsapp_message_id,
                             client_message_id,
                             uuid.uuid4().hex if client_message_id else None,
+                            request_fingerprint,
                             whatsapp_timestamp,
                             send_status,
                             error_message,
@@ -1742,6 +1750,7 @@ class SupportRepository(DashboardRepositoryMixin, DeliveryRepositoryMixin, ReadS
                                     str(sender_id or ""), client_message_id))
                     existing = await cur.fetchone()
                     if existing:
+                        verify_send_fingerprint(existing, request_fingerprint)
                         return existing, False
                 raise
             except Exception:
