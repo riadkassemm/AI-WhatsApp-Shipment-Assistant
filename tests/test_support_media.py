@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+import pytest
 
 from app import config
 from app.support_media import SupportMediaStore, media_kind_for_mime, normalize_mime_type
@@ -312,7 +313,7 @@ def test_support_media_store_persists_remote_reference_for_recovery(tmp_path: Pa
     assert loaded.business_phone_number_id == "phone-number-id"
 
 
-def test_native_stereo_ogg_is_normalized_for_mobile_voice_playback(tmp_path: Path) -> None:
+def test_native_stereo_ogg_is_normalized_for_mobile_voice_playback(tmp_path: Path, monkeypatch) -> None:
     import json
     import subprocess
 
@@ -327,7 +328,17 @@ def test_native_stereo_ogg_is_normalized_for_mobile_voice_playback(tmp_path: Pat
         'stream=codec_name,channels,sample_rate', '-of', 'json', str(output)]))['streams'][0]
     assert metadata == {'codec_name': 'opus', 'sample_rate': '48000', 'channels': 1}
     assert mime == 'audio/ogg; codecs=opus' and voice is True
+    assert filename == 'voice-note.opus'
     assert content != source.read_bytes()
+    monkeypatch.setattr(config.settings, 'support_media_directory', str(tmp_path/'stored'))
+    store = SupportMediaStore()
+    saved = store.save(ticket_id=42, message_id=7, content=content, mime_type=mime, filename=filename)
+    restored = store.get(42, 7)
+    assert saved.path.suffix == '.opus' and restored.filename == 'voice-note.opus'
+    assert restored.mime_type == mime and restored.path.read_bytes() == content
+    legacy = store.save(ticket_id=42, message_id=8, content=content, mime_type='audio/ogg', filename='old-note.ogg')
+    assert legacy.path.suffix == '.ogg'
+    assert store.get(42, 8).path.read_bytes() == content
 
 
 def test_native_ogg_does_not_trust_the_browser_codec_label():
@@ -362,7 +373,8 @@ def test_supported_mp4_audio_falls_back_when_ffmpeg_is_missing(tmp_path: Path, m
 
     asyncio.run(run())
 
-def test_whatsapp_media_upload_uses_base_mime_and_documented_form(monkeypatch) -> None:
+@pytest.mark.parametrize('filename', ['voice-note.ogg', 'voice-note.opus'])
+def test_whatsapp_media_upload_uses_base_mime_and_documented_form(monkeypatch, filename) -> None:
     async def run() -> None:
         seen: dict = {}
 
@@ -396,13 +408,13 @@ def test_whatsapp_media_upload_uses_base_mime_and_documented_form(monkeypatch) -
         media_id = await client.upload_media(
             content=b"OggSfake-opus",
             mime_type="audio/ogg; codecs=opus",
-            filename="voice-note.ogg",
+            filename=filename,
         )
 
         assert media_id == "uploaded-media-id"
         assert seen["post_kwargs"]["data"] == {"messaging_product": "whatsapp"}
         uploaded = seen["post_kwargs"]["files"]["file"]
-        assert uploaded[0] == "voice-note.ogg"
+        assert uploaded[0] == filename
         assert uploaded[1] == b"OggSfake-opus"
         assert uploaded[2] == "audio/ogg"
 

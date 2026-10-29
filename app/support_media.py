@@ -110,6 +110,9 @@ def media_kind_for_mime(value: str | None, *, allow_browser_audio: bool = False)
 
 def media_extension(value: str | None, *, allow_browser_audio: bool = False) -> str:
     mime_type = normalize_mime_type(value)
+    # Ogg Opus uses .opus (RFC 7845); generic Ogg and legacy assets keep .ogg.
+    if mime_type == "audio/ogg" and "opus" in str(value or "").lower():
+        return ".opus"
     if mime_type in STICKER_MIME_EXTENSIONS:
         return STICKER_MIME_EXTENSIONS[mime_type]
     if mime_type in IMAGE_MIME_EXTENSIONS:
@@ -308,7 +311,7 @@ class SupportMediaStore:
 
         directory = self._message_dir(ticket_id, message_id)
         directory.mkdir(parents=True, exist_ok=True)
-        extension = media_extension(normalized, allow_browser_audio=allow_browser_audio)
+        extension = media_extension(raw_mime_type, allow_browser_audio=allow_browser_audio)
         stored_name = f"media{extension}"
         media_path = directory / stored_name
         fallback_name = f"{kind}{extension}"
@@ -384,7 +387,7 @@ class SupportMediaStore:
 
         with tempfile.TemporaryDirectory(prefix="support-voice-") as temp_dir:
             source = Path(temp_dir) / f"input{media_extension(source_mime, allow_browser_audio=True)}"
-            output = Path(temp_dir) / "voice-note.ogg"
+            output = Path(temp_dir) / "voice-note.opus"
             source.write_bytes(content)
             try:
                 process = await asyncio.create_subprocess_exec(
@@ -455,7 +458,7 @@ class SupportMediaStore:
                 raise SupportMediaError(
                     f"The converted voice note is too large. Maximum size is {limit // (1024 * 1024)} MB."
                 )
-            return converted, "audio/ogg; codecs=opus", "voice-note.ogg", True
+            return converted, "audio/ogg; codecs=opus", "voice-note.opus", True
 
 
 support_media_store = SupportMediaStore()
