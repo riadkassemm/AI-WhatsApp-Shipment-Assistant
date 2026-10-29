@@ -1037,3 +1037,7 @@ WhatsApp. Run `tests/test_voice_recording.py tests/test_support_media.py` in the
 unit process and `tests/integration/test_voice_conversion.py` separately with the
 integration environment described above. Safari-specific capture and playback
 on physical recipient phones still require device verification.
+
+## Bridge persistence and dashboard refresh
+
+See [storage, request identity, polling, and rollback](bridge-dashboard-performance.md) before deploying the incremental bridge store. The API requires the additive `20261029_support_send_fingerprints.sql` migration. Existing polling overrides should be reviewed; the default is now 30 seconds with SSE-triggered refreshes. Production activation requires explicit approval.
