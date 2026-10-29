@@ -1979,15 +1979,6 @@ function addMessage(container, m, extraClass = '') {
     pending.setAttribute('aria-label', 'Sending');
     pending.append(createIcon('clock', 'icon icon-sm'));
     meta.append(pending);
-    if (!extraClass && canResendMessage(m)) {
-      const resume = document.createElement('button');
-      resume.type = 'button';
-      resume.className = 'btn send-retry-btn';
-      resume.textContent = 'Resume send';
-      resume.title = 'Resume abandoned preparation. An active send will not be repeated.';
-      resume.onclick = () => resendMessage(m, resume);
-      meta.append(resume);
-    }
   } else if (outbound && m.send_status) {
     // WhatsApp-style ticks: one grey when sent, two grey when delivered, two blue when read.
     const receipt = ['read', 'played'].includes(m.delivery_status) ? 'read' : m.delivery_status === 'delivered' ? 'delivered' : 'sent';
