@@ -10,6 +10,7 @@ def add_base_schema(columns):
 
 
 def add_linked_device_schema(columns):
+    columns.setdefault("support_tickets", set()).update({"business_display_name", "business_number_retired_at"})
     columns["support_dashboard_reads"] = {"ticket_id", "staff_id", "last_message_id", "updated_at"}
     columns.setdefault('whatsapp_phone_numbers', set()).add('removed_at')
     columns["support_delivery_receipts"] = {"provider_message_id", "line_id", "status", "checked_at", "failure_code"}

@@ -105,6 +105,12 @@ check($('queue').querySelector('.unread-dot[aria-label="Unread messages"][title=
 check(state.dashboardReadBoundaries.size===0,'list render does not mark read');
 state.queueFilters={supportNumber:'90005',staffId:'7',status:'open'};renderQueueFilters();
 check($('queueSupportNumber').value==='90005'&&$('queueStaff').value==='7'&&$('queueStatus').value==='open','combined selections');
+check($('queueSupportNumber').labels[0].querySelector('.sr-only'),'support filter retains accessible label');
+check($('queueStaff').labels[0].querySelector('.sr-only'),'staff filter retains accessible label');
+state.queueFilters.supportNumber='removed';state.queueFilters.staffId='deleted';
+check(renderQueueFilters({support_numbers:[{id:'90005',name:'Export Office'}],staff:[{id:'7',name:'Test Agent'}]}),'stale selection requests reload');
+check(state.queueFilters.supportNumber===''&&state.queueFilters.staffId==='','stale filters reset to All');
+check($('queueSupportNumber').options.length===2&&$('queueStaff').options.length===2,'no phantom options');
 state.view='mine';renderQueueFilters();renderQueue();
 check($('queueStaffLabel').classList.contains('hidden')&&$('queueStatusLabel').classList.contains('hidden'),'mine cannot choose another staff');
 check($('queue').querySelector('.unread-dot'),'mine unread dot');

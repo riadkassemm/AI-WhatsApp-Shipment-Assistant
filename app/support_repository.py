@@ -256,6 +256,7 @@ _SUPPORT_SCHEMA_MIGRATIONS: tuple[tuple[str, dict[str, set[str]]], ...] = (
         "support_ticket_messages": {"statistics_sent_at"},
     }),
     ("migrations/20261029_support_dashboard_reads.sql", {"support_dashboard_reads": {"ticket_id", "staff_id", "last_message_id", "updated_at"}}),
+    ("migrations/20261029_support_number_profile_deletion.sql", {"support_tickets": {"business_display_name", "business_number_retired_at"}}),
 )
 
 MAX_QUICK_REPLIES_PER_STAFF = 200
@@ -290,6 +291,11 @@ class SupportRepository(DashboardRepositoryMixin, DeliveryRepositoryMixin, ReadS
                 (str(line_id),),
             )
             row = await cur.fetchone()
+            if not row:
+                await cur.execute("""SELECT id FROM whatsapp_integration_audit WHERE phone_number_id=%s
+                    AND action IN ('META_NUMBER_REMOVED','LINKED_DEVICE_LINE_REMOVED') LIMIT 1 LOCK IN SHARE MODE""", (str(line_id),))
+                if await cur.fetchone():
+                    raise SupportConflictError("This WhatsApp number was permanently removed. Its chat history is read-only.")
             if row and row.get('removed_at'):
                 raise SupportConflictError("This WhatsApp number was permanently removed. Its chat history is read-only.")
             if get_transport(str(line_id)) not in {"linked_device", "removed"}:
@@ -397,7 +403,7 @@ class SupportRepository(DashboardRepositoryMixin, DeliveryRepositoryMixin, ReadS
             async with conn.cursor(aiomysql.DictCursor) as cur:
                 await cur.execute(
                     """
-                    SELECT t.*, n.display_name, n.removed_at AS business_number_removed_at
+                    SELECT t.*, COALESCE(n.display_name,t.business_display_name) AS display_name, COALESCE(n.removed_at,t.business_number_retired_at) AS business_number_removed_at
                     FROM support_tickets t
                     LEFT JOIN whatsapp_phone_numbers n
                       ON n.phone_number_id = t.business_phone_number_id
@@ -861,7 +867,7 @@ class SupportRepository(DashboardRepositoryMixin, DeliveryRepositoryMixin, ReadS
             async with conn.cursor(aiomysql.DictCursor) as cur:
                 await cur.execute(
                     """
-                    SELECT t.*, n.display_name
+                    SELECT t.*, COALESCE(n.display_name,t.business_display_name) AS display_name
                     FROM support_tickets t
                     LEFT JOIN whatsapp_phone_numbers n
                       ON n.phone_number_id = t.business_phone_number_id
@@ -888,7 +894,7 @@ class SupportRepository(DashboardRepositoryMixin, DeliveryRepositoryMixin, ReadS
                 if business_phone_number_id:
                     await cur.execute(
                         """
-                        SELECT t.*, n.display_name
+                        SELECT t.*, COALESCE(n.display_name,t.business_display_name) AS display_name
                         FROM support_tickets t
                         LEFT JOIN whatsapp_phone_numbers n
                           ON n.phone_number_id = t.business_phone_number_id
@@ -915,7 +921,7 @@ class SupportRepository(DashboardRepositoryMixin, DeliveryRepositoryMixin, ReadS
                 else:
                     await cur.execute(
                         """
-                        SELECT t.*, n.display_name
+                        SELECT t.*, COALESCE(n.display_name,t.business_display_name) AS display_name
                         FROM support_tickets t
                         LEFT JOIN whatsapp_phone_numbers n
                           ON n.phone_number_id = t.business_phone_number_id
@@ -1019,7 +1025,7 @@ class SupportRepository(DashboardRepositoryMixin, DeliveryRepositoryMixin, ReadS
             async with conn.cursor(aiomysql.DictCursor) as cur:
                 await cur.execute(
                     """
-                    SELECT t.*, n.display_name
+                    SELECT t.*, COALESCE(n.display_name,t.business_display_name) AS display_name
                     FROM support_tickets t
                     LEFT JOIN whatsapp_phone_numbers n
                       ON n.phone_number_id = t.business_phone_number_id
@@ -1244,7 +1250,7 @@ class SupportRepository(DashboardRepositoryMixin, DeliveryRepositoryMixin, ReadS
             async with conn.cursor(aiomysql.DictCursor) as cur:
                 await cur.execute(
                     """
-                    SELECT t.*, n.display_name
+                    SELECT t.*, COALESCE(n.display_name,t.business_display_name) AS display_name
                     FROM support_tickets t
                     LEFT JOIN whatsapp_phone_numbers n
                       ON n.phone_number_id = t.business_phone_number_id
@@ -2697,7 +2703,7 @@ class SupportRepository(DashboardRepositoryMixin, DeliveryRepositoryMixin, ReadS
                             t.id AS ticket_id, t.ticket_reference, t.customer_name,
                             t.customer_userid, t.whatsapp_phone, t.status,
                             t.conversation_origin, t.business_display_phone_number,
-                            t.business_phone_number_id, n.display_name,
+                            t.business_phone_number_id, COALESCE(n.display_name,t.business_display_name) AS display_name,
                             t.last_activity_at AS created_at
                         FROM support_tickets t
                         LEFT JOIN whatsapp_phone_numbers n
@@ -2721,7 +2727,7 @@ class SupportRepository(DashboardRepositoryMixin, DeliveryRepositoryMixin, ReadS
                         t.ticket_reference, t.customer_name, t.customer_userid,
                         t.whatsapp_phone, t.status, t.conversation_origin,
                         t.business_display_phone_number, t.business_phone_number_id,
-                        n.display_name
+                        COALESCE(n.display_name,t.business_display_name) AS display_name
                     FROM support_ticket_messages m
                     INNER JOIN support_tickets t ON t.id = m.ticket_id
                     LEFT JOIN whatsapp_phone_numbers n
@@ -3533,7 +3539,7 @@ class SupportRepository(DashboardRepositoryMixin, DeliveryRepositoryMixin, ReadS
                     SELECT
                         support_tickets.id, ticket_reference, whatsapp_phone, customer_id,
                         business_phone_number_id, business_display_phone_number,
-                        n.display_name,
+                        COALESCE(n.display_name,support_tickets.business_display_name) AS display_name,
                         conversation_origin, initiated_by_staff_id, initiated_by_staff_name,
                         customer_userid, customer_name,
                         LEFT(reason, 300) AS reason,

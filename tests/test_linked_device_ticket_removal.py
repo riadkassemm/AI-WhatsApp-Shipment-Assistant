@@ -29,6 +29,8 @@ class ChannelCursor:
                 self.connection.entered.set()
                 await self.connection.blocked.wait()
             self.result = dict(self.connection.number) if self.connection.number else None
+        elif query.startswith("SELECT id FROM whatsapp_integration_audit"):
+            self.result = None
         else:
             raise AssertionError("A removed/inactive line must fail before ticket locks or writes: " + query)
 
@@ -145,5 +147,6 @@ def test_cloud_channels_do_not_require_a_linked_registry_row(monkeypatch):
     connection.number = None
     monkeypatch.setattr(repository_module, "get_transport", lambda _line: "cloud")
     asyncio.run(SupportRepository._lock_available_whatsapp_line(connection, "123456789"))
-    assert len(connection.queries) == 1
+    assert len(connection.queries) == 2
+    assert "LOCK IN SHARE MODE" in connection.queries[1]
     assert 'removed_at' in connection.queries[0] and 'FOR UPDATE' in connection.queries[0]

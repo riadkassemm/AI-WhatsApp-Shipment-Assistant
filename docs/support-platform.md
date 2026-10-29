@@ -981,3 +981,35 @@ older than two minutes synchronize silently
 Read/view activity remains recorded, but only Admins and Super Admins receive
 `CONVERSATION_VIEWED` and `INCOMING_MARKED_READ` timeline events. This does not
 change conversation visibility, sending permissions or WhatsApp receipt behavior.
+
+
+### Active queue filters and permanent directory removal
+
+Queue filters list only current active staff and enabled, present linked-device
+numbers. Meta numbers, disabled/unpaired lines and historical assignee IDs are
+excluded from the choices; existing conversation visibility is unchanged.
+Removing a selected option resets that filter to All and reloads its results.
+Labels remain available to screen readers without occupying a separate row.
+
+Deleting a staff account physically deletes its credentials and private records,
+as before. Ticket/message/audit attribution remains historical; it does not
+create an account or a filter option. Deactivation alone remains reversible.
+
+After confirmed linked-device unlinking, or **Remove saved number** for an
+inactive Meta number, the number's directory row is now physically deleted.
+The existing removal audit prevents stale syncs, webhooks or configured defaults
+from recreating it. A short database advisory lock serializes discovery and
+removal across API processes; no provider request runs under that lock. Ticket
+snapshots retain the number's custom label and retirement status, so history is
+readable but the removed channel cannot be reopened for sending.
+
+Before deploying, apply `migrations/20261029_support_number_profile_deletion.sql`
+to the application's local database. It adds two nullable ticket metadata columns
+and is safe to repeat. Retired profiles from earlier releases require a one-time
+reviewed cleanup after deployment: back up the profiles, verify no active
+conversations, and use the same registry removal methods. For linked lines,
+confirm retirement in the bridge manifest first; a disabled but still paired
+number must not be treated as already unlinked. Keep removal audit records and
+bridge retirement records. Rolling back to code without these deletion guards
+can recreate profiles from stale configuration, so restore the backup or retain
+the guards when rolling back after cleanup.

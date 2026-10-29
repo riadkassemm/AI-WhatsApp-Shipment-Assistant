@@ -586,6 +586,7 @@ function renderQueueError(message) {
 }
 
 function renderQueueFilters(options = null) {
+  let reset = false;
   const filters = state.queueFilters;
   const supported = ['unassigned', 'mine', 'chats', 'active', 'history', 'waiting'].includes(state.view);
   $('queueFilters').classList.toggle('hidden', !supported);
@@ -598,12 +599,15 @@ function renderQueueFilters(options = null) {
     const select = $(id);
     if (items) {
       const choices = [new Option(label, ''), ...items.map(item => new Option(item.name || item.id, item.id))];
-      if (filters[key] && !items.some(item => String(item.id) === filters[key])) choices.push(new Option(select.selectedOptions[0]?.textContent || filters[key], filters[key]));
+      if (filters[key] && !items.some(item => String(item.id) === filters[key])) {
+        filters[key] = ''; reset = true;
+      }
       select.replaceChildren(...choices);
     }
     select.value = filters[key];
   }
   $('queueStatus').value = filters.status;
+  return reset;
 }
 
 function resetQueueFilters() {
@@ -717,7 +721,11 @@ async function loadQueue({silent = false} = {}) {
     state.page = Math.max(1, Math.ceil(state.queueItems.length / state.pageSize));
     state.queueExhausted = false;
     state.total = total;
-    renderQueueFilters(responses[0].filter_options);
+    if (renderQueueFilters(responses[0].filter_options)) {
+      state.page = 1;
+      await loadQueue({silent: true});
+      return;
+    }
     refreshAllQueueCounts().catch(() => {});
     if (state.view === 'unassigned' && !(state.unassignedSnapshot instanceof Map)) {
       state.unassignedSnapshot = new Map(

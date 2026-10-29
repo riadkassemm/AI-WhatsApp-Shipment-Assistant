@@ -367,7 +367,9 @@ def test_regular_agent_history_is_shared_but_active_queries_remain_participation
                 page_size=30,
             )
             assert len(calls) == 4
-            for sql, params in calls:
+            assert "source='LINKED_DEVICE' AND is_enabled=1 AND provider_present=1" in calls[2][0]
+            assert "is_active=1 AND deleted_at IS NULL" in calls[3][0]
+            for sql, params in calls[:2]:
                 assert "TICKET_CLAIMED" in sql
                 assert "$.from_agent_id" in sql
                 assert "$.to_agent_id" in sql

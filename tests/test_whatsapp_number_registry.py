@@ -320,8 +320,21 @@ class RemovalCursor:
         query = " ".join(query.split())
         state = self.connection
         self.result, self.results = None, []
-        if query.startswith("SELECT * FROM whatsapp_phone_numbers"):
-            self.result = dict(state.number) if state.number["phone_number_id"] == params[0] else None
+        if "GET_LOCK" in query:
+            self.result = {"acquired": 1}
+        elif "RELEASE_LOCK" in query:
+            self.result = {"released": 1}
+        elif query.startswith("SELECT id FROM whatsapp_integration_audit"):
+            self.result = {"id": 1} if any(a[0] == "removed" for a in state.audits) else None
+        elif query.startswith("SELECT * FROM whatsapp_phone_numbers"):
+            self.result = dict(state.number) if state.number and state.number["phone_number_id"] == params[0] else None
+        elif query.startswith("DELETE FROM whatsapp_phone_numbers"):
+            state.number = None
+        elif query.startswith("UPDATE support_tickets SET business_display_name"):
+            for ticket in state.tickets:
+                if ticket["business_phone_number_id"] == params[-1]:
+                    ticket["business_display_name"] = params[0]
+                    ticket["business_number_retired_at"] = "retired"
         elif query.startswith("SELECT id FROM support_tickets") or query.startswith("SELECT * FROM support_tickets"):
             self.results = [dict(ticket) for ticket in state.tickets if ticket["business_phone_number_id"] == params[0] and ticket.get("active_key") is not None]
         elif query.startswith("SELECT m.id FROM support_ticket_messages"):
@@ -434,7 +447,8 @@ def test_confirmed_removal_archives_only_target_line_preserving_history_and_owne
     assert [ticket["status"] for ticket in connection.tickets] == ["CLOSED", "CLOSED", "NEW", "RESOLVED"]
     assert [event[1] for event in connection.events] == ["TICKET_CLOSED", "CHAT_CLOSED"]
     assert all(event[2:4] == ("10", "Admin") for event in connection.events)
-    assert not connection.number["provider_present"] and not connection.number["is_enabled"]
+    assert connection.number is None
+    assert connection.tickets[3]["business_number_retired_at"] == "retired"
     assert asyncio.run(repository.finish_linked_device_removal("90002", actor_id=10, actor_name="Admin", close_active_tickets=True)) == []
     assert [audit[0] for audit in connection.audits] == ["started", "removed"]
 

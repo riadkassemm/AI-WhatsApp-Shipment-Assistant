@@ -418,4 +418,6 @@ async def delete_staff_account(actor: SupportAgent, staff_id: int) -> dict[str, 
     result = _normalize_public_row(deleted)
     result["deleted"] = True
     result["already_inactive"] = not bool(target.get("is_active"))
+    from app.support_events import publish_support_event
+    await publish_support_event("ticket_queues_changed")
     return result

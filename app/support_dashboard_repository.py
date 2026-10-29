@@ -26,7 +26,7 @@ def queue_filters(
         # Literal substring search, including hidden/deleted-message boundaries.
         term = search_pattern(query)
         columns = ['customer_name', 'customer_userid', 'whatsapp_phone', 'ticket_reference',
-                   'tracking_reference', 'current_assignee_name', 'business_display_phone_number']
+                   'tracking_reference', 'current_assignee_name', 'business_display_phone_number', 'business_display_name']
         predicates = [f"support_tickets.{column} LIKE %s ESCAPE '='" for column in columns]
         values.extend([term] * len(columns))
         predicates.append("""EXISTS (SELECT 1 FROM whatsapp_phone_numbers qn
@@ -59,19 +59,16 @@ async def attach_dashboard_unread(cur: Any, rows: list[dict[str, Any]], staff_id
 
 class DashboardRepositoryMixin:
     async def queue_filter_options(self, cur: Any, where: str, params: tuple) -> dict:
-        # Options come from this user's visible queue, including historical lines
-        # and inactive staff. No staff credentials or unrelated conversations leak.
-        await cur.execute(f"""SELECT DISTINCT support_tickets.business_phone_number_id AS id,
-            COALESCE(NULLIF(n.display_name,''),NULLIF(n.display_phone_number,''),
-                     support_tickets.business_display_phone_number,support_tickets.business_phone_number_id) AS name
-            FROM support_tickets LEFT JOIN whatsapp_phone_numbers n
-              ON n.phone_number_id=support_tickets.business_phone_number_id
-            WHERE ({where}) AND support_tickets.business_phone_number_id IS NOT NULL ORDER BY name,id""", params)
+        # Public directory metadata only. Historical assignment IDs are not
+        # accounts, and retired descriptors must never become filter options.
+        await cur.execute("""SELECT phone_number_id AS id,
+            COALESCE(NULLIF(display_name,''),NULLIF(display_phone_number,''),phone_number_id) AS name
+            FROM whatsapp_phone_numbers
+            WHERE source='LINKED_DEVICE' AND is_enabled=1 AND provider_present=1 AND removed_at IS NULL
+            ORDER BY name,id""", ())
         numbers = list(await cur.fetchall())
-        await cur.execute(f"""SELECT DISTINCT support_tickets.current_assignee_id AS id,
-            COALESCE(s.name,support_tickets.current_assignee_name,support_tickets.current_assignee_id) AS name
-            FROM support_tickets LEFT JOIN staff s ON CAST(s.id AS BINARY)=CAST(support_tickets.current_assignee_id AS BINARY)
-            WHERE ({where}) AND support_tickets.current_assignee_id IS NOT NULL ORDER BY name,id""", params)
+        await cur.execute("""SELECT CAST(id AS CHAR) AS id,name FROM staff
+            WHERE is_active=1 AND deleted_at IS NULL ORDER BY name,id""", ())
         return {'support_numbers': numbers, 'staff': list(await cur.fetchall())}
 
     async def attach_queue_search_matches(self, cur: Any, rows: list[dict], query: str, staff_id: str) -> None:

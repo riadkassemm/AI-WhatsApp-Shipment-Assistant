@@ -53,6 +53,8 @@ async def test_permanent_deletion_api_and_statistics(infrastructure, monkeypatch
         assert not list(tmp_path.rglob('*.pdf'))
         ticket = (await sql('SELECT * FROM support_tickets WHERE id=42'))[0]
         assert ticket['current_assignee_id'] == '7' and ticket['resolved_by_staff_id'] is None
+        queue = await repo.list_tickets(view='history', agent_id='8', can_view_all=True)
+        assert queue['filter_options']['staff'] == [{'id': '8', 'name': 'Other'}]
         assert (await sql('SELECT actor_id FROM support_ticket_events WHERE ticket_id=42'))[0]['actor_id']=='7'
         assert (await sql('SELECT body FROM support_ticket_messages WHERE ticket_id=42'))[0]['body']=='retained history'
         path='/api/support/statistics?start=2026-10-23&end=2026-10-23&timezone_name=UTC'

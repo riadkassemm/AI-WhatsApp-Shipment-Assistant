@@ -25,7 +25,7 @@ async def incoming(sql, ticket_id, body='needle', timestamp=None):
 async def test_combined_filters_counts_pages_and_permissions(infrastructure, monkeypatch):
     repo, sql, _ = infrastructure
     await sessions(sql)
-    await sql("INSERT INTO whatsapp_phone_numbers(phone_number_id,display_name,is_enabled,provider_present,source) VALUES ('90005','Export',1,1,'META_SYNC'),('90006','Office',1,1,'META_SYNC')")
+    await sql("INSERT INTO whatsapp_phone_numbers(phone_number_id,display_name,is_enabled,provider_present,source) VALUES ('90005','Export',1,1,'LINKED_DEVICE'),('90006','Office',1,1,'LINKED_DEVICE')")
     for n in range(50, 58):
         await sql("""INSERT INTO support_tickets(id,ticket_reference,whatsapp_phone,customer_name,reason,ai_summary,status,
             conversation_origin,current_assignee_id,business_phone_number_id,created_at,updated_at,last_activity_at)
@@ -194,7 +194,7 @@ async def test_read_endpoint_requires_session_csrf_and_ticket_access(infrastruct
 @pytest.mark.asyncio
 @pytest.mark.parametrize('legacy_id', ['agent-1', '7abc', '7'])
 @pytest.mark.parametrize('collation', ['utf8mb4_unicode_ci', 'utf8mb4_general_ci', 'utf8mb4_bin'])
-async def test_filter_options_preserve_legacy_assignment_identity(infrastructure, legacy_id, collation):
+async def test_filter_options_exclude_legacy_accounts_but_preserve_history_identity(infrastructure, legacy_id, collation):
     import warnings
     repo, sql, _ = infrastructure
     await sql(f'ALTER TABLE support_tickets MODIFY current_assignee_id VARCHAR(100) CHARACTER SET utf8mb4 COLLATE {collation} NULL')
@@ -203,5 +203,25 @@ async def test_filter_options_preserve_legacy_assignment_identity(infrastructure
         warnings.simplefilter('error')
         result = await repo.list_tickets(view='history', agent_id='8', can_view_all=True)
     expected_name = 'Agent' if legacy_id == '7' else 'Legacy staff'
-    assert result['filter_options']['staff'] == [{'id': legacy_id, 'name': expected_name}]
+    assert result['filter_options']['staff'] == [{'id': '7', 'name': 'Agent'}, {'id': '8', 'name': 'Other'}]
     assert result['items'][0]['current_assignee_name'] == expected_name
+
+
+@pytest.mark.asyncio
+async def test_filters_use_active_directory_even_without_ticket_history(infrastructure):
+    repo, sql, _ = infrastructure
+    await sql("UPDATE staff SET is_active=0 WHERE id=7")
+    await sql("UPDATE support_tickets SET current_assignee_id='deleted-staff' WHERE id=42")
+    await sql("""INSERT INTO whatsapp_phone_numbers(phone_number_id,display_name,source,is_enabled,provider_present,removed_at)
+        VALUES ('90011','Active','LINKED_DEVICE',1,1,NULL),
+               ('90012','Disabled','LINKED_DEVICE',0,1,NULL),
+               ('90013','Unpaired','LINKED_DEVICE',1,0,NULL),
+               ('90014','Removed','LINKED_DEVICE',1,1,UTC_TIMESTAMP(6)),
+               ('12345678','Meta','META_SYNC',1,1,NULL)""")
+    for view in ('unassigned','mine','chats','active','history','waiting'):
+        queue = await repo.list_tickets(view=view, agent_id='8', can_view_all=True)
+        assert queue['filter_options'] == {
+            'staff': [{'id':'8','name':'Other'}],
+            'support_numbers': [{'id':'90011','name':'Active'}]}
+    await sql("UPDATE staff SET deleted_at=UTC_TIMESTAMP(6) WHERE id=8")
+    assert (await repo.list_tickets(view='history', agent_id='8', can_view_all=True))['filter_options']['staff'] == []
