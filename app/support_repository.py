@@ -8,6 +8,7 @@ from typing import Any
 
 import aiomysql
 
+from app.support_dashboard_repository import DashboardRepositoryMixin, attach_dashboard_unread, queue_filters
 from app.support_staff_names import attach_current_staff_names
 from app.quick_reply_identity import quick_reply_identity
 from app.config import settings
@@ -254,6 +255,7 @@ _SUPPORT_SCHEMA_MIGRATIONS: tuple[tuple[str, dict[str, set[str]]], ...] = (
         "support_agent_activity": {"staff_id", "activity_day", "started_at", "ended_at"},
         "support_ticket_messages": {"statistics_sent_at"},
     }),
+    ("migrations/20261029_support_dashboard_reads.sql", {"support_dashboard_reads": {"ticket_id", "staff_id", "last_message_id", "updated_at"}}),
 )
 
 MAX_QUICK_REPLIES_PER_STAFF = 200
@@ -276,7 +278,7 @@ def _missing_support_schema_migrations(
 
 
 
-class SupportRepository(DeliveryRepositoryMixin, ReadSyncRepositoryMixin, ReceiptRepositoryMixin):
+class SupportRepository(DashboardRepositoryMixin, DeliveryRepositoryMixin, ReadSyncRepositoryMixin, ReceiptRepositoryMixin):
     @staticmethod
     async def _lock_available_whatsapp_line(conn: Any, line_id: str | None) -> None:
         """Serialize new/reopened conversations with number removal."""
@@ -2733,18 +2735,19 @@ class SupportRepository(DeliveryRepositoryMixin, ReadSyncRepositoryMixin, Receip
                 rows = conversations + list(await cur.fetchall())
                 return await attach_current_staff_names(cur, rows)
 
-    async def list_events(self, ticket_id: int, limit: int = 100) -> list[dict[str, Any]]:
+    async def list_events(self, ticket_id: int, limit: int = 100, *, include_private_activity: bool = True) -> list[dict[str, Any]]:
         limit = max(1, min(limit, 200))
+        visibility = "" if include_private_activity else "AND event_type NOT IN ('CONVERSATION_VIEWED','INCOMING_MARKED_READ')"
         if self._pool is None:
             await self.connect()
         assert self._pool is not None
         async with self._pool.acquire() as conn:
             async with conn.cursor(aiomysql.DictCursor) as cur:
                 await cur.execute(
-                    """
+                    f"""
                     SELECT *
                     FROM support_ticket_events
-                    WHERE ticket_id = %s
+                    WHERE ticket_id = %s {visibility}
                     ORDER BY id ASC
                     LIMIT %s
                     """,
@@ -3396,6 +3399,11 @@ class SupportRepository(DeliveryRepositoryMixin, ReadSyncRepositoryMixin, Receip
         can_view_all: bool = False,
         page: int = 1,
         page_size: int = 30,
+        staff_id: str | None = None,
+        support_number: str | None = None,
+        chat_status: str = "all",
+        query: str = "",
+        include_filter_options: bool = True,
     ) -> dict[str, Any]:
         page = max(page, 1)
         page_size = max(1, min(page_size, 500))
@@ -3502,6 +3510,11 @@ class SupportRepository(DeliveryRepositoryMixin, ReadSyncRepositoryMixin, Receip
         else:
             raise ValueError("Unknown ticket view.")
 
+        base_where, base_params = where, tuple(params)
+        extra, values = queue_filters(view, staff_id, support_number, chat_status, query, agent_id)
+        where = f"({where}) AND ({extra})"
+        params.extend(values)
+
         if self._pool is None:
             await self.connect()
         assert self._pool is not None
@@ -3543,8 +3556,12 @@ class SupportRepository(DeliveryRepositoryMixin, ReadSyncRepositoryMixin, Receip
                 rows = list(await cur.fetchall())
                 await attach_current_staff_names(cur, rows)
                 await attach_conversation_read_state(cur, rows)
+                await attach_dashboard_unread(cur, rows, agent_id)
+                await self.attach_queue_search_matches(cur, rows, query, agent_id)
+                options = await self.queue_filter_options(cur, base_where, base_params) if include_filter_options else None
         return {
             "items": rows,
+            "filter_options": options,
             "page": page,
             "page_size": page_size,
             "total": total,

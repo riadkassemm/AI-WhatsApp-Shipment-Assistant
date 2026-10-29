@@ -85,7 +85,8 @@ def _queries(view: str, *, can_view_all: bool, agent_id: str = "7") -> list[tupl
     repository = SupportRepository()
     repository._pool = _Pool(calls)  # type: ignore[assignment]
     asyncio.run(repository.list_tickets(view=view, agent_id=agent_id, can_view_all=can_view_all))
-    return calls
+    # Main count and page queries; separately validated facets follow these.
+    return calls[:2]
 
 
 def _database() -> sqlite3.Connection:

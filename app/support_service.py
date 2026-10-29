@@ -572,6 +572,7 @@ class SupportService:
         self,
         event: dict[str, Any],
         agent: SupportAgent,
+        *, notification_since: float | None = None,
     ) -> bool:
         """Authorize one realtime event before it reaches a staff browser."""
         if event.get("type") == "message_deleted_for_me" and str(event.get("user_id") or "") != agent.id:
@@ -605,6 +606,42 @@ class SupportService:
                 or message.get("direction") != "OUTBOUND"
             ):
                 return False
+        if event.get("type") == "dashboard_read" and str(event.get("staff_id") or "") != agent.id:
+            return False
+        if event.get("type") == "customer_message":
+            event["chat_notification"] = False
+            event["conversation_origin"] = ticket.get("conversation_origin")
+            event["customer_name"] = ticket.get("customer_name")
+            event["customer_phone"] = ticket.get("whatsapp_phone")
+            event["current_assignee_id"] = ticket.get("current_assignee_id")
+            try:
+                message = await support_repository.get_message(int(event.get("message_id") or 0))
+            except (TypeError, ValueError):
+                message = None
+            if message and int(message.get("ticket_id") or 0) == ticket_id:
+                # Old linked-device backlog is synchronized silently. created_at alone
+                # is insufficient: a historical message can be inserted just now.
+                timestamp = message.get("whatsapp_timestamp") or message.get("created_at")
+                try:
+                    received = (timestamp.replace(tzinfo=timezone.utc).timestamp()
+                                if isinstance(timestamp, datetime) else float(timestamp))
+                    if received > 10**12:
+                        received /= 1000
+                    recent = 0 <= datetime.now(timezone.utc).timestamp() - received <= 120
+                    if notification_since is not None:
+                        created = message.get("created_at")
+                        recent = bool(recent and received >= int(notification_since)
+                                      and isinstance(created, datetime)
+                                      and created.replace(tzinfo=timezone.utc).timestamp() >= notification_since)
+                except (TypeError, ValueError, OverflowError):
+                    recent = False
+                event["chat_notification"] = bool(
+                    ticket.get("conversation_origin") == "STAFF"
+                    and str(ticket.get("current_assignee_id") or "") == agent.id
+                    and ticket.get("active_key") and message.get("direction") == "INBOUND"
+                    and not message.get("deleted_for_everyone_at") and recent
+                    and not await support_repository.message_hidden_for_user(int(message["id"]), agent.id)
+                )
         if event.get("type") in {
             "outbound_message", "message_media_ready", "message_updated",
             "message_deleted_for_everyone", "message_reaction", "message_status", "incoming_read",
@@ -1986,6 +2023,7 @@ class SupportService:
                 can_view_all=agent.is_supervisor,
                 page=1,
                 page_size=1,
+                include_filter_options=False,
             )
             for view in views
         ), return_exceptions=True)
@@ -2093,6 +2131,18 @@ class SupportService:
             "reopened": reopened,
         }
 
+    async def mark_dashboard_read(self, ticket_id: int, message_id: int, agent: SupportAgent) -> dict:
+        ticket = await support_repository.get_ticket(ticket_id)
+        if not ticket:
+            raise SupportNotFoundError("Ticket not found.")
+        if not await _can_view_ticket(ticket, agent):
+            raise SupportForbiddenError("You cannot view this conversation.")
+        result = await support_repository.mark_dashboard_read(ticket_id, agent.id, message_id)
+        if result is None:
+            raise SupportValidationError("The read boundary must be a visible incoming message in this conversation.")
+        await publish_support_event("dashboard_read", ticket_id=ticket_id, staff_id=agent.id)
+        return result
+
     async def list_tickets(
         self,
         *,
@@ -2100,6 +2150,10 @@ class SupportService:
         agent: SupportAgent,
         page: int,
         page_size: int,
+        staff_id: str | None = None,
+        support_number: str | None = None,
+        chat_status: str = "all",
+        query: str = "",
     ) -> dict[str, Any]:
         if view == "active" and not agent.is_supervisor:
             # Active lists every live ticket for monitoring; agents work from their own queues.
@@ -2110,6 +2164,7 @@ class SupportService:
             can_view_all=agent.is_supervisor,
             page=page,
             page_size=page_size,
+            staff_id=staff_id, support_number=support_number, chat_status=chat_status, query=query,
         )
         result["items"] = [_safe_ticket_row(row) for row in result["items"]]
         return result
@@ -2421,7 +2476,7 @@ class SupportService:
             await _gather_or_cancel(
                 load_identity_and_shipment(),
                 load_messages(),
-                support_repository.list_events(ticket_id, limit=150),
+                support_repository.list_events(ticket_id, limit=150, include_private_activity=agent.is_supervisor),
                 load_history(),
             )
         )
@@ -2435,7 +2490,8 @@ class SupportService:
             "messages": safe_messages,
             "messages_has_more": messages_has_more,
             **history,
-            "events": [_safe_context_value(_normalize_row(row)) for row in events],
+            "events": [_safe_context_value(_normalize_row(row)) for row in events
+                       if agent.is_supervisor or row.get("event_type") not in {"CONVERSATION_VIEWED", "INCOMING_MARKED_READ"}],
             "customer_identity": {
                 "source": identity.source if identity is not None else "guest",
                 "name": identity.name if identity is not None else ticket.get("customer_name"),

@@ -928,6 +928,7 @@ def test_support_workspace_restores_only_verified_staff_selection() -> None:
     set_view = _HTML[_HTML.index("function setQueueView("): _HTML.index("function clearQueueSearch(")]
     script = r"""
 const assert = require('node:assert/strict');
+const resetQueueFilters = () => {};
 const stored = new Map([['shipment-support-theme', 'dark']]);
 const sessionStorage = {
   get length() {return stored.size}, key(index) {return [...stored.keys()][index] || null},
@@ -997,6 +998,7 @@ def test_restored_chat_and_ticket_use_correct_route_and_clear_stale_selection() 
     open_ticket = _HTML[_HTML.index("async function openTicket("): _HTML.index("async function doAction(")]
     script = r"""
 const assert = require('node:assert/strict');
+const resetQueueFilters = () => {};
 const stored = new Map();
 const sessionStorage = {
   get length() {return stored.size}, key(index) {return [...stored.keys()][index] || null},
@@ -1607,7 +1609,8 @@ const text = (node, value) => {node.textContent = value};
 const window = {setTimeout(callback) {callback()}};
 const state = {pageLeaving: false, authenticated: false, imageEditor: null,
   mediaRecorder: null, queueRequest: 0, ticketRequest: 0,
-  globalSearchRequest: 0, linkedDeviceRequest: 0};
+  globalSearchRequest: 0, linkedDeviceRequest: 0, dashboardReadBoundaries:new Map(),chatNotificationIds:new Set()};
+const resetQueueFilters = () => {};
 let clearedSelections = 0;
 const clearSupportSelections = () => {clearedSelections++};
 const disconnectSupportEvents = () => {};

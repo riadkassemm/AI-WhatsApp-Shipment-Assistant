@@ -948,3 +948,34 @@ before deploying. It adds an attachment MIME column and preserves existing PDFs;
 repeat application is safe. Restart only the API for this update. Existing
 bridge sessions, provider configuration, and media files are unchanged. Include
 both legacy `.pdf` files and new image `.bin` files in quick-reply backups.
+
+### Queue filters and dashboard unread state
+
+Unassigned and My Tickets can be filtered by Support Number. Chats, Activity,
+Waiting and History also offer Staff Member; Chats includes All/Open/Closed.
+Staff Member means the current/retained assignee, including resolved history.
+Filters intersect the existing queue access rules and search customer names,
+phone numbers, references and visible message text across the entire matching
+queue. Results remain ordered by most recent activity. Changing a filter/search
+resets pagination. The queue heading/footer count matching conversations; sidebar
+badges continue showing the full queue totals. Message search within an open
+conversation remains available for finding individual matching messages. Matching
+message previews in queue results open that message directly.
+
+Apply `migrations/20261029_support_dashboard_reads.sql` before starting this build.
+It adds per-staff, per-conversation viewing cursors, independent of WhatsApp
+read receipts and whether staff have replied. Existing messages are initially
+unread in the dashboard: past views cannot be reconstructed reliably. Green dots
+in Chats and My Tickets clear only after visible incoming messages are confirmed
+read by the API. Background tabs, list rendering, prefetch and investigation do
+not advance a cursor. Newer incoming messages beyond the displayed boundary stay
+unread. Other staff and other tabs cannot clear or rewind your cursor.
+
+Live incoming chat alerts use the current assignee at event authorization time;
+creator/participant access alone does not qualify. Duplicate event alerts are
+suppressed; messages predating the current event stream and provider messages
+older than two minutes synchronize silently
+(including reconnect backlog). Polling and navigation do not create chat alerts.
+Read/view activity remains recorded, but only Admins and Super Admins receive
+`CONVERSATION_VIEWED` and `INCOMING_MARKED_READ` timeline events. This does not
+change conversation visibility, sending permissions or WhatsApp receipt behavior.

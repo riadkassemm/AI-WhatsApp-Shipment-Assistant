@@ -366,7 +366,7 @@ def test_regular_agent_history_is_shared_but_active_queries_remain_participation
                 page=1,
                 page_size=30,
             )
-            assert len(calls) == 2
+            assert len(calls) == 4
             for sql, params in calls:
                 assert "TICKET_CLAIMED" in sql
                 assert "$.from_agent_id" in sql
@@ -377,7 +377,7 @@ def test_regular_agent_history_is_shared_but_active_queries_remain_participation
         repository = SupportRepository()
         repository._pool = _FakePool(calls)  # type: ignore[assignment]
         await repository.list_tickets(view="history", agent_id="7", can_view_all=False)
-        assert len(calls) == 2
+        assert len(calls) == 4
         assert all("TICKET_CLAIMED" not in sql for sql, _params in calls)
 
     asyncio.run(run())
@@ -395,7 +395,7 @@ def test_supervisor_history_query_remains_global() -> None:
             page=1,
             page_size=30,
         )
-        assert len(calls) == 2
+        assert len(calls) == 4
         for sql, _params in calls:
             assert "TICKET_CLAIMED" not in sql
             assert "$.to_agent_id" not in sql
@@ -468,7 +468,7 @@ def test_ticket_detail_handles_db_native_values_and_missing_first_message(monkey
     async def fake_list_messages(ticket_id: int, *, limit: int = 100, before_id=None, user_id=None):
         return []
 
-    async def fake_list_events(ticket_id: int, limit: int = 100):
+    async def fake_list_events(ticket_id: int, limit: int = 100, **kwargs):
         return []
 
     async def fake_resolve(phone: str):

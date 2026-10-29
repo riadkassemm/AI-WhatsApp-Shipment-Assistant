@@ -391,7 +391,7 @@ def test_staff_chat_ui_uses_chat_not_ticket_lifecycle():
     assert "actionButton('Close chat', closeStaffChat" in source
     assert "'/api/support/chats/' + state.ticketId + '/close'" in source
     assert "const detailBase = chatRequest ? '/api/support/chats/' : '/api/support/tickets/'" in source
-    assert "state.view === 'chats'" in source and "'/api/support/chats?page='" in source
+    assert "state.view === 'chats'" in source and "'/api/support/chats?'" in source
     assert "Existing WhatsApp chat reopened with its full history." in source
     assert "setComposerEnabled(Boolean(data.permissions.can_reply))" in source
     assert "Sending will reopen this chat and preserve its full history." in source

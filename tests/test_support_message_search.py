@@ -164,11 +164,13 @@ def test_ticket_detail_can_load_context_around_search_result(monkeypatch: pytest
     asyncio.run(run())
 
 
-def test_support_ui_contains_global_and_in_conversation_search() -> None:
+def test_support_ui_contains_queue_and_in_conversation_search() -> None:
     assert 'id="queueSearch"' in _HTML
     assert 'placeholder="Search conversations and messages"' in _HTML
     assert 'id="conversationSearchBtn"' in _HTML
     assert 'id="conversationSearchToolbar"' in _HTML
+    assert "params = new URLSearchParams({page, page_size: pageSize, q: state.query.trim()})" in _HTML
+    assert "ticket.search_message_id" in _HTML
     assert "/api/support/search/messages?q=" in _HTML
     assert "message-search-highlight" in _HTML
     assert "detailParams.set('around_message_id'" in _HTML

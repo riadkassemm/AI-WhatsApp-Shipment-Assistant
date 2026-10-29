@@ -1533,3 +1533,9 @@ button.message-quote.reply-loading { opacity: .65; cursor: progress; }
 @media (prefers-reduced-motion: reduce) {
   .message-row.reply-target .message-bubble { animation: none; outline: 2px solid var(--primary); outline-offset: 3px; }
 }
+
+.queue-filters { display: flex; flex-wrap: wrap; gap: 8px; padding: 0 16px 12px; }
+.queue-filters label { flex: 1 1 120px; min-width: 0; font-size: 12px; }
+.queue-filters select { display: block; width: 100%; margin-top: 4px; }
+.unread-dot { display: inline-block; width: 8px; height: 8px; margin-inline-start: 7px; border-radius: 50%; background: #16a34a; flex-shrink: 0; }
+.toast-open { color: inherit; text-align: start; background: transparent; border: 0; cursor: pointer; font: inherit; padding: 0; }

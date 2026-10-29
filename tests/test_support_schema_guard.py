@@ -10,6 +10,7 @@ def add_base_schema(columns):
 
 
 def add_linked_device_schema(columns):
+    columns["support_dashboard_reads"] = {"ticket_id", "staff_id", "last_message_id", "updated_at"}
     columns.setdefault('whatsapp_phone_numbers', set()).add('removed_at')
     columns["support_delivery_receipts"] = {"provider_message_id", "line_id", "status", "checked_at", "failure_code"}
     for path, required_tables in _SUPPORT_SCHEMA_MIGRATIONS:
@@ -268,3 +269,12 @@ def test_support_schema_guard_requires_statistics_migration():
             for table, required in tables.items():
                 columns.setdefault(table, set()).update(required)
     assert _missing_support_schema_migrations(columns) == ["migrations/20261023_agent_statistics.sql"]
+
+
+def test_support_schema_guard_requires_dashboard_reads():
+    columns = {}
+    for _, tables in _SUPPORT_SCHEMA_MIGRATIONS:
+        for table, required in tables.items():
+            columns.setdefault(table, set()).update(required)
+    columns.pop("support_dashboard_reads")
+    assert _missing_support_schema_migrations(columns) == ["migrations/20261029_support_dashboard_reads.sql"]
