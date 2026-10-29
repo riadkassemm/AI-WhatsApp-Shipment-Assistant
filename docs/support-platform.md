@@ -963,6 +963,8 @@ conversation remains available for finding individual matching messages. Matchin
 message previews in queue results open that message directly.
 
 Apply `migrations/20261029_support_dashboard_reads.sql` before starting this build.
+For installations with table-specific grants, grant the existing application
+account SELECT/INSERT/UPDATE/DELETE on `support_dashboard_reads` as well.
 It adds per-staff, per-conversation viewing cursors, independent of WhatsApp
 read receipts and whether staff have replied. Existing messages are initially
 unread in the dashboard: past views cannot be reconstructed reliably. Green dots

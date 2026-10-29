@@ -189,3 +189,16 @@ async def test_read_endpoint_requires_session_csrf_and_ticket_access(infrastruct
     # Private activity must not consume the agent's visible-event limit.
     await repo.add_event(42, event_type='TICKET_CLAIMED', actor_type='AGENT', actor_id='7')
     assert (await repo.list_events(42, limit=1, include_private_activity=False))[0]['event_type'] == 'TICKET_CLAIMED'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('legacy_id', ['agent-1', '7abc'])
+async def test_filter_options_preserve_legacy_assignment_identity(infrastructure, legacy_id):
+    import warnings
+    repo, sql, _ = infrastructure
+    await sql("UPDATE support_tickets SET status='RESOLVED',active_key=NULL,current_assignee_id=%s,current_assignee_name='Legacy staff' WHERE id=42", (legacy_id,))
+    with warnings.catch_warnings():
+        warnings.simplefilter('error')
+        result = await repo.list_tickets(view='history', agent_id='8', can_view_all=True)
+    assert result['filter_options']['staff'] == [{'id': legacy_id, 'name': 'Legacy staff'}]
+    assert result['items'][0]['current_assignee_name'] == 'Legacy staff'
