@@ -148,21 +148,30 @@ async def test_chat_event_assignment_is_current_and_backlog_silent(infrastructur
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('role,expected', [('agent',False),('supervisor',True),('admin',True)])
-async def test_view_and_read_events_are_manager_only(infrastructure, monkeypatch, role, expected):
+@pytest.mark.parametrize('role', ['agent', 'supervisor', 'admin'])
+@pytest.mark.parametrize('origin', ['CUSTOMER', 'STAFF'])
+async def test_view_and_read_audits_are_excluded_from_all_operational_timelines(infrastructure, monkeypatch, role, origin):
     repo, sql, _ = infrastructure
     import app.support_service as service
     async def no_identity(*args): return None
     monkeypatch.setattr(service.customer_directory, 'resolve', no_identity)
+    await sql('UPDATE support_tickets SET conversation_origin=%s WHERE id=42', (origin,))
     for event_type in ['CONVERSATION_VIEWED', 'INCOMING_MARKED_READ', 'TICKET_CLAIMED']:
         await repo.add_event(42, event_type=event_type, actor_type='AGENT', actor_id='7', actor_name='Agent')
     agent = SupportAgent(id='7', name='Agent', role=role, session_id=1)
     data = await service.support_service.ticket_detail(42, agent)
     types = {row['event_type'] for row in data['events']}
-    assert ('CONVERSATION_VIEWED' in types) is expected
-    assert ('INCOMING_MARKED_READ' in types) is expected
+    assert 'CONVERSATION_VIEWED' not in types
+    assert 'INCOMING_MARKED_READ' not in types
     assert 'TICKET_CLAIMED' in types
     assert len(await repo.list_events(42)) == 3  # audit is retained
+    # The exact same persisted records remain available for manager investigation.
+    if role != 'agent':
+        from app.support_investigation import InvestigationRepository
+        from app.support_statistics import StatisticsRepository
+        investigated = await InvestigationRepository(StatisticsRepository(repo)).investigate(42, agent)
+        assert {row['event_type'] for row in investigated['events']} >= {
+            'CONVERSATION_VIEWED', 'INCOMING_MARKED_READ', 'TICKET_CLAIMED'}
 
 
 @pytest.mark.asyncio
