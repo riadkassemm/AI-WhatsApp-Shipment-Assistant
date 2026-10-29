@@ -1,7 +1,8 @@
 // One visible-tab coordinator. SSE invalidates scopes; HTTP is a slow safety net.
 // The clock/timers are injectable so regressions use deterministic scheduling.
 class DashboardRefreshCoordinator {
-  constructor({visible, enabled, run, interval, later = setTimeout, cancel = clearTimeout}) {
+  constructor({visible, enabled, run, interval,
+      later = (callback, delay) => setTimeout(callback, delay), cancel = timer => clearTimeout(timer)}) {
     Object.assign(this, {visible, enabled, run, interval, later, cancel});
     this.pending = new Set(); this.running = false; this.started = false; this.timer = null; this.soon = false;
   }
