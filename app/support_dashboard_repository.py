@@ -70,7 +70,7 @@ class DashboardRepositoryMixin:
         numbers = list(await cur.fetchall())
         await cur.execute(f"""SELECT DISTINCT support_tickets.current_assignee_id AS id,
             COALESCE(s.name,support_tickets.current_assignee_name,support_tickets.current_assignee_id) AS name
-            FROM support_tickets LEFT JOIN staff s ON CAST(s.id AS CHAR)=support_tickets.current_assignee_id
+            FROM support_tickets LEFT JOIN staff s ON CAST(s.id AS BINARY)=CAST(support_tickets.current_assignee_id AS BINARY)
             WHERE ({where}) AND support_tickets.current_assignee_id IS NOT NULL ORDER BY name,id""", params)
         return {'support_numbers': numbers, 'staff': list(await cur.fetchall())}
 

@@ -192,13 +192,16 @@ async def test_read_endpoint_requires_session_csrf_and_ticket_access(infrastruct
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('legacy_id', ['agent-1', '7abc'])
-async def test_filter_options_preserve_legacy_assignment_identity(infrastructure, legacy_id):
+@pytest.mark.parametrize('legacy_id', ['agent-1', '7abc', '7'])
+@pytest.mark.parametrize('collation', ['utf8mb4_unicode_ci', 'utf8mb4_general_ci', 'utf8mb4_bin'])
+async def test_filter_options_preserve_legacy_assignment_identity(infrastructure, legacy_id, collation):
     import warnings
     repo, sql, _ = infrastructure
+    await sql(f'ALTER TABLE support_tickets MODIFY current_assignee_id VARCHAR(100) CHARACTER SET utf8mb4 COLLATE {collation} NULL')
     await sql("UPDATE support_tickets SET status='RESOLVED',active_key=NULL,current_assignee_id=%s,current_assignee_name='Legacy staff' WHERE id=42", (legacy_id,))
     with warnings.catch_warnings():
         warnings.simplefilter('error')
         result = await repo.list_tickets(view='history', agent_id='8', can_view_all=True)
-    assert result['filter_options']['staff'] == [{'id': legacy_id, 'name': 'Legacy staff'}]
-    assert result['items'][0]['current_assignee_name'] == 'Legacy staff'
+    expected_name = 'Agent' if legacy_id == '7' else 'Legacy staff'
+    assert result['filter_options']['staff'] == [{'id': legacy_id, 'name': expected_name}]
+    assert result['items'][0]['current_assignee_name'] == expected_name
