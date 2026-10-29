@@ -444,8 +444,9 @@ class SupportMediaStore:
 
             if process.returncode != 0 or not output.is_file():
                 detail = (stderr or b"").decode("utf-8", "replace").strip()[:300]
-                logger.warning("Voice note conversion failed: %s", detail or process.returncode)
-                raise SupportMediaError("Voice note could not be converted for WhatsApp.")
+                logger.warning("Voice note conversion failed: mime=%s bytes=%s exit=%s detail=%s",
+                               source_mime, len(content), process.returncode, detail or "no converter detail")
+                raise SupportMediaError("Voice note could not be converted for WhatsApp. Remove this recording and record it again.")
 
             converted = output.read_bytes()
             if not converted:

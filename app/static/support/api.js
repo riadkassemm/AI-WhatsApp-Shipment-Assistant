@@ -27,7 +27,7 @@ async function api(path, options = {}) {
 // After a deploy, reload as soon as nothing would be lost (no draft, upload,
 // recording, unsent message or open dialog). Otherwise offer a Reload button.
 function dashboardIsIdle() {
-  return !state.busy && !state.activeModal && !state.mediaRecorder && !state.pendingMedia && !state.editTarget &&
+  return !state.busy && !state.activeModal && !state.mediaRecorder && !state.voiceRecording && !state.pendingMedia && !state.editTarget &&
     !state.imageEditor && !state.localMessages.size && !String($('message').value || '').trim();
 }
 

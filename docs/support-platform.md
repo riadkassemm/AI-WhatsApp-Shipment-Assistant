@@ -1013,3 +1013,27 @@ number must not be treated as already unlinked. Keep removal audit records and
 bridge retirement records. Rolling back to code without these deletion guards
 can recreate profiles from stale configuration, so restore the backup or retain
 the guards when rolling back after cleanup.
+
+### Voice recording conversion
+
+Dashboard recordings prefer Ogg/Opus, then WebM/Opus, with MP4 retained for
+browsers that require it. Recording uses one complete capture (no periodic
+`MediaRecorder.start(timeslice)` fragments). The final `dataavailable` event is
+collected before the draft is created. Each recording owns its chunks and
+microphone stream; pending permission, cancellation, navigation, and repeated
+Stop clicks cannot mix recordings or place a draft in another conversation.
+This follows the [MediaRecorder completion model](https://www.w3.org/TR/mediastream-recording/).
+
+The server still normalizes audio to mono 48 kHz Ogg/Opus before provider upload.
+A conversion rejection occurs before an outbound row or provider submission;
+remove the rejected recording and record a fresh one. Existing uncertain sends
+must still follow the delivery recovery policy. Diagnostics record the ticket,
+agent, MIME type, byte count, converter exit code and bounded decoder error,
+without retaining rejected recordings or logging their audio contents.
+
+Regression coverage uses synthetic real-browser recordings, real FFmpeg and
+FFprobe, deterministic recorder events, and real MariaDB/Redis with mocked
+WhatsApp. Run `tests/test_voice_recording.py tests/test_support_media.py` in the
+unit process and `tests/integration/test_voice_conversion.py` separately with the
+integration environment described above. Safari-specific capture and playback
+on physical recipient phones still require device verification.

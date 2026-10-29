@@ -85,7 +85,7 @@ function showLogin() {
   state.composerEnabled = false;
   state.queueRequest += 1;
   state.ticketRequest += 1;
-  if (state.mediaRecorder) cancelVoiceRecording();
+  if (state.mediaRecorder || state.voiceRecording) cancelVoiceRecording();
   clearMediaDraft();
   clearTicketWorkspace();$('dashboard').classList.add('hidden');
   state.page = 1;
@@ -1006,7 +1006,7 @@ function messageTicketId(message) {
 
 function startMessageEdit(message) {
   if (!canChangeWhatsAppMessage(message, 'edit')) return;
-  if (state.busy || state.pendingMedia || state.mediaRecorder || state.editTarget) return;
+  if (state.busy || state.pendingMedia || state.mediaRecorder || state.voiceRecording || state.editTarget) return;
   state.editTarget = {
     id: Number(message.id), ticketId: messageTicketId(message), version: Number(message.version || 1),
     draft: $('message').value, reply: state.replyTarget
@@ -3086,7 +3086,7 @@ async function openTicket(id, {silent = false, refreshQueue = false, refreshHist
     state.currentTicketData = null;
     setComposerEnabled(false);
     cancelMessageEdit(false);
-    if (state.mediaRecorder) cancelVoiceRecording();
+    if (state.mediaRecorder || state.voiceRecording) cancelVoiceRecording();
     clearMediaDraft();
     clearReplyTarget();
     $('message').value = '';
