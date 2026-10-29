@@ -1086,6 +1086,8 @@ export class Bridge {
     if (!clientId || typeof clientId !== 'string') return this.dispatchSend(id, payload);
     const key = crypto.createHash('sha256').update(clientId).digest('hex');
     const fingerprint = this.sendFingerprint(line, payload);
+    const durable = line.store.data.messages[line.store.data.send_requests[key]?.native_id];
+    if (durable?.ack_confirmed || durable?.echo_seen) return this.existingSend(line, payload, key, fingerprint);
     const inFlight = line.sendTasks.get(key);
     if (inFlight) {
       if (inFlight.fingerprint !== fingerprint) throw new BridgeError(409, 'CLIENT_ID_CONFLICT', 'This send key belongs to another payload.');

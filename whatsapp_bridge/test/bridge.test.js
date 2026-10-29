@@ -2035,6 +2035,9 @@ test('HTTP client timeout after ACK reconciles the original durable send while p
   try {
     await entered.promise;await line.ackTail;
     assert.equal(bridge.deliveryStatus(LINE,{client_message_id:payload.client_message_id,phone:PHONE}).status,'confirmed');
+    const duplicate = await bridge.send(LINE,payload);
+    assert.equal(duplicate.messages.length,1,'a durable ACK bypasses the still-unresolved provider call');
+    assert.equal(socket.calls.length,1);
     controller.abort();await rejected;
   } finally {release.resolve();}
   await line.sendTail;
