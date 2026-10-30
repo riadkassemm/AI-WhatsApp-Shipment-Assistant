@@ -42,7 +42,15 @@ Run integration tests separately from unit tests: historical unit modules instal
 
 ## Commit & Pull Request Guidelines
 
-Use short imperative subjects, matching history: “Fix …”, “Add …”, or “Extract …”. Keep behavioral fixes and refactors separate. Commit and push completed work to the working branch. Describe behavior, verification results, migrations, and deployment impact; link relevant issues and include screenshots for visible UI changes.
+Use short imperative subjects, matching history: “Fix …”, “Add …”, or “Extract …”. Keep behavioral fixes and refactors separate. Describe behavior, verification results, migrations, and deployment impact; link relevant issues and include screenshots for visible UI changes.
+
+Workflow:
+
+- Developer PC: source editing and Git only. The build, test, and run commands above are executed on the DEV VPS, not on the PC.
+- DEV VPS: builds, tests, runtime services, and deployment, with disposable or mocked services for tests.
+- Committing, pushing, opening PRs, and deploying to the DEV VPS require authorization for the specific task; finishing a change is not that authorization.
+- Never merge PRs automatically or deploy to production.
+- Read-only tasks stay read-only unless explicitly expanded.
 
 ## Security & Configuration
 
