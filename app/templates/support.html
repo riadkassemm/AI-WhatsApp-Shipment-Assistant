@@ -126,6 +126,11 @@ __SUPPORT_STYLE__
   <span>The dashboard was updated. Reload to get the latest version.</span>
   <button class="btn small primary" id="updateReloadBtn" type="button">Reload</button>
 </div>
+<div class="connection-banner hidden" id="connectionBanner" role="status" aria-live="polite">
+  <svg class="icon icon-sm" aria-hidden="true"><use href="#icon-alert"></use></svg>
+  <span id="connectionBannerText"></span>
+  <button class="btn small" id="connectionRetryBtn" type="button">Retry now</button>
+</div>
 <div class="app-shell hidden" id="dashboard">
   <aside class="global-sidebar" aria-label="Support workspace navigation">
     <div class="brand-bar">

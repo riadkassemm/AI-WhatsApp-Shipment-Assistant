@@ -38,7 +38,9 @@ function clearTicketWorkspace() {
   state.pendingConversationRender = null;
   state.composerEnabled = false;
   closeConversationSearch(false);
+  forgetBackgroundRead('conversation');
   state.queueItems = [];
+  state.queueLoadedIdentity = null;
   state.total = 0;
   $('queue').replaceChildren(emptyMarkup('No tickets loaded', 'Your selected queue will appear here after sign-in.', 'inbox').outer);
   text($('ticketTitle'), 'Select a ticket');
@@ -80,6 +82,7 @@ function showLogin() {
   clearAgentStatistics();
   $('agentStatisticsBtn').classList.add('hidden');
   disconnectSupportEvents();
+  resetConnectionHealth();
   saveLinkedDeviceAddition(null);
   state.agent = null;
   state.staffItems = [];
@@ -309,7 +312,11 @@ async function refreshAllQueueCounts() {
       if (!state.authenticated || context !== JSON.stringify([dashboardRequestEpoch, state.agent?.id, state.agent?.role])) return;
       for (const [view, total] of Object.entries(data.counts || {})) updateQueueCount(view, total);
       if (revision === queueCountsRevision) queueCountsCache = {context, at: Date.now()};
-    } catch (_) { /* Queue rows remain authoritative; the next refresh retries. */ }
+      noteBackgroundRead('counts');
+    } catch (error) {
+      // Queue rows remain authoritative; the scheduler retries.
+      if (state.authenticated && transientReadError(error)) noteBackgroundRead('counts', error);
+    }
     finally {
       if (queueCountsFlight?.task === task) queueCountsFlight = null;
       if (revision !== queueCountsRevision && state.authenticated) dashboardRefresh.request('counts');
@@ -767,6 +774,8 @@ async function loadMoreQueue() {
 async function loadQueue({silent = false} = {}) {
   if (!state.authenticated || (silent && document.hidden)) return;
   const requestId = ++state.queueRequest;
+  // View, filters and search, without paging: identifies what the rows show.
+  const identity = queuePath(1, 1);
   const queue = $('queue');
   const previousScrollTop = queue.scrollTop;
   queue.setAttribute('aria-busy', 'true');
@@ -799,9 +808,17 @@ async function loadQueue({silent = false} = {}) {
     }
     renderQueue();
     if (silent) queue.scrollTop = previousScrollTop;
+    state.queueLoadedIdentity = identity;
+    noteBackgroundRead('queue');
   } catch (error) {
     if (requestId !== state.queueRequest) return;
     if (state.pageLeaving) return;
+    if (silent && transientReadError(error) && identity === state.queueLoadedIdentity) {
+      // Keep the rows on screen (and the reader's scroll position); the
+      // connection notice marks them as possibly out of date.
+      noteBackgroundRead('queue', error);
+      return;
+    }
     renderQueueError(error.message);
     text($('queueTotal'), 'Unavailable');
   } finally {
@@ -3187,6 +3204,7 @@ async function openTicket(id, {silent = false, refreshQueue = false, refreshHist
     }
     mergeLiveMessages(data, id);
     state.currentTicketData = data;
+    noteBackgroundRead('conversation');
     if (state.replyTarget && (data.messages || []).some(item => Number(item.id) === state.replyTarget.id && item.deleted_for_everyone_at)) {
       clearReplyTarget();
       notify('The replied-to message was deleted.', 'error');
@@ -3220,6 +3238,15 @@ async function openTicket(id, {silent = false, refreshQueue = false, refreshHist
     if (isNewSelection) setAppStatus(isStaffChat(ticket) ? ('Opened chat with ' + (ticket.customer_name || ticket.whatsapp_phone || 'customer') + '.') : ('Opened ' + (ticket.ticket_reference || 'ticket') + ' for ' + (ticket.customer_name || ticket.customer_userid || ticket.whatsapp_phone || 'customer') + '.'));
   } catch (e) {
     if (state.pageLeaving || requestId !== state.ticketRequest) return;
+    if (silent && !isNewSelection && transientReadError(e)) {
+      // Keep the open conversation, its scroll position and the unsent draft;
+      // the connection notice marks it as possibly out of date.
+      noteBackgroundRead('conversation', e);
+      return;
+    }
+    // Any other HTTP answer means the server was reached. A 403 below removes
+    // the protected conversation instead of keeping it as stale content.
+    if (e.status) forgetBackgroundRead('conversation');
     if (restoring && [403, 404].includes(e.status)) {
       clearTicketWorkspace();
       await loadQueue({silent: true});

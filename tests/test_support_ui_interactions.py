@@ -13,6 +13,12 @@ import pytest
 from app.support_ui import _HTML, support_image_editor_script
 from app.config import settings
 
+# Connection-health hooks used by queue/conversation loading: the shipped error
+# classifier and no-op recorders (tests/dashboard_connection.test.cjs covers them).
+CONNECTION_HOOKS = _HTML[_HTML.index("function transientReadError("):_HTML.index("function backgroundRetryDelay(")] + """
+const noteBackgroundRead = () => {}, forgetBackgroundRead = () => {}, resetConnectionHealth = () => {};
+"""
+
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is unavailable")
 def test_message_copy_handles_text_and_clipboard_fallback() -> None:
@@ -997,7 +1003,7 @@ def test_restored_chat_and_ticket_use_correct_route_and_clear_stale_selection() 
     merge_history = _HTML[_HTML.index("function mergeTimelineMessages("): _HTML.index("function changeCachedMessage(")]
     clear_workspace = _HTML[_HTML.index("function clearTicketWorkspace("): _HTML.index("function showLogin(")]
     open_ticket = _HTML[_HTML.index("async function openTicket("): _HTML.index("async function doAction(")]
-    script = r"""
+    script = CONNECTION_HOOKS + r"""
 const assert = require('node:assert/strict');
 const resetQueueFilters = () => {};
 const stored = new Map();
@@ -1247,7 +1253,7 @@ def test_initial_history_load_survives_background_poll_and_retries_after_error()
     paging = _HTML[_HTML.index("function beginHistoryLoad("): _HTML.index("function updateSharedHistoryShortcut(")]
     shortcuts = _HTML[_HTML.index("function updateSharedHistoryShortcut("): _HTML.index("function contextValue(")]
     open_ticket = _HTML[_HTML.index("async function openTicket("): _HTML.index("async function doAction(")]
-    script = r"""
+    script = CONNECTION_HOOKS + r"""
 const assert = require('node:assert/strict');
 const state = {agent: {id: '7'}, authenticated: true, view: 'unassigned',
   ticketId: null, currentTicketData: null, currentConversationOrigin: null,
@@ -1588,7 +1594,7 @@ def test_session_check_prevents_login_flash_and_has_retry_or_login_fallback() ->
     assert "$('sessionRetryBtn').addEventListener('click', bootstrap);" in _HTML
     views = _HTML[_HTML.index("function showLogin()"): _HTML.index("async function restoreSupportWorkspace()")]
     bootstrap = _HTML[_HTML.index("async function bootstrap()"): _HTML.index("async function logout()")]
-    script = r"""
+    script = CONNECTION_HOOKS + r"""
 const assert = require('node:assert/strict');
 function element(hidden = false) {
   const classes = new Set(hidden ? ['hidden'] : []);

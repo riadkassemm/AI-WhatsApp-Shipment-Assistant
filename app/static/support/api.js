@@ -33,7 +33,15 @@ async function performApiRequest(path, options = {}, epoch = dashboardRequestEpo
     else if (/^\/api\/support\/(tickets|chats)\?/.test(path)) dashboardHttpCounts.queue++;
     else if (/^\/api\/support\/(tickets|chats)\/\d+(?:\?|$)/.test(path)) dashboardHttpCounts.conversation++;
   }
-  const response = await fetch(path, {credentials: 'same-origin', ...options, cache:'no-store', headers});
+  let response;
+  try {
+    response = await fetch(path, {credentials: 'same-origin', ...options, cache:'no-store', headers});
+  } catch (error) {
+    // Marks a lost connection so background refreshes never mistake a code
+    // error for a temporary outage.
+    if (error && typeof error === 'object' && error.name !== 'AbortError') error.network = true;
+    throw error;
+  }
   if (options.signal?.aborted || epoch !== dashboardRequestEpoch) throw new DOMException('Stale staff session', 'AbortError');
   const serverVersion = response.headers && typeof response.headers.get === 'function' ? response.headers.get('X-Support-UI-Version') : null;
   if (serverVersion && serverVersion !== SUPPORT_UI_VERSION) noticeDashboardUpdate(serverVersion);

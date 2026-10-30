@@ -50,7 +50,19 @@ function applyStaffProfileName(staffId, name) {
   if (state.activeModal === 'agentStatisticsModal') loadAgentStatistics();
 }
 
+// Live-update reconnection is owned here, not by the browser: every error closes
+// the EventSource (so its built-in retry never competes) and schedules exactly
+// one retry with jittered backoff. A retry first checks the session through the
+// normal API path, because EventSource errors carry no HTTP status.
+const SUPPORT_EVENTS_RETRY_BASE_MS = 1000;
+const SUPPORT_EVENTS_RETRY_MAX_MS = 30000;
+
 function disconnectSupportEvents() {
+  state.supportEventsGeneration += 1;
+  clearTimeout(state.supportEventsRetryTimer);
+  state.supportEventsRetryTimer = null;
+  state.supportEventsProbe = null;
+  state.supportEventsAttempt = 0;
   if (state.supportEventSource) {
     state.supportEventSource.close();
     state.supportEventSource = null;
@@ -59,9 +71,73 @@ function disconnectSupportEvents() {
 
 function connectSupportEvents() {
   disconnectSupportEvents();
+  openSupportEventSource();
+}
+
+function supportEventsRetryDelay(attempt) {
+  const ceiling = Math.min(SUPPORT_EVENTS_RETRY_MAX_MS, SUPPORT_EVENTS_RETRY_BASE_MS * 2 ** attempt);
+  return Math.round(ceiling * (0.5 + Math.random() * 0.5));
+}
+
+function scheduleSupportEventsReconnect() {
+  if (!state.authenticated || state.pageLeaving || state.supportEventSource ||
+      state.supportEventsRetryTimer !== null || state.supportEventsProbe) return;
+  const delay = supportEventsRetryDelay(state.supportEventsAttempt++);
+  state.supportEventsRetryTimer = setTimeout(() => {
+    state.supportEventsRetryTimer = null;
+    reconnectSupportEvents();
+  }, delay);
+}
+
+async function reconnectSupportEvents() {
+  if (!state.authenticated || state.pageLeaving || state.supportEventSource || state.supportEventsProbe) return;
+  const generation = state.supportEventsGeneration;
+  const probe = api('/api/support/me');
+  state.supportEventsProbe = probe;
+  let failure = null;
+  try { await probe; } catch (error) { failure = error; }
+  finally { if (state.supportEventsProbe === probe) state.supportEventsProbe = null; }
+  if (generation !== state.supportEventsGeneration || !state.authenticated || state.supportEventSource) return;
+  if (failure) {
+    // 401 already ran the normal sign-in flow inside api(); stale-session
+    // aborts belong to a previous sign-in.
+    if (failure.status === 401 || failure.name === 'AbortError') return;
+    if (failure.status === 403) { markLiveUpdatesAccessDenied(); return; }
+    scheduleSupportEventsReconnect();
+    return;
+  }
+  openSupportEventSource();
+}
+
+// Network restored, tab shown again or "Retry now": skip the remaining wait.
+function reconnectSupportEventsNow() {
+  if (!state.authenticated || state.pageLeaving || state.supportEventSource || state.supportEventsProbe) return;
+  clearTimeout(state.supportEventsRetryTimer);
+  state.supportEventsRetryTimer = null;
+  reconnectSupportEvents();
+}
+
+function openSupportEventSource() {
   if (!state.authenticated || typeof EventSource === 'undefined') return;
   const source = new EventSource('/api/support/events', {withCredentials: true});
   state.supportEventSource = source;
+  source.onopen = () => {
+    if (state.supportEventSource !== source || !state.authenticated) return;
+    const recovered = state.supportEventsAttempt > 0 || connectionHealth.liveDownSince !== null;
+    state.supportEventsAttempt = 0;
+    markLiveUpdates(true);
+    // Events missed while disconnected are not replayed: reconcile from the
+    // API through the scheduler, including shared history after an outage.
+    requestDashboardRefresh('queue', recovered ? 'history' : 'conversation', 'counts');
+  };
+  source.onerror = () => {
+    if (state.supportEventSource !== source) return;
+    source.close();
+    state.supportEventSource = null;
+    if (!state.authenticated || state.pageLeaving) return;
+    markLiveUpdates(false);
+    scheduleSupportEventsReconnect();
+  };
   source.onmessage = event => {
     if (state.supportEventSource !== source || !state.authenticated) return;
     let payload = {};
@@ -192,10 +268,6 @@ function connectSupportEvents() {
     if (state.view === 'unassigned') requestDashboardRefresh('queue');
     else requestDashboardRefresh('counts');
     if (type !== 'customer_message' && state.ticketId && String(state.ticketId) === String(payload.ticket_id || '')) requestDashboardRefresh('conversation');
-  };
-  source.onopen = () => requestDashboardRefresh('queue', 'conversation', 'counts');
-  source.onerror = () => {
-    // EventSource retries automatically. Polling remains active as a fallback.
   };
 }
 
