@@ -153,8 +153,9 @@ await fetch('/result',{method:'POST',body:JSON.stringify(results)});
             path = tmp_path / filename
             path.write_bytes(data)
             stream = json.loads(subprocess.check_output(['ffprobe', '-v', 'error', '-show_entries',
-                'stream=codec_name,channels,sample_rate,duration', '-of', 'json', str(path)]))['streams'][0]
+                'stream=codec_name,channels,sample_rate,duration,start_pts', '-of', 'json', str(path)]))['streams'][0]
             assert stream['codec_name'] == 'opus' and stream['channels'] == 1
+            assert stream['start_pts'] == 0, 'WhatsApp mobile does not play voice notes that start off zero'
             assert stream['sample_rate'] == '48000' and float(stream['duration']) > 0.3
     finally:
         process.terminate()
