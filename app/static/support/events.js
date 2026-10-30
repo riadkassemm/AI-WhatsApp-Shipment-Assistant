@@ -78,11 +78,10 @@ function connectSupportEvents() {
       state.previousHistoryLoaded = false;
       refreshAllQueueCounts().catch(() => {});
       loadQueue({silent: true}).catch(() => {});
-      if (state.query.trim().length >= 2) runGlobalMessageSearch().catch(() => {});
       if (state.ticketId) openTicket(state.ticketId, {silent: true, refreshHistory: true}).catch(() => {});
       return;
     }
-    if (type === 'incoming_read') {
+    if (type === 'incoming_read' || type === 'dashboard_read') {
       if (payload.authorized !== true) return;
       state.ticketPrefetch.delete(String(payload.ticket_id));
       loadQueue({silent: true}).catch(() => {});
@@ -119,6 +118,11 @@ function connectSupportEvents() {
         return;
       }
       if (type !== 'customer_message') return;
+      loadQueue({silent: true}).catch(() => {});
+      if (payload.conversation_origin === 'STAFF') {
+        handleAssignedChatNotification(payload);
+        return;
+      }
     }
     refreshAllQueueCounts().catch(() => {});
     if (type === 'ticket_updated') {
@@ -191,4 +195,66 @@ function connectSupportEvents() {
   source.onerror = () => {
     // EventSource retries automatically. Polling remains active as a fallback.
   };
+}
+
+function handleAssignedChatNotification(payload) {
+  if (payload.authorized !== true || payload.chat_notification !== true ||
+      String(payload.current_assignee_id || '') !== String(state.agent?.id || '') ||
+      payload.message?.direction !== 'INBOUND' || !payload.message_id) return;
+  const key = String(state.agent.id) + ':' + payload.ticket_id + ':' + payload.message_id;
+  if (state.chatNotificationIds.has(key)) return;
+  state.chatNotificationIds.add(key);
+  // Preserve duplicate suppression across page refreshes, without storing bodies.
+  try {
+    const storageKey = 'support-chat-notifications:' + state.agent.id;
+    const seen = JSON.parse(sessionStorage.getItem(storageKey) || '[]');
+    if (Array.isArray(seen) && seen.includes(key)) return;
+    sessionStorage.setItem(storageKey, JSON.stringify([...(Array.isArray(seen) ? seen : []), key].slice(-500)));
+  } catch (_) {}
+  if (state.chatNotificationIds.size > 1000) state.chatNotificationIds.delete(state.chatNotificationIds.values().next().value);
+  const label = payload.customer_name || payload.customer_phone || 'customer';
+  const message = 'New chat message from ' + label + '.';
+  notifyNewCustomerActivity(message);
+  notify(message, 'success', () => {
+    setQueueView('chats');
+    openTicket(payload.ticket_id, {conversationOrigin: 'STAFF'}).catch(() => {});
+  });
+}
+
+let dashboardReadTimer = null;
+function scheduleDashboardRead() {
+  if (dashboardReadTimer) clearTimeout(dashboardReadTimer);
+  dashboardReadTimer = setTimeout(markVisibleDashboardMessagesRead, 150);
+}
+
+async function markVisibleDashboardMessagesRead() {
+  if (!state.authenticated || document.visibilityState !== 'visible' || !document.hasFocus() ||
+      state.activeModal || state.historyJumpActive || !state.ticketId) return;
+  const container = $('conversation');
+  const bounds = container.getBoundingClientRect();
+  if (!bounds.width || !bounds.height || bounds.right <= 0 || bounds.left >= window.innerWidth ||
+      bounds.bottom <= 0 || bounds.top >= window.innerHeight) return;
+  const data = state.currentTicketData;
+  const ticketId = state.ticketId;
+  if (String(data?.ticket?.id) !== String(ticketId)) return;
+  const incoming = new Set((data.messages || []).filter(m => m.direction === 'INBOUND' && !m.deleted_for_everyone_at).map(m => String(m.id)));
+  let boundary = 0;
+  for (const node of container.querySelectorAll('[data-message-id]')) {
+    if (!incoming.has(node.dataset.messageId)) continue;
+    const rect = node.getBoundingClientRect();
+    if (rect.height && rect.bottom > bounds.top && rect.top < bounds.bottom) boundary = Math.max(boundary, Number(node.dataset.messageId));
+  }
+  const key = String(state.agent.id) + ':' + ticketId;
+  if (!boundary || boundary <= (state.dashboardReadBoundaries.get(key) || 0)) return;
+  try {
+    const result = await api('/api/support/tickets/' + ticketId + '/dashboard-read', {
+      method: 'POST', body: JSON.stringify({message_id: boundary})
+    });
+    if (key !== String(state.agent?.id) + ':' + ticketId) return;
+    state.dashboardReadBoundaries.set(key, Math.max(boundary, state.dashboardReadBoundaries.get(key) || 0));
+    // Fetch rather than clearing optimistically: a newer arrival may remain unread.
+    if (result && state.authenticated) loadQueue({silent: true}).catch(() => {});
+  } catch (_) {
+    // Failed requests do not clear the dot; the next visible refresh retries.
+  }
 }

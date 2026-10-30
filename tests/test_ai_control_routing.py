@@ -952,7 +952,7 @@ def test_ticket_detail_exposes_recoverable_media_url_from_durable_provider_refer
         async def list_messages(_ticket_id, *, limit=150, user_id=None):
             return [dict(message)]
 
-        async def list_events(_ticket_id, *, limit=150):
+        async def list_events(_ticket_id, *, limit=150, include_private_activity=True):
             return []
 
         monkeypatch.setattr(support_service_module.support_repository, "get_ticket", get_ticket)

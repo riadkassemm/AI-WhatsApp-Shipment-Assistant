@@ -62,6 +62,10 @@ function clearTicketWorkspace() {
 }
 
 function showLogin() {
+  state.dashboardReadBoundaries.clear();
+  state.chatNotificationIds.clear();
+  resetQueueFilters();
+
   $('sessionLoading').classList.add('hidden');
   if (state.imageEditor) { state.imageEditor.dispose(); state.imageEditor = null; }
   $('mediaViewerModal').classList.add('hidden');
@@ -246,7 +250,7 @@ function updateQueueSummary(visibleCount = null) {
   text($('queueTitle'), config.label);
   const total = Number(state.total || 0);
   const shown = Math.min(state.queueItems.length, total);
-  const searchCount = visibleCount === null ? state.queueItems.length : visibleCount;
+  const searchCount = total;
   if (state.query) {
     text($('queueTotal'), searchCount + ' match' + (searchCount === 1 ? '' : 'es'));
   } else {
@@ -424,6 +428,12 @@ function createTicketRow(ticket) {
   name.className = 'ticket-customer';
   name.dir = 'auto';
   name.textContent = customer;
+  if (['chats', 'mine'].includes(state.view) && Number(ticket.dashboard_unread_count) > 0) {
+    const dot = document.createElement('span');
+    dot.className = 'unread-dot'; dot.setAttribute('role', 'img');
+    dot.setAttribute('aria-label', 'Unread messages'); dot.title = 'Unread messages';
+    name.append(dot);
+  }
   const reference = document.createElement('div');
   reference.className = 'ticket-reference';
   reference.textContent = isStaffChat(ticket) ? ('Chat · ' + (ticket.whatsapp_phone || ticket.id)) : (ticket.ticket_reference || ('Ticket #' + ticket.id));
@@ -449,10 +459,16 @@ function createTicketRow(ticket) {
   summary.dir = 'auto';
   summary.textContent = isStaffChat(ticket) ? ('WhatsApp conversation' + (ticket.current_assignee_name ? ' · ' + ticket.current_assignee_name : '')) : (ticket.ai_summary || ticket.reason || ticket.requested_action || 'No summary available.');
 
+  if (ticket.search_message_id) {
+    summary.textContent = ticket.search_preview || 'Matching message';
+    highlightSearchTerm(summary, state.query);
+  }
+
   const meta = document.createElement('div');
   meta.className = 'ticket-row-meta';
   meta.append(conversationStatusBadge(ticket));
-  if (ticket.unread_count) meta.append(createMetaChip(ticket.unread_count + ' unread', 'message'));
+  const unread = ['chats', 'mine'].includes(state.view) ? ticket.dashboard_unread_count : ticket.unread_count;
+  if (unread) meta.append(createMetaChip(unread + ' unread', 'message'));
   if (ticket.awaiting_staff_reply) meta.append(createMetaChip('Awaiting staff reply', 'clock'));
   meta.append(createMetaChip(createSupportNumberLabel(ticket, {focusable: false}), 'message', 'channel-pill'));
   if (ticket.current_assignee_name) meta.append(createMetaChip(ticket.current_assignee_name, 'user'));
@@ -464,7 +480,9 @@ function createTicketRow(ticket) {
   if (ticket.tracking_reference) meta.append(createMetaChip(ticket.tracking_reference, 'truck'));
 
   row.append(head, summary, meta);
-  row.onclick = () => openTicket(ticket.id, {conversationOrigin: ticket.conversation_origin});
+  row.onclick = () => ticket.search_message_id
+    ? openSearchResult({ticket_id: ticket.id, message_id: ticket.search_message_id, conversation_origin: ticket.conversation_origin}, state.query)
+    : openTicket(ticket.id, {conversationOrigin: ticket.conversation_origin});
   // Start loading as soon as the pointer rests on (or presses) a row, so the
   // conversation is usually ready by the time the click lands.
   let hoverTimer = null;
@@ -477,80 +495,11 @@ function createTicketRow(ticket) {
   return row;
 }
 
-function createSearchResultRow(item) {
-  const row = document.createElement('button');
-  row.type = 'button';
-  row.className = 'search-result-row';
-  row.setAttribute('role', 'option');
-  row.setAttribute('aria-selected', 'false');
-  row.tabIndex = -1;
-  const head = document.createElement('div');
-  head.className = 'search-result-head';
-  const customer = document.createElement('div');
-  customer.className = 'search-result-customer';
-  customer.dir = 'auto';
-  customer.textContent = item.customer_name || item.customer_userid || item.whatsapp_phone || 'Unknown customer';
-  highlightSearchTerm(customer, state.query);
-  const time = document.createElement('time');
-  time.className = 'search-result-time';
-  time.dateTime = item.created_at || '';
-  time.textContent = item.created_at ? relativeTime(item.created_at) : '';
-  head.append(customer, time);
-  const ref = document.createElement('div');
-  ref.className = 'search-result-ref';
-  ref.textContent = (item.conversation_origin === 'STAFF' ? 'Chat · ' : 'Ticket · ') + (item.ticket_reference || ('#' + item.ticket_id));
-  const preview = document.createElement('div');
-  preview.className = 'search-result-preview';
-  preview.dir = 'auto';
-  preview.textContent = item.result_type === 'conversation'
-    ? [item.whatsapp_phone, item.status].filter(Boolean).join(' · ')
-    : item.preview || item.message_type || 'Message';
-  highlightSearchTerm(preview, state.query);
-  row.append(head, ref, preview);
-  row.onclick = () => openSearchResult(item, state.query);
-  return row;
-}
-
-async function runGlobalMessageSearch() {
-  const query = state.query.trim();
-  const requestId = ++state.globalSearchRequest;
-  if (query.length < 2) {
-    state.globalSearchResults = [];
-    state.globalSearchBusy = false;
-    renderQueue();
-    return;
-  }
-  state.globalSearchBusy = true;
-  $('queue').setAttribute('aria-busy', 'true');
-  text($('searchScope'), 'Searching customer names, phone numbers, and messages…');
-  try {
-    const data = await api('/api/support/search/messages?q=' + encodeURIComponent(query) + '&limit=80');
-    if (requestId !== state.globalSearchRequest || query !== state.query.trim()) return;
-    state.globalSearchResults = Array.isArray(data.items) ? data.items : [];
-    renderQueue();
-  } catch (error) {
-    if (requestId !== state.globalSearchRequest) return;
-    state.globalSearchResults = [];
-    renderQueueError(error.message);
-  } finally {
-    if (requestId === state.globalSearchRequest) {
-      state.globalSearchBusy = false;
-      $('queue').setAttribute('aria-busy', 'false');
-      text($('searchScope'), query.length >= 2 ? 'Searches customer names, phone numbers, ticket references, and messages you are allowed to access.' : 'Searches the loaded page by customer, conversation, shipment, status, or support line.');
-    }
-  }
-}
-
 function refreshMessageSearchAfterChange(messageId) {
   state.globalSearchResults = state.globalSearchResults.filter(item => Number(item.message_id) !== Number(messageId));
   state.conversationSearchResults = state.conversationSearchResults.filter(item => Number(item.message_id) !== Number(messageId));
-  if (state.query.trim().length >= 2) runGlobalMessageSearch().catch(() => {});
+  if (state.query.trim()) loadQueue({silent: true}).catch(() => {});
   if (state.conversationSearchOpen && state.conversationSearchQuery.length >= 2) searchCurrentConversation({preserveQuery: true}).catch(() => {});
-}
-
-function scheduleGlobalMessageSearch() {
-  if (state.globalSearchTimer) clearTimeout(state.globalSearchTimer);
-  state.globalSearchTimer = setTimeout(runGlobalMessageSearch, 250);
 }
 
 async function openSearchResult(item, query) {
@@ -582,9 +531,7 @@ function renderQueue() {
   const queue = $('queue');
   const queueHadFocus = queue.contains(document.activeElement);
   const rawQuery = state.query.trim();
-  const query = rawQuery.toLocaleLowerCase();
-  const globalSearch = state.view !== 'contacts' && rawQuery.length >= 2;
-  const items = state.view === 'contacts' ? state.queueItems : (query && !globalSearch ? state.queueItems.filter(ticket => queueSearchText(ticket).includes(query)) : state.queueItems);
+  const items = state.queueItems;
   queue.replaceChildren();
 
   if (state.view === 'contacts') {
@@ -598,23 +545,6 @@ function renderQueue() {
       appendQueueMoreSentinel(queue);
     }
     updateQueueSummary(state.queueItems.length);
-    $('clearQueueSearchBtn').classList.toggle('hidden', !state.query);
-    syncQueueRovingFocus(queueHadFocus);
-    return;
-  }
-
-  if (globalSearch) {
-    if (state.globalSearchBusy) {
-      renderQueueSkeleton();
-    } else if (!state.globalSearchResults.length) {
-      queue.append(emptyMarkup('No matches', 'No accessible customer, ticket, chat, or message matches this search.', 'search').outer);
-    } else {
-      const fragment = document.createDocumentFragment();
-      for (const item of state.globalSearchResults) fragment.append(createSearchResultRow(item));
-      queue.append(fragment);
-    }
-    text($('queueTotal'), state.globalSearchResults.length + ' match' + (state.globalSearchResults.length === 1 ? '' : 'es'));
-    text($('pageSummary'), 'Conversation and message search');
     $('clearQueueSearchBtn').classList.toggle('hidden', !state.query);
     syncQueueRovingFocus(queueHadFocus);
     return;
@@ -655,12 +585,53 @@ function renderQueueError(message) {
   $('queue').replaceChildren(empty.outer);
 }
 
+function renderQueueFilters(options = null) {
+  let reset = false;
+  const filters = state.queueFilters;
+  const supported = ['unassigned', 'mine', 'chats', 'active', 'history', 'waiting'].includes(state.view);
+  $('queueFilters').classList.toggle('hidden', !supported);
+  $('queueStaffLabel').classList.toggle('hidden', !['chats', 'active', 'history', 'waiting'].includes(state.view));
+  $('queueStatusLabel').classList.toggle('hidden', state.view !== 'chats');
+  for (const [id, key, items, label] of [
+    ['queueSupportNumber', 'supportNumber', options?.support_numbers, 'All support numbers'],
+    ['queueStaff', 'staffId', options?.staff, 'All staff members']
+  ]) {
+    const select = $(id);
+    if (items) {
+      const choices = [new Option(label, ''), ...items.map(item => new Option(item.name || item.id, item.id))];
+      if (filters[key] && !items.some(item => String(item.id) === filters[key])) {
+        filters[key] = ''; reset = true;
+      }
+      select.replaceChildren(...choices);
+    }
+    select.value = filters[key];
+  }
+  $('queueStatus').value = filters.status;
+  return reset;
+}
+
+function resetQueueFilters() {
+  state.queueFilters = {supportNumber: '', staffId: '', status: 'all'};
+  renderQueueFilters();
+}
+
+function queueCriteriaChanged() {
+  state.page = 1;
+  state.queueRequest += 1; // Invalidate an in-flight page before debounce fires.
+  state.queueExhausted = false;
+  if (state.globalSearchTimer) clearTimeout(state.globalSearchTimer);
+  state.globalSearchTimer = setTimeout(() => loadQueue({silent: true}), 220);
+}
+
 function queuePath(page, pageSize) {
-  return state.view === 'contacts'
-    ? '/api/support/contacts?page=' + page + '&page_size=' + pageSize + '&q=' + encodeURIComponent(state.query.trim())
-    : state.view === 'chats'
-      ? '/api/support/chats?page=' + page + '&page_size=' + pageSize
-      : '/api/support/tickets?view=' + encodeURIComponent(state.view) + '&page=' + page + '&page_size=' + pageSize;
+  if (state.view === 'contacts') return '/api/support/contacts?page=' + page + '&page_size=' + pageSize + '&q=' + encodeURIComponent(state.query.trim());
+  const params = new URLSearchParams({page, page_size: pageSize, q: state.query.trim()});
+  const filters = state.queueFilters || {};
+  if (filters.supportNumber) params.set('support_number', filters.supportNumber);
+  if (filters.staffId && ['chats', 'active', 'history', 'waiting'].includes(state.view)) params.set('staff_id', filters.staffId);
+  if (state.view === 'chats') params.set('chat_status', filters.status || 'all');
+  else params.set('view', state.view);
+  return (state.view === 'chats' ? '/api/support/chats?' : '/api/support/tickets?') + params;
 }
 
 function uniqueQueueItems(items) {
@@ -674,8 +645,7 @@ function uniqueQueueItems(items) {
 }
 
 function queueHasMore() {
-  // A short local filter only searches loaded rows, so it does not page further.
-  if (state.queueExhausted || (state.view !== 'contacts' && state.query.trim())) return false;
+  if (state.queueExhausted) return false;
   return state.queueItems.length < Number(state.total || 0);
 }
 
@@ -714,7 +684,7 @@ async function loadMoreQueue() {
     if (state.queueItems.length === before) state.queueExhausted = true;
     state.page = Math.max(1, Math.ceil(state.queueItems.length / state.pageSize));
     saveSupportSelection();
-    updateQueueCount(view, state.total);
+    refreshAllQueueCounts().catch(() => {});
     const scrollTop = queue.scrollTop;
     renderQueue();
     queue.scrollTop = scrollTop;
@@ -751,7 +721,12 @@ async function loadQueue({silent = false} = {}) {
     state.page = Math.max(1, Math.ceil(state.queueItems.length / state.pageSize));
     state.queueExhausted = false;
     state.total = total;
-    updateQueueCount(state.view, total);
+    if (renderQueueFilters(responses[0].filter_options)) {
+      state.page = 1;
+      await loadQueue({silent: true});
+      return;
+    }
+    refreshAllQueueCounts().catch(() => {});
     if (state.view === 'unassigned' && !(state.unassignedSnapshot instanceof Map)) {
       state.unassignedSnapshot = new Map(
         state.queueItems.map(item => [String(item.id), String(item.last_activity_at || '')])
@@ -804,6 +779,7 @@ function setQueueView(view, {load = true, persist = true} = {}) {
   if (view === 'active' && !canViewActiveQueue()) view = 'unassigned';
   if (!Object.prototype.hasOwnProperty.call(QUEUE_CONFIG, view) || state.view === view) return;
   state.view = view;
+  resetQueueFilters();
   state.page = 1;
   state.query = '';
   state.globalSearchResults = [];
@@ -817,7 +793,7 @@ function setQueueView(view, {load = true, persist = true} = {}) {
   const contacts = view === 'contacts';
   $('contactsToolbar').classList.toggle('hidden', !contacts);
   $('queueSearch').placeholder = contacts ? 'Search contacts' : 'Search conversations and messages';
-  text($('searchScope'), contacts ? 'Search saved, Google-synced, and VCF-imported contacts by name, phone, or email.' : 'Searches message history you are allowed to access. Customer/ticket filtering remains available for short searches.');
+  text($('searchScope'), contacts ? 'Search saved, Google-synced, and VCF-imported contacts by name, phone, or email.' : 'Searches customers, tickets and message text within this queue and the selected filters.');
   if (contacts) loadGoogleContactsStatus().catch(() => {});
   updateQueueSummary();
   if (persist) saveSupportSelection();
@@ -830,9 +806,8 @@ function clearQueueSearch() {
   state.globalSearchRequest += 1;
   if (state.globalSearchTimer) { clearTimeout(state.globalSearchTimer); state.globalSearchTimer = null; }
   $('queueSearch').value = '';
-  text($('searchScope'), state.view === 'contacts' ? 'Search saved, Google-synced, and VCF-imported contacts by name, phone, or email.' : 'Searches message history you are allowed to access. Customer/ticket filtering remains available for short searches.');
-  if (state.view === 'contacts') loadQueue({silent: true});
-  else renderQueue();
+  text($('searchScope'), state.view === 'contacts' ? 'Search saved, Google-synced, and VCF-imported contacts by name, phone, or email.' : 'Searches customers, tickets and message text within this queue and the selected filters.');
+  queueCriteriaChanged();
   $('queueSearch').focus();
 }
 
@@ -3194,10 +3169,6 @@ async function openTicket(id, {silent = false, refreshQueue = false, refreshHist
     state.currentConversationOrigin = ticket?.conversation_origin || state.currentConversationOrigin;
     saveSupportSelection();
     const inboundId = latestInboundMessageId(data);
-    const previousInboundId = Number(state.lastInboundByTicket[String(id)] || 0);
-    if (!isNewSelection && previousInboundId && inboundId > previousInboundId && ticket.current_assignee_id) {
-      notifyNewCustomerActivity('New customer message from ' + (ticket.customer_name || ticket.customer_userid || ticket.whatsapp_phone || 'customer') + '.');
-    }
     if (inboundId) state.lastInboundByTicket[String(id)] = inboundId;
     renderTicketHeader(ticket);
     renderContext(ticket, data.context || {}, data.shipment || null, data.customer_identity || null, data.permissions || null);

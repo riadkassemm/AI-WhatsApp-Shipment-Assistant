@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Literal
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Path, Request, Response, Query, UploadFile, status
@@ -813,13 +813,14 @@ async def support_events(
     from app.support_auth import revalidate_support_agent
 
     current_agent = agent
+    notification_since = datetime.now(timezone.utc).timestamp()
 
     async def validate() -> None:
         nonlocal current_agent
         current_agent = await revalidate_support_agent(agent)
 
     async def authorize(event: dict) -> bool:
-        return await support_service.can_receive_support_event(event, current_agent)
+        return await support_service.can_receive_support_event(event, current_agent, notification_since=notification_since)
 
     return StreamingResponse(
         event_stream(authorize, validate=validate),
@@ -983,11 +984,16 @@ async def chat_lines(
 async def list_chats(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=30, ge=1, le=500),
+    staff_id: str | None = Query(default=None, max_length=64),
+    support_number: str | None = Query(default=None, max_length=64),
+    chat_status: str = Query(default="all", pattern="^(all|open|closed)$"),
+    q: str = Query(default="", max_length=200),
     agent: SupportAgent = Depends(get_current_agent),
 ) -> dict:
     try:
         return await support_service.list_tickets(
-            view="chats", agent=agent, page=page, page_size=page_size
+            view="chats", agent=agent, page=page, page_size=page_size,
+            staff_id=staff_id, support_number=support_number, chat_status=chat_status, query=q
         )
     except Exception as exc:
         raise _translate_error(exc) from exc
@@ -1066,6 +1072,10 @@ async def list_tickets(
     ),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=30, ge=1, le=500),
+    staff_id: str | None = Query(default=None, max_length=64),
+    support_number: str | None = Query(default=None, max_length=64),
+    chat_status: str = Query(default="all", pattern="^(all|open|closed)$"),
+    q: str = Query(default="", max_length=200),
     agent: SupportAgent = Depends(get_current_agent),
 ) -> dict:
     try:
@@ -1074,6 +1084,7 @@ async def list_tickets(
             agent=agent,
             page=page,
             page_size=page_size,
+            staff_id=staff_id, support_number=support_number, chat_status=chat_status, query=q,
         )
     except Exception as exc:
         raise _translate_error(exc) from exc
@@ -1484,5 +1495,20 @@ async def reopen_ticket(
 ) -> dict:
     try:
         return await support_service.reopen_ticket(ticket_id, agent=agent, resolved_at=payload.resolved_at)
+    except Exception as exc:
+        raise _translate_error(exc) from exc
+
+
+class DashboardReadRequest(BaseModel):
+    message_id: int = Field(gt=0)
+
+
+@router.post("/tickets/{ticket_id}/dashboard-read")
+async def mark_dashboard_read(
+    ticket_id: int, payload: DashboardReadRequest,
+    agent: SupportAgent = Depends(require_support_csrf),
+) -> dict:
+    try:
+        return await support_service.mark_dashboard_read(ticket_id, payload.message_id, agent)
     except Exception as exc:
         raise _translate_error(exc) from exc

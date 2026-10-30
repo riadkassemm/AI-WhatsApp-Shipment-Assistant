@@ -37,6 +37,9 @@ const state = {
   pageSize: 50,
   total: 0,
   queueItems: [],
+  queueFilters: {supportNumber: "", staffId: "", status: "all"},
+  dashboardReadBoundaries: new Map(),
+  chatNotificationIds: new Set(),
   queueLoadingMore: false,
   queueExhausted: false,
   queueMoreObserver: null,
@@ -359,7 +362,7 @@ function markPageLeaving() {
   state.ticketRequest += 1;
 }
 
-function notify(message, type = 'success') {
+function notify(message, type = 'success', onOpen = null) {
   if (!message || state.pageLeaving) return;
   const toast = document.createElement('div');
   toast.className = 'toast ' + type;
@@ -368,6 +371,12 @@ function notify(message, type = 'success') {
   const copy = document.createElement('div');
   copy.className = 'toast-copy';
   copy.textContent = message;
+  if (onOpen) {
+    const button = document.createElement('button');
+    button.type = 'button'; button.className = 'toast-open'; button.textContent = message;
+    button.onclick = () => { toast.remove(); onOpen(); };
+    copy.replaceChildren(button);
+  }
   const close = document.createElement('button');
   close.type = 'button';
   close.className = 'icon-btn';

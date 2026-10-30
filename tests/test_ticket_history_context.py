@@ -63,7 +63,7 @@ def test_new_ticket_detail_includes_previous_ticket_messages_as_read_only_contex
     async def list_messages(ticket_id: int, *, limit: int = 100, before_id=None, user_id=None):
         return [dict(current_message)] if ticket_id == 52 else [dict(previous_message)]
 
-    async def list_events(ticket_id: int, limit: int = 100):
+    async def list_events(ticket_id: int, limit: int = 100, *, include_private_activity=True):
         return []
 
     async def list_previous_customer_tickets(**kwargs):
@@ -143,7 +143,7 @@ def test_staff_chat_shows_its_previous_closed_conversation(monkeypatch: pytest.M
     async def list_messages(ticket_id: int, *, limit: int = 100, before_id=None, user_id=None):
         return [dict(previous_message)] if ticket_id == 40 else []
 
-    async def list_events(_ticket_id: int, limit: int = 100):
+    async def list_events(_ticket_id: int, limit: int = 100, *, include_private_activity=True):
         return []
 
     async def list_previous_customer_tickets(**_kwargs):

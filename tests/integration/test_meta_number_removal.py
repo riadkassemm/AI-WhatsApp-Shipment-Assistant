@@ -42,11 +42,15 @@ async def test_remove_retains_history_and_survives_sync_webhooks_and_legacy_seed
         direction='INBOUND', body='Historical content', whatsapp_message_id='wamid.history')
     before = await sql('SELECT * FROM support_tickets WHERE id=42')
     assert (await service.remove_saved_number(MANAGER, LINE))['numbers'] == []
-    retired = (await sql('SELECT * FROM whatsapp_phone_numbers WHERE phone_number_id=%s', (LINE,)))[0]
-    assert retired['removed_at'] and not retired['is_enabled']
-    assert retired['display_name'] == 'Old office'
+    assert not await sql('SELECT * FROM whatsapp_phone_numbers WHERE phone_number_id=%s', (LINE,))
     assert (await repo.get_message(message['id']))['body'] == 'Historical content'
-    assert await sql('SELECT * FROM support_tickets WHERE id=42') == before
+    after = (await sql('SELECT * FROM support_tickets WHERE id=42'))[0]
+    assert after['business_display_name'] == 'Old office'
+    assert after['business_display_phone_number'] == '96176063972'
+    assert after['business_number_retired_at'] is not None
+    for column, value in before[0].items():
+        if column not in {'business_display_name', 'business_display_phone_number', 'business_number_retired_at'}:
+            assert after[column] == value, column
     assert (await repo.get_ticket(42))['display_name'] == 'Old office'
     # Re-discovery, including the configured legacy default, must not revive it.
     for numbers in ([], [{'id': LINE, 'display_phone_number': '96176063972', 'verified_name': 'Meta name'}]):
@@ -118,9 +122,11 @@ async def test_removal_and_enabling_cannot_revive_retired_number(infrastructure,
         release.set()
         with pytest.raises(WhatsAppRegistryConflictError, match='permanently removed'):
             await enabling
-    row = (await sql('SELECT is_enabled,removed_at FROM whatsapp_phone_numbers WHERE phone_number_id=%s', (LINE,)))[0]
-    assert bool(row['is_enabled']) is enable_first
-    assert bool(row['removed_at']) is not enable_first
+    rows = await sql('SELECT is_enabled,removed_at FROM whatsapp_phone_numbers WHERE phone_number_id=%s', (LINE,))
+    if enable_first:
+        assert rows[0]['is_enabled'] and rows[0]['removed_at'] is None
+    else:
+        assert not rows
 
 
 @pytest.mark.asyncio
@@ -204,3 +210,58 @@ async def test_api_requires_valid_session_csrf_and_current_manager_role(infrastr
             assert response.status_code == 200 and response.json()['numbers'] == []
         await sql("UPDATE staff SET is_active=0 WHERE id=8")
         assert (await client.delete(path, headers=headers)).status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_confirmed_linked_removal_deletes_profile_and_preserves_history(infrastructure, monkeypatch):
+    service, sql = await registry(infrastructure, monkeypatch)
+    repo, _, _ = infrastructure
+    await sql("UPDATE whatsapp_phone_numbers SET source='LINKED_DEVICE',provider_present=0 WHERE phone_number_id=%s", (LINE,))
+    await sql("UPDATE support_tickets SET business_phone_number_id=%s,status='RESOLVED',active_key=NULL WHERE id=42", (LINE,))
+    await service.repository.finish_linked_device_removal(LINE, actor_id=8, actor_name='Manager', close_active_tickets=False)
+    assert not await sql('SELECT * FROM whatsapp_phone_numbers WHERE phone_number_id=%s', (LINE,))
+    ticket = await repo.get_ticket(42)
+    assert ticket['display_name'] == 'Old office' and ticket['business_number_removed_at']
+    assert ticket['current_assignee_id'] == '7' and ticket['status'] == 'RESOLVED'
+    assert await service.repository.finish_linked_device_removal(LINE, actor_id=8, actor_name='Manager', close_active_tickets=False) == []
+    monkeypatch.setattr('app.whatsapp_registry.configured_linked_device_lines', lambda: {LINE: '96176063972'})
+    monkeypatch.setattr('app.whatsapp_registry.get_transport', lambda *_: 'linked_device')
+    await service._seed_legacy_number()
+    assert not await sql('SELECT * FROM whatsapp_phone_numbers WHERE phone_number_id=%s', (LINE,))
+    assert len(await sql("SELECT id FROM whatsapp_integration_audit WHERE action='LINKED_DEVICE_LINE_REMOVED'")) == 1
+    for _ in range(2):
+        await sql(Path('migrations/20261029_support_number_profile_deletion.sql').read_text())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('sync_first', [True, False])
+async def test_sync_and_delete_serialize_without_resurrection(infrastructure, monkeypatch, sync_first):
+    from contextlib import asynccontextmanager
+    service, sql = await registry(infrastructure, monkeypatch)
+    entered, release, started = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    original = service.repository.mutation_connection
+    @asynccontextmanager
+    async def pause_first():
+        async with original() as conn:
+            if not entered.is_set():
+                entered.set()
+                await release.wait()
+            yield conn
+    monkeypatch.setattr(service.repository, 'mutation_connection', pause_first)
+    # Repository methods isolate the critical transactions from service startup seeding.
+    async def sync():
+        await service.repository.persist_sync(waba_id=WABA, account_name='Business',
+            numbers=[{'id':LINE}], actor_id=8)
+    async def remove():
+        await service.repository.remove_saved_meta_number(LINE, actor_id=8)
+    first = asyncio.create_task(sync() if sync_first else remove())
+    await asyncio.wait_for(entered.wait(), 5)
+    async def second():
+        started.set()
+        await (remove() if sync_first else sync())
+    follower = asyncio.create_task(second())
+    await asyncio.wait_for(started.wait(), 5)
+    release.set()
+    await asyncio.wait_for(asyncio.gather(first, follower), 5)
+    assert not await sql('SELECT * FROM whatsapp_phone_numbers WHERE phone_number_id=%s', (LINE,))
+    assert len(await sql("SELECT id FROM whatsapp_integration_audit WHERE action='META_NUMBER_REMOVED'")) == 1

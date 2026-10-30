@@ -224,13 +224,18 @@ __SUPPORT_STYLE__
       <label class="sr-only" for="queueSearch">Search conversations and messages</label>
       <div class="search-field">
         <svg class="icon" aria-hidden="true"><use href="#icon-search"></use></svg>
-        <input id="queueSearch" type="search" autocomplete="off" placeholder="Search conversations and messages" aria-describedby="searchScope" aria-keyshortcuts="Control+K /" />
+        <input id="queueSearch" type="search" maxlength="200" autocomplete="off" placeholder="Search conversations and messages" aria-describedby="searchScope" aria-keyshortcuts="Control+K /" />
         <span class="search-kbd" aria-hidden="true"><kbd>/</kbd></span>
         <button class="icon-btn search-clear hidden" id="clearQueueSearchBtn" type="button" aria-label="Clear ticket search">
           <svg class="icon icon-sm" aria-hidden="true"><use href="#icon-x"></use></svg>
         </button>
       </div>
-      <div class="search-scope" id="searchScope">Searches customer names, phone numbers, ticket references, and messages you are allowed to access.</div>
+      <div class="search-scope" id="searchScope">Searches customers, tickets and message text within this queue and the selected filters.</div>
+    </div>
+    <div class="queue-filters" id="queueFilters">
+      <label><span class="sr-only">Support Number</span><select class="input" id="queueSupportNumber"><option value="">All support numbers</option></select></label>
+      <label class="hidden" id="queueStaffLabel"><span class="sr-only">Staff Member</span><select class="input" id="queueStaff"><option value="">All staff members</option></select></label>
+      <label class="hidden" id="queueStatusLabel"><span class="sr-only">Status</span><select class="input" id="queueStatus"><option value="all">All</option><option value="open">Open</option><option value="closed">Closed</option></select></label>
     </div>
     <div class="contacts-toolbar hidden" id="contactsToolbar">
       <div class="contacts-google-copy"><strong id="googleContactsTitle">Google Contacts</strong><span id="googleContactsStatus">Not connected</span></div>

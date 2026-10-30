@@ -948,3 +948,68 @@ before deploying. It adds an attachment MIME column and preserves existing PDFs;
 repeat application is safe. Restart only the API for this update. Existing
 bridge sessions, provider configuration, and media files are unchanged. Include
 both legacy `.pdf` files and new image `.bin` files in quick-reply backups.
+
+### Queue filters and dashboard unread state
+
+Unassigned and My Tickets can be filtered by Support Number. Chats, Activity,
+Waiting and History also offer Staff Member; Chats includes All/Open/Closed.
+Staff Member means the current/retained assignee, including resolved history.
+Filters intersect the existing queue access rules and search customer names,
+phone numbers, references and visible message text across the entire matching
+queue. Results remain ordered by most recent activity. Changing a filter/search
+resets pagination. The queue heading/footer count matching conversations; sidebar
+badges continue showing the full queue totals. Message search within an open
+conversation remains available for finding individual matching messages. Matching
+message previews in queue results open that message directly.
+
+Apply `migrations/20261029_support_dashboard_reads.sql` before starting this build.
+For installations with table-specific grants, grant the existing application
+account SELECT/INSERT/UPDATE/DELETE on `support_dashboard_reads` as well.
+It adds per-staff, per-conversation viewing cursors, independent of WhatsApp
+read receipts and whether staff have replied. Existing messages are initially
+unread in the dashboard: past views cannot be reconstructed reliably. Green dots
+in Chats and My Tickets clear only after visible incoming messages are confirmed
+read by the API. Background tabs, list rendering, prefetch and investigation do
+not advance a cursor. Newer incoming messages beyond the displayed boundary stay
+unread. Other staff and other tabs cannot clear or rewind your cursor.
+
+Live incoming chat alerts use the current assignee at event authorization time;
+creator/participant access alone does not qualify. Duplicate event alerts are
+suppressed; messages predating the current event stream and provider messages
+older than two minutes synchronize silently
+(including reconnect backlog). Polling and navigation do not create chat alerts.
+Read/view activity remains recorded, but only Admins and Super Admins receive
+`CONVERSATION_VIEWED` and `INCOMING_MARKED_READ` timeline events. This does not
+change conversation visibility, sending permissions or WhatsApp receipt behavior.
+
+
+### Active queue filters and permanent directory removal
+
+Queue filters list only current active staff and enabled, present linked-device
+numbers. Meta numbers, disabled/unpaired lines and historical assignee IDs are
+excluded from the choices; existing conversation visibility is unchanged.
+Removing a selected option resets that filter to All and reloads its results.
+Labels remain available to screen readers without occupying a separate row.
+
+Deleting a staff account physically deletes its credentials and private records,
+as before. Ticket/message/audit attribution remains historical; it does not
+create an account or a filter option. Deactivation alone remains reversible.
+
+After confirmed linked-device unlinking, or **Remove saved number** for an
+inactive Meta number, the number's directory row is now physically deleted.
+The existing removal audit prevents stale syncs, webhooks or configured defaults
+from recreating it. A short database advisory lock serializes discovery and
+removal across API processes; no provider request runs under that lock. Ticket
+snapshots retain the number's custom label and retirement status, so history is
+readable but the removed channel cannot be reopened for sending.
+
+Before deploying, apply `migrations/20261029_support_number_profile_deletion.sql`
+to the application's local database. It adds two nullable ticket metadata columns
+and is safe to repeat. Retired profiles from earlier releases require a one-time
+reviewed cleanup after deployment: back up the profiles, verify no active
+conversations, and use the same registry removal methods. For linked lines,
+confirm retirement in the bridge manifest first; a disabled but still paired
+number must not be treated as already unlinked. Keep removal audit records and
+bridge retirement records. Rolling back to code without these deletion guards
+can recreate profiles from stale configuration, so restore the backup or retain
+the guards when rolling back after cleanup.

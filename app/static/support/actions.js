@@ -2197,23 +2197,14 @@ $('updateReloadBtn').addEventListener('click', () => { saveSupportSelection(); m
 $('queue').addEventListener('keydown', handleQueueKeydown);
 $('queueSearch').addEventListener('input', event => {
   state.query = event.target.value;
-  if (state.view === 'contacts') {
-    state.page = 1;
-    if (state.globalSearchTimer) clearTimeout(state.globalSearchTimer);
-    state.globalSearchTimer = setTimeout(() => loadQueue({silent: true}), 220);
-    return;
-  }
-  if (state.query.trim().length >= 2) {
-    state.globalSearchBusy = true;
-    renderQueue();
-    scheduleGlobalMessageSearch();
-  } else {
-    state.globalSearchResults = [];
-    state.globalSearchRequest += 1;
-    if (state.globalSearchTimer) { clearTimeout(state.globalSearchTimer); state.globalSearchTimer = null; }
-    renderQueue();
-  }
+  queueCriteriaChanged();
 });
+for (const [id, key] of [['queueSupportNumber', 'supportNumber'], ['queueStaff', 'staffId'], ['queueStatus', 'status']]) {
+  $(id).addEventListener('change', event => {
+    state.queueFilters[key] = event.target.value;
+    queueCriteriaChanged();
+  });
+}
 $('queueSearch').addEventListener('keydown', event => {
   if (event.key === 'Escape' && state.query) {
     event.preventDefault();
@@ -2548,3 +2539,12 @@ setInterval(() => {
 
 $('cancelMessageSelectionBtn').addEventListener('click', clearMessageSelection);
 $('forwardSelectedBtn').addEventListener('click', () => openForwardModal([...state.selectedMessages.values()]));
+
+// Only the mounted, visible conversation can advance the viewing cursor.
+new MutationObserver(scheduleDashboardRead).observe($('conversation'), {childList: true, subtree: true});
+$('conversation').addEventListener('scroll', scheduleDashboardRead, {passive: true});
+document.addEventListener('visibilitychange', scheduleDashboardRead);
+window.addEventListener('focus', scheduleDashboardRead);
+document.addEventListener('focusin', scheduleDashboardRead);
+// Retry a failed viewing acknowledgement without resending confirmed boundaries.
+setInterval(scheduleDashboardRead, 15000);
