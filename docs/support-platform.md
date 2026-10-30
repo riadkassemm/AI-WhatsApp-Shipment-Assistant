@@ -868,3 +868,34 @@ bridge; keep the existing state directory. The bridge restart loads the new code
 and reconnects existing sessions without logging them out. Ordinary transient
 failures may still briefly show pending updates; permanent callback failures
 remain visible for diagnosis rather than being hidden.
+
+### Multiple attachments, forwarding, and image quick replies
+
+- Use a message's **Select messages** action, then tick additional messages and
+  choose **Forward selected**. Up to 20 selected messages are forwarded in their
+  conversation order to one contact or active conversation. Existing source
+  visibility and destination-assignee permissions are checked for every item.
+- The attachment picker, drag-and-drop, and clipboard paste accept multiple
+  supported files. Each has its own preview, Remove action, and image Edit
+  action where applicable. Select up to 20 files totaling 100 MB; existing
+  per-file/provider limits still apply. Browser clipboard access depends on the
+  source application exposing files, rather than only text or an image URL.
+- **Send** processes the queue in order through the existing delivery API. The
+  composer caption applies to the first image, video, or PDF. Saved reply
+  captions remain with their own attachments. Ordinary text drafts are preserved.
+  Completed items leave the queue. A failed, pending, or uncertain delivery stops
+  the batch and remains visible in the conversation; inspect its delivery state
+  before continuing with the remaining items. HTTP interruptions retain each
+  item's request ID so retrying checks the same delivery instead of sending a
+  duplicate. Do not refresh away from unsent file previews.
+- **Quick replies → Images** stores JPEG/PNG images with optional captions and
+  thumbnails. Inserting an image adds a preview; it does not send immediately.
+  Image replies use the same private ownership, manager distribution, immutable
+  file storage, and duplicate detection as PDF replies. Staff copies can be
+  independently edited or deleted.
+
+Apply `migrations/20261027_quick_reply_images.sql` to the app's local database
+before deploying. It adds an attachment MIME column and preserves existing PDFs;
+repeat application is safe. Restart only the API for this update. Existing
+bridge sessions, provider configuration, and media files are unchanged. Include
+both legacy `.pdf` files and new image `.bin` files in quick-reply backups.

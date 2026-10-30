@@ -240,6 +240,7 @@ _SUPPORT_SCHEMA_MIGRATIONS: tuple[tuple[str, dict[str, set[str]]], ...] = (
     ("migrations/20261024_quick_reply_locations.sql", {
         "support_quick_replies": {"location_latitude", "location_longitude", "location_name", "location_address"},
     }),
+    ("migrations/20261027_quick_reply_images.sql", {"support_quick_replies": {"attachment_mime_type"}}),
     ("migrations/20261024_quick_reply_pdf_digests.sql", {
         "support_quick_replies": {"attachment_sha256"},
     }),
@@ -512,7 +513,7 @@ class SupportRepository(DeliveryRepositoryMixin, ReadSyncRepositoryMixin, Receip
 
     # Quick replies are private to one staff account. Every query is scoped by
     # staff_id, so another account's reply behaves exactly like a missing one.
-    _QUICK_REPLY_COLUMNS = "id, title, body, created_at, updated_at, attachment_key, attachment_filename, attachment_size, location_latitude, location_longitude, location_name, location_address"
+    _QUICK_REPLY_COLUMNS = "id, title, body, created_at, updated_at, attachment_key, attachment_filename, attachment_size, attachment_mime_type, location_latitude, location_longitude, location_name, location_address"
 
     async def list_quick_replies(self, staff_id: int) -> list[dict[str, Any]]:
         if self._pool is None:
@@ -570,9 +571,9 @@ class SupportRepository(DeliveryRepositoryMixin, ReadSyncRepositoryMixin, Receip
                             (location['latitude'], location['longitude'], location['name'], location['address'], reply_id, int(staff_id)))
                     if attachment:
                         await cur.execute("""UPDATE support_quick_replies
-                            SET attachment_key=%s,attachment_filename=%s,attachment_size=%s,attachment_sha256=%s
+                            SET attachment_key=%s,attachment_filename=%s,attachment_size=%s,attachment_sha256=%s,attachment_mime_type=%s
                             WHERE id=%s AND staff_id=%s""",
-                            (attachment['attachment_key'],attachment['attachment_filename'],attachment['attachment_size'],attachment.get('attachment_sha256'),reply_id,int(staff_id)))
+                            (attachment['attachment_key'],attachment['attachment_filename'],attachment['attachment_size'],attachment.get('attachment_sha256'),attachment.get('attachment_mime_type', 'application/pdf'),reply_id,int(staff_id)))
                     await cur.execute(
                         f"SELECT {self._QUICK_REPLY_COLUMNS} FROM support_quick_replies WHERE id = %s AND staff_id = %s",
                         (reply_id, int(staff_id)),
@@ -652,9 +653,9 @@ class SupportRepository(DeliveryRepositoryMixin, ReadSyncRepositoryMixin, Receip
                     if old.get("location_latitude") is not None:
                         raise SupportConflictError("A location quick reply cannot be replaced with a PDF.")
                     await cur.execute("""UPDATE support_quick_replies SET title=%s,body=%s,
-                        attachment_key=%s,attachment_filename=%s,attachment_size=%s,attachment_sha256=%s,updated_at=UTC_TIMESTAMP(6)
+                        attachment_key=%s,attachment_filename=%s,attachment_size=%s,attachment_sha256=%s,attachment_mime_type=%s,updated_at=UTC_TIMESTAMP(6)
                         WHERE id=%s AND staff_id=%s""",
-                        (title,body,attachment['attachment_key'],attachment['attachment_filename'],attachment['attachment_size'],attachment.get('attachment_sha256'),reply_id,staff_id))
+                        (title,body,attachment['attachment_key'],attachment['attachment_filename'],attachment['attachment_size'],attachment.get('attachment_sha256'),attachment.get('attachment_mime_type', 'application/pdf'),reply_id,staff_id))
                     await cur.execute(f"SELECT {self._QUICK_REPLY_COLUMNS} FROM support_quick_replies WHERE id=%s AND staff_id=%s", (reply_id,staff_id))
                     row = await cur.fetchone()
                 await conn.commit()
@@ -774,11 +775,11 @@ class SupportRepository(DeliveryRepositoryMixin, ReadSyncRepositoryMixin, Receip
                         pdf = (attachments or {}).get(staff_id, {})
                         pin = location or {}
                         await cur.execute("""INSERT INTO support_quick_replies
-                            (staff_id,title,body,attachment_key,attachment_filename,attachment_size,attachment_sha256,
+                            (staff_id,title,body,attachment_key,attachment_filename,attachment_size,attachment_sha256,attachment_mime_type,
                              location_latitude,location_longitude,location_name,location_address,created_at,updated_at)
-                            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,UTC_TIMESTAMP(6),UTC_TIMESTAMP(6))""",
+                            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,UTC_TIMESTAMP(6),UTC_TIMESTAMP(6))""",
                             (staff_id,title,body,pdf.get('attachment_key'),pdf.get('attachment_filename'),pdf.get('attachment_size'),
-                             pdf.get('attachment_sha256'),pin.get('latitude'),pin.get('longitude'),pin.get('name'),pin.get('address')))
+                             pdf.get('attachment_sha256'),pdf.get('attachment_mime_type', 'application/pdf'),pin.get('latitude'),pin.get('longitude'),pin.get('name'),pin.get('address')))
                         await cur.execute(f"SELECT staff_id,{self._QUICK_REPLY_COLUMNS} FROM support_quick_replies WHERE id=%s AND staff_id=%s",
                                           (cur.lastrowid,staff_id))
                         rows.append(await cur.fetchone())
@@ -2761,6 +2762,7 @@ class SupportRepository(DeliveryRepositoryMixin, ReadSyncRepositoryMixin, Receip
         actor_id: str | None = None,
         actor_name: str | None = None,
         details: dict[str, Any] | None = None,
+        audit_key: str | None = None,
     ) -> None:
         if self._pool is None:
             await self.connect()
@@ -2771,8 +2773,9 @@ class SupportRepository(DeliveryRepositoryMixin, ReadSyncRepositoryMixin, Receip
                     """
                     INSERT INTO support_ticket_events (
                         ticket_id, event_type, actor_type, actor_id, actor_name,
-                        details_json, created_at
-                    ) VALUES (%s, %s, %s, %s, %s, %s, UTC_TIMESTAMP(6))
+                        details_json, created_at, audit_key
+                    ) VALUES (%s, %s, %s, %s, %s, %s, UTC_TIMESTAMP(6), %s)
+                    ON DUPLICATE KEY UPDATE audit_key=VALUES(audit_key)
                     """,
                     (
                         ticket_id,
@@ -2781,6 +2784,7 @@ class SupportRepository(DeliveryRepositoryMixin, ReadSyncRepositoryMixin, Receip
                         actor_id,
                         actor_name,
                         json.dumps(details or {}, ensure_ascii=False),
+                        audit_key,
                     ),
                 )
 

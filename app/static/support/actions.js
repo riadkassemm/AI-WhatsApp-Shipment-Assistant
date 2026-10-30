@@ -110,10 +110,10 @@ async function saveMessagePreferences(event) {
 }
 
 // Manager assignments create independent copies; existing replies stay owner-scoped.
-const QUICK_REPLIES_LIST_SUBTITLE = 'Copy text, attach a PDF, or preview a saved location. Only you can see your quick replies.';
+const QUICK_REPLIES_LIST_SUBTITLE = 'Copy text, attach an image or PDF, or preview a saved location. Only you can see your quick replies.';
 
 function quickReplyKind(reply) {
-  return reply?.location ? 'location' : reply?.attachment_filename ? 'pdf' : 'text';
+  return reply?.location ? 'location' : reply?.attachment_filename ? (reply.attachment_mime_type?.startsWith('image/') ? 'image' : 'pdf') : 'text';
 }
 
 function quickReplyAssignmentNotice(result) {
@@ -131,7 +131,7 @@ function selectQuickReplyTab(kind, focus = false) {
   state.quickReplyTab = kind;
   $('quickRepliesSearch').value = '';
   renderQuickReplies();
-  if (focus) $('quickReplyTab' + ({text: 'Text', pdf: 'Pdf', location: 'Location'})[kind]).focus();
+  if (focus) $('quickReplyTab' + ({text: 'Text', pdf: 'Pdf', location: 'Location', image: 'Image'})[kind]).focus();
 }
 
 async function updateQuickReplyAudience() {
@@ -240,7 +240,7 @@ function quickReplyRow(reply) {
   const copy = document.createElement('button');
   copy.type = 'button';
   copy.className = 'quick-reply-copy';
-  copy.setAttribute('aria-label', (location ? 'Preview location: ' : reply.attachment_filename ? 'Attach PDF: ' : 'Copy quick reply: ') + label);
+  copy.setAttribute('aria-label', (location ? 'Preview location: ' : reply.attachment_filename ? (quickReplyKind(reply) === 'image' ? 'Attach image: ' : 'Attach PDF: ') : 'Copy quick reply: ') + label);
   const copyText = document.createElement('span');
   copyText.className = 'quick-reply-text';
   if (String(reply.title || '').trim()) {
@@ -257,7 +257,13 @@ function quickReplyRow(reply) {
   const hint = document.createElement('span');
   hint.className = 'quick-reply-copy-hint';
   hint.setAttribute('aria-hidden', 'true');
-  hint.append(createIcon(location ? 'map-pin' : reply.attachment_filename ? 'paperclip' : 'copy', 'icon icon-sm'), document.createTextNode(location ? 'Preview' : reply.attachment_filename ? 'Attach PDF' : 'Copy'));
+  hint.append(createIcon(location ? 'map-pin' : reply.attachment_filename ? 'paperclip' : 'copy', 'icon icon-sm'), document.createTextNode(location ? 'Preview' : reply.attachment_filename ? (quickReplyKind(reply) === 'image' ? 'Attach image' : 'Attach PDF') : 'Copy'));
+  if (quickReplyKind(reply) === 'image') {
+    const thumbnail = document.createElement('img');
+    thumbnail.className = 'quick-reply-thumbnail'; thumbnail.alt = label; thumbnail.loading = 'lazy';
+    thumbnail.src = '/api/support/quick-replies/' + encodeURIComponent(reply.id) + '/image';
+    copy.append(thumbnail);
+  }
   copy.append(copyText, hint);
   copy.addEventListener('click', () => location ? previewQuickReplyLocation(reply) : reply.attachment_filename ? attachQuickReplyPdf(reply) : copyQuickReply(reply));
 
@@ -296,7 +302,7 @@ function renderQuickReplies() {
   const list = $('quickRepliesList');
   const query = $('quickRepliesSearch').value.trim().toLocaleLowerCase();
   const tab = state.quickReplyTab || 'text';
-  for (const [kind, suffix] of Object.entries({text: 'Text', pdf: 'Pdf', location: 'Location'})) {
+  for (const [kind, suffix] of Object.entries({text: 'Text', pdf: 'Pdf', location: 'Location', image: 'Image'})) {
     const button = $('quickReplyTab' + suffix);
     button.classList.toggle('active', tab === kind);
     button.setAttribute('aria-selected', String(tab === kind));
@@ -316,7 +322,7 @@ function renderQuickReplies() {
     return;
   }
   if (!inTab.length) {
-    list.append(emptyMarkup('No ' + ({text: 'text replies', pdf: 'PDFs', location: 'locations'})[tab] + ' yet', 'Choose New reply to save one here.', 'zap').outer);
+    list.append(emptyMarkup('No ' + ({text: 'text replies', pdf: 'PDFs', location: 'locations', image: 'images'})[tab] + ' yet', 'Choose New reply to save one here.', 'zap').outer);
     return;
   }
   if (!replies.length) {
@@ -371,7 +377,7 @@ function showQuickReplyForm(reply, draft = null) {
   const kind = state.quickReplyKind;
   const source = reply || draft;
   $('quickReplyBodyField').classList.toggle('hidden', kind === 'location');
-  $('quickReplyPdfField').classList.toggle('hidden', kind !== 'pdf');
+  $('quickReplyPdfField').classList.toggle('hidden', !['pdf', 'image'].includes(kind));
   $('quickReplyLocationFields').classList.toggle('hidden', kind !== 'location');
   text($('quickReplyTitleLabel'), kind === 'location' ? 'Location name' : 'Title (optional)');
   $('quickReplyLatitude').value = source?.location?.latitude ?? '';
@@ -384,12 +390,14 @@ function showQuickReplyForm(reply, draft = null) {
   $('quickReplyRecipients').replaceChildren();
   showQuickRepliesError('');
   $('quickReplyPdf').value = '';
-  text($('quickReplyPdfHint'), reply?.attachment_filename ? 'Saved PDF: ' + reply.attachment_filename + '. Choose another PDF to replace it.' : 'Save a PDF to attach it to future replies. A caption is optional.');
+  $('quickReplyPdf').accept = kind === 'image' ? 'image/jpeg,image/png' : 'application/pdf,.pdf';
+  text($('quickReplyFileLabel'), kind === 'image' ? 'Image file (JPEG or PNG)' : 'PDF file');
+  text($('quickReplyPdfHint'), reply?.attachment_filename ? 'Saved attachment: ' + reply.attachment_filename + '. Choose another file to replace it.' : 'Save an attachment to preview in future replies. A caption is optional.');
   $('quickReplyTitle').value = source ? String(source.title || '') : '';
   $('quickReplyBody').value = reply ? String(reply.body || '') : '';
   updateQuickReplyCount();
   text($('quickRepliesTitle'), reply ? 'Edit quick reply' : 'New quick reply');
-  text($('quickRepliesSubtitle'), kind === 'location' ? 'Save a named pin to preview and send to clients later.' : 'Save ' + (kind === 'pdf' ? 'a PDF' : 'text') + ' you send often.');
+  text($('quickRepliesSubtitle'), kind === 'location' ? 'Save a named pin to preview and send to clients later.' : 'Save ' + (kind === 'pdf' ? 'a PDF' : kind === 'image' ? 'an image' : 'text') + ' you send often.');
   $('quickRepliesListView').classList.add('hidden');
   $('quickReplyForm').classList.remove('hidden');
   $(reply && kind !== 'location' ? 'quickReplyBody' : 'quickReplyTitle').focus();
@@ -481,26 +489,28 @@ async function copyQuickReply(reply) {
 async function attachQuickReplyPdf(reply) {
   if (state.quickRepliesBusy) return;
   if (!canAttachToComposer()) { showQuickRepliesError('Open a conversation you can reply to first.'); return; }
-  if (state.pendingMedia || $('message').value.trim()) { showQuickRepliesError('Send or clear your current draft before attaching a saved PDF.'); return; }
   const ticketId = state.ticketId;
   const agentId = state.agent?.id;
   const request = state.quickRepliesRequest;
   state.quickRepliesBusy = true;
-  showQuickRepliesError('Loading PDF…');
+  showQuickRepliesError('Loading attachment…');
   try {
-    const response = await fetch('/api/support/quick-replies/' + encodeURIComponent(reply.id) + '/pdf', {credentials: 'same-origin', cache: 'no-store'});
+    const response = await fetch('/api/support/quick-replies/' + encodeURIComponent(reply.id) + (quickReplyKind(reply) === 'image' ? '/image' : '/pdf'), {credentials: 'same-origin', cache: 'no-store'});
     if (!response.ok) {
       if (response.status === 401) showLogin();
       const error = await response.json().catch(() => ({}));
       throw new Error(error.detail || 'Could not load the saved PDF.');
     }
-    const file = new File([await response.blob()], reply.attachment_filename, {type: 'application/pdf'});
+    const file = new File([await response.blob()], reply.attachment_filename, {type: reply.attachment_mime_type || 'application/pdf'});
     if (!state.authenticated || state.agent?.id !== agentId || request !== state.quickRepliesRequest) return;
-    if (state.ticketId !== ticketId || !canAttachToComposer() || state.pendingMedia || $('message').value.trim()) {
+    if (state.ticketId !== ticketId || !canAttachToComposer()) {
       showQuickRepliesError('The conversation or draft changed. Select the PDF again.'); return;
     }
     if (attachComposerFile(file)) {
-      $('message').value = reply.body || ''; updateComposerCount(); resizeComposer();
+      const draft = state.pendingMediaItems?.at(-1);
+      if (!state.pendingMediaItems || (state.pendingMediaItems.length === 1 && !$('message').value.trim())) $('message').value = reply.body || '';
+      else if (draft && reply.body) draft.caption = reply.body;
+      updateComposerCount(); resizeComposer();
       closeDialog('quickRepliesModal', false); focusMessageComposer();
     }
   } catch (error) {
@@ -525,7 +535,7 @@ async function saveQuickReply(event) {
     return;
   }
   const editing = state.quickReplyEditing;
-  if (state.quickReplyKind === 'pdf' && !file && !current?.attachment_filename) { showQuickRepliesError('Choose a PDF file.'); return; }
+  if (['pdf', 'image'].includes(state.quickReplyKind) && !file && !current?.attachment_filename) { showQuickRepliesError('Choose a ' + (state.quickReplyKind === 'image' ? 'JPEG/PNG image.' : 'PDF file.')); return; }
   if (isLocation && !$('quickReplyTitle').value.trim()) { showQuickRepliesError('Give this saved location a name.'); $('quickReplyTitle').focus(); return; }
   const audience = editing === 'new' && canAssignQuickReplies() ? $('quickReplyAudience').value : 'me';
   const recipients = audience === 'selected' ? Array.from($('quickReplyRecipients').querySelectorAll('input:checked'), input => Number(input.value)) : [];
@@ -549,7 +559,7 @@ async function saveQuickReply(event) {
       payload = new FormData(); payload.append('file', file, file.name);
       if (audience !== 'me') payload.append('assignment', JSON.stringify(fields));
       else { payload.append('title', fields.title); payload.append('body', body); }
-      path += '/pdf';
+      path += state.quickReplyKind === 'image' ? '/image' : '/pdf';
     }
     const result = await api(path, {method: editing === 'new' ? 'POST' : 'PUT', body: payload});
     if (!state.authenticated || request !== state.quickRepliesRequest) return;
@@ -1936,6 +1946,7 @@ function forwardChoiceRow({kind, id, name, phone, subtitle, badgeLabel = null}) 
   badge.textContent = badgeLabel || (kind === 'contact' ? 'Contact' : 'Conversation');
   button.append(copy, badge);
   button.onclick = () => {
+    if (state.forwardBusy) return;
     state.forwardSelection = {key, kind, id, name, phone};
     renderForwardChoices($('forwardSearch').value.trim());
     $('confirmForwardBtn').disabled = false;
@@ -1991,13 +2002,43 @@ function showForwardError(message) {
   element.style.display = message ? 'block' : 'none';
 }
 
+function updateMessageSelection() {
+  const count = state.selectedMessages.size;
+  $('messageSelectionBar').classList.toggle('hidden', !state.selectingMessages);
+  $('conversation').classList.toggle('selecting-messages', state.selectingMessages);
+  text($('messageSelectionCount'), count + ' selected');
+  $('forwardSelectedBtn').disabled = !count || state.forwardBusy;
+  for (const box of $('conversation').querySelectorAll('.message-select')) {
+    box.checked = state.selectedMessages.has(box.dataset.messageId);
+  }
+}
+
+function clearMessageSelection() {
+  state.selectedMessages.clear(); state.selectingMessages = false; updateMessageSelection();
+}
+
+function selectChatMessage(message, checked = true) {
+  if (state.forwardBusy || state.busy) return;
+  if (checked && state.selectedMessages.size >= 20 && !state.selectedMessages.has(String(message.id))) {
+    showError('Select up to 20 messages at a time.'); updateMessageSelection(); return;
+  }
+  state.selectingMessages = true;
+  if (checked) state.selectedMessages.set(String(message.id), message);
+  else state.selectedMessages.delete(String(message.id));
+  updateMessageSelection();
+}
+
 async function openForwardModal(message) {
-  if (!message || !message.id || state.forwardBusy) return;
-  state.forwardTarget = {ticketId: Number(state.ticketId), messageId: Number(message.id), preview: messagePreview(message)};
+  const messages = Array.isArray(message) ? message : [message];
+  if (!messages.length || messages.some(item => !item?.id) || state.forwardBusy) return;
+  state.forwardTarget = messages.sort((a, b) => String(messageOccurredAt(a) || '').localeCompare(String(messageOccurredAt(b) || '')) || Number(a.id) - Number(b.id)).map(item => ({
+    ticketId: Number(item.ticket_id || state.ticketId), messageId: Number(item.id),
+    preview: messagePreview(item), clientId: crypto.randomUUID()
+  }));
   state.forwardSelection = null;
   state.forwardContacts = [];
   state.forwardConversations = [];
-  text($('forwardSubtitle'), 'Forward: ' + state.forwardTarget.preview);
+  text($('forwardSubtitle'), messages.length === 1 ? 'Forward: ' + state.forwardTarget[0].preview : 'Forward ' + messages.length + ' selected messages in conversation order.');
   showForwardError('');
   $('forwardSearch').value = '';
   $('forwardContactsList').replaceChildren(emptyMarkup('Loading contacts', 'Loading saved and Google contacts…', 'users').outer);
@@ -2027,26 +2068,37 @@ async function confirmForward() {
   state.forwardBusy = true;
   setButtonBusy($('confirmForwardBtn'), true, 'Forwarding…');
   showForwardError('');
+  const destination = {...state.forwardSelection};
   try {
-    if (state.forwardSelection.kind === 'conversation') {
-      await api('/api/support/tickets/' + state.forwardTarget.ticketId + '/messages/' + state.forwardTarget.messageId + '/forward', {
-        method:'POST', body: JSON.stringify({destination_ticket_id: Number(state.forwardSelection.id)})
-      });
-    } else {
-      await api('/api/support/tickets/' + state.forwardTarget.ticketId + '/messages/' + state.forwardTarget.messageId + '/forward-contact', {
-        method:'POST', body: JSON.stringify({phone_number: state.forwardSelection.phone, customer_name: state.forwardSelection.name || null})
-      });
+    const total = state.forwardTarget.length;
+    while (state.forwardTarget.length) {
+      const item = state.forwardTarget[0];
+      setButtonBusy($('confirmForwardBtn'), true, 'Forwarding ' + (total - state.forwardTarget.length + 1) + ' of ' + total + '…');
+      const path = '/api/support/tickets/' + item.ticketId + '/messages/' + item.messageId;
+      const result = destination.kind === 'conversation'
+        ? await api(path + '/forward', {method: 'POST', body: JSON.stringify({destination_ticket_id: Number(destination.id), client_message_id: item.clientId})})
+        : await api(path + '/forward-contact', {method: 'POST', body: JSON.stringify({phone_number: destination.phone, customer_name: destination.name || null, client_message_id: item.clientId})});
+      if (!result.message?.id) throw new Error('Could not confirm forwarding. Try again to check the same attempt.');
+      if (result.destination) { destination.kind = 'conversation'; destination.id = result.destination.id; state.forwardSelection = {...destination}; }
+      state.forwardTarget.shift();
+      state.selectedMessages.delete(String(item.messageId));
+      updateMessageSelection();
+      if (!['SENT', 'DELIVERED', 'READ', 'PLAYED'].includes(result.message.send_status)) {
+        throw new Error('Forwarding paused. Check the destination conversation for delivery status before continuing with the remaining messages.');
+      }
     }
     closeDialog('forwardModal');
     state.forwardTarget = null;
     state.forwardSelection = null;
-    notify('Message forwarded.');
+    clearMessageSelection();
+    notify('Selected messages forwarded.');
     refreshAllQueueCounts().catch(() => {});
   } catch (error) {
     showForwardError(error.message);
   } finally {
     state.forwardBusy = false;
     setButtonBusy($('confirmForwardBtn'), false);
+    $('confirmForwardBtn').disabled = !state.forwardTarget?.length || !state.forwardSelection;
   }
 }
 
@@ -2236,14 +2288,14 @@ $('cancelQuickReplyBtn').addEventListener('click', showQuickReplyList);
 $('quickReplyForm').addEventListener('submit', saveQuickReply);
 $('quickRepliesSearch').addEventListener('input', renderQuickReplies);
 $('quickReplyAudience').addEventListener('change', updateQuickReplyAudience);
-for (const [index, [kind, suffix]] of Object.entries({text: 'Text', pdf: 'Pdf', location: 'Location'}).entries()) {
+for (const [index, [kind, suffix]] of Object.entries({text: 'Text', pdf: 'Pdf', location: 'Location', image: 'Image'}).entries()) {
   const button = $('quickReplyTab' + suffix);
   button.addEventListener('click', () => selectQuickReplyTab(kind));
   button.addEventListener('keydown', event => {
     if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
     event.preventDefault();
-    const target = event.key === 'Home' ? 0 : event.key === 'End' ? 2 : (index + (event.key === 'ArrowRight' ? 1 : 2)) % 3;
-    selectQuickReplyTab(['text', 'pdf', 'location'][target], true);
+    const target = event.key === 'Home' ? 0 : event.key === 'End' ? 3 : (index + (event.key === 'ArrowRight' ? 1 : 3)) % 4;
+    selectQuickReplyTab(['text', 'pdf', 'location', 'image'][target], true);
   });
 }
 $('quickReplyBody').addEventListener('input', updateQuickReplyCount);
@@ -2493,3 +2545,6 @@ setInterval(() => {
   if (!state.authenticated || state.aiSettingsBusy || document.hidden) return;
   loadAiSettings().catch(error => renderAiSettingsUnavailable(error.message));
 }, Math.max(30000, __POLL_MS__));
+
+$('cancelMessageSelectionBtn').addEventListener('click', clearMessageSelection);
+$('forwardSelectedBtn').addEventListener('click', () => openForwardModal([...state.selectedMessages.values()]));

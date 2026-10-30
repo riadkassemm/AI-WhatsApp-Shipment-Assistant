@@ -289,6 +289,11 @@ __SUPPORT_STYLE__
           <button class="icon-btn" id="conversationSearchNext" type="button" aria-label="Next match" data-tooltip="Next match"><svg class="icon icon-sm"><use href="#icon-chevron-right"></use></svg></button>
           <button class="icon-btn" id="conversationSearchClose" type="button" aria-label="Close conversation search"><svg class="icon icon-sm"><use href="#icon-x"></use></svg></button>
         </div>
+        <div id="messageSelectionBar" class="message-selection-bar hidden" role="region" aria-label="Selected messages">
+          <span id="messageSelectionCount" aria-live="polite">0 selected</span>
+          <button id="forwardSelectedBtn" type="button" class="btn primary" disabled>Forward selected</button>
+          <button id="cancelMessageSelectionBtn" type="button" class="btn">Cancel selection</button>
+        </div>
         <div class="conversation" id="conversation" role="log" aria-label="Conversation timeline" tabindex="0">
           <div class="conversation-empty"><div class="empty-state-inner"><div class="empty-icon"><svg class="icon icon-lg" aria-hidden="true"><use href="#icon-message"></use></svg></div><h3>Open a customer conversation</h3><p>Ticket conversation will appear here.</p></div></div>
         </div>
@@ -320,7 +325,7 @@ __SUPPORT_STYLE__
           </div>
           <div class="composer-toolbar">
             <div class="composer-tools">
-              <input id="imageInput" type="file" accept="image/jpeg,image/png,image/webp,application/pdf,video/mp4,video/3gpp" class="hidden" />
+              <input id="imageInput" type="file" multiple accept="image/jpeg,image/png,image/webp,application/pdf,video/mp4,video/3gpp,audio/mpeg,audio/mp4,audio/aac,audio/amr,audio/ogg" class="hidden" />
               <button class="icon-btn" id="imageBtn" type="button" disabled aria-label="Attach an image, video, sticker, or PDF" data-tooltip="Attach image, video, sticker, or PDF" data-tooltip-placement="top">
                 <svg class="icon" aria-hidden="true"><use href="#icon-paperclip"></use></svg>
               </button>
@@ -472,6 +477,7 @@ __SUPPORT_STYLE__
           <button id="quickReplyTabText" class="btn active" type="button" role="tab" aria-selected="true" aria-controls="quickRepliesPanel">Text</button>
           <button id="quickReplyTabPdf" class="btn" type="button" role="tab" aria-selected="false" aria-controls="quickRepliesPanel" tabindex="-1">PDF</button>
           <button id="quickReplyTabLocation" class="btn" type="button" role="tab" aria-selected="false" aria-controls="quickRepliesPanel" tabindex="-1">Locations</button>
+          <button id="quickReplyTabImage" class="btn" type="button" role="tab" aria-selected="false" aria-controls="quickRepliesPanel" tabindex="-1">Images</button>
         </div>
         <div id="quickRepliesPanel" role="tabpanel" aria-labelledby="quickReplyTabText">
         <div class="quick-replies-toolbar">
@@ -498,7 +504,7 @@ __SUPPORT_STYLE__
           <div class="field-hint message-preference-hint"><span id="quickReplyBodyHint">Copied exactly as written.</span><span id="quickReplyBodyCount">0 / 4096</span></div>
         </div>
         <div class="field" id="quickReplyPdfField">
-          <label for="quickReplyPdf">PDF file</label>
+          <label for="quickReplyPdf" id="quickReplyFileLabel">PDF file</label>
           <input id="quickReplyPdf" type="file" accept="application/pdf,.pdf" />
           <div class="field-hint" id="quickReplyPdfHint">Save a PDF to attach it to future replies. A caption is optional.</div>
         </div>
