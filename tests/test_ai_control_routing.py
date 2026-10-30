@@ -952,7 +952,7 @@ def test_ticket_detail_exposes_recoverable_media_url_from_durable_provider_refer
         async def list_messages(_ticket_id, *, limit=150, user_id=None):
             return [dict(message)]
 
-        async def list_events(_ticket_id, *, limit=150):
+        async def list_events(_ticket_id, *, limit=150, include_private_activity=True):
             return []
 
         monkeypatch.setattr(support_service_module.support_repository, "get_ticket", get_ticket)
@@ -1025,7 +1025,7 @@ def test_latency_defaults_reduce_deliberate_wait_without_lowering_ai_reasoning()
 
     assert settings.whatsapp_message_burst_debounce_seconds <= 0.65
     assert settings.whatsapp_message_burst_max_wait_seconds <= 2.0
-    assert settings.support_queue_poll_seconds <= 2
+    assert settings.support_queue_poll_seconds == 30  # SSE drives updates; HTTP is a safety net.
     assert settings.openai_reasoning_effort == "medium"
     assert settings.max_conversation_messages >= 30
 

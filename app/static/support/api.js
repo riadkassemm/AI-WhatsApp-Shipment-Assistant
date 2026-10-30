@@ -1,12 +1,53 @@
 async function api(path, options = {}) {
+  const get = !options.method || options.method === 'GET';
+  // Entire URL includes filters/pagination; identity/role/session epoch isolate caches.
+  const key = JSON.stringify([dashboardRequestEpoch, state.agent?.id, state.agent?.role, path, options.headers || {}]);
+  if (get && dashboardRequests.has(key)) return dashboardRequests.get(key);
+  const epoch = dashboardRequestEpoch;
+  const task = performApiRequest(path, options, epoch).then(data => {
+    if (get && epoch !== dashboardRequestEpoch) throw new DOMException('Stale staff session', 'AbortError');
+    if (!get) { dashboardRequests.clear(); invalidateQueueCounts(); }
+    return data;
+  });
+  if (get) dashboardRequests.set(key, task);
+  try { return await task; }
+  finally { if (dashboardRequests.get(key) === task) dashboardRequests.delete(key); }
+}
+const dashboardRequests = new Map();
+const dashboardHttpCounts = {queue:0, conversation:0, sidebar:0};
+function supportRequestDiagnostics() { return {...dashboardHttpCounts}; }
+let dashboardRequestEpoch = 0;
+let queueCountsRevision = 0;
+let queueCountsCache = null;
+let queueCountsFlight = null;
+function invalidateQueueCounts() { queueCountsRevision++; queueCountsCache = null; }
+function resetDashboardRequests() {
+  dashboardRequestEpoch++; dashboardRequests.clear(); invalidateQueueCounts(); queueCountsFlight = null;
+}
+async function performApiRequest(path, options = {}, epoch = dashboardRequestEpoch) {
   const headers = {...(options.headers || {})};
   if (options.body && !(options.body instanceof FormData)) headers['Content-Type'] = 'application/json';
   if (options.method && options.method !== 'GET') headers['X-CSRF-Token'] = csrf();
-  const response = await fetch(path, {credentials: 'same-origin', ...options, cache:'no-store', headers});
+  if ((!options.method || options.method === 'GET')) {
+    if (path.startsWith('/api/support/queue-counts')) dashboardHttpCounts.sidebar++;
+    else if (/^\/api\/support\/(tickets|chats)\?/.test(path)) dashboardHttpCounts.queue++;
+    else if (/^\/api\/support\/(tickets|chats)\/\d+(?:\?|$)/.test(path)) dashboardHttpCounts.conversation++;
+  }
+  let response;
+  try {
+    response = await fetch(path, {credentials: 'same-origin', ...options, cache:'no-store', headers});
+  } catch (error) {
+    // Marks a lost connection so background refreshes never mistake a code
+    // error for a temporary outage.
+    if (error && typeof error === 'object' && error.name !== 'AbortError') error.network = true;
+    throw error;
+  }
+  if (options.signal?.aborted || epoch !== dashboardRequestEpoch) throw new DOMException('Stale staff session', 'AbortError');
   const serverVersion = response.headers && typeof response.headers.get === 'function' ? response.headers.get('X-Support-UI-Version') : null;
   if (serverVersion && serverVersion !== SUPPORT_UI_VERSION) noticeDashboardUpdate(serverVersion);
   let data = {};
   try { data = await response.json(); } catch (_) {}
+  if (options.signal?.aborted || epoch !== dashboardRequestEpoch) throw new DOMException('Stale staff session', 'AbortError');
   if (response.status === 401 && path !== '/api/support/login') {
     if (!state.pageLeaving) showLogin();
     const error = new Error('Your staff session expired. Please sign in again.');
@@ -27,7 +68,7 @@ async function api(path, options = {}) {
 // After a deploy, reload as soon as nothing would be lost (no draft, upload,
 // recording, unsent message or open dialog). Otherwise offer a Reload button.
 function dashboardIsIdle() {
-  return !state.busy && !state.activeModal && !state.mediaRecorder && !state.pendingMedia && !state.editTarget &&
+  return !state.busy && !state.activeModal && !state.mediaRecorder && !state.voiceRecording && !state.pendingMedia && !state.editTarget &&
     !state.imageEditor && !state.localMessages.size && !String($('message').value || '').trim();
 }
 

@@ -61,6 +61,11 @@ check($('mediaDraft').children.length===2,'one preview for each queued file');cl
 drop([new File(['x'],'script.exe',{type:'application/x-msdownload'})]);check(!state.pendingMedia,'unsupported type rejected');
 check(!attachComposerFile(new File([],'empty.pdf',{type:'application/pdf'})),'empty file rejected');
 check(!attachComposerFile(new File([new Uint8Array(6*1024*1024)],'large.png',{type:'image/png'})),'size limit enforced before upload');
+for(const type of ['', 'application/octet-stream', 'audio/opus', 'audio/x-opus+ogg', 'audio/ogg']){
+  check(attachComposerFile(new File(['synthetic audio'],'note.opus',{type})),'Opus file stages a preview');
+  check(state.pendingMedia.kind==='audio'&&state.pendingMedia.file.name==='note.opus','Opus filename and audio preview retained');
+  check(state.pendingMedia.file.type==='audio/ogg','Opus uses the Ogg container MIME');clearMediaDraft();
+}
 const outside=new DragEvent('drop',{bubbles:true,cancelable:true,dataTransfer:transfer([pdf])});document.body.dispatchEvent(outside);check(outside.defaultPrevented&&!state.pendingMedia,'missed drop never leaves page');
 const dragText=new DataTransfer();dragText.setData('text/plain','hello');const plainDrop=new DragEvent('drop',{bubbles:true,cancelable:true,dataTransfer:dragText});zone.dispatchEvent(plainDrop);check(!plainDrop.defaultPrevented,'text drag preserved');
 const saved={id:4,title:'Shipping guide',body:'Please see our shipping guide.',attachment_filename:pdf.name,attachment_size:50};
@@ -84,7 +89,9 @@ $('sessionLoading').classList.add('hidden');
 document.body.dataset.attachmentsTest='passed';
 })().catch(error=>{document.body.dataset.attachmentsTest='FAILED: '+error.message});
 '''
-    script=setup+'function createIcon('+state_helpers+_ASSETS['media.js']+'const QUICK_REPLIES_LIST_SUBTITLE = '+quick+assertions
+    rendering = _ASSETS['rendering.js']
+    player = rendering[rendering.index('function createVoiceNotePlayer('):rendering.index('function addMessage(')]
+    script=setup+'function createIcon('+state_helpers+player+_ASSETS['media.js']+'const QUICK_REPLIES_LIST_SUBTITLE = '+quick+assertions
     html=_configure(_TEMPLATE.replace('__SUPPORT_STYLE__','<style>'+_ASSETS['support.css']+'</style>').replace('__SUPPORT_THEME__','').replace('__SUPPORT_SCRIPTS__','<script>'+script+'</script>'))
     path=tmp_path/'attachments.html';path.write_text(html)
     command=[browser,'--headless','--no-sandbox','--disable-gpu','--disable-dev-shm-usage','--no-first-run','--disable-background-networking','--user-data-dir='+str(tmp_path/'profile'),'--window-size=1440,1000','--virtual-time-budget=2000','--dump-dom']

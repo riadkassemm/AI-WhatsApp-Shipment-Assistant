@@ -103,6 +103,7 @@ const state = {authenticated: true, query: '', ticketId: 42, ticketPrefetch: new
   previousTicketHistory: [{ticket: {id: 1}}], previousHistoryExpanded: true, previousHistoryLoaded: true};
 const calls = [];
 const refreshAllQueueCounts = async () => calls.push('counts');
+const requestDashboardRefresh = scope => {if(scope==='counts')refreshAllQueueCounts();else if(scope==='queue')loadQueue({silent:true});else openTicket(state.ticketId,{silent:true,refreshHistory:scope==='history'});};
 const loadQueue = async () => calls.push('queue');
 const openTicket = async (...args) => calls.push(args);
 """ + functions + r"""

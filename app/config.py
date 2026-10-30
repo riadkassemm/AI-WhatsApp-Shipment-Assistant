@@ -102,7 +102,7 @@ class Settings(BaseSettings):
 
     # Support dashboard/API.
     support_ui_enabled: bool = True
-    support_queue_poll_seconds: int = 2
+    support_queue_poll_seconds: int = 30
     support_session_ttl_seconds: int = 8 * 60 * 60
     # Unclaimed tickets answered in the WhatsApp app resolve themselves after
     # this many minutes without a message in either direction (0 disables).

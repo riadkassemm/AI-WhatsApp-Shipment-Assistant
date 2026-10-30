@@ -1215,3 +1215,5 @@ and handling history without changing read status or ownership. See
 [responsibility timing and investigation](docs/support-platform.md#responsibility-timing-and-read-only-investigation)
 for period definitions, audit coverage, permissions and the required additive
 `20261025_statistics_investigation.sql` migration.
+
+See [bridge persistence and dashboard refresh](docs/bridge-dashboard-performance.md) for the development performance changes, local benchmarks, and approval-required storage migration/rollback procedure.

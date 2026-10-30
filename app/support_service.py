@@ -10,6 +10,7 @@ from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from typing import Any
 
+from app.support_idempotency import send_fingerprint, verify_send_fingerprint
 from app.config import settings
 from app.conversation_store import Conversation, conversation_store
 from app.customer_directory import ContactConflictError, ContactNotFoundError, customer_directory, normalize_phone
@@ -489,9 +490,17 @@ def _serialize_support_messages(
             continue
         reply_id = str(item.get("reply_to_whatsapp_message_id") or "").strip()
         target = message_by_whatsapp_id.get(reply_id)
+        if not reply_id:
+            continue
+        # Keep off-page references navigable without exposing hidden message text.
         if target is None:
+            item["reply_to"] = {
+                "source_message_id": item.get("id"), "source_ticket_id": ticket_id,
+                "body": "Earlier message",
+            }
             continue
         item["reply_to"] = {
+            "source_message_id": item.get("id"), "source_ticket_id": ticket_id,
             "id": target.get("id"),
             "sender_type": target.get("sender_type"),
             "sender_name": target.get("sender_name"),
@@ -564,6 +573,7 @@ class SupportService:
         self,
         event: dict[str, Any],
         agent: SupportAgent,
+        *, notification_since: float | None = None,
     ) -> bool:
         """Authorize one realtime event before it reaches a staff browser."""
         if event.get("type") == "message_deleted_for_me" and str(event.get("user_id") or "") != agent.id:
@@ -597,6 +607,42 @@ class SupportService:
                 or message.get("direction") != "OUTBOUND"
             ):
                 return False
+        if event.get("type") == "dashboard_read" and str(event.get("staff_id") or "") != agent.id:
+            return False
+        if event.get("type") == "customer_message":
+            event["chat_notification"] = False
+            event["conversation_origin"] = ticket.get("conversation_origin")
+            event["customer_name"] = ticket.get("customer_name")
+            event["customer_phone"] = ticket.get("whatsapp_phone")
+            event["current_assignee_id"] = ticket.get("current_assignee_id")
+            try:
+                message = await support_repository.get_message(int(event.get("message_id") or 0))
+            except (TypeError, ValueError):
+                message = None
+            if message and int(message.get("ticket_id") or 0) == ticket_id:
+                # Old linked-device backlog is synchronized silently. created_at alone
+                # is insufficient: a historical message can be inserted just now.
+                timestamp = message.get("whatsapp_timestamp") or message.get("created_at")
+                try:
+                    received = (timestamp.replace(tzinfo=timezone.utc).timestamp()
+                                if isinstance(timestamp, datetime) else float(timestamp))
+                    if received > 10**12:
+                        received /= 1000
+                    recent = 0 <= datetime.now(timezone.utc).timestamp() - received <= 120
+                    if notification_since is not None:
+                        created = message.get("created_at")
+                        recent = bool(recent and received >= int(notification_since)
+                                      and isinstance(created, datetime)
+                                      and created.replace(tzinfo=timezone.utc).timestamp() >= notification_since)
+                except (TypeError, ValueError, OverflowError):
+                    recent = False
+                event["chat_notification"] = bool(
+                    ticket.get("conversation_origin") == "STAFF"
+                    and str(ticket.get("current_assignee_id") or "") == agent.id
+                    and ticket.get("active_key") and message.get("direction") == "INBOUND"
+                    and not message.get("deleted_for_everyone_at") and recent
+                    and not await support_repository.message_hidden_for_user(int(message["id"]), agent.id)
+                )
         if event.get("type") in {
             "outbound_message", "message_media_ready", "message_updated",
             "message_deleted_for_everyone", "message_reaction", "message_status", "incoming_read",
@@ -819,7 +865,12 @@ class SupportService:
         location_address: str | None = None,
         current_language: str | None = None,
         communication_style: str | None = None,
+        require_active: bool = True,
+        expected_phone: str | None = None,
+        expected_line_id: str | None = None,
     ) -> tuple[dict[str, Any], bool]:
+        # require_active=False only records a delayed message in the closed
+        # conversation it belongs to; it never reopens or re-routes that ticket.
         message, created = await support_repository.add_ticket_message(
             ticket_id=int(ticket["id"]),
             sender_type="CUSTOMER",
@@ -834,12 +885,14 @@ class SupportService:
             location_name=sanitize_support_text(location_name).strip()[:255] or None,
             location_address=sanitize_support_text(location_address).strip()[:1000] or None,
             send_status="RECEIVED",
-            require_active=True,
+            require_active=require_active,
             current_language=current_language,
             communication_style=communication_style,
+            expected_phone=expected_phone,
+            expected_line_id=expected_line_id,
         )
 
-        if created and ticket.get("status") == "WAITING_CUSTOMER":
+        if created and require_active and ticket.get("status") == "WAITING_CUSTOMER":
             try:
                 await support_repository.mark_customer_replied(int(ticket["id"]))
             except Exception:
@@ -857,6 +910,26 @@ class SupportService:
                 message=_serialize_support_messages(int(ticket["id"]), [message])[0],
             )
         return message, created
+
+    async def ticket_for_delayed_inbound(
+        self, *, phone_number: str, business_phone_number_id: str | None, sent_at: datetime,
+    ) -> tuple[dict[str, Any] | None, str]:
+        """The single conversation, on this business line, open when a message was sent.
+
+        Being open when the message arrived, or now, is not evidence: a newer
+        ticket must never receive an older message. Without exactly one match
+        the caller keeps the existing behaviour for stale messages.
+        """
+        peer = normalize_phone(phone_number)
+        line_id = str(business_phone_number_id or "").strip()
+        if not peer or not line_id:
+            return None, "no_line_identity"
+        tickets = await support_repository.find_tickets_open_at_whatsapp_timestamp(peer, line_id, sent_at)
+        if not tickets:
+            return None, "no_ticket_at_send_time"
+        if len(tickets) > 1:
+            return None, "ambiguous_ticket_at_send_time"
+        return tickets[0], "matched"
 
     async def sync_linked_device_outbound(self, incoming: IncomingWhatsAppMessage) -> bool:
         """Mirror a message sent in the WhatsApp app without entering the AI flow.
@@ -1978,6 +2051,8 @@ class SupportService:
                 can_view_all=agent.is_supervisor,
                 page=1,
                 page_size=1,
+                include_filter_options=False,
+                count_only=True,
             )
             for view in views
         ), return_exceptions=True)
@@ -2085,6 +2160,18 @@ class SupportService:
             "reopened": reopened,
         }
 
+    async def mark_dashboard_read(self, ticket_id: int, message_id: int, agent: SupportAgent) -> dict:
+        ticket = await support_repository.get_ticket(ticket_id)
+        if not ticket:
+            raise SupportNotFoundError("Ticket not found.")
+        if not await _can_view_ticket(ticket, agent):
+            raise SupportForbiddenError("You cannot view this conversation.")
+        result = await support_repository.mark_dashboard_read(ticket_id, agent.id, message_id)
+        if result is None:
+            raise SupportValidationError("The read boundary must be a visible incoming message in this conversation.")
+        await publish_support_event("dashboard_read", ticket_id=ticket_id, staff_id=agent.id)
+        return result
+
     async def list_tickets(
         self,
         *,
@@ -2092,6 +2179,10 @@ class SupportService:
         agent: SupportAgent,
         page: int,
         page_size: int,
+        staff_id: str | None = None,
+        support_number: str | None = None,
+        chat_status: str = "all",
+        query: str = "",
     ) -> dict[str, Any]:
         if view == "active" and not agent.is_supervisor:
             # Active lists every live ticket for monitoring; agents work from their own queues.
@@ -2102,6 +2193,7 @@ class SupportService:
             can_view_all=agent.is_supervisor,
             page=page,
             page_size=page_size,
+            staff_id=staff_id, support_number=support_number, chat_status=chat_status, query=query,
         )
         result["items"] = [_safe_ticket_row(row) for row in result["items"]]
         return result
@@ -2264,6 +2356,61 @@ class SupportService:
             "messages_has_more": len(page) > limit,
         }
 
+    async def reply_destination(
+        self, ticket_id: int, source_message_id: int, agent: SupportAgent,
+    ) -> dict[str, Any]:
+        """Resolve a quote within the authorized conversation/history context.
+
+        No read, assignment, or activity state is changed by navigation.
+        """
+        current = await support_repository.get_ticket(ticket_id)
+        if not current:
+            raise SupportNotFoundError("Ticket not found.")
+        if not await _can_view_ticket(current, agent):
+            raise SupportForbiddenError("You cannot view this conversation.")
+        source = await support_repository.get_message(source_message_id)
+        if not source:
+            raise SupportNotFoundError("Original message is unavailable.")
+        source_ticket = await support_repository.get_ticket(int(source["ticket_id"]))
+        if not source_ticket or (
+            int(source_ticket["id"]) != ticket_id
+            and not await _historical_ticket_accessible(source_ticket, current, agent)
+        ):
+            raise SupportNotFoundError("Original message is unavailable.")
+        visible_source = await support_repository.list_messages_around(
+            int(source_ticket["id"]), source_message_id, before=0, after=0, user_id=agent.id,
+        )
+        reference = str(source.get("reply_to_whatsapp_message_id") or "").strip()
+        if not visible_source or source.get("deleted_for_everyone_at") or not reference:
+            raise SupportNotFoundError("Original message is unavailable.")
+        target = await support_repository.get_message_by_whatsapp_id(reference)
+        target_ticket = await support_repository.get_ticket(int(target["ticket_id"])) if target else None
+        # A provider reference alone is not authorization. Replies cannot expose
+        # another customer/line, active private ticket, or locally hidden message.
+        if not target_ticket or not _same_customer_phone(target_ticket, source_ticket) or (
+            str(target_ticket.get("business_phone_number_id") or "")
+            != str(source_ticket.get("business_phone_number_id") or "")
+        ) or (
+            int(target_ticket["id"]) != ticket_id
+            and not await _historical_ticket_accessible(target_ticket, current, agent)
+        ):
+            raise SupportNotFoundError("Original message is unavailable.")
+        target_id = int(target["id"])
+        target_ticket_id = int(target_ticket["id"])
+        if not await support_repository.list_messages_around(
+            target_ticket_id, target_id, before=0, after=0, user_id=agent.id,
+        ):
+            raise SupportNotFoundError("Original message is unavailable.")
+        page = await support_repository.list_messages(target_ticket_id, limit=151, user_id=agent.id)
+        return {
+            "message_id": target_id,
+            "ticket": _history_ticket_summary(target_ticket),
+            "messages": _serialize_support_messages(
+                target_ticket_id, page[-150:], media_context_ticket_id=ticket_id,
+            ),
+            "messages_has_more": len(page) > 150,
+        }
+
     async def messages_page(
         self,
         ticket_id: int,
@@ -2358,7 +2505,10 @@ class SupportService:
             await _gather_or_cancel(
                 load_identity_and_shipment(),
                 load_messages(),
-                support_repository.list_events(ticket_id, limit=150),
+                # Read/view audits belong in manager investigation, not the
+                # operational timeline (including for managers). Filter before
+                # LIMIT so they cannot crowd out assignment/resolution events.
+                support_repository.list_events(ticket_id, limit=150, include_private_activity=False),
                 load_history(),
             )
         )
@@ -2372,7 +2522,8 @@ class SupportService:
             "messages": safe_messages,
             "messages_has_more": messages_has_more,
             **history,
-            "events": [_safe_context_value(_normalize_row(row)) for row in events],
+            "events": [_safe_context_value(_normalize_row(row)) for row in events
+                       if row.get("event_type") not in {"CONVERSATION_VIEWED", "INCOMING_MARKED_READ"}],
             "customer_identity": {
                 "source": identity.source if identity is not None else "guest",
                 "name": identity.name if identity is not None else ticket.get("customer_name"),
@@ -3023,8 +3174,14 @@ class SupportService:
 
         ticket = await self._prepare_agent_outbound_ticket(ticket_id, agent)
 
+        fingerprint = send_fingerprint(
+            "text", body=body, reply_id=reply_to_message_id,
+            forwarded=is_forwarded, source_ticket=forwarded_from_ticket_id,
+            source_message=forwarded_from_message_id,
+        )
         existing = await support_repository.get_message_by_client_id(client_message_id, ticket_id=ticket_id, sender_type="AGENT", sender_id=agent.id)
         if existing:
+            verify_send_fingerprint(existing, fingerprint)
             return _serialize_support_messages(ticket_id, [existing])[0] or {}
 
         _reply_local_id, reply_whatsapp_id = await self._resolve_reply_target(
@@ -3039,6 +3196,7 @@ class SupportService:
             direction="OUTBOUND",
             body=body,
             client_message_id=client_message_id,
+            request_fingerprint=fingerprint,
             message_type="text",
             reply_to_whatsapp_message_id=reply_whatsapp_id,
             send_status="PENDING",
@@ -3220,8 +3378,15 @@ class SupportService:
 
         ticket = await self._prepare_agent_outbound_ticket(ticket_id, agent)
 
+        fingerprint = send_fingerprint(
+            "location", latitude=float(latitude), longitude=float(longitude),
+            name=safe_name, address=safe_address, reply_id=reply_to_message_id,
+            forwarded=is_forwarded, source_ticket=forwarded_from_ticket_id,
+            source_message=forwarded_from_message_id,
+        )
         existing = await support_repository.get_message_by_client_id(client_message_id, ticket_id=ticket_id, sender_type="AGENT", sender_id=agent.id)
         if existing:
+            verify_send_fingerprint(existing, fingerprint)
             return _serialize_support_messages(ticket_id, [existing])[0] or {}
 
         _reply_local_id, reply_whatsapp_id = await self._resolve_reply_target(
@@ -3236,6 +3401,7 @@ class SupportService:
             direction="OUTBOUND",
             body=body,
             client_message_id=client_message_id,
+            request_fingerprint=fingerprint,
             message_type="location",
             reply_to_whatsapp_message_id=reply_whatsapp_id,
             location_latitude=float(latitude),
@@ -3279,8 +3445,15 @@ class SupportService:
 
         ticket = await self._prepare_agent_outbound_ticket(ticket_id, agent)
 
+        fingerprint = send_fingerprint(
+            media_type, content_hash=hashlib.sha256(content).hexdigest(),
+            mime=str(content_type or "").lower(), filename=filename, caption=caption,
+            reply_id=reply_to_message_id, forwarded=is_forwarded,
+            source_ticket=forwarded_from_ticket_id, source_message=forwarded_from_message_id,
+        )
         existing = await support_repository.get_message_by_client_id(client_message_id, ticket_id=ticket_id, sender_type="AGENT", sender_id=agent.id)
         if existing:
+            verify_send_fingerprint(existing, fingerprint)
             return _serialize_support_messages(ticket_id, [existing])[0] or {}
 
         normalized_mime = normalize_mime_type(content_type)
@@ -3331,6 +3504,8 @@ class SupportService:
                     await support_media_store.prepare_voice_note(content, content_type or normalized_mime)
                 )
             except SupportMediaError as exc:
+                logger.warning("Staff voice preparation rejected: ticket_id=%s agent_id=%s mime=%s bytes=%s",
+                               ticket_id, agent.id, normalized_mime, len(content))
                 raise SupportValidationError(str(exc)) from exc
             safe_caption = ""
             body = "Voice note" if send_as_voice else "Audio message"
@@ -3361,6 +3536,7 @@ class SupportService:
             direction="OUTBOUND",
             body=body,
             client_message_id=client_message_id,
+            request_fingerprint=fingerprint,
             message_type=media_type,
             reply_to_whatsapp_message_id=reply_whatsapp_id,
             send_status="PENDING",

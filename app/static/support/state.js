@@ -37,6 +37,9 @@ const state = {
   pageSize: 50,
   total: 0,
   queueItems: [],
+  queueFilters: {supportNumber: "", staffId: "", status: "all"},
+  dashboardReadBoundaries: new Map(),
+  chatNotificationIds: new Set(),
   queueLoadingMore: false,
   queueExhausted: false,
   queueMoreObserver: null,
@@ -127,10 +130,9 @@ const state = {
   replyTarget: null,
   mediaRecorder: null,
   mediaStream: null,
-  recordingChunks: [],
+  voiceRecording: null,
   recordingTimer: null,
   recordingStartedAt: 0,
-  discardRecording: false,
   transferBusy: false,
   transferTargets: [],
   activeModal: null,
@@ -142,6 +144,13 @@ const state = {
   notificationUnlocked: false,
   notificationPermissionRequested: false,
   supportEventSource: null,
+  // One reconnect lifecycle per page: at most one scheduled retry and one
+  // session check; a generation bump invalidates late results after sign-out.
+  supportEventsRetryTimer: null,
+  supportEventsAttempt: 0,
+  supportEventsGeneration: 0,
+  supportEventsProbe: null,
+  queueLoadedIdentity: null,
   mediaZoom: 1,
   mediaTranslateX: 0,
   mediaTranslateY: 0,
@@ -271,6 +280,19 @@ function messageOccurredAt(message) {
   return message?.created_at || null;
 }
 
+// Matches the server's AI freshness cutoff (WHATSAPP_MAX_INBOUND_AGE_SECONDS default).
+const LATE_ARRIVAL_NOTICE_MS = 15 * 60 * 1000;
+
+// A customer message received well after it was sent (for example after a
+// WhatsApp connection outage). It is still shown at its send time.
+function messageArrivedLate(message) {
+  if (message?.direction !== 'INBOUND' || !message.created_at) return false;
+  // Both through parseServerDate: a naive server time is UTC, not browser-local.
+  const sent = parseServerDate(messageOccurredAt(message) || '').getTime();
+  const received = parseServerDate(message.created_at).getTime();
+  return Number.isFinite(sent) && Number.isFinite(received) && received - sent >= LATE_ARRIVAL_NOTICE_MS;
+}
+
 function fmt(value) {
   if (!value) return '—';
   const date = parseServerDate(value);
@@ -355,11 +377,12 @@ function showError(message) {
 function markPageLeaving() {
   if (state.pageLeaving) return;
   state.pageLeaving = true;
+  state.sessionCheckController?.abort();
   state.queueRequest += 1;
   state.ticketRequest += 1;
 }
 
-function notify(message, type = 'success') {
+function notify(message, type = 'success', onOpen = null) {
   if (!message || state.pageLeaving) return;
   const toast = document.createElement('div');
   toast.className = 'toast ' + type;
@@ -368,6 +391,12 @@ function notify(message, type = 'success') {
   const copy = document.createElement('div');
   copy.className = 'toast-copy';
   copy.textContent = message;
+  if (onOpen) {
+    const button = document.createElement('button');
+    button.type = 'button'; button.className = 'toast-open'; button.textContent = message;
+    button.onclick = () => { toast.remove(); onOpen(); };
+    copy.replaceChildren(button);
+  }
   const close = document.createElement('button');
   close.type = 'button';
   close.className = 'icon-btn';

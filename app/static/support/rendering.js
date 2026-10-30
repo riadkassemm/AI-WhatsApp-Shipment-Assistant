@@ -38,7 +38,9 @@ function clearTicketWorkspace() {
   state.pendingConversationRender = null;
   state.composerEnabled = false;
   closeConversationSearch(false);
+  forgetBackgroundRead('conversation');
   state.queueItems = [];
+  state.queueLoadedIdentity = null;
   state.total = 0;
   $('queue').replaceChildren(emptyMarkup('No tickets loaded', 'Your selected queue will appear here after sign-in.', 'inbox').outer);
   text($('ticketTitle'), 'Select a ticket');
@@ -62,6 +64,12 @@ function clearTicketWorkspace() {
 }
 
 function showLogin() {
+  state.sessionCheckController?.abort();
+  stopDashboardRefresh();
+  state.dashboardReadBoundaries.clear();
+  state.chatNotificationIds.clear();
+  resetQueueFilters();
+
   $('sessionLoading').classList.add('hidden');
   if (state.imageEditor) { state.imageEditor.dispose(); state.imageEditor = null; }
   $('mediaViewerModal').classList.add('hidden');
@@ -74,6 +82,7 @@ function showLogin() {
   clearAgentStatistics();
   $('agentStatisticsBtn').classList.add('hidden');
   disconnectSupportEvents();
+  resetConnectionHealth();
   saveLinkedDeviceAddition(null);
   state.agent = null;
   state.staffItems = [];
@@ -81,7 +90,7 @@ function showLogin() {
   state.composerEnabled = false;
   state.queueRequest += 1;
   state.ticketRequest += 1;
-  if (state.mediaRecorder) cancelVoiceRecording();
+  if (state.mediaRecorder || state.voiceRecording) cancelVoiceRecording();
   clearMediaDraft();
   clearTicketWorkspace();$('dashboard').classList.add('hidden');
   state.page = 1;
@@ -135,6 +144,7 @@ function showDashboard() {
   configureStaffAccess();
   startSupportActivity();
   connectSupportEvents();
+  startDashboardRefresh();
 }
 
 async function restoreSupportWorkspace() {
@@ -177,14 +187,27 @@ async function login(event) {
 }
 
 async function bootstrap() {
+  if (state.pageLeaving) return;
+  if (state.bootstrapTask) return state.bootstrapTask;
+  const task = bootstrapSupportWorkspace();
+  state.bootstrapTask = task;
+  try { await task; }
+  finally { if (state.bootstrapTask === task) state.bootstrapTask = null; }
+}
+
+async function bootstrapSupportWorkspace() {
   syncThemeControls();
   text($('sessionLoadingStatus'), 'Checking your session…');
   $('sessionRetryBtn').classList.add('hidden');
   try {
-    state.agent = await api('/api/support/me');
+    const agent = await loadSupportSession();
+    if (state.pageLeaving) return;
+    state.agent = agent;
   } catch (error) {
-    if (state.pageLeaving || error.status === 401) return;
-    text($('sessionLoadingStatus'), 'Unable to check your session. Check your connection and try again.');
+    if (state.pageLeaving || error.status === 401 || error.name === 'AbortError') return;
+    text($('sessionLoadingStatus'), error.status === 403
+      ? 'Your account does not have access to this dashboard. Contact your administrator.'
+      : 'Unable to check your session. Check your connection and try again.');
     $('sessionRetryBtn').classList.remove('hidden');
     return;
   }
@@ -197,6 +220,60 @@ async function bootstrap() {
   } catch (error) {
     if (state.authenticated && !state.pageLeaving) showError(error.message);
   }
+}
+
+async function loadSupportSession() {
+  // Retry only this read-only session lookup. Never reuse a cached identity or
+  // apply these retries to login, message sends or other writes.
+  const controller = new AbortController();
+  state.sessionCheckController = controller;
+  const delays = [0, 1000, 2000];
+  try {
+    for (let attempt = 0; attempt < delays.length; attempt++) {
+      if (state.pageLeaving || controller.signal.aborted) throw new DOMException('Session check cancelled', 'AbortError');
+      if (delays[attempt]) await waitForSessionRetry(delays[attempt], controller.signal);
+      if (state.pageLeaving || controller.signal.aborted) throw new DOMException('Session check cancelled', 'AbortError');
+      const request = new AbortController();
+      const abort = () => request.abort();
+      controller.signal.addEventListener('abort', abort, {once: true});
+      let timedOut = false;
+      const timer = setTimeout(() => { timedOut = true; request.abort(); }, 10000);
+      try {
+        const agent = await api('/api/support/me', {signal: request.signal});
+        if (request.signal.aborted) throw new DOMException('Session request cancelled', 'AbortError');
+        if (state.pageLeaving || controller.signal.aborted) throw new DOMException('Session check cancelled', 'AbortError');
+        return agent;
+      } catch (error) {
+        if (state.pageLeaving || controller.signal.aborted) throw new DOMException('Session check cancelled', 'AbortError');
+        const transient = timedOut || (!error.status && error instanceof TypeError) ||
+          [408, 429, 500, 502, 503, 504].includes(error.status);
+        if (!transient || attempt === delays.length - 1) {
+          if (timedOut) throw new Error('Session check timed out.');
+          throw error;
+        }
+        text($('sessionLoadingStatus'), 'Connection interrupted. Retrying your session…');
+      } finally {
+        clearTimeout(timer);
+        controller.signal.removeEventListener('abort', abort);
+      }
+    }
+  } finally {
+    if (state.sessionCheckController === controller) state.sessionCheckController = null;
+  }
+}
+
+function waitForSessionRetry(delay, signal) {
+  return new Promise((resolve, reject) => {
+    let timer;
+    const finish = () => { clearTimeout(timer); signal.removeEventListener('abort', abort); resolve(); };
+    const abort = () => {
+      clearTimeout(timer); signal.removeEventListener('abort', abort);
+      reject(new DOMException('Session check cancelled', 'AbortError'));
+    };
+    if (signal.aborted) { abort(); return; }
+    signal.addEventListener('abort', abort, {once: true});
+    timer = setTimeout(finish, delay);
+  });
 }
 
 async function logout() {
@@ -224,21 +301,29 @@ function updateQueueCount(view, total) {
 }
 
 async function refreshAllQueueCounts() {
-  if (!state.authenticated) return;
-  if (state.queueCountsBusy) { state.queueCountsPending = true; return; }
-  state.queueCountsBusy = true;
-  try {
-    const data = await api('/api/support/queue-counts');
-    for (const [view, total] of Object.entries(data.counts || {})) updateQueueCount(view, total);
-  } catch (_) {
-    // Individual queue loading remains authoritative; count refresh is best-effort.
-  } finally {
-    state.queueCountsBusy = false;
-    if (state.queueCountsPending) {
-      state.queueCountsPending = false;
-      window.setTimeout(() => refreshAllQueueCounts(), 100);
+  if (!state.authenticated || document.hidden) return;
+  const context = JSON.stringify([dashboardRequestEpoch, state.agent?.id, state.agent?.role]);
+  if (queueCountsCache?.context === context && Date.now() - queueCountsCache.at < 3000) return;
+  if (queueCountsFlight?.context === context) return queueCountsFlight.task;
+  const revision = queueCountsRevision;
+  const task = (async () => {
+    try {
+      const data = await api('/api/support/queue-counts');
+      if (!state.authenticated || context !== JSON.stringify([dashboardRequestEpoch, state.agent?.id, state.agent?.role])) return;
+      for (const [view, total] of Object.entries(data.counts || {})) updateQueueCount(view, total);
+      if (revision === queueCountsRevision) queueCountsCache = {context, at: Date.now()};
+      noteBackgroundRead('counts');
+    } catch (error) {
+      // Queue rows remain authoritative; the scheduler retries.
+      if (state.authenticated && transientReadError(error)) noteBackgroundRead('counts', error);
     }
-  }
+    finally {
+      if (queueCountsFlight?.task === task) queueCountsFlight = null;
+      if (revision !== queueCountsRevision && state.authenticated) dashboardRefresh.request('counts');
+    }
+  })();
+  queueCountsFlight = {context, task};
+  return task;
 }
 
 function updateQueueSummary(visibleCount = null) {
@@ -246,7 +331,7 @@ function updateQueueSummary(visibleCount = null) {
   text($('queueTitle'), config.label);
   const total = Number(state.total || 0);
   const shown = Math.min(state.queueItems.length, total);
-  const searchCount = visibleCount === null ? state.queueItems.length : visibleCount;
+  const searchCount = total;
   if (state.query) {
     text($('queueTotal'), searchCount + ' match' + (searchCount === 1 ? '' : 'es'));
   } else {
@@ -424,6 +509,12 @@ function createTicketRow(ticket) {
   name.className = 'ticket-customer';
   name.dir = 'auto';
   name.textContent = customer;
+  if (['chats', 'mine'].includes(state.view) && Number(ticket.dashboard_unread_count) > 0) {
+    const dot = document.createElement('span');
+    dot.className = 'unread-dot'; dot.setAttribute('role', 'img');
+    dot.setAttribute('aria-label', 'Unread messages'); dot.title = 'Unread messages';
+    name.append(dot);
+  }
   const reference = document.createElement('div');
   reference.className = 'ticket-reference';
   reference.textContent = isStaffChat(ticket) ? ('Chat · ' + (ticket.whatsapp_phone || ticket.id)) : (ticket.ticket_reference || ('Ticket #' + ticket.id));
@@ -449,10 +540,16 @@ function createTicketRow(ticket) {
   summary.dir = 'auto';
   summary.textContent = isStaffChat(ticket) ? ('WhatsApp conversation' + (ticket.current_assignee_name ? ' · ' + ticket.current_assignee_name : '')) : (ticket.ai_summary || ticket.reason || ticket.requested_action || 'No summary available.');
 
+  if (ticket.search_message_id) {
+    summary.textContent = ticket.search_preview || 'Matching message';
+    highlightSearchTerm(summary, state.query);
+  }
+
   const meta = document.createElement('div');
   meta.className = 'ticket-row-meta';
   meta.append(conversationStatusBadge(ticket));
-  if (ticket.unread_count) meta.append(createMetaChip(ticket.unread_count + ' unread', 'message'));
+  const unread = ['chats', 'mine'].includes(state.view) ? ticket.dashboard_unread_count : ticket.unread_count;
+  if (unread) meta.append(createMetaChip(unread + ' unread', 'message'));
   if (ticket.awaiting_staff_reply) meta.append(createMetaChip('Awaiting staff reply', 'clock'));
   meta.append(createMetaChip(createSupportNumberLabel(ticket, {focusable: false}), 'message', 'channel-pill'));
   if (ticket.current_assignee_name) meta.append(createMetaChip(ticket.current_assignee_name, 'user'));
@@ -464,93 +561,17 @@ function createTicketRow(ticket) {
   if (ticket.tracking_reference) meta.append(createMetaChip(ticket.tracking_reference, 'truck'));
 
   row.append(head, summary, meta);
-  row.onclick = () => openTicket(ticket.id, {conversationOrigin: ticket.conversation_origin});
-  // Start loading as soon as the pointer rests on (or presses) a row, so the
-  // conversation is usually ready by the time the click lands.
-  let hoverTimer = null;
-  row.addEventListener('pointerenter', event => {
-    if (event.pointerType !== 'mouse') return;
-    hoverTimer = setTimeout(() => prefetchTicketDetail(ticket.id, ticket.conversation_origin), TICKET_HOVER_PREFETCH_DELAY_MS);
-  });
-  row.addEventListener('pointerleave', () => { clearTimeout(hoverTimer); hoverTimer = null; });
-  row.addEventListener('pointerdown', () => prefetchTicketDetail(ticket.id, ticket.conversation_origin));
+  row.onclick = () => ticket.search_message_id
+    ? openSearchResult({ticket_id: ticket.id, message_id: ticket.search_message_id, conversation_origin: ticket.conversation_origin}, state.query)
+    : openTicket(ticket.id, {conversationOrigin: ticket.conversation_origin});
   return row;
-}
-
-function createSearchResultRow(item) {
-  const row = document.createElement('button');
-  row.type = 'button';
-  row.className = 'search-result-row';
-  row.setAttribute('role', 'option');
-  row.setAttribute('aria-selected', 'false');
-  row.tabIndex = -1;
-  const head = document.createElement('div');
-  head.className = 'search-result-head';
-  const customer = document.createElement('div');
-  customer.className = 'search-result-customer';
-  customer.dir = 'auto';
-  customer.textContent = item.customer_name || item.customer_userid || item.whatsapp_phone || 'Unknown customer';
-  highlightSearchTerm(customer, state.query);
-  const time = document.createElement('time');
-  time.className = 'search-result-time';
-  time.dateTime = item.created_at || '';
-  time.textContent = item.created_at ? relativeTime(item.created_at) : '';
-  head.append(customer, time);
-  const ref = document.createElement('div');
-  ref.className = 'search-result-ref';
-  ref.textContent = (item.conversation_origin === 'STAFF' ? 'Chat · ' : 'Ticket · ') + (item.ticket_reference || ('#' + item.ticket_id));
-  const preview = document.createElement('div');
-  preview.className = 'search-result-preview';
-  preview.dir = 'auto';
-  preview.textContent = item.result_type === 'conversation'
-    ? [item.whatsapp_phone, item.status].filter(Boolean).join(' · ')
-    : item.preview || item.message_type || 'Message';
-  highlightSearchTerm(preview, state.query);
-  row.append(head, ref, preview);
-  row.onclick = () => openSearchResult(item, state.query);
-  return row;
-}
-
-async function runGlobalMessageSearch() {
-  const query = state.query.trim();
-  const requestId = ++state.globalSearchRequest;
-  if (query.length < 2) {
-    state.globalSearchResults = [];
-    state.globalSearchBusy = false;
-    renderQueue();
-    return;
-  }
-  state.globalSearchBusy = true;
-  $('queue').setAttribute('aria-busy', 'true');
-  text($('searchScope'), 'Searching customer names, phone numbers, and messages…');
-  try {
-    const data = await api('/api/support/search/messages?q=' + encodeURIComponent(query) + '&limit=80');
-    if (requestId !== state.globalSearchRequest || query !== state.query.trim()) return;
-    state.globalSearchResults = Array.isArray(data.items) ? data.items : [];
-    renderQueue();
-  } catch (error) {
-    if (requestId !== state.globalSearchRequest) return;
-    state.globalSearchResults = [];
-    renderQueueError(error.message);
-  } finally {
-    if (requestId === state.globalSearchRequest) {
-      state.globalSearchBusy = false;
-      $('queue').setAttribute('aria-busy', 'false');
-      text($('searchScope'), query.length >= 2 ? 'Searches customer names, phone numbers, ticket references, and messages you are allowed to access.' : 'Searches the loaded page by customer, conversation, shipment, status, or support line.');
-    }
-  }
 }
 
 function refreshMessageSearchAfterChange(messageId) {
   state.globalSearchResults = state.globalSearchResults.filter(item => Number(item.message_id) !== Number(messageId));
   state.conversationSearchResults = state.conversationSearchResults.filter(item => Number(item.message_id) !== Number(messageId));
-  if (state.query.trim().length >= 2) runGlobalMessageSearch().catch(() => {});
+  if (state.query.trim()) loadQueue({silent: true}).catch(() => {});
   if (state.conversationSearchOpen && state.conversationSearchQuery.length >= 2) searchCurrentConversation({preserveQuery: true}).catch(() => {});
-}
-
-function scheduleGlobalMessageSearch() {
-  if (state.globalSearchTimer) clearTimeout(state.globalSearchTimer);
-  state.globalSearchTimer = setTimeout(runGlobalMessageSearch, 250);
 }
 
 async function openSearchResult(item, query) {
@@ -582,9 +603,7 @@ function renderQueue() {
   const queue = $('queue');
   const queueHadFocus = queue.contains(document.activeElement);
   const rawQuery = state.query.trim();
-  const query = rawQuery.toLocaleLowerCase();
-  const globalSearch = state.view !== 'contacts' && rawQuery.length >= 2;
-  const items = state.view === 'contacts' ? state.queueItems : (query && !globalSearch ? state.queueItems.filter(ticket => queueSearchText(ticket).includes(query)) : state.queueItems);
+  const items = state.queueItems;
   queue.replaceChildren();
 
   if (state.view === 'contacts') {
@@ -598,23 +617,6 @@ function renderQueue() {
       appendQueueMoreSentinel(queue);
     }
     updateQueueSummary(state.queueItems.length);
-    $('clearQueueSearchBtn').classList.toggle('hidden', !state.query);
-    syncQueueRovingFocus(queueHadFocus);
-    return;
-  }
-
-  if (globalSearch) {
-    if (state.globalSearchBusy) {
-      renderQueueSkeleton();
-    } else if (!state.globalSearchResults.length) {
-      queue.append(emptyMarkup('No matches', 'No accessible customer, ticket, chat, or message matches this search.', 'search').outer);
-    } else {
-      const fragment = document.createDocumentFragment();
-      for (const item of state.globalSearchResults) fragment.append(createSearchResultRow(item));
-      queue.append(fragment);
-    }
-    text($('queueTotal'), state.globalSearchResults.length + ' match' + (state.globalSearchResults.length === 1 ? '' : 'es'));
-    text($('pageSummary'), 'Conversation and message search');
     $('clearQueueSearchBtn').classList.toggle('hidden', !state.query);
     syncQueueRovingFocus(queueHadFocus);
     return;
@@ -655,12 +657,53 @@ function renderQueueError(message) {
   $('queue').replaceChildren(empty.outer);
 }
 
+function renderQueueFilters(options = null) {
+  let reset = false;
+  const filters = state.queueFilters;
+  const supported = ['unassigned', 'mine', 'chats', 'active', 'history', 'waiting'].includes(state.view);
+  $('queueFilters').classList.toggle('hidden', !supported);
+  $('queueStaffLabel').classList.toggle('hidden', !['chats', 'active', 'history', 'waiting'].includes(state.view));
+  $('queueStatusLabel').classList.toggle('hidden', state.view !== 'chats');
+  for (const [id, key, items, label] of [
+    ['queueSupportNumber', 'supportNumber', options?.support_numbers, 'All support numbers'],
+    ['queueStaff', 'staffId', options?.staff, 'All staff members']
+  ]) {
+    const select = $(id);
+    if (items) {
+      const choices = [new Option(label, ''), ...items.map(item => new Option(item.name || item.id, item.id))];
+      if (filters[key] && !items.some(item => String(item.id) === filters[key])) {
+        filters[key] = ''; reset = true;
+      }
+      select.replaceChildren(...choices);
+    }
+    select.value = filters[key];
+  }
+  $('queueStatus').value = filters.status;
+  return reset;
+}
+
+function resetQueueFilters() {
+  state.queueFilters = {supportNumber: '', staffId: '', status: 'all'};
+  renderQueueFilters();
+}
+
+function queueCriteriaChanged() {
+  state.page = 1;
+  state.queueRequest += 1; // Invalidate an in-flight page before debounce fires.
+  state.queueExhausted = false;
+  if (state.globalSearchTimer) clearTimeout(state.globalSearchTimer);
+  state.globalSearchTimer = setTimeout(() => loadQueue({silent: true}), 220);
+}
+
 function queuePath(page, pageSize) {
-  return state.view === 'contacts'
-    ? '/api/support/contacts?page=' + page + '&page_size=' + pageSize + '&q=' + encodeURIComponent(state.query.trim())
-    : state.view === 'chats'
-      ? '/api/support/chats?page=' + page + '&page_size=' + pageSize
-      : '/api/support/tickets?view=' + encodeURIComponent(state.view) + '&page=' + page + '&page_size=' + pageSize;
+  if (state.view === 'contacts') return '/api/support/contacts?page=' + page + '&page_size=' + pageSize + '&q=' + encodeURIComponent(state.query.trim());
+  const params = new URLSearchParams({page, page_size: pageSize, q: state.query.trim()});
+  const filters = state.queueFilters || {};
+  if (filters.supportNumber) params.set('support_number', filters.supportNumber);
+  if (filters.staffId && ['chats', 'active', 'history', 'waiting'].includes(state.view)) params.set('staff_id', filters.staffId);
+  if (state.view === 'chats') params.set('chat_status', filters.status || 'all');
+  else params.set('view', state.view);
+  return (state.view === 'chats' ? '/api/support/chats?' : '/api/support/tickets?') + params;
 }
 
 function uniqueQueueItems(items) {
@@ -674,8 +717,7 @@ function uniqueQueueItems(items) {
 }
 
 function queueHasMore() {
-  // A short local filter only searches loaded rows, so it does not page further.
-  if (state.queueExhausted || (state.view !== 'contacts' && state.query.trim())) return false;
+  if (state.queueExhausted) return false;
   return state.queueItems.length < Number(state.total || 0);
 }
 
@@ -714,7 +756,7 @@ async function loadMoreQueue() {
     if (state.queueItems.length === before) state.queueExhausted = true;
     state.page = Math.max(1, Math.ceil(state.queueItems.length / state.pageSize));
     saveSupportSelection();
-    updateQueueCount(view, state.total);
+    refreshAllQueueCounts().catch(() => {});
     const scrollTop = queue.scrollTop;
     renderQueue();
     queue.scrollTop = scrollTop;
@@ -730,8 +772,10 @@ async function loadMoreQueue() {
 }
 
 async function loadQueue({silent = false} = {}) {
-  if (!state.authenticated) return;
+  if (!state.authenticated || (silent && document.hidden)) return;
   const requestId = ++state.queueRequest;
+  // View, filters and search, without paging: identifies what the rows show.
+  const identity = queuePath(1, 1);
   const queue = $('queue');
   const previousScrollTop = queue.scrollTop;
   queue.setAttribute('aria-busy', 'true');
@@ -751,7 +795,12 @@ async function loadQueue({silent = false} = {}) {
     state.page = Math.max(1, Math.ceil(state.queueItems.length / state.pageSize));
     state.queueExhausted = false;
     state.total = total;
-    updateQueueCount(state.view, total);
+    if (renderQueueFilters(responses[0].filter_options)) {
+      state.page = 1;
+      await loadQueue({silent: true});
+      return;
+    }
+    refreshAllQueueCounts().catch(() => {});
     if (state.view === 'unassigned' && !(state.unassignedSnapshot instanceof Map)) {
       state.unassignedSnapshot = new Map(
         state.queueItems.map(item => [String(item.id), String(item.last_activity_at || '')])
@@ -759,9 +808,17 @@ async function loadQueue({silent = false} = {}) {
     }
     renderQueue();
     if (silent) queue.scrollTop = previousScrollTop;
+    state.queueLoadedIdentity = identity;
+    noteBackgroundRead('queue');
   } catch (error) {
     if (requestId !== state.queueRequest) return;
     if (state.pageLeaving) return;
+    if (silent && transientReadError(error) && identity === state.queueLoadedIdentity) {
+      // Keep the rows on screen (and the reader's scroll position); the
+      // connection notice marks them as possibly out of date.
+      noteBackgroundRead('queue', error);
+      return;
+    }
     renderQueueError(error.message);
     text($('queueTotal'), 'Unavailable');
   } finally {
@@ -804,6 +861,7 @@ function setQueueView(view, {load = true, persist = true} = {}) {
   if (view === 'active' && !canViewActiveQueue()) view = 'unassigned';
   if (!Object.prototype.hasOwnProperty.call(QUEUE_CONFIG, view) || state.view === view) return;
   state.view = view;
+  resetQueueFilters();
   state.page = 1;
   state.query = '';
   state.globalSearchResults = [];
@@ -817,7 +875,7 @@ function setQueueView(view, {load = true, persist = true} = {}) {
   const contacts = view === 'contacts';
   $('contactsToolbar').classList.toggle('hidden', !contacts);
   $('queueSearch').placeholder = contacts ? 'Search contacts' : 'Search conversations and messages';
-  text($('searchScope'), contacts ? 'Search saved, Google-synced, and VCF-imported contacts by name, phone, or email.' : 'Searches message history you are allowed to access. Customer/ticket filtering remains available for short searches.');
+  text($('searchScope'), contacts ? 'Search saved, Google-synced, and VCF-imported contacts by name, phone, or email.' : 'Searches customers, tickets and message text within this queue and the selected filters.');
   if (contacts) loadGoogleContactsStatus().catch(() => {});
   updateQueueSummary();
   if (persist) saveSupportSelection();
@@ -830,9 +888,8 @@ function clearQueueSearch() {
   state.globalSearchRequest += 1;
   if (state.globalSearchTimer) { clearTimeout(state.globalSearchTimer); state.globalSearchTimer = null; }
   $('queueSearch').value = '';
-  text($('searchScope'), state.view === 'contacts' ? 'Search saved, Google-synced, and VCF-imported contacts by name, phone, or email.' : 'Searches message history you are allowed to access. Customer/ticket filtering remains available for short searches.');
-  if (state.view === 'contacts') loadQueue({silent: true});
-  else renderQueue();
+  text($('searchScope'), state.view === 'contacts' ? 'Search saved, Google-synced, and VCF-imported contacts by name, phone, or email.' : 'Searches customers, tickets and message text within this queue and the selected filters.');
+  queueCriteriaChanged();
   $('queueSearch').focus();
 }
 
@@ -1031,7 +1088,7 @@ function messageTicketId(message) {
 
 function startMessageEdit(message) {
   if (!canChangeWhatsAppMessage(message, 'edit')) return;
-  if (state.busy || state.pendingMedia || state.mediaRecorder || state.editTarget) return;
+  if (state.busy || state.pendingMedia || state.mediaRecorder || state.voiceRecording || state.editTarget) return;
   state.editTarget = {
     id: Number(message.id), ticketId: messageTicketId(message), version: Number(message.version || 1),
     draft: $('message').value, reply: state.replyTarget
@@ -1150,10 +1207,146 @@ function messageReactionBar(message) {
   return bar;
 }
 
+// Quote navigation leaves the selected ticket, composer, and media drafts intact.
+let replyNavigationRequest = 0;
+let replyHighlightTimer = null;
+function highlightReplyMessage(messageId, conversation = $('conversation')) {
+  const target = conversation.querySelector('[data-message-id="' + Number(messageId) + '"]');
+  if (!target) return false;
+  document.querySelectorAll('.reply-target').forEach(row => row.classList.remove('reply-target'));
+  clearTimeout(replyHighlightTimer);
+  // Restart the animation when the same quote is clicked again.
+  void target.offsetWidth;
+  target.classList.add('reply-target');
+  const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const center = target.getBoundingClientRect().top - conversation.getBoundingClientRect().top +
+    conversation.scrollTop - (conversation.clientHeight - target.clientHeight) / 2;
+  conversation.scrollTo({top: Math.max(0, center), behavior: reduced ? 'auto' : 'smooth'});
+  replyHighlightTimer = setTimeout(() => target.classList.remove('reply-target'), 2400);
+  if (conversation.id === 'conversation') updateScrollLatestButton();
+  return true;
+}
+
+async function navigateToReply(reply, button) {
+  const request = ++replyNavigationRequest;
+  const review = button.closest('#investigationMessages');
+  const container = review || $('conversation');
+  if (reply.id && highlightReplyMessage(reply.id, container)) return;
+  if (!reply.source_message_id || (!review && !state.currentTicketData)) {
+    notify('Original message is unavailable.', 'error');
+    return;
+  }
+  const ticketId = review ? investigationTicket : state.ticketId;
+  const epoch = review ? investigationRequest : state.historySelectionEpoch;
+  const isCurrent = () => request === replyNavigationRequest && state.authenticated && (review
+    ? investigationStillAllowed(epoch) && String(investigationTicket) === String(ticketId)
+    : String(state.ticketId) === String(ticketId) && state.historySelectionEpoch === epoch);
+  const base = review ? '/api/support/tickets/' + ticketId : historyDetailBase();
+  button.dataset.replyRequest = String(request);
+  button.setAttribute('aria-busy', 'true');
+  button.classList.add('reply-loading');
+  try {
+    const result = await api(base + '/messages/' + Number(reply.source_message_id) + '/reply');
+    if (!isCurrent()) return;
+    const targetTicketId = Number(result.ticket?.id);
+    const targetId = Number(result.message_id);
+    const previous = targetTicketId !== Number(ticketId);
+    let messages = result.messages || [];
+    let hasMore = Boolean(result.messages_has_more);
+    // Walk backward with the existing keyset pages. Keeping every intervening
+    // message avoids timeline gaps and keeps Load older messages reliable.
+    while (!messages.some(message => Number(message.id) === targetId) && hasMore) {
+      const oldest = Number(messages[0]?.id);
+      if (!oldest || oldest <= targetId) break;
+      const page = await api(base + (previous ? '/history/' + targetTicketId : '') +
+        '/messages?before_message_id=' + oldest + '&limit=100');
+      if (!isCurrent()) return;
+      const older = (page.messages || []).filter(message => Number(message.id) < oldest);
+      if (!older.length) break;
+      messages = mergeTimelineMessages(older, messages);
+      hasMore = Boolean(page.messages_has_more);
+    }
+    if (!isCurrent()) return;
+    if (!messages.some(message => Number(message.id) === targetId)) {
+      throw new Error('Original message is unavailable.');
+    }
+    if (review) {
+      // The manager's read-only review uses the same renderer but must never
+      // navigate or mutate the operational ticket behind the review panel.
+      const group = document.createElement('div');
+      if (previous) {
+        const heading = document.createElement('p');
+        heading.className = 'form-note';
+        heading.textContent = 'Referenced conversation · ' + (result.ticket.ticket_reference || targetTicketId);
+        group.append(heading);
+      }
+      for (const message of messages) {
+        if (!review.querySelector('[data-message-id="' + Number(message.id) + '"]')) addMessage(group, message, 'investigation');
+      }
+      group.querySelectorAll('.message-actions').forEach(element => element.remove());
+      review.prepend(group);
+      if (!previous && investigationMessageBefore && Number(messages[0]?.id) < Number(investigationMessageBefore)) {
+        investigationMessageBefore = hasMore ? Number(messages[0].id) : null;
+        $('investigationOlderMessages').classList.toggle('hidden', !investigationMessageBefore);
+      }
+      highlightReplyMessage(targetId, review);
+      return;
+    }
+    const data = state.currentTicketData;
+    if (previous) {
+      let thread = state.previousTicketHistory.find(item => Number(item.ticket?.id) === targetTicketId);
+      if (!thread) {
+        // Preserve the history-pagination boundary when inserting a referenced
+        // conversation older than the currently loaded history page.
+        const oldest = Number(state.previousTicketHistory[0]?.ticket?.id);
+        if (oldest && targetTicketId < oldest) state.replyHistoryBoundary = state.replyHistoryBoundary || oldest;
+        thread = {ticket: result.ticket, context: {}, messages: []};
+        state.previousTicketHistory.push(thread);
+        state.previousTicketHistory.sort((a, b) => Number(a.ticket.id) - Number(b.ticket.id));
+      }
+      thread.messages = mergeTimelineMessages(messages, thread.messages);
+      thread.messages_has_more = hasMore;
+      thread._messagesExpanded = true;
+      state.previousHistoryExpanded = true;
+      data.previous_ticket_history = state.previousTicketHistory;
+    } else {
+      state.cachedCurrentMessages = mergeTimelineMessages(messages, state.cachedCurrentMessages);
+      state.currentMessagesHasMore = hasMore;
+      state.currentMessagesExpanded = true;
+      data.messages = state.cachedCurrentMessages.slice();
+      data.messages_has_more = hasMore;
+    }
+    updateSharedHistoryShortcut();
+    renderConversation(data, {preserveAudio: true, preserveScrollAnchor: '[data-message-id="' + Number(reply.source_message_id) + '"]'});
+    state.timelineSignature = timelineSignature(data);
+    highlightReplyMessage(targetId);
+  } catch (error) {
+    if (isCurrent() && !state.pageLeaving) notify(error.message || 'Original message could not be loaded. Please try again.', 'error');
+  } finally {
+    if (button.dataset.replyRequest === String(request)) {
+      button.removeAttribute('aria-busy');
+      button.classList.remove('reply-loading');
+    }
+  }
+}
+
 function renderReplyQuote(parent, reply) {
   if (!reply) return;
-  const quote = document.createElement('div');
+  const quote = document.createElement('button');
+  quote.type = 'button';
   quote.className = 'message-quote';
+  quote.setAttribute('aria-label', 'Go to original message');
+  quote.onclick = event => {
+    event.stopPropagation();
+    const selection = window.getSelection();
+    // Drag-selecting quote text is still copyable. A normal click or keyboard
+    // activation clears an older selection so deferred rendering cannot hide
+    // the requested destination.
+    if (event.detail && selection && !selection.isCollapsed &&
+        quote.contains(selection.anchorNode) && quote.contains(selection.focusNode)) return;
+    if (selectedConversationText()) selection.removeAllRanges();
+    navigateToReply(reply, quote);
+  };
   const actor = document.createElement('strong');
   actor.textContent = reply.sender_name || MESSAGE_ROLE_LABELS[String(reply.sender_type || '').toUpperCase()] || 'Message';
   const preview = document.createElement('span');
@@ -1709,6 +1902,13 @@ function addMessage(container, m, extraClass = '') {
   time.title = fmt(occurredAt);
   time.textContent = occurredAt ? fmt(occurredAt) : (extraClass ? 'Earlier context' : 'Time unavailable');
   meta.append(time);
+  if (messageArrivedLate(m)) {
+    const late = document.createElement('span');
+    late.className = 'arrived-late';
+    late.textContent = 'arrived late';
+    late.title = 'Sent ' + fmt(occurredAt) + ' · received ' + fmt(m.created_at);
+    meta.append(late);
+  }
   if (m.edited_at && !deleted) {
     const edited = document.createElement('span');
     edited.textContent = 'edited';
@@ -1871,15 +2071,6 @@ function addMessage(container, m, extraClass = '') {
     pending.setAttribute('aria-label', 'Sending');
     pending.append(createIcon('clock', 'icon icon-sm'));
     meta.append(pending);
-    if (!extraClass && canResendMessage(m)) {
-      const resume = document.createElement('button');
-      resume.type = 'button';
-      resume.className = 'btn send-retry-btn';
-      resume.textContent = 'Resume send';
-      resume.title = 'Resume abandoned preparation. An active send will not be repeated.';
-      resume.onclick = () => resendMessage(m, resume);
-      meta.append(resume);
-    }
   } else if (outbound && m.send_status) {
     // WhatsApp-style ticks: one grey when sent, two grey when delivered, two blue when read.
     const receipt = ['read', 'played'].includes(m.delivery_status) ? 'read' : m.delivery_status === 'delivered' ? 'delivered' : 'sent';
@@ -1973,6 +2164,7 @@ function labelMessageAction(button, action, label) {
 }
 
 function addEvent(container, event) {
+  if (['CONVERSATION_VIEWED', 'INCOMING_MARKED_READ'].includes(event.event_type)) return;
   const element = document.createElement('div');
   element.className = 'event';
   let label = String(event.event_type || 'EVENT').replaceAll('_', ' ');
@@ -2401,7 +2593,7 @@ function historyDetailBase() {
 
 async function loadEarlierConversations(button = null) {
   const oldest = state.previousTicketHistory[0];
-  const beforeTicketId = Number(oldest?.ticket?.id);
+  const beforeTicketId = Number(state.replyHistoryBoundary || oldest?.ticket?.id);
   if (!state.previousTicketHistoryHasMore || !beforeTicketId) return;
   const request = beginHistoryLoad(button);
   if (!request) return;
@@ -2412,8 +2604,10 @@ async function loadEarlierConversations(button = null) {
     if (!Array.isArray(result.previous_ticket_history)) throw new Error('Earlier conversation history could not be loaded.');
     const existing = new Set(state.previousTicketHistory.map(thread => String(thread.ticket?.id)));
     const older = result.previous_ticket_history.filter(thread => thread.ticket?.id && !existing.has(String(thread.ticket.id)));
-    state.previousTicketHistory = [...older, ...state.previousTicketHistory];
-    state.previousTicketHistoryHasMore = older.length > 0 && Boolean(result.previous_ticket_history_has_more);
+    state.previousTicketHistory = [...older, ...state.previousTicketHistory]
+      .sort((a, b) => Number(a.ticket.id) - Number(b.ticket.id));
+    state.replyHistoryBoundary = result.previous_ticket_history[0]?.ticket?.id || null;
+    state.previousTicketHistoryHasMore = result.previous_ticket_history.length > 0 && Boolean(result.previous_ticket_history_has_more);
     state.previousHistoryExpanded = true;
     updateSharedHistoryShortcut();
     const data = state.currentTicketData;
@@ -2907,38 +3101,6 @@ function moveConversationSearch(delta) {
   jumpToConversationSearchResult(next);
 }
 
-const TICKET_PREFETCH_TTL_MS = 5000;
-const TICKET_HOVER_PREFETCH_DELAY_MS = 120;
-
-function ticketOpenPath(id, conversationOrigin) {
-  // Mirrors the request openTicket makes for a newly selected conversation.
-  const origin = conversationOrigin || (state.view === 'chats' ? 'STAFF' : 'CUSTOMER');
-  const base = String(origin).toUpperCase() === 'STAFF' ? '/api/support/chats/' : '/api/support/tickets/';
-  return base + id + '?include_previous_history=true';
-}
-
-function prefetchTicketDetail(id, conversationOrigin) {
-  if (!id || String(id) === String(state.ticketId || '')) return;
-  const path = ticketOpenPath(id, conversationOrigin);
-  const now = Date.now();
-  for (const [key, entry] of state.ticketPrefetch) {
-    if (now - entry.at > TICKET_PREFETCH_TTL_MS) state.ticketPrefetch.delete(key);
-  }
-  if (state.ticketPrefetch.has(path)) return;
-  // Settle into a result object so an unused prefetch never raises an
-  // unhandled rejection; a failed prefetch is simply retried by openTicket.
-  const result = api(path).then(data => ({ok: true, data}), () => ({ok: false}));
-  state.ticketPrefetch.set(path, {at: now, result});
-}
-
-function takeTicketPrefetch(path) {
-  const entry = state.ticketPrefetch.get(path);
-  if (!entry) return null;
-  state.ticketPrefetch.delete(path);
-  if (Date.now() - entry.at > TICKET_PREFETCH_TTL_MS) return null;
-  return entry.result.then(outcome => outcome.ok ? outcome.data : api(path));
-}
-
 function showTicketOpening(id) {
   // Answer the tap immediately: show the selected ticket's header from its queue
   // row and a conversation placeholder while the full details load.
@@ -2965,6 +3127,7 @@ function showTicketOpening(id) {
 }
 
 async function openTicket(id, {silent = false, refreshQueue = false, refreshHistory = false, aroundMessageId = null, preserveSearch = false, conversationOrigin = null, restoring = false} = {}) {
+  if (silent && document.hidden) return;
   const isNewSelection = String(state.ticketId || '') !== String(id || '');
   if (!isNewSelection && silent && !refreshHistory && state.previousHistoryPending) return;
   if (isNewSelection) {
@@ -2973,13 +3136,14 @@ async function openTicket(id, {silent = false, refreshQueue = false, refreshHist
     state.currentTicketData = null;
     setComposerEnabled(false);
     cancelMessageEdit(false);
-    if (state.mediaRecorder) cancelVoiceRecording();
+    if (state.mediaRecorder || state.voiceRecording) cancelVoiceRecording();
     clearMediaDraft();
     clearReplyTarget();
     $('message').value = '';
     updateComposerCount();
     state.timelineSignature = '';
     state.previousTicketHistory = [];
+    state.replyHistoryBoundary = null;
     state.previousTicketHistoryHasMore = false;
     state.previousHistoryExpanded = false;
     state.previousHistoryLoaded = false;
@@ -3019,7 +3183,7 @@ async function openTicket(id, {silent = false, refreshQueue = false, refreshHist
     if (aroundMessageId) detailParams.set('around_message_id', String(aroundMessageId));
     if (needPreviousHistory) detailParams.set('include_previous_history', 'true');
     const detailPath = detailBase + id + (detailParams.toString() ? ('?' + detailParams.toString()) : '');
-    const data = await (takeTicketPrefetch(detailPath) || api(detailPath));
+    const data = await api(detailPath);
     if (requestId !== state.ticketRequest || String(state.ticketId) !== String(id)) return;
     if (!silent) api('/api/support/statistics/tickets/' + id + '/view', {
       method: 'POST', body: JSON.stringify({request_id: crypto.randomUUID()})
@@ -3047,6 +3211,7 @@ async function openTicket(id, {silent = false, refreshQueue = false, refreshHist
     }
     mergeLiveMessages(data, id);
     state.currentTicketData = data;
+    noteBackgroundRead('conversation');
     if (state.replyTarget && (data.messages || []).some(item => Number(item.id) === state.replyTarget.id && item.deleted_for_everyone_at)) {
       clearReplyTarget();
       notify('The replied-to message was deleted.', 'error');
@@ -3055,10 +3220,6 @@ async function openTicket(id, {silent = false, refreshQueue = false, refreshHist
     state.currentConversationOrigin = ticket?.conversation_origin || state.currentConversationOrigin;
     saveSupportSelection();
     const inboundId = latestInboundMessageId(data);
-    const previousInboundId = Number(state.lastInboundByTicket[String(id)] || 0);
-    if (!isNewSelection && previousInboundId && inboundId > previousInboundId && ticket.current_assignee_id) {
-      notifyNewCustomerActivity('New customer message from ' + (ticket.customer_name || ticket.customer_userid || ticket.whatsapp_phone || 'customer') + '.');
-    }
     if (inboundId) state.lastInboundByTicket[String(id)] = inboundId;
     renderTicketHeader(ticket);
     renderContext(ticket, data.context || {}, data.shipment || null, data.customer_identity || null, data.permissions || null);
@@ -3084,6 +3245,15 @@ async function openTicket(id, {silent = false, refreshQueue = false, refreshHist
     if (isNewSelection) setAppStatus(isStaffChat(ticket) ? ('Opened chat with ' + (ticket.customer_name || ticket.whatsapp_phone || 'customer') + '.') : ('Opened ' + (ticket.ticket_reference || 'ticket') + ' for ' + (ticket.customer_name || ticket.customer_userid || ticket.whatsapp_phone || 'customer') + '.'));
   } catch (e) {
     if (state.pageLeaving || requestId !== state.ticketRequest) return;
+    if (silent && !isNewSelection && transientReadError(e)) {
+      // Keep the open conversation, its scroll position and the unsent draft;
+      // the connection notice marks it as possibly out of date.
+      noteBackgroundRead('conversation', e);
+      return;
+    }
+    // Any other HTTP answer means the server was reached. A 403 below removes
+    // the protected conversation instead of keeping it as stale content.
+    if (e.status) forgetBackgroundRead('conversation');
     if (restoring && [403, 404].includes(e.status)) {
       clearTicketWorkspace();
       await loadQueue({silent: true});

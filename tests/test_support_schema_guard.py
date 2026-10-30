@@ -10,13 +10,15 @@ def add_base_schema(columns):
 
 
 def add_linked_device_schema(columns):
+    columns.setdefault("support_tickets", set()).update({"business_display_name", "business_number_retired_at"})
+    columns["support_dashboard_reads"] = {"ticket_id", "staff_id", "last_message_id", "updated_at"}
     columns.setdefault('whatsapp_phone_numbers', set()).add('removed_at')
     columns["support_delivery_receipts"] = {"provider_message_id", "line_id", "status", "checked_at", "failure_code"}
     for path, required_tables in _SUPPORT_SCHEMA_MIGRATIONS:
         if "20261027_quick_reply_images" in path or "20261025_statistics_investigation" in path or "20261023_agent_statistics" in path or "20261023_quick_reply_pdfs" in path or "20261024_quick_reply_" in path:
             for table, required in required_tables.items():
                 columns.setdefault(table, set()).update(required)
-    columns['support_ticket_messages'].add('replacement_for_message_id')
+    columns['support_ticket_messages'].update({'replacement_for_message_id', 'request_fingerprint'})
     columns["support_ticket_messages"].update({"transport_client_id", "sender_scope", "delivery_token", "delivery_claimed_at", "delivery_started_at", "delivery_retry_safe"})
     columns["support_ticket_messages"].update({"whatsapp_change_timestamp", "pending_change_operation_id"})
     columns["support_ticket_messages"].update({"delivery_status", "delivered_at", "read_at", "read_sync_pending", "read_sync_attempted_at"})
@@ -268,3 +270,12 @@ def test_support_schema_guard_requires_statistics_migration():
             for table, required in tables.items():
                 columns.setdefault(table, set()).update(required)
     assert _missing_support_schema_migrations(columns) == ["migrations/20261023_agent_statistics.sql"]
+
+
+def test_support_schema_guard_requires_dashboard_reads():
+    columns = {}
+    for _, tables in _SUPPORT_SCHEMA_MIGRATIONS:
+        for table, required in tables.items():
+            columns.setdefault(table, set()).update(required)
+    columns.pop("support_dashboard_reads")
+    assert _missing_support_schema_migrations(columns) == ["migrations/20261029_support_dashboard_reads.sql"]

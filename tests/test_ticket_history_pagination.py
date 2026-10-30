@@ -313,7 +313,7 @@ def test_repository_history_and_search_count_staff_chat_starter_as_participant()
 
         calls.clear()
         await repository.list_tickets(view="chats", agent_id="7")
-        assert len(calls) == 2
+        assert len(calls) == 4
         assert "support_tickets.initiated_by_staff_id = %s" in calls[0][0]
         assert calls[0][1] == ("7", "7", "7", "7", "7")
         assert "LEFT JOIN whatsapp_phone_numbers n" in calls[1][0]

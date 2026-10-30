@@ -13,6 +13,12 @@ import pytest
 from app.support_ui import _HTML, support_image_editor_script
 from app.config import settings
 
+# Connection-health hooks used by queue/conversation loading: the shipped error
+# classifier and no-op recorders (tests/dashboard_connection.test.cjs covers them).
+CONNECTION_HOOKS = _HTML[_HTML.index("function transientReadError("):_HTML.index("function backgroundRetryDelay(")] + """
+const noteBackgroundRead = () => {}, forgetBackgroundRead = () => {}, resetConnectionHealth = () => {};
+"""
+
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is unavailable")
 def test_message_copy_handles_text_and_clipboard_fallback() -> None:
@@ -131,6 +137,7 @@ const loadQueue = async options => {
   queueRefreshes++;
 };
 const refreshAllQueueCounts = async () => {countRefreshes++};
+const requestDashboardRefresh = scope => {if(scope==='counts')refreshAllQueueCounts();else if(scope==='queue')loadQueue({silent:true});else openTicket(state.ticketId,{silent:true});};
 const openTicket = async () => {ticketReloads++};
 const upsertTimelineMessage = (message, ticketId) => upserts.push([message.id, ticketId]);
 const notifyNewCustomerActivity = () => {customerNotifications++};
@@ -928,6 +935,7 @@ def test_support_workspace_restores_only_verified_staff_selection() -> None:
     set_view = _HTML[_HTML.index("function setQueueView("): _HTML.index("function clearQueueSearch(")]
     script = r"""
 const assert = require('node:assert/strict');
+const resetQueueFilters = () => {};
 const stored = new Map([['shipment-support-theme', 'dark']]);
 const sessionStorage = {
   get length() {return stored.size}, key(index) {return [...stored.keys()][index] || null},
@@ -995,8 +1003,9 @@ def test_restored_chat_and_ticket_use_correct_route_and_clear_stale_selection() 
     merge_history = _HTML[_HTML.index("function mergeTimelineMessages("): _HTML.index("function changeCachedMessage(")]
     clear_workspace = _HTML[_HTML.index("function clearTicketWorkspace("): _HTML.index("function showLogin(")]
     open_ticket = _HTML[_HTML.index("async function openTicket("): _HTML.index("async function doAction(")]
-    script = r"""
+    script = CONNECTION_HOOKS + r"""
 const assert = require('node:assert/strict');
+const resetQueueFilters = () => {};
 const stored = new Map();
 const sessionStorage = {
   get length() {return stored.size}, key(index) {return [...stored.keys()][index] || null},
@@ -1037,7 +1046,7 @@ const renderContext = () => {};
 const renderReadOnlyState = () => {};
 const renderActions = () => {};
 const showTicketOpening = () => {};
-const takeTicketPrefetch = () => null;
+const document = {hidden: false};
 const timelineSignature = () => 'rendered';
 const renderConversation = () => {};
 const isStaffChat = ticket => ticket.conversation_origin === 'STAFF';
@@ -1244,7 +1253,7 @@ def test_initial_history_load_survives_background_poll_and_retries_after_error()
     paging = _HTML[_HTML.index("function beginHistoryLoad("): _HTML.index("function updateSharedHistoryShortcut(")]
     shortcuts = _HTML[_HTML.index("function updateSharedHistoryShortcut("): _HTML.index("function contextValue(")]
     open_ticket = _HTML[_HTML.index("async function openTicket("): _HTML.index("async function doAction(")]
-    script = r"""
+    script = CONNECTION_HOOKS + r"""
 const assert = require('node:assert/strict');
 const state = {agent: {id: '7'}, authenticated: true, view: 'unassigned',
   ticketId: null, currentTicketData: null, currentConversationOrigin: null,
@@ -1285,7 +1294,7 @@ const renderContext = () => {};
 const renderReadOnlyState = () => {};
 const renderActions = () => {};
 const showTicketOpening = () => {};
-const takeTicketPrefetch = () => null;
+const document = {hidden: false};
 const emptyMarkup = () => ({outer: {}});
 const timelineSignature = data => JSON.stringify((data.previous_ticket_history || []).map(item => item.ticket.id));
 const renderConversation = () => {};
@@ -1585,7 +1594,7 @@ def test_session_check_prevents_login_flash_and_has_retry_or_login_fallback() ->
     assert "$('sessionRetryBtn').addEventListener('click', bootstrap);" in _HTML
     views = _HTML[_HTML.index("function showLogin()"): _HTML.index("async function restoreSupportWorkspace()")]
     bootstrap = _HTML[_HTML.index("async function bootstrap()"): _HTML.index("async function logout()")]
-    script = r"""
+    script = CONNECTION_HOOKS + r"""
 const assert = require('node:assert/strict');
 function element(hidden = false) {
   const classes = new Set(hidden ? ['hidden'] : []);
@@ -1607,10 +1616,12 @@ const text = (node, value) => {node.textContent = value};
 const window = {setTimeout(callback) {callback()}};
 const state = {pageLeaving: false, authenticated: false, imageEditor: null,
   mediaRecorder: null, queueRequest: 0, ticketRequest: 0,
-  globalSearchRequest: 0, linkedDeviceRequest: 0};
+  globalSearchRequest: 0, linkedDeviceRequest: 0, dashboardReadBoundaries:new Map(),chatNotificationIds:new Set()};
+const resetQueueFilters = () => {};
 let clearedSelections = 0;
 const clearSupportSelections = () => {clearedSelections++};
 const disconnectSupportEvents = () => {};
+const stopDashboardRefresh = () => {};
 const saveLinkedDeviceAddition = () => {};
 const cancelVoiceRecording = () => {};
 const clearMediaDraft = () => {};
@@ -1624,6 +1635,7 @@ const startSupportActivity = () => {};
 const stopSupportActivity = () => {};
 const clearAgentStatistics = () => {};
 const connectSupportEvents = () => {};
+const startDashboardRefresh = () => {};
 const syncThemeControls = () => {};
 const setAgentIdentity = () => {};
 const loadAiSettings = async () => {};
@@ -1794,48 +1806,8 @@ assert.equal(menu().open, false, 'switching tickets closes the menu');
     assert result.returncode == 0, result.stderr
 
 
-@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is unavailable")
-def test_ticket_prefetch_is_reused_once_retried_on_failure_and_expires() -> None:
-    helpers = _HTML[_HTML.index("const TICKET_PREFETCH_TTL_MS = "): _HTML.index("function showTicketOpening(")]
-    script = r"""
-const assert = require('node:assert/strict');
-const state = {ticketId: 7, view: 'unassigned', ticketPrefetch: new Map()};
-const calls = [];
-let failNext = false;
-const api = async path => {
-  calls.push(path);
-  if (failNext) {failNext = false; throw new Error('offline')}
-  return {path, n: calls.length};
-};
-let now = 1000;
-Date.now = () => now;
-""" + helpers + r"""
-(async () => {
-  prefetchTicketDetail(7, 'CUSTOMER');
-  assert.equal(calls.length, 0, 'the open ticket is never prefetched');
-
-  prefetchTicketDetail(9, 'CUSTOMER');
-  prefetchTicketDetail(9, 'CUSTOMER');
-  assert.deepEqual(calls, ['/api/support/tickets/9?include_previous_history=true'], 'one request per ticket');
-  const data = await takeTicketPrefetch('/api/support/tickets/9?include_previous_history=true');
-  assert.equal(data.n, 1, 'openTicket reuses the prefetched response');
-  assert.equal(takeTicketPrefetch('/api/support/tickets/9?include_previous_history=true'), null, 'a prefetch is used once');
-
-  state.view = 'chats';
-  prefetchTicketDetail(11);
-  assert.equal(calls.at(-1), '/api/support/chats/11?include_previous_history=true', 'chats view prefetches the chat route');
-  state.view = 'unassigned';
-
-  failNext = true;
-  prefetchTicketDetail(12, 'CUSTOMER');
-  const retried = await takeTicketPrefetch('/api/support/tickets/12?include_previous_history=true');
-  assert.equal(retried.path, '/api/support/tickets/12?include_previous_history=true');
-  assert.equal(calls.filter(path => path.includes('/12?')).length, 2, 'a failed prefetch is retried');
-
-  prefetchTicketDetail(13, 'CUSTOMER');
-  now += TICKET_PREFETCH_TTL_MS + 1;
-  assert.equal(takeTicketPrefetch('/api/support/tickets/13?include_previous_history=true'), null, 'stale data is not shown');
-})().catch(error => {console.error(error); process.exitCode = 1});
-"""
-    result = subprocess.run(["node", "-e", script], text=True, capture_output=True, timeout=10)
-    assert result.returncode == 0, result.stderr
+def test_ticket_details_load_only_after_selection_not_pointer_hover() -> None:
+    assert "prefetchTicketDetail" not in _HTML
+    assert "takeTicketPrefetch" not in _HTML
+    assert "const data = await api(detailPath);" in _HTML
+    assert "requestId !== state.ticketRequest || String(state.ticketId) !== String(id)" in _HTML

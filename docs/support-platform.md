@@ -30,6 +30,16 @@ An original sender may receive updates to their own historical message after a
 transfer without receiving the rest of an otherwise inaccessible conversation.
 Deleting history from this app does not recall messages from WhatsApp.
 
+Click or tap a quoted reply to scroll to its original message and briefly highlight
+it. This works for text and attachments, including messages in accessible shared
+history. Older originals load on demand with their intervening messages; very long
+conversations may take several pages to load. Switching conversations or choosing
+another quote cancels the pending jump. Navigation preserves drafts, playback,
+assignment, and read state. Missing or locally hidden originals show an unavailable
+message; globally deleted originals show only their deletion placeholder.
+
+![Reply navigation with synthetic messages](screenshots/reply-navigation.png)
+
 Event streams use the authenticated staff session. Each incoming Redis event
 and idle heartbeat revalidates the session against MariaDB, including expiry,
 revocation, account activity, and current role. Ticket permissions are evaluated
@@ -166,9 +176,12 @@ overwrites a confirmed result or a newer attempt. A hard process kill, repeated
 cancellation, or unavailable database can prevent this cleanup; use the explicit
 recovery command below after inspecting the abandoned worker.
 
-1. Refresh the conversation and inspect the stored state. For `PENDING`, the
-   original sender can choose **Resume send** while still assigned. Claims older
-   than five minutes can be reclaimed; younger active claims cannot.
+1. Refresh the conversation and inspect the stored state. `PENDING` and
+   `DISPATCHING` show a sending indicator without a retry button. If preparation
+   is abandoned, an operator must inspect the worker before using the existing
+   authorized resend endpoint. It can reclaim `PENDING` claims older than five
+   minutes; younger active claims cannot be reclaimed. This does not authorize
+   replaying an uncertain dispatch.
 2. For `FAILED`, fix the reported preparation/configuration issue and choose
    **Resend**. Missing attachments must be restored before retrying; the server
    will not fabricate a replacement attachment.
@@ -181,6 +194,45 @@ recovery command below after inspecting the abandoned worker.
 4. For `UNCERTAIN`, use **Check status** or inspect the paired phone/provider
    evidence. Do not clear the marker, change its client ID, or force a SQL reset.
    The original attempt and its audit record are retained.
+
+### Linked-device connection recovery
+
+Sends require an open WebSocket, a validated WhatsApp session, and the current
+connection generation. A close event blocks new sends immediately, before queued
+session writes finish. Readiness is checked again after attachment preparation
+and durable reservation, immediately before invoking the provider. Disconnected
+requests return `NOT_CONNECTED` with `delivery_uncertain=false`; staff can retry
+after reconnection. The bridge does not automatically replay customer messages.
+
+Once `sendMessage` or `relayMessage` is invoked, interruption is conservatively
+uncertain unless WhatsApp explicitly rejects it. Submission is bounded at
+120 seconds; the normal 20-second ACK timer starts after the provider call
+returns, so attachment preparation does not consume the ACK window. These bounds
+release bridge queues; the API's shorter HTTP timeout may report uncertainty first.
+Original native IDs remain reserved. Duplicate message client IDs return saved
+confirmation or uncertainty and never create a second submission. Existing
+explicit edit/delete retries retain the original protocol ID and payload.
+
+Recovery is isolated per line and uses one reconnect attempt/timer, with 1–60
+second exponential backoff (a restart-required handshake can use 250 ms when
+no reconnect is already scheduled).
+A connection must remain ready for a minute before a later disconnect resets
+backoff. Obsolete open/close/error events cannot change a replacement's readiness;
+logout, removal, shutdown, and storage failures suppress network retries.
+
+A positive ACK for a reserved message ID on the current authenticated transport
+is saved, even when its original waiter expired. Confirmation callbacks are
+coalesced; existing receipt/echo reconciliation remains available. An ACK proves
+acceptance only, never delivery, reading, or playback. Listeners, waiters, and
+reconnect timers are retired on replacement/shutdown. Structured bridge logs
+include line, generation, opaque native ID, transition/recovery reason, ACK timeout,
+and provider status codes; they exclude bodies, credentials, and raw provider
+exceptions. Missing ACKs alone do not identify an external cause.
+
+No migration or historical-record repair is needed. A future approved deployment
+needs a normal bridge restart to load this code; retain all saved pairing state.
+Do not resend the October 28 uncertain attempts in Tripoli Office: their
+replacements already have delivery confirmations.
 
 ### Uncertain delivery actions
 
@@ -683,6 +735,12 @@ or provider support; Cloud read events never imply playback.
 All dashboard voice recordings, including browser-native Ogg/Opus, are normalized
 by FFmpeg to **mono, 48 kHz Opus** before storage. Browser recordings can contain
 stereo audio that plays on WhatsApp Web but fails on mobile as a voice note.
+New converted recordings are saved/uploaded as `voice-note.opus` with the
+`audio/ogg; codecs=opus` MIME type. The `.opus` extension still uses the Ogg
+container ([RFC 7845 §9](https://www.rfc-editor.org/rfc/rfc7845.html#section-9));
+changing the extension alone is not a repair for corrupt audio. Existing `.ogg`
+history remains readable without a migration, rewrite or resend. The file picker,
+drag/drop and paste also accept `.opus` attachments for preview and normalization.
 Linked-device PTT retains `audio/ogg; codecs=opus` through upload and relay; the
 bridge rejects non-Opus or non-mono PTT before dispatch. Text, locations and all
 supported attachment kinds share delivery ownership and ACK handling. Explicit
@@ -899,3 +957,105 @@ before deploying. It adds an attachment MIME column and preserves existing PDFs;
 repeat application is safe. Restart only the API for this update. Existing
 bridge sessions, provider configuration, and media files are unchanged. Include
 both legacy `.pdf` files and new image `.bin` files in quick-reply backups.
+
+### Queue filters and dashboard unread state
+
+Unassigned and My Tickets can be filtered by Support Number. Chats, Activity,
+Waiting and History also offer Staff Member; Chats includes All/Open/Closed.
+Staff Member means the current/retained assignee, including resolved history.
+Filters intersect the existing queue access rules and search customer names,
+phone numbers, references and visible message text across the entire matching
+queue. Results remain ordered by most recent activity. Changing a filter/search
+resets pagination. The queue heading/footer count matching conversations; sidebar
+badges continue showing the full queue totals. Message search within an open
+conversation remains available for finding individual matching messages. Matching
+message previews in queue results open that message directly.
+
+Apply `migrations/20261029_support_dashboard_reads.sql` before starting this build.
+For installations with table-specific grants, grant the existing application
+account SELECT/INSERT/UPDATE/DELETE on `support_dashboard_reads` as well.
+It adds per-staff, per-conversation viewing cursors, independent of WhatsApp
+read receipts and whether staff have replied. Existing messages are initially
+unread in the dashboard: past views cannot be reconstructed reliably. Green dots
+in Chats and My Tickets clear only after visible incoming messages are confirmed
+read by the API. Background tabs, list rendering, prefetch and investigation do
+not advance a cursor. Newer incoming messages beyond the displayed boundary stay
+unread. Other staff and other tabs cannot clear or rewind your cursor.
+
+Live incoming chat alerts use the current assignee at event authorization time;
+creator/participant access alone does not qualify. Duplicate event alerts are
+suppressed; messages predating the current event stream and provider messages
+older than two minutes synchronize silently
+(including reconnect backlog). Polling and navigation do not create chat alerts.
+Read/view activity remains recorded for manager-only statistics/investigation.
+`CONVERSATION_VIEWED` and `INCOMING_MARKED_READ` are excluded from operational
+chat/ticket timelines for every role, before applying the event limit. This does not
+change conversation visibility, sending permissions or WhatsApp receipt behavior.
+
+The initial session check retries temporary network failures and HTTP
+408/429/500/502/503/504 responses at most twice, after one and two seconds.
+Each attempt has a ten-second deadline; navigation cancels requests/retry timers.
+Concurrent checks share one bootstrap operation. Authentication remains required:
+401 opens sign-in immediately, 403 shows an access error, and exhausted retries
+leave a manual Retry button without clearing the saved workspace. These retries
+apply only to the read-only session check, never to outgoing messages or login.
+
+
+### Active queue filters and permanent directory removal
+
+Queue filters list only current active staff and enabled, present linked-device
+numbers. Meta numbers, disabled/unpaired lines and historical assignee IDs are
+excluded from the choices; existing conversation visibility is unchanged.
+Removing a selected option resets that filter to All and reloads its results.
+Labels remain available to screen readers without occupying a separate row.
+
+Deleting a staff account physically deletes its credentials and private records,
+as before. Ticket/message/audit attribution remains historical; it does not
+create an account or a filter option. Deactivation alone remains reversible.
+
+After confirmed linked-device unlinking, or **Remove saved number** for an
+inactive Meta number, the number's directory row is now physically deleted.
+The existing removal audit prevents stale syncs, webhooks or configured defaults
+from recreating it. A short database advisory lock serializes discovery and
+removal across API processes; no provider request runs under that lock. Ticket
+snapshots retain the number's custom label and retirement status, so history is
+readable but the removed channel cannot be reopened for sending.
+
+Before deploying, apply `migrations/20261029_support_number_profile_deletion.sql`
+to the application's local database. It adds two nullable ticket metadata columns
+and is safe to repeat. Retired profiles from earlier releases require a one-time
+reviewed cleanup after deployment: back up the profiles, verify no active
+conversations, and use the same registry removal methods. For linked lines,
+confirm retirement in the bridge manifest first; a disabled but still paired
+number must not be treated as already unlinked. Keep removal audit records and
+bridge retirement records. Rolling back to code without these deletion guards
+can recreate profiles from stale configuration, so restore the backup or retain
+the guards when rolling back after cleanup.
+
+### Voice recording conversion
+
+Dashboard recordings prefer Ogg/Opus, then WebM/Opus, with MP4 retained for
+browsers that require it. Recording uses one complete capture (no periodic
+`MediaRecorder.start(timeslice)` fragments). The final `dataavailable` event is
+collected before the draft is created. Each recording owns its chunks and
+microphone stream; pending permission, cancellation, navigation, and repeated
+Stop clicks cannot mix recordings or place a draft in another conversation.
+This follows the [MediaRecorder completion model](https://www.w3.org/TR/mediastream-recording/).
+
+The server still normalizes audio to mono 48 kHz Ogg/Opus before provider upload.
+A conversion rejection occurs before an outbound row or provider submission;
+remove the rejected recording and record a fresh one. Existing uncertain sends
+must still follow the delivery recovery policy. Diagnostics record the ticket,
+agent, MIME type, byte count, converter exit code and bounded decoder error,
+without retaining rejected recordings or logging their audio contents.
+
+Regression coverage uses synthetic real-browser recordings, real FFmpeg and
+FFprobe, deterministic recorder events, and real MariaDB/Redis with mocked
+WhatsApp. Run `tests/test_voice_recording.py tests/test_support_media.py` in the
+unit process and `tests/integration/test_voice_conversion.py` separately with the
+integration environment described above. Safari-specific capture and playback
+on physical recipient phones still require device verification.
+
+## Bridge persistence and dashboard refresh
+
+See [storage, request identity, polling, and rollback](bridge-dashboard-performance.md) before deploying the incremental bridge store. The API requires the additive `20261029_support_send_fingerprints.sql` migration. Existing polling overrides should be reviewed; the default is now 30 seconds with SSE-triggered refreshes. Production activation requires explicit approval.

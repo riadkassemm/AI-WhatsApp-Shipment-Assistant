@@ -20,8 +20,11 @@ def test_queue_footer_has_no_page_buttons() -> None:
 def test_queue_appends_pages_on_scroll_and_refresh_keeps_loaded_rows() -> None:
     start = _HTML.index("function queuePath(")
     end = _HTML.index("async function pollUnassignedActivity(")
-    script = r"""
+    transient = _HTML[_HTML.index("function transientReadError("):_HTML.index("function backgroundRetryDelay(")]
+    script = transient + r"""
 const assert = require('node:assert/strict');
+const document = {hidden:false};
+const noteBackgroundRead = () => {};
 const QUEUE_MAX_REQUEST_SIZE = 500;
 const tickets = Array.from({length: 120}, (_, index) => ({id: index + 1}));
 const requests = [];
@@ -44,6 +47,8 @@ const renderQueue = () => {renders++};
 const renderQueueSkeleton = () => {};
 const renderQueueError = () => {};
 const updateQueueCount = () => {};
+const refreshAllQueueCounts = async () => {};
+const renderQueueFilters = () => {};
 const saveSupportSelection = () => {saved++};
 const notify = (message, tone) => notices.push([message, tone]);
 const text = () => {};
@@ -54,7 +59,7 @@ const text = () => {};
   assert.equal(queueHasMore(), true);
 
   await loadMoreQueue();
-  assert.equal(requests.at(-1), '/api/support/tickets?view=history&page=2&page_size=50');
+  assert.equal(requests.at(-1), '/api/support/tickets?page=2&page_size=50&q=&view=history');
   assert.equal(state.queueItems.length, 100);
   assert.equal(state.page, 2);
   assert.ok(saved > 0, 'the loaded depth is remembered');
@@ -68,13 +73,13 @@ const text = () => {};
 
   // A refresh reloads everything already scrolled into view.
   await loadQueue({silent: true});
-  assert.equal(requests.at(-1), '/api/support/tickets?view=history&page=1&page_size=150');
+  assert.equal(requests.at(-1), '/api/support/tickets?page=1&page_size=150&q=&view=history');
   assert.equal(state.queueItems.length, 121);
   assert.equal(state.queueItems[0].id, 999);
 
-  // Short local filters only search loaded rows.
+  // Server-side searches continue through the complete matching dataset.
   state.total = 500; state.query = 'ab';
-  assert.equal(queueHasMore(), false);
+  assert.equal(queueHasMore(), true);
   state.query = '';
 
   // A failed page stops automatic retries until the next refresh.
@@ -90,8 +95,8 @@ const text = () => {};
   state.page = 12;
   await loadQueue({silent: true});
   assert.deepEqual(requests.slice(-2), [
-    '/api/support/tickets?view=history&page=1&page_size=500',
-    '/api/support/tickets?view=history&page=2&page_size=500',
+    '/api/support/tickets?page=1&page_size=500&q=&view=history',
+    '/api/support/tickets?page=2&page_size=500&q=&view=history',
   ]);
   assert.equal(state.queueExhausted, false);
 })().catch(error => {console.error(error); process.exitCode = 1});

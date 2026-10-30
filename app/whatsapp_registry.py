@@ -9,6 +9,7 @@ from typing import Any
 import aiomysql
 import httpx
 
+from app.whatsapp_registry_removal import RegistryMutationMixin, delete_number_profile, removed_number
 from app.config import removed_linked_device_line_ids, settings
 from app.support_auth import SupportAgent
 from app.whatsapp_client import configured_linked_device_lines, get_transport, linked_device_client
@@ -72,7 +73,7 @@ def _clean_id(value: str | None, *, label: str) -> str:
     return cleaned
 
 
-class WhatsAppRegistryRepository:
+class WhatsAppRegistryRepository(RegistryMutationMixin):
     def __init__(self) -> None:
         self._pool: aiomysql.Pool | None = None
 
@@ -113,46 +114,49 @@ class WhatsAppRegistryRepository:
     async def execute(self, query: str, params: tuple | list = ()) -> int:
         await self.connect()
         assert self._pool is not None
-        async with self._pool.acquire() as conn:
-            async with conn.cursor() as cur:
+        async with self.mutation_connection() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                if re.search(r'INSERT\s+INTO\s+whatsapp_phone_numbers\b', query, re.I):
+                    if await removed_number(cur, str(params[0])):
+                        return 0
                 await cur.execute(query, params)
                 return int(cur.rowcount or 0)
 
     async def remove_saved_meta_number(self, phone_number_id: str, *, actor_id: int) -> None:
-        """Retire an inactive descriptor while retaining historical references."""
+        """Remove the profile; keep ticket snapshots and the existing removal audit."""
         await self.connect()
         assert self._pool is not None
-        async with self._pool.acquire() as conn:
+        async with self.mutation_connection() as conn:
             await conn.begin()
             try:
                 async with conn.cursor(aiomysql.DictCursor) as cur:
                     await cur.execute(
-                        "SELECT source,is_enabled,removed_at,waba_id FROM whatsapp_phone_numbers WHERE phone_number_id=%s FOR UPDATE",
+                        "SELECT * FROM whatsapp_phone_numbers WHERE phone_number_id=%s FOR UPDATE",
                         (phone_number_id,),
                     )
                     row = await cur.fetchone()
+                    if not row and await removed_number(cur, phone_number_id):
+                        await conn.commit()
+                        return
                     if not row or row.get('source') not in {'META_SYNC', 'WEBHOOK', 'LEGACY_ENV'}:
                         raise WhatsAppRegistryValidationError("Only saved Meta Cloud numbers can be removed here.")
                     if row.get('is_enabled'):
                         raise WhatsAppRegistryConflictError("Remove this number from the app before removing its saved entry.")
-                    if not row.get('removed_at'):
-                        # New/reopened conversations take this number lock first
-                        # as well. Never retire a number beneath an active chat.
-                        await cur.execute(
-                            "SELECT id FROM support_tickets WHERE business_phone_number_id=%s AND active_key IS NOT NULL LIMIT 1 FOR UPDATE",
-                            (phone_number_id,),
-                        )
-                        if await cur.fetchone():
-                            raise WhatsAppRegistryConflictError("Resolve or close this number's active conversations before removing its saved entry.")
-                        await cur.execute(
-                            "UPDATE whatsapp_phone_numbers SET removed_at=UTC_TIMESTAMP(6),updated_by_staff_id=%s WHERE phone_number_id=%s",
-                            (actor_id, phone_number_id),
-                        )
+                    # New/reopened conversations take this number lock first
+                    # as well. Never retire a number beneath an active chat.
+                    await cur.execute(
+                        "SELECT id FROM support_tickets WHERE business_phone_number_id=%s AND active_key IS NOT NULL LIMIT 1 FOR UPDATE",
+                        (phone_number_id,),
+                    )
+                    if await cur.fetchone():
+                        raise WhatsAppRegistryConflictError("Resolve or close this number's active conversations before removing its saved entry.")
+                    if not await removed_number(cur, phone_number_id):
                         await cur.execute(
                             """INSERT INTO whatsapp_integration_audit (action,actor_staff_id,waba_id,phone_number_id,details_json)
                                VALUES ('META_NUMBER_REMOVED',%s,%s,%s,%s)""",
                             (actor_id, row.get('waba_id'), phone_number_id, json.dumps({'history_preserved': True})),
                         )
+                    await delete_number_profile(cur, row)
                 await conn.commit()
             except Exception:
                 await conn.rollback()
@@ -164,12 +168,15 @@ class WhatsAppRegistryRepository:
         """Stop routing before native logout; retain conversations until it succeeds."""
         await self.connect()
         assert self._pool is not None
-        async with self._pool.acquire() as conn:
+        async with self.mutation_connection() as conn:
             await conn.begin()
             try:
                 async with conn.cursor(aiomysql.DictCursor) as cur:
                     await cur.execute("SELECT * FROM whatsapp_phone_numbers WHERE phone_number_id = %s FOR UPDATE", (line_id,))
                     row = await cur.fetchone()
+                    if not row and await removed_number(cur, line_id):
+                        await conn.commit()
+                        return 0
                     if not row or row.get("source") != "LINKED_DEVICE":
                         raise WhatsAppRegistryValidationError("Only a registered linked-device number can be removed here.")
                     await cur.execute(
@@ -215,12 +222,15 @@ class WhatsAppRegistryRepository:
         """Archive remaining conversations only after WhatsApp confirms logout."""
         await self.connect()
         assert self._pool is not None
-        async with self._pool.acquire() as conn:
+        async with self.mutation_connection() as conn:
             await conn.begin()
             try:
                 async with conn.cursor(aiomysql.DictCursor) as cur:
                     await cur.execute("SELECT * FROM whatsapp_phone_numbers WHERE phone_number_id = %s FOR UPDATE", (line_id,))
                     row = await cur.fetchone()
+                    if not row and await removed_number(cur, line_id):
+                        await conn.commit()
+                        return []
                     if not row or row.get("source") != "LINKED_DEVICE":
                         raise WhatsAppRegistryValidationError("Only a registered linked-device number can be removed here.")
                     if row.get("is_enabled"):
@@ -249,19 +259,14 @@ class WhatsAppRegistryRepository:
                             VALUES (%s, %s, 'AGENT', %s, %s, %s, UTC_TIMESTAMP(6))
                             """, (ticket["id"], event_type, str(actor_id), actor_name, details),
                         )
-                    # Keep a disabled descriptor for historic provider references and
-                    # idempotent retries. The manifest permanently retires this ID.
-                    await cur.execute(
-                        "UPDATE whatsapp_phone_numbers SET is_enabled = 0, provider_present = 0, updated_by_staff_id = %s WHERE phone_number_id = %s",
-                        (actor_id, line_id),
-                    )
-                    if row.get("provider_present") or tickets:
+                    if not await removed_number(cur, line_id):
                         await cur.execute(
                             """
                             INSERT INTO whatsapp_integration_audit (action, actor_staff_id, phone_number_id, details_json)
                             VALUES ('LINKED_DEVICE_LINE_REMOVED', %s, %s, %s)
                             """, (actor_id, line_id, json.dumps({"closed_conversations": len(tickets), "unlinked": True})),
                         )
+                    await delete_number_profile(cur, row)
                 await conn.commit()
                 return tickets
             except Exception:
@@ -279,7 +284,7 @@ class WhatsAppRegistryRepository:
         await self.connect()
         assert self._pool is not None
         now = _utcnow()
-        async with self._pool.acquire() as conn:
+        async with self.mutation_connection() as conn:
             autocommit = getattr(conn, "autocommit", None)
             if callable(autocommit):
                 await autocommit(False)
@@ -301,6 +306,8 @@ class WhatsAppRegistryRepository:
                     discovered_ids: list[str] = []
                     for item in numbers:
                         phone_id = _clean_id(str(item.get("id") or ""), label="phone-number ID")
+                        if await removed_number(cur, phone_id):
+                            continue
                         discovered_ids.append(phone_id)
                         legacy_default = phone_id == str(settings.whatsapp_phone_number_id or "").strip()
                         await cur.execute(
@@ -679,6 +686,8 @@ class WhatsAppRegistryService:
         if get_transport(phone_number_id) != 'cloud':
             raise WhatsAppRegistryValidationError("Use Remove and unlink for linked-device numbers.")
         await self.repository.remove_saved_meta_number(phone_number_id, actor_id=int(agent.id))
+        from app.support_events import publish_support_event
+        await publish_support_event("ticket_queues_changed")
         return await self.list_payload(agent)
 
     async def prepare_linked_device_removal(
@@ -720,6 +729,7 @@ class WhatsAppRegistryService:
             except Exception:
                 logger.exception("Removed WhatsApp line conversation cache could not be updated: ticket_id=%s", ticket["id"])
             await publish_support_event("ticket_updated", ticket_id=int(ticket["id"]), status="CLOSED")
+        await publish_support_event("ticket_queues_changed")
         return len(tickets)
 
     async def sync_waba(self, agent: SupportAgent, waba_id: str) -> dict[str, Any]:
@@ -772,6 +782,10 @@ class WhatsAppRegistryService:
             (phone_number_id,),
         )
         if not row:
+            retired = await self.repository.fetch_one("""SELECT id FROM whatsapp_integration_audit
+                WHERE phone_number_id=%s AND action IN ('META_NUMBER_REMOVED','LINKED_DEVICE_LINE_REMOVED') LIMIT 1""", (phone_number_id,))
+            if retired:
+                raise WhatsAppRegistryConflictError("This saved number was permanently removed from the app.")
             raise WhatsAppRegistryValidationError(
                 "This phone number has not been discovered from Meta yet. Sync its WABA first."
             )

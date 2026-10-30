@@ -50,7 +50,19 @@ function applyStaffProfileName(staffId, name) {
   if (state.activeModal === 'agentStatisticsModal') loadAgentStatistics();
 }
 
+// Live-update reconnection is owned here, not by the browser: every error closes
+// the EventSource (so its built-in retry never competes) and schedules exactly
+// one retry with jittered backoff. A retry first checks the session through the
+// normal API path, because EventSource errors carry no HTTP status.
+const SUPPORT_EVENTS_RETRY_BASE_MS = 1000;
+const SUPPORT_EVENTS_RETRY_MAX_MS = 30000;
+
 function disconnectSupportEvents() {
+  state.supportEventsGeneration += 1;
+  clearTimeout(state.supportEventsRetryTimer);
+  state.supportEventsRetryTimer = null;
+  state.supportEventsProbe = null;
+  state.supportEventsAttempt = 0;
   if (state.supportEventSource) {
     state.supportEventSource.close();
     state.supportEventSource = null;
@@ -59,10 +71,75 @@ function disconnectSupportEvents() {
 
 function connectSupportEvents() {
   disconnectSupportEvents();
+  openSupportEventSource();
+}
+
+function supportEventsRetryDelay(attempt) {
+  const ceiling = Math.min(SUPPORT_EVENTS_RETRY_MAX_MS, SUPPORT_EVENTS_RETRY_BASE_MS * 2 ** attempt);
+  return Math.round(ceiling * (0.5 + Math.random() * 0.5));
+}
+
+function scheduleSupportEventsReconnect() {
+  if (!state.authenticated || state.pageLeaving || state.supportEventSource ||
+      state.supportEventsRetryTimer !== null || state.supportEventsProbe) return;
+  const delay = supportEventsRetryDelay(state.supportEventsAttempt++);
+  state.supportEventsRetryTimer = setTimeout(() => {
+    state.supportEventsRetryTimer = null;
+    reconnectSupportEvents();
+  }, delay);
+}
+
+async function reconnectSupportEvents() {
+  if (!state.authenticated || state.pageLeaving || state.supportEventSource || state.supportEventsProbe) return;
+  const generation = state.supportEventsGeneration;
+  const probe = api('/api/support/me');
+  state.supportEventsProbe = probe;
+  let failure = null;
+  try { await probe; } catch (error) { failure = error; }
+  finally { if (state.supportEventsProbe === probe) state.supportEventsProbe = null; }
+  if (generation !== state.supportEventsGeneration || !state.authenticated || state.supportEventSource) return;
+  if (failure) {
+    // 401 already ran the normal sign-in flow inside api(); stale-session
+    // aborts belong to a previous sign-in.
+    if (failure.status === 401 || failure.name === 'AbortError') return;
+    if (failure.status === 403) { markLiveUpdatesAccessDenied(); return; }
+    scheduleSupportEventsReconnect();
+    return;
+  }
+  openSupportEventSource();
+}
+
+// Network restored, tab shown again or "Retry now": skip the remaining wait.
+function reconnectSupportEventsNow() {
+  if (!state.authenticated || state.pageLeaving || state.supportEventSource || state.supportEventsProbe) return;
+  clearTimeout(state.supportEventsRetryTimer);
+  state.supportEventsRetryTimer = null;
+  reconnectSupportEvents();
+}
+
+function openSupportEventSource() {
   if (!state.authenticated || typeof EventSource === 'undefined') return;
   const source = new EventSource('/api/support/events', {withCredentials: true});
   state.supportEventSource = source;
+  source.onopen = () => {
+    if (state.supportEventSource !== source || !state.authenticated) return;
+    const recovered = state.supportEventsAttempt > 0 || connectionHealth.liveDownSince !== null;
+    state.supportEventsAttempt = 0;
+    markLiveUpdates(true);
+    // Events missed while disconnected are not replayed: reconcile from the
+    // API through the scheduler, including shared history after an outage.
+    requestDashboardRefresh('queue', recovered ? 'history' : 'conversation', 'counts');
+  };
+  source.onerror = () => {
+    if (state.supportEventSource !== source) return;
+    source.close();
+    state.supportEventSource = null;
+    if (!state.authenticated || state.pageLeaving) return;
+    markLiveUpdates(false);
+    scheduleSupportEventsReconnect();
+  };
   source.onmessage = event => {
+    if (state.supportEventSource !== source || !state.authenticated) return;
     let payload = {};
     try { payload = JSON.parse(event.data || '{}'); } catch (_) { return; }
     const type = String(payload.type || '');
@@ -76,17 +153,16 @@ function connectSupportEvents() {
       state.previousTicketHistory = [];
       state.previousHistoryExpanded = false;
       state.previousHistoryLoaded = false;
-      refreshAllQueueCounts().catch(() => {});
-      loadQueue({silent: true}).catch(() => {});
-      if (state.query.trim().length >= 2) runGlobalMessageSearch().catch(() => {});
-      if (state.ticketId) openTicket(state.ticketId, {silent: true, refreshHistory: true}).catch(() => {});
+      requestDashboardRefresh('counts');
+      requestDashboardRefresh('queue');
+      if (state.ticketId) requestDashboardRefresh('history');
       return;
     }
-    if (type === 'incoming_read') {
+    if (type === 'incoming_read' || type === 'dashboard_read') {
       if (payload.authorized !== true) return;
       state.ticketPrefetch.delete(String(payload.ticket_id));
-      loadQueue({silent: true}).catch(() => {});
-      if (String(state.ticketId) === String(payload.ticket_id)) openTicket(state.ticketId, {silent: true}).catch(() => {});
+      requestDashboardRefresh('queue');
+      if (String(state.ticketId) === String(payload.ticket_id)) requestDashboardRefresh('conversation');
       return;
     }
     if (type === 'message_status') {
@@ -100,7 +176,7 @@ function connectSupportEvents() {
       if (payload.message && state.ticketId && String(state.ticketId) === String(payload.ticket_id || '')) {
         upsertTimelineMessage(payload.message, payload.ticket_id);
       } else if (state.ticketId && String(state.ticketId) === String(payload.ticket_id || '')) {
-        openTicket(state.ticketId, {silent: true}).catch(() => {});
+        requestDashboardRefresh('conversation');
       } else if (type === 'message_media_ready' && state.previousTicketHistory.some(thread => String(thread.ticket?.id) === String(payload.ticket_id))) {
         if (payload.message) {
           changeCachedMessage(payload.ticket_id, payload.message.id, payload.message);
@@ -108,30 +184,35 @@ function connectSupportEvents() {
             state.timelineSignature = timelineSignature(state.currentTicketData);
             renderConversation(state.currentTicketData);
           }
-        } else if (state.ticketId) openTicket(state.ticketId, {silent: true, refreshHistory: true}).catch(() => {});
+        } else if (state.ticketId) requestDashboardRefresh('history');
       }
       if (type === 'outbound_message') {
         // Messages sent from the linked WhatsApp app can change a ticket's
         // preview and place in the queue even when another ticket is open.
         // Refreshing only the queue leaves any playing voice note untouched.
-        refreshAllQueueCounts().catch(() => {});
-        if (state.view !== 'contacts') loadQueue({silent: true}).catch(() => {});
+        requestDashboardRefresh('counts');
+        if (state.view !== 'contacts') requestDashboardRefresh('queue');
         return;
       }
       if (type !== 'customer_message') return;
+      requestDashboardRefresh('queue');
+      if (payload.conversation_origin === 'STAFF') {
+        handleAssignedChatNotification(payload);
+        return;
+      }
     }
-    refreshAllQueueCounts().catch(() => {});
+    requestDashboardRefresh('counts');
     if (type === 'ticket_updated') {
       if (payload.authorized !== true) return;
       if (state.ticketId && String(state.ticketId) === String(payload.ticket_id || '')) {
-        openTicket(state.ticketId, {silent: true}).catch(() => {});
+        requestDashboardRefresh('conversation');
       }
-      loadQueue({silent: true}).catch(() => {});
+      requestDashboardRefresh('queue');
       return;
     }
     if (type === 'contacts_synced' || type === 'contact_saved') {
       if (!payload.staff_id || String(payload.staff_id) === String(state.agent?.id || '')) {
-        if (state.view === 'contacts') loadQueue({silent: true}).catch(() => {});
+        if (state.view === 'contacts') requestDashboardRefresh('queue');
         loadGoogleContactsStatus().catch(() => {});
       }
       return;
@@ -157,10 +238,10 @@ function connectSupportEvents() {
           if (payload.message && type !== 'message_deleted_for_me') {
             upsertTimelineMessage(payload.message, payload.ticket_id);
             if (type === 'message_deleted_for_everyone' && state.replyTarget?.id === changedId) clearReplyTarget();
-          } else openTicket(state.ticketId, {silent: true}).catch(() => {});
+          } else requestDashboardRefresh('conversation');
         } else if (state.previousTicketHistory.some(thread => String(thread.ticket?.id) === String(payload.ticket_id))) {
           if (payload.message && type !== 'message_deleted_for_me') changeCachedMessage(payload.ticket_id, changedId, payload.message);
-          openTicket(state.ticketId, {silent: true, refreshHistory: true}).catch(() => {});
+          requestDashboardRefresh('history');
         }
       }
       return;
@@ -173,7 +254,7 @@ function connectSupportEvents() {
     if (type === 'ticket_created' && payload.phone_initiated === true) {
       // Started in the WhatsApp app, so someone is already talking to the
       // customer. It goes to Active without an unassigned alert.
-      if (state.view !== 'contacts') loadQueue({silent: true}).catch(() => {});
+      if (state.view !== 'contacts') requestDashboardRefresh('queue');
       return;
     }
     const customer = payload.customer_name || payload.customer_phone || 'customer';
@@ -184,11 +265,70 @@ function connectSupportEvents() {
         : 'New customer message from ' + customer + '.';
     notifyNewCustomerActivity(notificationText);
     state.unassignedSnapshot = null;
-    if (state.view === 'unassigned') loadQueue({silent: true}).catch(() => {});
-    else pollUnassignedActivity().catch(() => {});
-    if (type !== 'customer_message' && state.ticketId && String(state.ticketId) === String(payload.ticket_id || '')) openTicket(state.ticketId, {silent: true}).catch(() => {});
+    if (state.view === 'unassigned') requestDashboardRefresh('queue');
+    else requestDashboardRefresh('counts');
+    if (type !== 'customer_message' && state.ticketId && String(state.ticketId) === String(payload.ticket_id || '')) requestDashboardRefresh('conversation');
   };
-  source.onerror = () => {
-    // EventSource retries automatically. Polling remains active as a fallback.
-  };
+}
+
+function handleAssignedChatNotification(payload) {
+  if (payload.authorized !== true || payload.chat_notification !== true ||
+      String(payload.current_assignee_id || '') !== String(state.agent?.id || '') ||
+      payload.message?.direction !== 'INBOUND' || !payload.message_id) return;
+  const key = String(state.agent.id) + ':' + payload.ticket_id + ':' + payload.message_id;
+  if (state.chatNotificationIds.has(key)) return;
+  state.chatNotificationIds.add(key);
+  // Preserve duplicate suppression across page refreshes, without storing bodies.
+  try {
+    const storageKey = 'support-chat-notifications:' + state.agent.id;
+    const seen = JSON.parse(sessionStorage.getItem(storageKey) || '[]');
+    if (Array.isArray(seen) && seen.includes(key)) return;
+    sessionStorage.setItem(storageKey, JSON.stringify([...(Array.isArray(seen) ? seen : []), key].slice(-500)));
+  } catch (_) {}
+  if (state.chatNotificationIds.size > 1000) state.chatNotificationIds.delete(state.chatNotificationIds.values().next().value);
+  const label = payload.customer_name || payload.customer_phone || 'customer';
+  const message = 'New chat message from ' + label + '.';
+  notifyNewCustomerActivity(message);
+  notify(message, 'success', () => {
+    setQueueView('chats');
+    openTicket(payload.ticket_id, {conversationOrigin: 'STAFF'}).catch(() => {});
+  });
+}
+
+let dashboardReadTimer = null;
+function scheduleDashboardRead() {
+  if (dashboardReadTimer) clearTimeout(dashboardReadTimer);
+  dashboardReadTimer = setTimeout(markVisibleDashboardMessagesRead, 150);
+}
+
+async function markVisibleDashboardMessagesRead() {
+  if (!state.authenticated || document.visibilityState !== 'visible' || !document.hasFocus() ||
+      state.activeModal || state.historyJumpActive || !state.ticketId) return;
+  const container = $('conversation');
+  const bounds = container.getBoundingClientRect();
+  if (!bounds.width || !bounds.height || bounds.right <= 0 || bounds.left >= window.innerWidth ||
+      bounds.bottom <= 0 || bounds.top >= window.innerHeight) return;
+  const data = state.currentTicketData;
+  const ticketId = state.ticketId;
+  if (String(data?.ticket?.id) !== String(ticketId)) return;
+  const incoming = new Set((data.messages || []).filter(m => m.direction === 'INBOUND' && !m.deleted_for_everyone_at).map(m => String(m.id)));
+  let boundary = 0;
+  for (const node of container.querySelectorAll('[data-message-id]')) {
+    if (!incoming.has(node.dataset.messageId)) continue;
+    const rect = node.getBoundingClientRect();
+    if (rect.height && rect.bottom > bounds.top && rect.top < bounds.bottom) boundary = Math.max(boundary, Number(node.dataset.messageId));
+  }
+  const key = String(state.agent.id) + ':' + ticketId;
+  if (!boundary || boundary <= (state.dashboardReadBoundaries.get(key) || 0)) return;
+  try {
+    const result = await api('/api/support/tickets/' + ticketId + '/dashboard-read', {
+      method: 'POST', body: JSON.stringify({message_id: boundary})
+    });
+    if (key !== String(state.agent?.id) + ':' + ticketId) return;
+    state.dashboardReadBoundaries.set(key, Math.max(boundary, state.dashboardReadBoundaries.get(key) || 0));
+    // Fetch rather than clearing optimistically: a newer arrival may remain unread.
+    if (result && state.authenticated) requestDashboardRefresh('queue');
+  } catch (_) {
+    // Failed requests do not clear the dot; the next visible refresh retries.
+  }
 }

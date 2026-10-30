@@ -1175,6 +1175,7 @@ async function openWhatsAppModal() {
   if (!canManageWhatsApp() || state.whatsappBusy) return;
   clearWhatsAppFeedback();
   openDialog('whatsappModal', 'wabaIdInput');
+  dashboardRefresh.request('linked-status');
   state.whatsappBusy = true;
   $('refreshWhatsAppBtn').disabled = true;
   try {
@@ -2197,23 +2198,14 @@ $('updateReloadBtn').addEventListener('click', () => { saveSupportSelection(); m
 $('queue').addEventListener('keydown', handleQueueKeydown);
 $('queueSearch').addEventListener('input', event => {
   state.query = event.target.value;
-  if (state.view === 'contacts') {
-    state.page = 1;
-    if (state.globalSearchTimer) clearTimeout(state.globalSearchTimer);
-    state.globalSearchTimer = setTimeout(() => loadQueue({silent: true}), 220);
-    return;
-  }
-  if (state.query.trim().length >= 2) {
-    state.globalSearchBusy = true;
-    renderQueue();
-    scheduleGlobalMessageSearch();
-  } else {
-    state.globalSearchResults = [];
-    state.globalSearchRequest += 1;
-    if (state.globalSearchTimer) { clearTimeout(state.globalSearchTimer); state.globalSearchTimer = null; }
-    renderQueue();
-  }
+  queueCriteriaChanged();
 });
+for (const [id, key] of [['queueSupportNumber', 'supportNumber'], ['queueStaff', 'staffId'], ['queueStatus', 'status']]) {
+  $(id).addEventListener('change', event => {
+    state.queueFilters[key] = event.target.value;
+    queueCriteriaChanged();
+  });
+}
 $('queueSearch').addEventListener('keydown', event => {
   if (event.key === 'Escape' && state.query) {
     event.preventDefault();
@@ -2502,19 +2494,19 @@ window.addEventListener('beforeunload', () => {
 window.addEventListener('pagehide', markPageLeaving);
 window.addEventListener('pageshow', event => {
   state.pageLeaving = false;
+  if (event.persisted && !state.authenticated && $('loginPage').classList.contains('hidden')) {
+    // A page restored from the browser's back/forward cache may have cancelled
+    // its session check on pagehide. Let that check finish before starting one.
+    Promise.resolve(state.bootstrapTask).then(() => {
+      if (!state.pageLeaving && !state.authenticated) bootstrap();
+    });
+  }
   if (event.persisted && state.authenticated) {
     if (state.ticketId) openTicket(state.ticketId, {silent: true}).catch(() => {});
     else loadQueue({silent: true}).catch(() => {});
   }
 });
 
-document.addEventListener('visibilitychange', () => {
-  if (!document.hidden) clearAttentionIndicator();
-  if (!document.hidden && state.authenticated && !state.busy && !state.activeModal) {
-    if (state.ticketId && !state.conversationSearchOpen) openTicket(state.ticketId, {silent: true});
-    else if (!state.ticketId) loadQueue({silent: true});
-  }
-});
 
 restoreLayoutPreferences();
 installColumnResizer({id: 'queueResizer', variableName: '--queue-width', storageKey: LAYOUT_STORAGE.queueWidth, minimum: 260, maximum: 520, direction: 1, enabled: () => window.innerWidth > 800});
@@ -2524,27 +2516,15 @@ updateMessagePreferenceCounts();
 updateComposerControls();
 updateQueueSummary();
 bootstrap();
-setInterval(() => {
-  if (!state.authenticated || state.busy || state.mediaRecorder || state.activeModal || state.conversationSearchOpen) return;
-  const audioPlaying = [...document.querySelectorAll('#conversation audio')].some(audio => !audio.paused && !audio.ended);
-  if (state.ticketId && !audioPlaying) openTicket(state.ticketId, {silent: true});
-  else if (!state.ticketId) loadQueue({silent: true});
-}, Math.max(3000, __POLL_MS__));
-setInterval(() => {
-  if (state.authenticated && state.activeModal === 'whatsappModal' && !state.whatsappBusy && !state.linkedDeviceBusy) loadLinkedDeviceStatus();
-}, 2000);
-setInterval(() => {
-  if (!state.authenticated || state.busy || state.activeModal) return;
-  pollUnassignedActivity();
-}, Math.max(2000, __POLL_MS__));
-setInterval(() => {
-  if (!state.authenticated) return;
-  refreshAllQueueCounts();
-}, Math.max(5000, __POLL_MS__));
-setInterval(() => {
-  if (!state.authenticated || state.aiSettingsBusy || document.hidden) return;
-  loadAiSettings().catch(error => renderAiSettingsUnavailable(error.message));
-}, Math.max(30000, __POLL_MS__));
 
 $('cancelMessageSelectionBtn').addEventListener('click', clearMessageSelection);
 $('forwardSelectedBtn').addEventListener('click', () => openForwardModal([...state.selectedMessages.values()]));
+
+// Only the mounted, visible conversation can advance the viewing cursor.
+new MutationObserver(scheduleDashboardRead).observe($('conversation'), {childList: true, subtree: true});
+$('conversation').addEventListener('scroll', scheduleDashboardRead, {passive: true});
+document.addEventListener('visibilitychange', scheduleDashboardRead);
+window.addEventListener('focus', scheduleDashboardRead);
+document.addEventListener('focusin', scheduleDashboardRead);
+// Retry a failed viewing acknowledgement without resending confirmed boundaries.
+setInterval(scheduleDashboardRead, 15000);

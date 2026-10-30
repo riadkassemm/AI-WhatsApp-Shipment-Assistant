@@ -6,6 +6,7 @@ import pino from 'pino';
 import QRCode from 'qrcode';
 import { BridgeError, phoneDigits, wrapId, unwrapId, validateLineManifest, UUID_PATTERN, MANIFEST_MAX_BYTES } from './config.js';
 import { FileStore, createAuth } from './storage.js';
+import { JournalStore } from './journal-store.js';
 import { AckTracker } from './ack.js';
 import { inboundEvent, outgoingEvent, outgoingConfirmationEvent, messageTombstoneEvent, messageStatusEvent, mutationEvent, textBody, millis, eventId, MEDIA_TYPES, RECEIPT_STATUSES, RECEIPT_RANK } from './events.js';
 import { preserveNativeMutationMetadata } from './native-events.js';
@@ -18,6 +19,34 @@ function isReactionCallback(event) {
   const messages = (event.payload?.entry ?? []).flatMap(entry =>
     (entry.changes ?? []).flatMap(change => change.value?.messages ?? []));
   return messages.length === 1 && messages[0].type === 'reaction';
+}
+
+// A photo/video album arrives as an envelope plus one message per item. The
+// envelope is never forwarded (events.js), so a reaction to it has no target
+// in support and the API would wait out its retry window for nothing. Deliver
+// such a reaction against the album's first item instead. Outbox entries keep
+// the original event; this mapping is recomputed on every delivery attempt.
+function albumReactionCallback(event, messages) {
+  if (!['message', 'outgoing_message'].includes(event.type) || !messages) return event;
+  const entries = event.payload?.entry;
+  const changes = entries?.length === 1 ? entries[0]?.changes : null;
+  const nodes = changes?.length === 1 ? changes[0]?.value?.messages : null;
+  if (nodes?.length !== 1 || nodes[0]?.type !== 'reaction' || typeof nodes[0].reaction?.message_id !== 'string') return event;
+  let albumId;
+  try { albumId = unwrapId(event.line_id, nodes[0].reaction.message_id); } catch { return event; }
+  if (!messages[albumId]?.message?.message?.albumMessage) return event;
+  const items = Object.entries(messages).filter(([, record]) => {
+    const content = record?.message?.message;
+    return content?.messageContextInfo?.messageAssociation?.parentMessageKey?.id === albumId &&
+      MEDIA_TYPES.some(type => content[`${type}Message`]);
+  }).sort(([leftId, left], [rightId, right]) =>
+    (left.timestamp ?? 0) - (right.timestamp ?? 0) || (leftId < rightId ? -1 : leftId > rightId ? 1 : 0));
+  // Items normally follow the envelope within seconds; until one is stored,
+  // keep the original target and the existing history-wait behavior.
+  if (!items.length) return event;
+  const mapped = structuredClone(event);
+  mapped.payload.entry[0].changes[0].value.messages[0].reaction.message_id = wrapId(event.line_id, items[0][0]);
+  return mapped;
 }
 
 // Host of the media URL stored in a WhatsApp message, if any.
@@ -44,12 +73,13 @@ export class Bridge {
     this.registrationTail = Promise.resolve();
     this.phoneReservations = new Map();
     this.stopping = false;
+    this.log = dependencies.log ?? (entry => console.info(JSON.stringify(entry)));
     this.callbackTasks = new Map();
     this.onError = dependencies.onError ?? (() => console.error('Bridge operation failed; check the connection status.'));
   }
 
   async initialize({ autoConnect = true } = {}) {
-    this.outbox = await new FileStore(path.join(this.config.dataDir, 'outbox.json'), () => ({ entries: [], dead_letters: [] })).load();
+    this.outbox = await new JournalStore(path.join(this.config.dataDir, 'outbox.json'), () => ({ entries: [], dead_letters: [] })).load();
     this.manifest = await new FileStore(path.join(this.config.dataDir, 'lines.json'), () => ({ version: 1, lines: {}, requests: {} })).load();
     const manifest = validateLineManifest(this.manifest.data);
     // Confirmed removal tombstones also form a durable cleanup work queue.
@@ -84,6 +114,7 @@ export class Bridge {
         if (autoConnect && line.store.data.enabled) await this.connect(line.line_id);
       } catch (error) {
         this.onError(error);
+        line.session?.dispose();
         line.ack?.close();
         line.socket?.end(new Error('Failed to initialize this linked-device line'));
         line.socket = null;
@@ -101,12 +132,32 @@ export class Bridge {
   lineContext(definition) {
     return { ...definition, directory: path.join(this.config.dataDir, definition.line_id),
       display_phone_number: definition.expected_phone, status: 'disconnected', socket: null, ack: null,
-      eventTail: Promise.resolve(), sendTail: Promise.resolve(), readTail: Promise.resolve(), reconnectTimer: null };
+      generation: 0, session: null, ackTail: Promise.resolve(), confirmationTasks: new Map(),
+      eventTail: Promise.resolve(), sendTail: Promise.resolve(), sendPending: 0, sendTasks: new Map(), readTail: Promise.resolve(), reconnectTimer: null };
   }
   async prepareLine(line) {
     try {
       await mkdir(path.join(line.directory, 'media'), { recursive: true, mode: 0o700 });
-      line.store = await new FileStore(path.join(line.directory, 'state.json'), initialLine).load();
+      line.store = await new JournalStore(path.join(line.directory, 'state.json'), initialLine, { diagnostics: event => { if (event.persist_ms >= 100 || event.queue_wait_ms >= 100) this.trace(line, 'storage_slow', event); } }).load();
+      // Rebuild only missing index entries at startup, also after a rollback
+      // export was used by an older bridge. Never infer a legacy payload hash.
+      const requests = new Map();
+      for (const [nativeId, record] of Object.entries(line.store.data.messages)) if (record.client_message_id) {
+        const key = crypto.createHash('sha256').update(record.client_message_id).digest('hex');
+        const previous = requests.get(key) ?? line.store.data.send_requests?.[key];
+        if (previous?.native_id && previous.native_id !== nativeId) throw new Error('DUPLICATE_DURABLE_SEND_KEY');
+        requests.set(key, {native_id: nativeId, fingerprint: record.request_fingerprint ?? null});
+      }
+      if (!line.store.data.send_requests) await line.store.update(data => {data.send_requests = {};});
+      const entries = [...requests].filter(([key, value]) => {
+        const old = line.store.data.send_requests[key];
+        return !old || old.native_id !== value.native_id || old.fingerprint !== value.fingerprint;
+      });
+      for (let offset = 0; offset < entries.length; offset += 256) {
+        await line.store.update(data => {
+          for (const [key, value] of entries.slice(offset, offset + 256)) data.send_requests[key] = value;
+        });
+      }
       // Retained disconnected/error sessions must remain identifiable as paired
       // after restart so the manager can explicitly unlink their credentials.
       line.auth = await createAuth(line.directory);
@@ -189,6 +240,8 @@ export class Bridge {
         if (this.lineStatus(line).is_paired && !line.removalRemoteConfirmed) await this.confirmDeviceUnlink(line);
         this.stopRemovedSocket(line);
         await line.eventTail;
+        await line.ackTail;
+        await Promise.allSettled(line.confirmationTasks.values());
         await line.auth?.store.flush();
         await line.store.flush();
         // Only a remote-confirmed removal (or an unpaired line) enters the
@@ -232,6 +285,7 @@ export class Bridge {
   }
   stopRemovedSocket(line) {
     const socket = line.socket;
+    line.session?.dispose();
     line.socket = null;
     line.ack?.close();
     socket?.end(new Error('Linked-device number removal'));
@@ -303,7 +357,7 @@ export class Bridge {
   async connect(id) {
     const line = this.getLine(id);
     if (line.removing) throw new BridgeError(503, 'LINE_REMOVING', 'This WhatsApp number is being removed.');
-    if (line.socket && ['connected', 'connecting', 'qr'].includes(line.status)) return this.lineStatus(line);
+    if (line.socket && !line.session?.closed && ['connected', 'connecting', 'qr'].includes(line.status)) return this.lineStatus(line);
     if (line.connectPromise) return line.connectPromise;
     line.connectPromise = this.openSocket(line).finally(() => { line.connectPromise = null; });
     return line.connectPromise;
@@ -311,6 +365,8 @@ export class Bridge {
 
   async openSocket(line) {
     if (this.stopping) throw new BridgeError(503, 'STOPPING', 'The bridge is shutting down.');
+    const generation = ++line.generation;
+    line.session?.dispose();
     line.ack?.close();
     line.socket?.end(new Error('Replacing linked-device session'));
     line.socket = null;
@@ -325,7 +381,9 @@ export class Bridge {
       error.bridgePersistenceFailure = true;
       throw error;
     }
+    if (this.stopping || generation !== line.generation) return this.lineStatus(line);
     line.status = 'connecting';
+    this.trace(line, 'connection_transition', { state: 'connecting' });
     delete line.error;
     delete line.qr;
     delete line.qr_data_url;
@@ -337,18 +395,50 @@ export class Bridge {
       getMessage: async key => line.store.data.messages[key.id]?.message?.message,
     });
     line.socket = socket;
+    const session = { generation, ready: false, closed: false };
+    line.session = session;
+    const onClose = () => {
+      if (line.socket !== socket) return;
+      this.blockConnection(line, socket, 'transport_closed');
+      this.scheduleReconnect(line);
+    };
+    socket.ws.on('close', onClose);
+    session.dispose = () => {
+      if (session.disposed) return;
+      session.disposed = true;
+      session.closed = true; session.ready = false;
+      socket.ws.off('close', onClose);
+      session.ack?.close();
+      session.restoreNativeEvents?.();
+      session.unsubscribe?.();
+    };
     // Real sockets expose the same emitter used by their native receive path.
     // Mock sockets may supply only ev.process; keep that seam for transport tests.
-    if (typeof socket.ev.emit === 'function') line.restoreNativeEvents = preserveNativeMutationMetadata(socket);
+    if (typeof socket.ev.emit === 'function') line.restoreNativeEvents = session.restoreNativeEvents = preserveNativeMutationMetadata(socket);
     line.ack?.close();
-    line.ack = new AckTracker(socket, this.config.ackTimeoutMs);
-    socket.ev.process(events => {
+    line.ack = session.ack = new AckTracker(socket, this.config.ackTimeoutMs, {
+      onTimeout: id => this.trace(line, 'ack_timeout', { generation, native_id: id }),
+      onConfirmation: id => {
+        if (line.socket !== socket || line.generation !== generation || this.stopping) return;
+        line.ackTail = line.ackTail.then(async () => {
+          const record = line.store?.data?.messages[id];
+          if (!record?.client_message_id || record.ack_confirmed) return;
+          await line.store.update(data => { if (data.messages[id]) data.messages[id].ack_confirmed = true; });
+          this.trace(line, 'ack_confirmed', { generation, native_id: id });
+          if (!line.store.data.messages[id]?.pending_send) await this.enqueueOwnConfirmation(line, id);
+        }).catch(this.onError);
+      },
+    });
+    session.unsubscribe = socket.ev.process(events => {
+      // Fence immediately, before persistence or another queued event can yield.
+      if (events['connection.update']?.connection === 'close') this.blockConnection(line, socket, 'connection_closed');
       line.eventTail = line.eventTail.then(async () => {
         if (line.socket !== socket) return;
         if (events['creds.update']) {
           Object.assign(line.auth.state.creds, events['creds.update']);
           await line.auth.saveCreds();
         }
+        if (line.socket !== socket || line.generation !== generation) return;
         if (events['connection.update']) await this.connectionUpdate(line, socket, events['connection.update']);
         if (line.removing) return;
         const upsert = events['messages.upsert'];
@@ -367,8 +457,13 @@ export class Bridge {
         }
         for (const update of events['messages.update'] ?? []) await this.receiveUpdate(line, update);
       }).catch(error => {
+        if (line.socket !== socket || line.generation !== generation) { this.onError(error); return; }
+        this.blockConnection(line, socket, 'persistence_failed');
         line.status = 'error';
         line.error = 'Could not safely save or synchronize the WhatsApp session. Reconnect after checking bridge storage.';
+        clearTimeout(line.reconnectTimer);
+        line.reconnectTimer = null;
+        session.dispose();
         line.ack?.close();
         socket.end(new Error('Linked-device event persistence failed'));
         if (line.socket === socket) line.socket = null;
@@ -380,6 +475,14 @@ export class Bridge {
   }
 
   async connectionUpdate(line, socket, update) {
+    if (line.socket !== socket || line.session?.generation !== line.generation) return;
+    const session = line.session;
+    if (update.connection === 'close') {
+      this.blockConnection(line, socket, 'connection_closed');
+      const code = update.lastDisconnect?.error?.output?.statusCode;
+      this.trace(line, 'connection_closed', { provider_status: Number.isInteger(code) ? code : null });
+    }
+    if (update.connection !== 'close' && session.closed) return;
     if (line.removing) {
       if (update.qr) line.removalWaiter?.reject(new BridgeError(409, 'UNLINK_NOT_CONFIRMED', 'The saved session cannot reconnect for unlinking. Its credentials have been retained.'));
       if (update.connection === 'open') { line.status = 'connected'; line.removalWaiter?.resolve(socket); }
@@ -396,7 +499,9 @@ export class Bridge {
     }
     if (update.qr) {
       line.qr = update.qr;
-      line.qr_data_url = await QRCode.toDataURL(update.qr, { errorCorrectionLevel: 'M', margin: 3, width: 320 });
+      const qrUrl = await QRCode.toDataURL(update.qr, { errorCorrectionLevel: 'M', margin: 3, width: 320 });
+      if (line.session !== session || session.closed) return;
+      line.qr_data_url = qrUrl;
       line.status = 'qr';
     }
     if (update.connection === 'open') {
@@ -406,6 +511,8 @@ export class Bridge {
         line.status = 'error';
         line.error = 'The linked phone does not match this configured line. Disconnect it and pair the expected phone.';
         await line.store.update(data => { data.enabled = false; });
+        if (line.session !== session) return;
+        session.dispose();
         line.ack.close();
         socket.end(new Error('Unexpected linked-device phone'));
         line.socket = null;
@@ -417,6 +524,8 @@ export class Bridge {
         line.status = 'error';
         line.error = 'This WhatsApp number is already linked to another line. Unlink this device and pair a different number.';
         await line.store.update(data => { data.enabled = false; });
+        if (line.session !== session) return;
+        session.dispose();
         line.ack.close();
         line.socket = null;
         delete line.qr;
@@ -429,24 +538,32 @@ export class Bridge {
       this.phoneReservations.set(ownPhone, line.line_id);
       try { await line.store.update(data => { data.bound_phone = ownPhone; }); }
       finally { if (this.phoneReservations.get(ownPhone) === line.line_id) this.phoneReservations.delete(ownPhone); }
+      if (line.session !== session || session.closed || socket.ws.isOpen !== true || this.stopping) return;
       line.display_phone_number = ownPhone;
+      session.ready = true;
       line.status = 'connected';
-      line.reconnectAttempts = 0;
+      this.trace(line, 'connection_transition', { state: 'ready' });
+      session.readyAt = Date.now();
       delete line.error;
       delete line.qr;
       delete line.qr_data_url;
     }
     if (update.connection === 'close' && line.socket === socket) {
+      session.dispose();
       line.ack.close();
       line.socket = null;
       delete line.qr;
       delete line.qr_data_url;
       const reason = update.lastDisconnect?.error?.output?.statusCode;
       if (reason === DisconnectReason.loggedOut) {
+        clearTimeout(line.reconnectTimer);
+        line.reconnectTimer = null;
         line.status = 'logged_out';
         line.error = 'This linked device was logged out. Connect and scan a new QR code.';
+        const auth = line.auth;
         await line.store.update(data => { data.enabled = false; });
-        await line.auth.reset();
+        if (line.session !== session) return;
+        await auth.reset();
       } else {
         line.status = 'disconnected';
         this.scheduleReconnect(line, reason === DisconnectReason.restartRequired);
@@ -454,12 +571,14 @@ export class Bridge {
     }
   }
   scheduleReconnect(line, restartRequired = false) {
-    if (this.stopping || line.removing || !line.store?.data?.enabled || line.status === 'error' || line.reconnectTimer) return;
+    if (this.stopping || line.removing || !line.store?.data?.enabled || line.status !== 'disconnected' || line.reconnectTimer) return;
     const delay = restartRequired ? 250 : Math.min(60_000, 1000 * 2 ** Math.min(line.reconnectAttempts ?? 0, 6));
     line.reconnectAttempts = (line.reconnectAttempts ?? 0) + 1;
+    const generation = line.generation;
+    this.trace(line, 'recovery_scheduled', { delay_ms: delay, attempt: line.reconnectAttempts });
     line.reconnectTimer = setTimeout(() => {
       line.reconnectTimer = null;
-      if (this.stopping || line.removing || !line.store.data.enabled || line.status === 'error') return;
+      if (generation !== line.generation || this.stopping || line.removing || !line.store.data.enabled || line.status !== 'disconnected') return;
       this.connect(line.line_id).catch(error => {
         this.onError(error);
         if (!this.stopping && line.store.data.enabled && line.status !== 'error' &&
@@ -482,6 +601,9 @@ export class Bridge {
     if (line.removing) throw new BridgeError(503, 'LINE_REMOVING', 'This WhatsApp number is being removed.');
     if (!line.store?.data) throw new BridgeError(503, 'LINE_STORAGE_UNAVAILABLE', 'Check this line session storage before disconnecting.');
     clearTimeout(line.reconnectTimer);
+    line.reconnectTimer = null;
+    line.generation++;
+    line.session?.dispose();
     await line.store.update(data => { data.enabled = false; });
     const socket = line.socket;
     line.socket = null;
@@ -519,10 +641,43 @@ export class Bridge {
     const jidPhone = jid.endsWith('@s.whatsapp.net') ? jid.split('@')[0].split(':')[0] : '';
     return { phone, exists: match ? true : null, whatsapp_phone: /^\d{5,15}$/.test(jidPhone) ? jidPhone : phone };
   }
-  connected(line) {
+  trace(line, event, fields = {}) {
+    // Callers supply only fixed labels, generations, durations and opaque IDs.
+    this.log({ component: 'whatsapp_bridge', event, line_id: line.line_id, generation: line.generation, ...fields });
+  }
+  blockConnection(line, socket, reason) {
+    if (line.socket !== socket || !line.session || line.session.closed) return;
+    if (line.session.readyAt && Date.now() - line.session.readyAt >= 60_000) line.reconnectAttempts = 0;
+    line.session.closed = true;
+    line.session.ready = false;
+    line.ack?.interrupt();
+    if (!line.removing && line.status !== 'error') line.status = 'disconnected';
+    this.trace(line, 'connection_transition', { state: 'blocked', reason });
+  }
+  connected(line, expectedSocket = null) {
     if (line.removing) throw new BridgeError(503, 'LINE_REMOVING', 'This WhatsApp number is being removed.');
-    if (line.status !== 'connected' || !line.socket) throw new BridgeError(503, 'NOT_CONNECTED', 'Connect this WhatsApp line before sending or changing messages.');
-    return line.socket;
+    const socket = line.socket;
+    if (socket && line.session?.ready && socket.ws.isOpen !== true) this.restartStaleSocket(line, socket);
+    if (this.stopping || line.status !== 'connected' || !socket ||
+        !line.session?.ready || line.session.closed || line.session.generation !== line.generation ||
+        socket.ws.isOpen !== true || (expectedSocket && expectedSocket !== socket)) {
+      this.trace(line, 'send_blocked', { reason: 'transport_not_ready' });
+      const error = new BridgeError(503, 'NOT_CONNECTED', 'This WhatsApp line is reconnecting. Try again once connected.');
+      error.delivery_uncertain = false;
+      throw error;
+    }
+    return socket;
+  }
+  async awaitSubmission(task, waiter) {
+    let timer;
+    // ACKs may precede sendMessage's return; only rejection interrupts that call.
+    const interrupted = waiter.promise.then(() => new Promise(() => {}));
+    try {
+      return await Promise.race([task, interrupted, new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new BridgeError(504, 'CONFIRMATION_UNKNOWN', 'Message submission did not finish in time.')),
+          this.config.submissionTimeoutMs ?? 120_000);
+      })]);
+    } finally { clearTimeout(timer); }
   }
   async counterpart(line, key) {
     for (const jid of [key.remoteJidAlt, key.remoteJid]) {
@@ -555,7 +710,7 @@ export class Bridge {
       await this.enqueueOwnConfirmation(line, key.id);
     }
     await this.enqueue(messageStatusEvent(line, key.id, record.phone, status, timestamp));
-    await line.store.update(data => { if (data.messages[key.id]) data.messages[key.id].receipt = status; });
+    await line.store.update(data => { if (data.messages[key.id] && (RECEIPT_RANK[data.messages[key.id].receipt] ?? 0) < RECEIPT_RANK[status]) data.messages[key.id].receipt = status; });
   }
   async markRead(id, payload) {
     const line = this.getLine(id);
@@ -595,9 +750,9 @@ export class Bridge {
         typeof phone !== 'string' || !/^\d{6,20}$/.test(phone)) {
       throw new BridgeError(400, 'INVALID_DELIVERY_LOOKUP', 'A client message ID and recipient are required.');
     }
-    const found = Object.entries(line.store.data.messages).find(([, record]) => record.client_message_id === clientId);
-    if (!found) return { status: 'unknown' };
-    const [nativeId, record] = found;
+    const request = line.store.data.send_requests[crypto.createHash('sha256').update(clientId).digest('hex')];
+    if (!request?.native_id) return { status: 'unknown' };
+    const nativeId = request.native_id, record = line.store.data.messages[nativeId];
     if (record.phone !== phone) throw new BridgeError(409, 'CLIENT_ID_CONFLICT', 'The client ID belongs to another recipient.');
     // Read durable evidence only, even while disconnected. No socket send,
     // resend, queue mutation, or receipt upgrade occurs in this endpoint.
@@ -606,6 +761,12 @@ export class Bridge {
   }
 
   async enqueueOwnConfirmation(line, nativeId) {
+    if (line.confirmationTasks.has(nativeId)) return line.confirmationTasks.get(nativeId);
+    const task = this.enqueueOwnConfirmationOnce(line, nativeId).finally(() => line.confirmationTasks.delete(nativeId));
+    line.confirmationTasks.set(nativeId, task);
+    return task;
+  }
+  async enqueueOwnConfirmationOnce(line, nativeId) {
     const record = line.store.data.messages[nativeId];
     if (!record?.client_message_id || record.confirmation_enqueued || (!record.ack_confirmed && !record.echo_seen)) return;
     const timestamp = millis(record.message?.messageTimestamp ?? record.timestamp);
@@ -875,7 +1036,7 @@ export class Bridge {
     const mediaId = `ldmedia:${id}:${crypto.randomUUID()}`;
     const filename = this.mediaPath(line, mediaId);
     await this.writeBytes(filename, bytes);
-    await line.store.update(data => { data.media[mediaId] = { mime_type: mime, filename: path.basename(String(payload.filename ?? 'attachment')).slice(0, 255), downloaded: true }; });
+    await line.store.update(data => { data.media[mediaId] = { content_hash: crypto.createHash('sha256').update(bytes).digest('hex'), mime_type: mime, filename: path.basename(String(payload.filename ?? 'attachment')).slice(0, 255), downloaded: true }; });
     return { id: mediaId };
   }
   mediaPath(line, id) {
@@ -929,7 +1090,57 @@ export class Bridge {
     return { content: await readFile(filename), mime_type: media.mime_type };
   }
 
+  sendFingerprint(line, payload) {
+    const canonical = value => Array.isArray(value) ? value.map(canonical) : value && typeof value === 'object'
+      ? Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])])) : value;
+    const normalized = {...payload, to: phoneDigits(payload?.to)};
+    delete normalized.client_message_id;
+    if (MEDIA_TYPES.includes(payload.type)) {
+      const media = line.store.data.media[payload[payload.type]?.id];
+      // Uploaded IDs are not logical content: the API can upload identical bytes
+      // again after a definitely-not-submitted failure.
+      if (media?.content_hash) normalized[payload.type] = {...payload[payload.type], id: media.content_hash, mime_type: media.mime_type};
+    }
+    return crypto.createHash('sha256').update(JSON.stringify(canonical(normalized))).digest('hex');
+  }
+  queueOwnConfirmation(line, nativeId) {
+    // The acknowledged record is already fsynced. Recovery scans this durable
+    // obligation after a crash; unrelated callback backlog cannot delay HTTP.
+    this.enqueueOwnConfirmation(line, nativeId).catch(error => this.onError(error));
+  }
   async send(id, payload) {
+    const line = this.getLine(id);
+    const clientId = payload?.client_message_id;
+    if (!clientId || typeof clientId !== 'string') return this.dispatchSend(id, payload);
+    const key = crypto.createHash('sha256').update(clientId).digest('hex');
+    const fingerprint = this.sendFingerprint(line, payload);
+    const durable = line.store.data.messages[line.store.data.send_requests[key]?.native_id];
+    if (durable?.ack_confirmed || durable?.echo_seen) return this.existingSend(line, payload, key, fingerprint);
+    const inFlight = line.sendTasks.get(key);
+    if (inFlight) {
+      if (inFlight.fingerprint !== fingerprint) throw new BridgeError(409, 'CLIENT_ID_CONFLICT', 'This send key belongs to another payload.');
+      return inFlight.task;
+    }
+    // Known durable results bypass unrelated sends queued on this line.
+    const known = this.existingSend(line, payload, key, fingerprint);
+    if (known) return known;
+    const task = this.dispatchSend(id, payload).finally(() => line.sendTasks.delete(key));
+    line.sendTasks.set(key, {fingerprint, task});
+    return task;
+  }
+  existingSend(line, payload, key, fingerprint) {
+    const previous = line.store.data.send_requests[key];
+    if (!previous) return null;
+    if (previous.native_id && line.store.data.messages[previous.native_id]?.phone !== phoneDigits(payload.to)) throw new BridgeError(409, 'CLIENT_ID_CONFLICT', 'The client ID belongs to another recipient.');
+    if (previous.fingerprint !== fingerprint) throw new BridgeError(409, 'CLIENT_ID_CONFLICT', 'This send key belongs to another payload or cannot be verified. Check the original send.');
+    if (previous.retry_safe && previous.native_id === null) return null;
+    const record = line.store.data.messages[previous.native_id];
+    if (record.ack_confirmed || record.echo_seen) return {messages: [{id: wrapId(line.line_id, previous.native_id)}]};
+    const error = new BridgeError(409, 'DELIVERY_UNCERTAIN', 'The original delivery is unconfirmed; it will not be sent again.');
+    error.delivery_uncertain = true;
+    throw error;
+  }
+  async dispatchSend(id, payload) {
     const line = this.getLine(id);
     return this.serialSend(line, async () => {
       const phone = phoneDigits(payload?.to);
@@ -943,16 +1154,11 @@ export class Bridge {
       // The line send queue serializes this lookup with durable reservation.
       // A retry never invents a second native ID, even after a process restart.
       if (clientMessageId) {
-        const previous = Object.entries(line.store.data.messages).find(([, record]) => record.client_message_id === clientMessageId);
-        if (previous) {
-          const [nativeId, record] = previous;
-          if (record.phone !== phone) throw new BridgeError(409, 'CLIENT_ID_CONFLICT', 'The client ID belongs to another recipient.');
-          if (record.ack_confirmed || record.echo_seen) return { messages: [{ id: wrapId(id, nativeId) }] };
-          const error = new BridgeError(409, 'DELIVERY_UNCERTAIN', 'The original delivery is unconfirmed; it will not be sent again.');
-          error.delivery_uncertain = true;
-          throw error;
-        }
+        const key = crypto.createHash('sha256').update(clientMessageId).digest('hex');
+        const known = this.existingSend(line, payload, key, this.sendFingerprint(line, payload));
+        if (known) return known;
       }
+      const fingerprint = this.sendFingerprint(line, payload);
       const socket = this.connected(line);
       let content;
       if (payload.type === 'text') {
@@ -989,38 +1195,56 @@ export class Bridge {
       } else throw new BridgeError(400, 'UNSUPPORTED_TYPE', 'This message type is not supported by the linked-device bridge.');
       const options = {};
       if (payload.context?.message_id) options.quoted = this.target(line, payload.context.message_id, phone, false).message;
+      this.connected(line, socket);
       const nativeId = generateMessageIDV2(socket.user?.id);
       const waiter = line.ack.expect(nativeId, { deferred: true });
+      let submitted = false;
       try {
         // Reserve the native ID durably before the socket can emit a fromMe
         // upsert. A fast echo or crash must not mirror this dashboard send as
         // a second, unattributed WhatsApp-app message in the ticket.
-        await line.store.update(data => { data.messages[nativeId] = {
-          message: { key: { id: nativeId, remoteJid: jid, fromMe: true } },
+        await line.store.update(data => {
+          if (clientMessageId) data.send_requests[crypto.createHash('sha256').update(clientMessageId).digest('hex')] = {native_id: nativeId, fingerprint};
+          data.messages[nativeId] = {
+          request_fingerprint: fingerprint, message: { key: { id: nativeId, remoteJid: jid, fromMe: true } },
           phone, timestamp: Date.now(), notified: true, pending_send: true,
           ...(clientMessageId ? { client_message_id: clientMessageId } : {}),
         }; });
-        const message = await socket.sendMessage(jid, content, { ...options, messageId: nativeId });
+        this.connected(line, socket);
+        const sendStarted = Date.now();
+        this.trace(line, 'send_attempt', { native_id: nativeId, content_type: payload.type });
+        submitted = true;
+        const message = await this.awaitSubmission(socket.sendMessage(jid, content, { ...options, messageId: nativeId }), waiter);
         waiter.startTimer();
         if (!message?.key?.id || message.key.id !== nativeId) throw new BridgeError(502, 'INVALID_PROVIDER_RESPONSE', 'WhatsApp did not return the expected message ID.');
         // Keep retry keys even if ACK is lost; no success is returned until confirmed.
-        await line.store.update(data => { data.messages[nativeId] = { message, phone, timestamp: millis(message.messageTimestamp), text: textBody(message.message), notified: true, pending_send: true,
+        await line.store.update(data => { data.messages[nativeId] = { request_fingerprint: fingerprint, message, phone, timestamp: millis(message.messageTimestamp), text: textBody(message.message), notified: true, pending_send: true,
           ...(clientMessageId ? { client_message_id: clientMessageId } : {}),
           ack_confirmed: Boolean(data.messages[nativeId]?.ack_confirmed), receipt: data.messages[nativeId]?.receipt, echo_seen: Boolean(data.messages[nativeId]?.echo_seen), confirmation_enqueued: Boolean(data.messages[nativeId]?.confirmation_enqueued),
           ...(MEDIA_TYPES.includes(payload.type) ? { media_id: payload[payload.type].id } : {}) }; });
         await waiter.promise;
+        const acknowledgedAt = waiter.confirmedAt ?? Date.now();
         await line.store.update(data => { data.messages[nativeId].pending_send = false; data.messages[nativeId].ack_confirmed = true; });
-        await this.enqueueOwnConfirmation(line, nativeId);
+        this.trace(line, 'send_result', {send_to_ack_ms: acknowledgedAt-sendStarted, ack_to_response_ms: Date.now()-acknowledgedAt});
+        this.queueOwnConfirmation(line, nativeId);
         return { messages: [{ id: wrapId(id, nativeId) }] };
       } catch (error) {
         waiter.cancel();
+        if (!submitted) {
+          try {
+            await line.store.update(data => { delete data.messages[nativeId]; if (clientMessageId) data.send_requests[crypto.createHash('sha256').update(clientMessageId).digest('hex')] = {native_id: null, fingerprint, retry_safe: true}; });
+          } catch (persistError) { error = persistError; }
+          error.delivery_uncertain = false;
+          this.trace(line, 'send_not_submitted', { native_id: nativeId });
+          throw error;
+        }
         if (line.store.data.messages[nativeId]?.ack_confirmed || line.store.data.messages[nativeId]?.echo_seen) {
           await line.store.update(data => { data.messages[nativeId].pending_send = false; });
-          await this.enqueueOwnConfirmation(line, nativeId);
+          this.queueOwnConfirmation(line, nativeId);
           return { messages: [{ id: wrapId(id, nativeId) }] };
         }
         if (error.code === 'WHATSAPP_REJECTED' && !line.store.data.messages[nativeId]?.receipt) {
-          await line.store.update(data => { delete data.messages[nativeId]; });
+          await line.store.update(data => { delete data.messages[nativeId]; if (clientMessageId) data.send_requests[crypto.createHash('sha256').update(clientMessageId).digest('hex')] = {native_id: null, fingerprint, retry_safe: true}; });
           error.delivery_uncertain = false;
           throw error;
         }
@@ -1029,14 +1253,15 @@ export class Bridge {
         // and source correlation, then await a real WhatsApp echo or callback.
         if (line.store.data.messages[nativeId]) {
           try {
-            await line.store.update(data => { data.messages[nativeId].pending_send = false; data.messages[nativeId].delivery_uncertain = true; });
-            await this.enqueueOwnConfirmation(line, nativeId);
+            await line.store.update(data => { data.messages[nativeId].pending_send = false; data.messages[nativeId].delivery_uncertain = !data.messages[nativeId].ack_confirmed && !data.messages[nativeId].echo_seen; });
+            this.queueOwnConfirmation(line, nativeId);
           } catch (persistError) {
             persistError.delivery_uncertain = true;
             throw persistError;
           }
         }
         error.delivery_uncertain = true;
+        this.trace(line, 'send_uncertain', { native_id: nativeId, reason: staleConnectionError(error) ? 'transport_or_ack_timeout' : 'submission_interrupted' });
         throw error;
       }
     });
@@ -1044,11 +1269,14 @@ export class Bridge {
 
   restartStaleSocket(line, socket) {
     if (line.socket !== socket || line.removing || this.stopping) return;
-    console.warn(`Linked-device connection looks stale; reconnecting: line=${line.line_id}`);
+    this.blockConnection(line, socket, 'stale_transport');
     socket.end(new Error('WhatsApp connection stopped responding'));
+    this.scheduleReconnect(line);
   }
   serialSend(line, action) {
-    const task = line.sendTail.then(action);
+    if (line.sendPending >= 64) throw new BridgeError(503, 'SEND_QUEUE_FULL', 'This connection is busy. The request was not submitted.');
+    line.sendPending++;
+    const task = line.sendTail.then(action).finally(() => { line.sendPending--; });
     line.sendTail = task.catch(() => {});
     return task;
   }
@@ -1091,10 +1319,16 @@ export class Bridge {
         operation = { fingerprint, target_id: nativeId, kind, phone, body, provider_id: generateMessageIDV2(socket.user?.id), status: 'pending', timestamp, payload: { protocolMessage } };
         await line.store.update(data => { data.operations[operationId] = operation; });
       } else await line.store.update(data => { data.operations[operationId].status = 'pending'; });
-      const waiter = line.ack.expect(operation.provider_id);
+      let waiter;
+      let submitted = false;
       try {
-        const providerId = await socket.relayMessage(target.message.key.remoteJid, operation.payload,
-          { messageId: operation.provider_id, additionalAttributes: { edit: kind === 'edit' ? '1' : '7' } });
+        this.connected(line, socket);
+        waiter = line.ack.expect(operation.provider_id, { deferred: true });
+        this.trace(line, 'send_attempt', { native_id: operation.provider_id, content_type: kind });
+        submitted = true;
+        const providerId = await this.awaitSubmission(socket.relayMessage(target.message.key.remoteJid, operation.payload,
+          { messageId: operation.provider_id, additionalAttributes: { edit: kind === 'edit' ? '1' : '7' } }), waiter);
+        waiter.startTimer();
         if (providerId !== operation.provider_id) throw new BridgeError(502, 'INVALID_PROVIDER_RESPONSE', 'WhatsApp did not relay the expected operation.');
         await waiter.promise;
         const timestamp = operation.timestamp;
@@ -1109,10 +1343,12 @@ export class Bridge {
         await line.store.update(data => { data.operations[operationId].event_enqueued = true; });
         return result;
       } catch (error) {
-        waiter.cancel();
+        waiter?.cancel();
+        if (submitted && staleConnectionError(error)) this.restartStaleSocket(line, socket);
         if (line.store.data.operations[operationId]?.status !== 'confirmed') await line.store.update(data => {
           const current = data.operations[operationId];
-          current.status = error.code === 'WHATSAPP_REJECTED' && !current.uncertainty_seen ? 'rejected' : 'uncertain';
+          current.status = !submitted && !current.uncertainty_seen ? 'not_submitted'
+            : error.code === 'WHATSAPP_REJECTED' && !current.uncertainty_seen ? 'rejected' : 'uncertain';
           if (current.status === 'uncertain') current.uncertainty_seen = true;
         });
         throw error;
@@ -1125,6 +1361,7 @@ export class Bridge {
   }
 
   startWorkers() {
+    if (this.stopping || this.workerTimer || this.pendingTimer) return;
     this.workerTimer = setInterval(() => this.deliverCallbacks().catch(this.onError), 1000);
     this.workerTimer.unref();
     this.pendingTimer = setInterval(() => this.recoverPending().catch(this.onError), 15_000);
@@ -1217,9 +1454,10 @@ export class Bridge {
       if (!entry) return;
       let waitingForHistory = false;
       try {
+        const callback = albumReactionCallback(entry.event, this.lines.get(id)?.store?.data?.messages);
         const response = await this.fetch(this.config.callbackUrl, { method: 'POST', redirect: 'error',
           headers: { Authorization: `Bearer ${this.config.secret}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify(entry.event), signal: AbortSignal.timeout(5000) });
+          body: JSON.stringify(callback), signal: AbortSignal.timeout(5000) });
         await response.body?.cancel();
         if (!response.ok) {
           waitingForHistory = response.status === 503 && isReactionCallback(entry.event) &&
@@ -1266,11 +1504,16 @@ export class Bridge {
     await this.registrationTail;
     for (const line of this.lines.values()) {
       clearTimeout(line.reconnectTimer);
+      line.generation++;
+      line.session?.dispose();
       line.ack?.close();
       line.socket?.end(new Error('Bridge shutdown'));
+      await line.connectPromise?.catch(() => {});
       await line.sendTail;
       await line.readTail;
       await line.eventTail;
+      await line.ackTail;
+      await Promise.allSettled(line.confirmationTasks.values());
       await line.auth?.store.flush();
       await line.store?.flush();
     }

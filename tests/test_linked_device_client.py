@@ -161,7 +161,8 @@ def test_disabled_linked_references_never_get_sent_to_cloud(bridge, monkeypatch)
     assert not requests
 
 
-def test_media_upload_download_and_send_remain_scoped_to_line(bridge):
+@pytest.mark.parametrize('filename', ['voice.ogg', 'voice.opus'])
+def test_media_upload_download_and_send_remain_scoped_to_line(bridge, filename):
     def respond(request):
         if request.method == "GET":
             return httpx.Response(200, content=b"audio-payload", headers={"content-type": "audio/ogg"})
@@ -174,7 +175,7 @@ def test_media_upload_download_and_send_remain_scoped_to_line(bridge):
 
     async def run():
         client = RoutedWhatsAppClient()
-        media_id = await client.upload_media(content=b"audio-payload", mime_type="audio/ogg; codecs=opus", filename="voice.ogg", phone_number_id="10001")
+        media_id = await client.upload_media(content=b"audio-payload", mime_type="audio/ogg; codecs=opus", filename=filename, phone_number_id="10001")
         await client.send_media(to="96171111111", media_type="audio", media_id=media_id, voice=True, phone_number_id="10001")
         media = await client.download_media(media_id, phone_number_id="10001")
         assert media.content == b"audio-payload"
@@ -185,6 +186,7 @@ def test_media_upload_download_and_send_remain_scoped_to_line(bridge):
     asyncio.run(run())
     assert len(requests) == 3
     assert json.loads(requests[0].content)["mime_type"] == "audio/ogg; codecs=opus"
+    assert json.loads(requests[0].content)["filename"] == filename
     assert json.loads(requests[1].content)["audio"] == {"id": MEDIA, "voice": True}
 
 

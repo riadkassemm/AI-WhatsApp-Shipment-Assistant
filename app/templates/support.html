@@ -126,6 +126,11 @@ __SUPPORT_STYLE__
   <span>The dashboard was updated. Reload to get the latest version.</span>
   <button class="btn small primary" id="updateReloadBtn" type="button">Reload</button>
 </div>
+<div class="connection-banner hidden" id="connectionBanner" role="status" aria-live="polite">
+  <svg class="icon icon-sm" aria-hidden="true"><use href="#icon-alert"></use></svg>
+  <span id="connectionBannerText"></span>
+  <button class="btn small" id="connectionRetryBtn" type="button">Retry now</button>
+</div>
 <div class="app-shell hidden" id="dashboard">
   <aside class="global-sidebar" aria-label="Support workspace navigation">
     <div class="brand-bar">
@@ -224,13 +229,18 @@ __SUPPORT_STYLE__
       <label class="sr-only" for="queueSearch">Search conversations and messages</label>
       <div class="search-field">
         <svg class="icon" aria-hidden="true"><use href="#icon-search"></use></svg>
-        <input id="queueSearch" type="search" autocomplete="off" placeholder="Search conversations and messages" aria-describedby="searchScope" aria-keyshortcuts="Control+K /" />
+        <input id="queueSearch" type="search" maxlength="200" autocomplete="off" placeholder="Search conversations and messages" aria-describedby="searchScope" aria-keyshortcuts="Control+K /" />
         <span class="search-kbd" aria-hidden="true"><kbd>/</kbd></span>
         <button class="icon-btn search-clear hidden" id="clearQueueSearchBtn" type="button" aria-label="Clear ticket search">
           <svg class="icon icon-sm" aria-hidden="true"><use href="#icon-x"></use></svg>
         </button>
       </div>
-      <div class="search-scope" id="searchScope">Searches customer names, phone numbers, ticket references, and messages you are allowed to access.</div>
+      <div class="search-scope" id="searchScope">Searches customers, tickets and message text within this queue and the selected filters.</div>
+    </div>
+    <div class="queue-filters" id="queueFilters">
+      <label><span class="sr-only">Support Number</span><select class="input" id="queueSupportNumber"><option value="">All support numbers</option></select></label>
+      <label class="hidden" id="queueStaffLabel"><span class="sr-only">Staff Member</span><select class="input" id="queueStaff"><option value="">All staff members</option></select></label>
+      <label class="hidden" id="queueStatusLabel"><span class="sr-only">Status</span><select class="input" id="queueStatus"><option value="all">All</option><option value="open">Open</option><option value="closed">Closed</option></select></label>
     </div>
     <div class="contacts-toolbar hidden" id="contactsToolbar">
       <div class="contacts-google-copy"><strong id="googleContactsTitle">Google Contacts</strong><span id="googleContactsStatus">Not connected</span></div>
@@ -325,7 +335,7 @@ __SUPPORT_STYLE__
           </div>
           <div class="composer-toolbar">
             <div class="composer-tools">
-              <input id="imageInput" type="file" multiple accept="image/jpeg,image/png,image/webp,application/pdf,video/mp4,video/3gpp,audio/mpeg,audio/mp4,audio/aac,audio/amr,audio/ogg" class="hidden" />
+              <input id="imageInput" type="file" multiple accept="image/jpeg,image/png,image/webp,application/pdf,video/mp4,video/3gpp,audio/mpeg,audio/mp4,audio/aac,audio/amr,audio/ogg,audio/opus,.opus" class="hidden" />
               <button class="icon-btn" id="imageBtn" type="button" disabled aria-label="Attach an image, video, sticker, or PDF" data-tooltip="Attach image, video, sticker, or PDF" data-tooltip-placement="top">
                 <svg class="icon" aria-hidden="true"><use href="#icon-paperclip"></use></svg>
               </button>

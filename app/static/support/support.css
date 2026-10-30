@@ -852,6 +852,7 @@ body.column-resizing * { cursor: col-resize !important; }
 .search-result-ref { margin-top: 1px; color: var(--text-subtle); font-size: var(--text-xs); font-family: var(--font-mono); }
 .search-result-preview { margin-top: 6px; color: var(--text-muted); font-size: var(--text-sm); line-height: 1.45; overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; }
 .message-meta { min-height: 22px; display: flex; align-items: center; flex-wrap: wrap; gap: 4px 6px; margin-top: 4px; padding: 0 2px; color: var(--text-subtle); font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
+.message-meta .arrived-late { color: var(--warning); font-weight: 600; }
 .message-row.outbound .message-meta { justify-content: flex-end; }
 
 /* Compact message toolbar: buttons keep their text as the accessible name;
@@ -939,6 +940,12 @@ body.column-resizing * { cursor: col-resize !important; }
 .send-state.read { color: var(--tick-read); }
 .update-banner { position: fixed; top: 12px; left: 50%; transform: translateX(-50%); z-index: var(--z-toast, 1000); display: flex; align-items: center; gap: 12px; max-width: calc(100vw - 32px); padding: 8px 8px 8px 16px; border: 1px solid var(--border); border-radius: var(--radius-full); background: var(--surface); box-shadow: var(--shadow-md); font-size: var(--text-sm); }
 .update-banner.hidden { display: none; }
+.connection-banner { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); z-index: var(--z-toast, 1000); display: flex; align-items: center; gap: 10px; width: max-content; max-width: min(640px, calc(100vw - 32px)); padding: 8px 8px 8px 14px; border: 1px solid color-mix(in srgb, var(--warning) 45%, var(--border)); border-radius: var(--radius-md); background: var(--warning-soft); color: var(--text-strong); box-shadow: var(--shadow-md); font-size: var(--text-sm); }
+.connection-banner > .icon { flex: none; color: var(--warning); }
+.connection-banner.extended { border-color: color-mix(in srgb, var(--danger) 45%, var(--border)); background: var(--danger-soft); }
+.connection-banner.extended > .icon { color: var(--danger); }
+.connection-banner .btn { flex: none; }
+.connection-banner.hidden { display: none; }
 .send-retry-btn { min-height: 22px; padding: 0 8px; border-radius: var(--radius-full); font-size: var(--text-xs); font-weight: 600; color: var(--danger); border-color: var(--danger); background: transparent; }
 .send-retry-btn:hover:not(:disabled) { background: var(--danger-soft); }
 .msg-media { margin: 2px 0 6px; }
@@ -1519,3 +1526,23 @@ body.column-resizing * { cursor: col-resize !important; }
 .selecting-messages .message-select { position: absolute; left: 0; top: 50%; transform: translateY(-50%); margin: 0; }
 .quick-reply-copy:has(.quick-reply-thumbnail) { grid-template-columns: 58px minmax(0, 1fr) auto; }
 .conversation-shell:has(.message-selection-bar:not(.hidden)) .conversation-search-toolbar { top: 68px; }
+
+/* Reply previews behave identically for text and every attachment kind. */
+button.message-quote { display: block; text-align: start; font-family: inherit; border-top: 0; border-right: 0; border-bottom: 0; cursor: pointer; }
+button.message-quote:hover, button.message-quote:focus-visible { background: color-mix(in srgb, var(--primary) 14%, transparent); }
+button.message-quote:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+button.message-quote.reply-loading { opacity: .65; cursor: progress; }
+.message-row.reply-target .message-bubble { animation: reply-message-highlight 2.4s ease-out; }
+@keyframes reply-message-highlight {
+  0%, 35% { box-shadow: 0 0 0 4px color-mix(in srgb, var(--primary) 65%, transparent); }
+  100% { box-shadow: 0 0 0 4px transparent; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .message-row.reply-target .message-bubble { animation: none; outline: 2px solid var(--primary); outline-offset: 3px; }
+}
+
+.queue-filters { display: flex; flex-wrap: wrap; gap: 8px; padding: 0 16px 12px; }
+.queue-filters label { flex: 1 1 120px; min-width: 0; font-size: 12px; }
+.queue-filters select { display: block; width: 100%; margin-top: 0; }
+.unread-dot { display: inline-block; width: 8px; height: 8px; margin-inline-start: 7px; border-radius: 50%; background: #16a34a; flex-shrink: 0; }
+.toast-open { color: inherit; text-align: start; background: transparent; border: 0; cursor: pointer; font: inherit; padding: 0; }

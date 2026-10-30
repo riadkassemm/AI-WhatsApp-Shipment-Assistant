@@ -69,9 +69,12 @@ export function createServer(bridge, config) {
       const isKnown = error instanceof BridgeError;
       const status = isKnown ? error.status : 500;
       if (status >= 500) {
-        // Phone numbers in provider errors are masked; message content is never part of them.
-        const detail = String(error?.message ?? '').replace(/\d{6,}/g, '#').slice(0, 160);
-        console.warn(`Linked-device request failed: route=${request.method} ${String(request.url ?? '').split('?')[0].replace(/\/(messages|media)\/[^/]+/, '/$1/:id')} status=${status} code=${error?.code ?? error?.output?.statusCode ?? error?.name ?? 'unknown'} error=${detail}`);
+        // Do not stringify provider errors: they may contain bodies, JIDs or keys.
+        const providerStatus = error?.output?.statusCode;
+        console.warn(JSON.stringify({ component: 'whatsapp_bridge', event: 'request_failed',
+          route: `${request.method} ${String(request.url ?? '').split('?')[0].replace(/\/(messages|media)\/[^/]+/, '/$1/:id')}`,
+          http_status: status, error_code: isKnown ? error.code : 'BRIDGE_ERROR',
+          provider_status: Number.isInteger(providerStatus) ? providerStatus : null }));
       }
       const uncertainCodes = ['CONFIRMATION_UNKNOWN', 'DISCONNECTED', 'SEND_FAILED', 'INVALID_PROVIDER_RESPONSE'];
       const deliveryUncertain = error.delivery_uncertain ?? (!isKnown || uncertainCodes.includes(error.code));

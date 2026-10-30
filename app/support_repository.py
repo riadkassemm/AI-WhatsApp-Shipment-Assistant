@@ -8,6 +8,8 @@ from typing import Any
 
 import aiomysql
 
+from app.support_idempotency import verify_send_fingerprint
+from app.support_dashboard_repository import DashboardRepositoryMixin, attach_dashboard_unread, queue_filters
 from app.support_staff_names import attach_current_staff_names
 from app.quick_reply_identity import quick_reply_identity
 from app.config import settings
@@ -254,6 +256,9 @@ _SUPPORT_SCHEMA_MIGRATIONS: tuple[tuple[str, dict[str, set[str]]], ...] = (
         "support_agent_activity": {"staff_id", "activity_day", "started_at", "ended_at"},
         "support_ticket_messages": {"statistics_sent_at"},
     }),
+    ("migrations/20261029_support_send_fingerprints.sql", {"support_ticket_messages": {"request_fingerprint"}}),
+    ("migrations/20261029_support_dashboard_reads.sql", {"support_dashboard_reads": {"ticket_id", "staff_id", "last_message_id", "updated_at"}}),
+    ("migrations/20261029_support_number_profile_deletion.sql", {"support_tickets": {"business_display_name", "business_number_retired_at"}}),
 )
 
 MAX_QUICK_REPLIES_PER_STAFF = 200
@@ -276,7 +281,7 @@ def _missing_support_schema_migrations(
 
 
 
-class SupportRepository(DeliveryRepositoryMixin, ReadSyncRepositoryMixin, ReceiptRepositoryMixin):
+class SupportRepository(DashboardRepositoryMixin, DeliveryRepositoryMixin, ReadSyncRepositoryMixin, ReceiptRepositoryMixin):
     @staticmethod
     async def _lock_available_whatsapp_line(conn: Any, line_id: str | None) -> None:
         """Serialize new/reopened conversations with number removal."""
@@ -288,6 +293,11 @@ class SupportRepository(DeliveryRepositoryMixin, ReadSyncRepositoryMixin, Receip
                 (str(line_id),),
             )
             row = await cur.fetchone()
+            if not row:
+                await cur.execute("""SELECT id FROM whatsapp_integration_audit WHERE phone_number_id=%s
+                    AND action IN ('META_NUMBER_REMOVED','LINKED_DEVICE_LINE_REMOVED') LIMIT 1 LOCK IN SHARE MODE""", (str(line_id),))
+                if await cur.fetchone():
+                    raise SupportConflictError("This WhatsApp number was permanently removed. Its chat history is read-only.")
             if row and row.get('removed_at'):
                 raise SupportConflictError("This WhatsApp number was permanently removed. Its chat history is read-only.")
             if get_transport(str(line_id)) not in {"linked_device", "removed"}:
@@ -395,7 +405,7 @@ class SupportRepository(DeliveryRepositoryMixin, ReadSyncRepositoryMixin, Receip
             async with conn.cursor(aiomysql.DictCursor) as cur:
                 await cur.execute(
                     """
-                    SELECT t.*, n.display_name, n.removed_at AS business_number_removed_at
+                    SELECT t.*, COALESCE(n.display_name,t.business_display_name) AS display_name, COALESCE(n.removed_at,t.business_number_retired_at) AS business_number_removed_at
                     FROM support_tickets t
                     LEFT JOIN whatsapp_phone_numbers n
                       ON n.phone_number_id = t.business_phone_number_id
@@ -859,7 +869,7 @@ class SupportRepository(DeliveryRepositoryMixin, ReadSyncRepositoryMixin, Receip
             async with conn.cursor(aiomysql.DictCursor) as cur:
                 await cur.execute(
                     """
-                    SELECT t.*, n.display_name
+                    SELECT t.*, COALESCE(n.display_name,t.business_display_name) AS display_name
                     FROM support_tickets t
                     LEFT JOIN whatsapp_phone_numbers n
                       ON n.phone_number_id = t.business_phone_number_id
@@ -886,7 +896,7 @@ class SupportRepository(DeliveryRepositoryMixin, ReadSyncRepositoryMixin, Receip
                 if business_phone_number_id:
                     await cur.execute(
                         """
-                        SELECT t.*, n.display_name
+                        SELECT t.*, COALESCE(n.display_name,t.business_display_name) AS display_name
                         FROM support_tickets t
                         LEFT JOIN whatsapp_phone_numbers n
                           ON n.phone_number_id = t.business_phone_number_id
@@ -913,7 +923,7 @@ class SupportRepository(DeliveryRepositoryMixin, ReadSyncRepositoryMixin, Receip
                 else:
                     await cur.execute(
                         """
-                        SELECT t.*, n.display_name
+                        SELECT t.*, COALESCE(n.display_name,t.business_display_name) AS display_name
                         FROM support_tickets t
                         LEFT JOIN whatsapp_phone_numbers n
                           ON n.phone_number_id = t.business_phone_number_id
@@ -939,12 +949,35 @@ class SupportRepository(DeliveryRepositoryMixin, ReadSyncRepositoryMixin, Receip
         Reopened chats and customer tickets can have multiple active intervals;
         lifecycle events identify which conversation owned a delayed message.
         """
+        tickets = await self._tickets_open_at_whatsapp_timestamp(
+            phone_number, business_phone_number_id, sent_at, first_only=True,
+        )
+        return tickets[0] if tickets else None
+
+    async def find_tickets_open_at_whatsapp_timestamp(
+        self, phone_number: str, business_phone_number_id: str,
+        sent_at: datetime,
+    ) -> list[dict[str, Any]]:
+        """Every conversation for this customer and line that was open at ``sent_at``.
+
+        Callers that must not guess (delayed inbound messages, recovery) treat
+        anything other than exactly one result as no match.
+        """
+        return await self._tickets_open_at_whatsapp_timestamp(
+            phone_number, business_phone_number_id, sent_at, first_only=False,
+        )
+
+    async def _tickets_open_at_whatsapp_timestamp(
+        self, phone_number: str, business_phone_number_id: str,
+        sent_at: datetime, *, first_only: bool,
+    ) -> list[dict[str, Any]]:
         if self._pool is None:
             await self.connect()
         assert self._pool is not None
         # WhatsApp normal messages carry whole seconds; include a ticket that
         # opened later within that same provider second.
         start_cutoff = sent_at + timedelta(seconds=1)
+        matches: list[dict[str, Any]] = []
         async with self._pool.acquire() as conn:
             async with conn.cursor(aiomysql.DictCursor) as cur:
                 await cur.execute(
@@ -957,40 +990,44 @@ class SupportRepository(DeliveryRepositoryMixin, ReadSyncRepositoryMixin, Receip
                     (phone_number, business_phone_number_id, start_cutoff),
                 )
                 for ticket in await cur.fetchall():
-                    if str(ticket.get("conversation_origin") or "CUSTOMER") == "STAFF":
-                        await cur.execute(
-                            """
-                            SELECT event_type FROM support_ticket_events
-                            WHERE ticket_id = %s
-                              AND event_type IN ('CHAT_STARTED', 'CHAT_REOPENED', 'CHAT_CLOSED')
-                              AND created_at < %s
-                            ORDER BY created_at DESC, id DESC LIMIT 1
-                            """,
-                            (ticket["id"], start_cutoff),
-                        )
-                        lifecycle = await cur.fetchone()
-                        if lifecycle and lifecycle.get("event_type") in {"CHAT_STARTED", "CHAT_REOPENED"}:
-                            return ticket
-                    else:
-                        await cur.execute(
-                            """SELECT event_type FROM support_ticket_events
-                               WHERE ticket_id=%s AND (event_type IN ('TICKET_REOPENED', 'TICKET_RESOLVED') OR
-                                   (event_type='STATUS_CHANGED' AND JSON_VALID(details_json)
-                                    AND JSON_UNQUOTE(JSON_EXTRACT(details_json, '$.to'))='CLOSED'))
-                                 AND created_at < %s
-                               ORDER BY created_at DESC, id DESC LIMIT 1""",
-                            (ticket['id'], start_cutoff),
-                        )
-                        lifecycle = await cur.fetchone()
-                        if lifecycle and lifecycle['event_type'] == 'TICKET_REOPENED':
-                            return ticket
-                        if lifecycle and lifecycle['event_type'] in {'TICKET_RESOLVED', 'STATUS_CHANGED'}:
-                            continue
-                        resolved_at = ticket.get("resolved_at")
-                        closed_at = ticket.get("closed_at")
-                        if (resolved_at is None or resolved_at >= sent_at) and (closed_at is None or closed_at >= sent_at):
-                            return ticket
-        return None
+                    if await self._ticket_open_at(cur, ticket, sent_at, start_cutoff):
+                        matches.append(ticket)
+                        if first_only:
+                            break
+        return matches
+
+    @staticmethod
+    async def _ticket_open_at(cur: Any, ticket: dict[str, Any], sent_at: datetime, start_cutoff: datetime) -> bool:
+        if str(ticket.get("conversation_origin") or "CUSTOMER") == "STAFF":
+            await cur.execute(
+                """
+                SELECT event_type FROM support_ticket_events
+                WHERE ticket_id = %s
+                  AND event_type IN ('CHAT_STARTED', 'CHAT_REOPENED', 'CHAT_CLOSED')
+                  AND created_at < %s
+                ORDER BY created_at DESC, id DESC LIMIT 1
+                """,
+                (ticket["id"], start_cutoff),
+            )
+            lifecycle = await cur.fetchone()
+            return bool(lifecycle and lifecycle.get("event_type") in {"CHAT_STARTED", "CHAT_REOPENED"})
+        await cur.execute(
+            """SELECT event_type FROM support_ticket_events
+               WHERE ticket_id=%s AND (event_type IN ('TICKET_REOPENED', 'TICKET_RESOLVED') OR
+                   (event_type='STATUS_CHANGED' AND JSON_VALID(details_json)
+                    AND JSON_UNQUOTE(JSON_EXTRACT(details_json, '$.to'))='CLOSED'))
+                 AND created_at < %s
+               ORDER BY created_at DESC, id DESC LIMIT 1""",
+            (ticket['id'], start_cutoff),
+        )
+        lifecycle = await cur.fetchone()
+        if lifecycle and lifecycle['event_type'] == 'TICKET_REOPENED':
+            return True
+        if lifecycle and lifecycle['event_type'] in {'TICKET_RESOLVED', 'STATUS_CHANGED'}:
+            return False
+        resolved_at = ticket.get("resolved_at")
+        closed_at = ticket.get("closed_at")
+        return (resolved_at is None or resolved_at >= sent_at) and (closed_at is None or closed_at >= sent_at)
 
     async def list_previous_customer_tickets(
         self,
@@ -1017,7 +1054,7 @@ class SupportRepository(DeliveryRepositoryMixin, ReadSyncRepositoryMixin, Receip
             async with conn.cursor(aiomysql.DictCursor) as cur:
                 await cur.execute(
                     """
-                    SELECT t.*, n.display_name
+                    SELECT t.*, COALESCE(n.display_name,t.business_display_name) AS display_name
                     FROM support_tickets t
                     LEFT JOIN whatsapp_phone_numbers n
                       ON n.phone_number_id = t.business_phone_number_id
@@ -1242,7 +1279,7 @@ class SupportRepository(DeliveryRepositoryMixin, ReadSyncRepositoryMixin, Receip
             async with conn.cursor(aiomysql.DictCursor) as cur:
                 await cur.execute(
                     """
-                    SELECT t.*, n.display_name
+                    SELECT t.*, COALESCE(n.display_name,t.business_display_name) AS display_name
                     FROM support_tickets t
                     LEFT JOIN whatsapp_phone_numbers n
                       ON n.phone_number_id = t.business_phone_number_id
@@ -1552,6 +1589,7 @@ class SupportRepository(DeliveryRepositoryMixin, ReadSyncRepositoryMixin, Receip
         sender_name: str | None = None,
         whatsapp_message_id: str | None = None,
         client_message_id: str | None = None,
+        request_fingerprint: str | None = None,
         whatsapp_timestamp: str | None = None,
         message_type: str = "text",
         reply_to_whatsapp_message_id: str | None = None,
@@ -1579,10 +1617,12 @@ class SupportRepository(DeliveryRepositoryMixin, ReadSyncRepositoryMixin, Receip
         if whatsapp_message_id:
             existing = await self.get_message_by_whatsapp_id(whatsapp_message_id)
             if existing:
+                verify_send_fingerprint(existing, request_fingerprint)
                 return existing, False
         if client_message_id:
             existing = await self.get_message_by_client_id(client_message_id, ticket_id=ticket_id, sender_type=sender_type, sender_id=sender_id)
             if existing:
+                verify_send_fingerprint(existing, request_fingerprint)
                 return existing, False
 
         async with self._pool.acquire() as conn:
@@ -1642,6 +1682,7 @@ class SupportRepository(DeliveryRepositoryMixin, ReadSyncRepositoryMixin, Receip
                             (ticket_id, sender_type, str(sender_id or ""), client_message_id))
                         existing = await cur.fetchone()
                         if existing:
+                            verify_send_fingerprint(existing, request_fingerprint)
                             await conn.commit()
                             return existing, False
 
@@ -1663,6 +1704,7 @@ class SupportRepository(DeliveryRepositoryMixin, ReadSyncRepositoryMixin, Receip
                             whatsapp_message_id,
                             client_message_id,
                             transport_client_id,
+                            request_fingerprint,
                             whatsapp_timestamp,
                             send_status,
                             error_message,
@@ -1673,7 +1715,7 @@ class SupportRepository(DeliveryRepositoryMixin, ReadSyncRepositoryMixin, Receip
                             updated_at
                         ) VALUES (
                             %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                            %s, %s, %s, %s,
+                            %s, %s, %s, %s, %s,
                             UTC_TIMESTAMP(6), UTC_TIMESTAMP(6)
                         )
                         """,
@@ -1693,6 +1735,7 @@ class SupportRepository(DeliveryRepositoryMixin, ReadSyncRepositoryMixin, Receip
                             whatsapp_message_id,
                             client_message_id,
                             uuid.uuid4().hex if client_message_id else None,
+                            request_fingerprint,
                             whatsapp_timestamp,
                             send_status,
                             error_message,
@@ -1734,6 +1777,7 @@ class SupportRepository(DeliveryRepositoryMixin, ReadSyncRepositoryMixin, Receip
                                     str(sender_id or ""), client_message_id))
                     existing = await cur.fetchone()
                     if existing:
+                        verify_send_fingerprint(existing, request_fingerprint)
                         return existing, False
                 raise
             except Exception:
@@ -2695,7 +2739,7 @@ class SupportRepository(DeliveryRepositoryMixin, ReadSyncRepositoryMixin, Receip
                             t.id AS ticket_id, t.ticket_reference, t.customer_name,
                             t.customer_userid, t.whatsapp_phone, t.status,
                             t.conversation_origin, t.business_display_phone_number,
-                            t.business_phone_number_id, n.display_name,
+                            t.business_phone_number_id, COALESCE(n.display_name,t.business_display_name) AS display_name,
                             t.last_activity_at AS created_at
                         FROM support_tickets t
                         LEFT JOIN whatsapp_phone_numbers n
@@ -2719,7 +2763,7 @@ class SupportRepository(DeliveryRepositoryMixin, ReadSyncRepositoryMixin, Receip
                         t.ticket_reference, t.customer_name, t.customer_userid,
                         t.whatsapp_phone, t.status, t.conversation_origin,
                         t.business_display_phone_number, t.business_phone_number_id,
-                        n.display_name
+                        COALESCE(n.display_name,t.business_display_name) AS display_name
                     FROM support_ticket_messages m
                     INNER JOIN support_tickets t ON t.id = m.ticket_id
                     LEFT JOIN whatsapp_phone_numbers n
@@ -2733,18 +2777,19 @@ class SupportRepository(DeliveryRepositoryMixin, ReadSyncRepositoryMixin, Receip
                 rows = conversations + list(await cur.fetchall())
                 return await attach_current_staff_names(cur, rows)
 
-    async def list_events(self, ticket_id: int, limit: int = 100) -> list[dict[str, Any]]:
+    async def list_events(self, ticket_id: int, limit: int = 100, *, include_private_activity: bool = True) -> list[dict[str, Any]]:
         limit = max(1, min(limit, 200))
+        visibility = "" if include_private_activity else "AND event_type NOT IN ('CONVERSATION_VIEWED','INCOMING_MARKED_READ')"
         if self._pool is None:
             await self.connect()
         assert self._pool is not None
         async with self._pool.acquire() as conn:
             async with conn.cursor(aiomysql.DictCursor) as cur:
                 await cur.execute(
-                    """
+                    f"""
                     SELECT *
                     FROM support_ticket_events
-                    WHERE ticket_id = %s
+                    WHERE ticket_id = %s {visibility}
                     ORDER BY id ASC
                     LIMIT %s
                     """,
@@ -3396,6 +3441,12 @@ class SupportRepository(DeliveryRepositoryMixin, ReadSyncRepositoryMixin, Receip
         can_view_all: bool = False,
         page: int = 1,
         page_size: int = 30,
+        staff_id: str | None = None,
+        support_number: str | None = None,
+        chat_status: str = "all",
+        query: str = "",
+        include_filter_options: bool = True,
+        count_only: bool = False,
     ) -> dict[str, Any]:
         page = max(page, 1)
         page_size = max(1, min(page_size, 500))
@@ -3502,6 +3553,11 @@ class SupportRepository(DeliveryRepositoryMixin, ReadSyncRepositoryMixin, Receip
         else:
             raise ValueError("Unknown ticket view.")
 
+        base_where, base_params = where, tuple(params)
+        extra, values = queue_filters(view, staff_id, support_number, chat_status, query, agent_id)
+        where = f"({where}) AND ({extra})"
+        params.extend(values)
+
         if self._pool is None:
             await self.connect()
         assert self._pool is not None
@@ -3514,13 +3570,16 @@ class SupportRepository(DeliveryRepositoryMixin, ReadSyncRepositoryMixin, Receip
                 count_row = await cur.fetchone()
                 total = int((count_row or {}).get("total", 0))
 
+                if count_only:
+                    return {"total": total}
+
                 list_params = [*params, page_size, offset]
                 await cur.execute(
                     f"""
                     SELECT
                         support_tickets.id, ticket_reference, whatsapp_phone, customer_id,
                         business_phone_number_id, business_display_phone_number,
-                        n.display_name,
+                        COALESCE(n.display_name,support_tickets.business_display_name) AS display_name,
                         conversation_origin, initiated_by_staff_id, initiated_by_staff_name,
                         customer_userid, customer_name,
                         LEFT(reason, 300) AS reason,
@@ -3543,8 +3602,12 @@ class SupportRepository(DeliveryRepositoryMixin, ReadSyncRepositoryMixin, Receip
                 rows = list(await cur.fetchall())
                 await attach_current_staff_names(cur, rows)
                 await attach_conversation_read_state(cur, rows)
+                await attach_dashboard_unread(cur, rows, agent_id)
+                await self.attach_queue_search_matches(cur, rows, query, agent_id)
+                options = await self.queue_filter_options(cur, base_where, base_params) if include_filter_options else None
         return {
             "items": rows,
+            "filter_options": options,
             "page": page,
             "page_size": page_size,
             "total": total,

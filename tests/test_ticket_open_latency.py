@@ -86,7 +86,7 @@ def test_ticket_detail_loads_identity_messages_events_and_history_concurrently(m
             return [{"id": ticket_id * 10, "ticket_id": ticket_id, "sender_type": "CUSTOMER",
                      "direction": "INBOUND", "message_type": "text", "body": "hi"}]
 
-        async def list_events(_ticket_id: int, limit: int = 100):
+        async def list_events(_ticket_id: int, limit: int = 100, *, include_private_activity=True):
             await arrive("events")
             return []
 
@@ -155,7 +155,7 @@ def test_a_failing_branch_cancels_the_other_lookups(monkeypatch) -> None:
         async def list_messages_around(*_args, **_kwargs):
             return []
 
-        async def list_events(_ticket_id: int, limit: int = 100):
+        async def list_events(_ticket_id: int, limit: int = 100, *, include_private_activity=True):
             try:
                 await asyncio.sleep(5)
             except asyncio.CancelledError:

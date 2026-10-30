@@ -31,7 +31,7 @@ const loadForwardChoices=async()=>{};
 const messageClass=()=>'customer',messageActor=()=>'Customer',initials=()=>'EX';
 const renderReplyQuote=()=>{},canChangeWhatsAppMessage=()=>false,messageReactionBar=()=>null;
 const messageTextForCopy=m=>m.deleted_for_everyone_at?'':m.body||'',appendMessageTextWithLinks=(e,t)=>e.textContent=t;
-const fmt=()=>'12:00',messageOccurredAt=()=>'2026-10-27T12:00:00Z';
+const fmt=()=>'12:00',messageOccurredAt=()=>'2026-10-27T12:00:00Z',messageArrivedLate=()=>false;
 function labelMessageAction(button,action,label){button.dataset.action=action;button.setAttribute('aria-label',label);button.dataset.tooltip=label;}
 
 function openDialog(id){state.activeModal=id;$(id).classList.remove('hidden');}

@@ -139,10 +139,10 @@ def test_sender_queue_processes_adjacent_messages_as_one_turn(monkeypatch) -> No
         store = InMemoryConversationStore()
         phone = "96170123456"
         first = IncomingWhatsAppMessage(
-            phone, "wamid.1", "text", "How much to ship to KSA?", "100"
+            phone, "wamid.1", "text", "How much to ship to KSA?", str(int(time.time()) - 2)
         )
         second = IncomingWhatsAppMessage(
-            phone, "wamid.2", "text", "It is 5 kg", "101"
+            phone, "wamid.2", "text", "It is 5 kg", str(int(time.time()) - 1)
         )
         first_claim = await store.claim_incoming_message(first.message_id or "")
         second_claim = await store.claim_incoming_message(second.message_id or "")

@@ -47,6 +47,7 @@ async def test_queue_counts_refresh_every_view(monkeypatch):
     }
 
     async def fake_list_tickets(*, view, **kwargs):
+        assert kwargs["count_only"] is True
         return {"items": [], "total": expected[view], "page": 1, "page_size": 1}
 
     async def fake_contact_count():

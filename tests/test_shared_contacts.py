@@ -48,7 +48,7 @@ const state = {conversationSearchOpen: false};
 const messageClass = m => m.sender_type === 'AGENT' ? 'agent' : 'customer';
 const messageActor = m => m.sender_type === 'AGENT' ? 'Staff' : 'Customer';
 const initials = () => 'EX', renderReplyQuote = () => {}, canChangeWhatsAppMessage = () => false;
-const fmt = () => '12:00', messageOccurredAt = () => '2026-10-21T12:00:00Z';
+const fmt = () => '12:00', messageOccurredAt = () => '2026-10-21T12:00:00Z',messageArrivedLate=()=>false;
 const labelMessageAction = () => {}, messageReactionBar = () => null;
 let copied;
 const copyMessageText = text => {copied = text};
