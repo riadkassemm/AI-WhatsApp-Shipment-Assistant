@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from app import main
+import app.support_service as service
 from app.conversation_store import InMemoryConversationStore
 from app.whatsapp_client import IncomingWhatsAppMessage
 
@@ -17,7 +18,10 @@ def utcnow():
 @pytest.fixture
 def routing(infrastructure, monkeypatch):
     repository, sql, redis = infrastructure
-    monkeypatch.setattr(main, "conversation_store", InMemoryConversationStore())
+    store = InMemoryConversationStore()
+    # The live route also syncs conversation mode through the service module.
+    monkeypatch.setattr(main, "conversation_store", store)
+    monkeypatch.setattr(service, "conversation_store", store)
     monkeypatch.setattr(main.settings, "whatsapp_max_inbound_age_seconds", 900)
     lookups = []
     original = main.support_service.ticket_for_delayed_inbound
@@ -54,8 +58,8 @@ def routing(infrastructure, monkeypatch):
         return response.status_code, json.loads(response.body)
 
     async def rows(message_id):
-        return await sql("SELECT ticket_id, whatsapp_timestamp, created_at FROM support_ticket_messages WHERE whatsapp_message_id=%s",
-                         (message_id,))
+        return list(await sql("SELECT ticket_id, whatsapp_timestamp, created_at FROM support_ticket_messages WHERE whatsapp_message_id=%s",
+                              (message_id,)))
 
     async def state(ticket_id):
         return (await sql("SELECT status, active_key, current_assignee_id, resolved_at FROM support_tickets WHERE id=%s",
