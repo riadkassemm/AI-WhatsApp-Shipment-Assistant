@@ -1150,10 +1150,146 @@ function messageReactionBar(message) {
   return bar;
 }
 
+// Quote navigation leaves the selected ticket, composer, and media drafts intact.
+let replyNavigationRequest = 0;
+let replyHighlightTimer = null;
+function highlightReplyMessage(messageId, conversation = $('conversation')) {
+  const target = conversation.querySelector('[data-message-id="' + Number(messageId) + '"]');
+  if (!target) return false;
+  document.querySelectorAll('.reply-target').forEach(row => row.classList.remove('reply-target'));
+  clearTimeout(replyHighlightTimer);
+  // Restart the animation when the same quote is clicked again.
+  void target.offsetWidth;
+  target.classList.add('reply-target');
+  const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const center = target.getBoundingClientRect().top - conversation.getBoundingClientRect().top +
+    conversation.scrollTop - (conversation.clientHeight - target.clientHeight) / 2;
+  conversation.scrollTo({top: Math.max(0, center), behavior: reduced ? 'auto' : 'smooth'});
+  replyHighlightTimer = setTimeout(() => target.classList.remove('reply-target'), 2400);
+  if (conversation.id === 'conversation') updateScrollLatestButton();
+  return true;
+}
+
+async function navigateToReply(reply, button) {
+  const request = ++replyNavigationRequest;
+  const review = button.closest('#investigationMessages');
+  const container = review || $('conversation');
+  if (reply.id && highlightReplyMessage(reply.id, container)) return;
+  if (!reply.source_message_id || (!review && !state.currentTicketData)) {
+    notify('Original message is unavailable.', 'error');
+    return;
+  }
+  const ticketId = review ? investigationTicket : state.ticketId;
+  const epoch = review ? investigationRequest : state.historySelectionEpoch;
+  const isCurrent = () => request === replyNavigationRequest && state.authenticated && (review
+    ? investigationStillAllowed(epoch) && String(investigationTicket) === String(ticketId)
+    : String(state.ticketId) === String(ticketId) && state.historySelectionEpoch === epoch);
+  const base = review ? '/api/support/tickets/' + ticketId : historyDetailBase();
+  button.dataset.replyRequest = String(request);
+  button.setAttribute('aria-busy', 'true');
+  button.classList.add('reply-loading');
+  try {
+    const result = await api(base + '/messages/' + Number(reply.source_message_id) + '/reply');
+    if (!isCurrent()) return;
+    const targetTicketId = Number(result.ticket?.id);
+    const targetId = Number(result.message_id);
+    const previous = targetTicketId !== Number(ticketId);
+    let messages = result.messages || [];
+    let hasMore = Boolean(result.messages_has_more);
+    // Walk backward with the existing keyset pages. Keeping every intervening
+    // message avoids timeline gaps and keeps Load older messages reliable.
+    while (!messages.some(message => Number(message.id) === targetId) && hasMore) {
+      const oldest = Number(messages[0]?.id);
+      if (!oldest || oldest <= targetId) break;
+      const page = await api(base + (previous ? '/history/' + targetTicketId : '') +
+        '/messages?before_message_id=' + oldest + '&limit=100');
+      if (!isCurrent()) return;
+      const older = (page.messages || []).filter(message => Number(message.id) < oldest);
+      if (!older.length) break;
+      messages = mergeTimelineMessages(older, messages);
+      hasMore = Boolean(page.messages_has_more);
+    }
+    if (!isCurrent()) return;
+    if (!messages.some(message => Number(message.id) === targetId)) {
+      throw new Error('Original message is unavailable.');
+    }
+    if (review) {
+      // The manager's read-only review uses the same renderer but must never
+      // navigate or mutate the operational ticket behind the review panel.
+      const group = document.createElement('div');
+      if (previous) {
+        const heading = document.createElement('p');
+        heading.className = 'form-note';
+        heading.textContent = 'Referenced conversation · ' + (result.ticket.ticket_reference || targetTicketId);
+        group.append(heading);
+      }
+      for (const message of messages) {
+        if (!review.querySelector('[data-message-id="' + Number(message.id) + '"]')) addMessage(group, message, 'investigation');
+      }
+      group.querySelectorAll('.message-actions').forEach(element => element.remove());
+      review.prepend(group);
+      if (!previous && investigationMessageBefore && Number(messages[0]?.id) < Number(investigationMessageBefore)) {
+        investigationMessageBefore = hasMore ? Number(messages[0].id) : null;
+        $('investigationOlderMessages').classList.toggle('hidden', !investigationMessageBefore);
+      }
+      highlightReplyMessage(targetId, review);
+      return;
+    }
+    const data = state.currentTicketData;
+    if (previous) {
+      let thread = state.previousTicketHistory.find(item => Number(item.ticket?.id) === targetTicketId);
+      if (!thread) {
+        // Preserve the history-pagination boundary when inserting a referenced
+        // conversation older than the currently loaded history page.
+        const oldest = Number(state.previousTicketHistory[0]?.ticket?.id);
+        if (oldest && targetTicketId < oldest) state.replyHistoryBoundary = state.replyHistoryBoundary || oldest;
+        thread = {ticket: result.ticket, context: {}, messages: []};
+        state.previousTicketHistory.push(thread);
+        state.previousTicketHistory.sort((a, b) => Number(a.ticket.id) - Number(b.ticket.id));
+      }
+      thread.messages = mergeTimelineMessages(messages, thread.messages);
+      thread.messages_has_more = hasMore;
+      thread._messagesExpanded = true;
+      state.previousHistoryExpanded = true;
+      data.previous_ticket_history = state.previousTicketHistory;
+    } else {
+      state.cachedCurrentMessages = mergeTimelineMessages(messages, state.cachedCurrentMessages);
+      state.currentMessagesHasMore = hasMore;
+      state.currentMessagesExpanded = true;
+      data.messages = state.cachedCurrentMessages.slice();
+      data.messages_has_more = hasMore;
+    }
+    updateSharedHistoryShortcut();
+    renderConversation(data, {preserveAudio: true, preserveScrollAnchor: '[data-message-id="' + Number(reply.source_message_id) + '"]'});
+    state.timelineSignature = timelineSignature(data);
+    highlightReplyMessage(targetId);
+  } catch (error) {
+    if (isCurrent() && !state.pageLeaving) notify(error.message || 'Original message could not be loaded. Please try again.', 'error');
+  } finally {
+    if (button.dataset.replyRequest === String(request)) {
+      button.removeAttribute('aria-busy');
+      button.classList.remove('reply-loading');
+    }
+  }
+}
+
 function renderReplyQuote(parent, reply) {
   if (!reply) return;
-  const quote = document.createElement('div');
+  const quote = document.createElement('button');
+  quote.type = 'button';
   quote.className = 'message-quote';
+  quote.setAttribute('aria-label', 'Go to original message');
+  quote.onclick = event => {
+    event.stopPropagation();
+    const selection = window.getSelection();
+    // Drag-selecting quote text is still copyable. A normal click or keyboard
+    // activation clears an older selection so deferred rendering cannot hide
+    // the requested destination.
+    if (event.detail && selection && !selection.isCollapsed &&
+        quote.contains(selection.anchorNode) && quote.contains(selection.focusNode)) return;
+    if (selectedConversationText()) selection.removeAllRanges();
+    navigateToReply(reply, quote);
+  };
   const actor = document.createElement('strong');
   actor.textContent = reply.sender_name || MESSAGE_ROLE_LABELS[String(reply.sender_type || '').toUpperCase()] || 'Message';
   const preview = document.createElement('span');
@@ -2401,7 +2537,7 @@ function historyDetailBase() {
 
 async function loadEarlierConversations(button = null) {
   const oldest = state.previousTicketHistory[0];
-  const beforeTicketId = Number(oldest?.ticket?.id);
+  const beforeTicketId = Number(state.replyHistoryBoundary || oldest?.ticket?.id);
   if (!state.previousTicketHistoryHasMore || !beforeTicketId) return;
   const request = beginHistoryLoad(button);
   if (!request) return;
@@ -2412,8 +2548,10 @@ async function loadEarlierConversations(button = null) {
     if (!Array.isArray(result.previous_ticket_history)) throw new Error('Earlier conversation history could not be loaded.');
     const existing = new Set(state.previousTicketHistory.map(thread => String(thread.ticket?.id)));
     const older = result.previous_ticket_history.filter(thread => thread.ticket?.id && !existing.has(String(thread.ticket.id)));
-    state.previousTicketHistory = [...older, ...state.previousTicketHistory];
-    state.previousTicketHistoryHasMore = older.length > 0 && Boolean(result.previous_ticket_history_has_more);
+    state.previousTicketHistory = [...older, ...state.previousTicketHistory]
+      .sort((a, b) => Number(a.ticket.id) - Number(b.ticket.id));
+    state.replyHistoryBoundary = result.previous_ticket_history[0]?.ticket?.id || null;
+    state.previousTicketHistoryHasMore = result.previous_ticket_history.length > 0 && Boolean(result.previous_ticket_history_has_more);
     state.previousHistoryExpanded = true;
     updateSharedHistoryShortcut();
     const data = state.currentTicketData;
@@ -2980,6 +3118,7 @@ async function openTicket(id, {silent = false, refreshQueue = false, refreshHist
     updateComposerCount();
     state.timelineSignature = '';
     state.previousTicketHistory = [];
+    state.replyHistoryBoundary = null;
     state.previousTicketHistoryHasMore = false;
     state.previousHistoryExpanded = false;
     state.previousHistoryLoaded = false;

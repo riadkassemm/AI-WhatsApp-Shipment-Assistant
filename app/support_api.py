@@ -1176,6 +1176,19 @@ async def conversation_history_messages_page(
         raise _translate_error(exc) from exc
 
 
+@router.get("/tickets/{ticket_id}/messages/{message_id}/reply")
+@router.get("/chats/{ticket_id}/messages/{message_id}/reply")
+async def conversation_reply_destination(
+    ticket_id: int,
+    message_id: int,
+    agent: SupportAgent = Depends(get_current_agent),
+) -> dict:
+    try:
+        return await support_service.reply_destination(ticket_id, message_id, agent)
+    except Exception as exc:
+        raise _translate_error(exc) from exc
+
+
 @router.get("/tickets/{ticket_id}/messages")
 @router.get("/chats/{ticket_id}/messages")
 async def conversation_messages_page(

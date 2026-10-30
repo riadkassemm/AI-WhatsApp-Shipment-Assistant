@@ -1519,3 +1519,17 @@ body.column-resizing * { cursor: col-resize !important; }
 .selecting-messages .message-select { position: absolute; left: 0; top: 50%; transform: translateY(-50%); margin: 0; }
 .quick-reply-copy:has(.quick-reply-thumbnail) { grid-template-columns: 58px minmax(0, 1fr) auto; }
 .conversation-shell:has(.message-selection-bar:not(.hidden)) .conversation-search-toolbar { top: 68px; }
+
+/* Reply previews behave identically for text and every attachment kind. */
+button.message-quote { display: block; text-align: start; font-family: inherit; border-top: 0; border-right: 0; border-bottom: 0; cursor: pointer; }
+button.message-quote:hover, button.message-quote:focus-visible { background: color-mix(in srgb, var(--primary) 14%, transparent); }
+button.message-quote:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+button.message-quote.reply-loading { opacity: .65; cursor: progress; }
+.message-row.reply-target .message-bubble { animation: reply-message-highlight 2.4s ease-out; }
+@keyframes reply-message-highlight {
+  0%, 35% { box-shadow: 0 0 0 4px color-mix(in srgb, var(--primary) 65%, transparent); }
+  100% { box-shadow: 0 0 0 4px transparent; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .message-row.reply-target .message-bubble { animation: none; outline: 2px solid var(--primary); outline-offset: 3px; }
+}

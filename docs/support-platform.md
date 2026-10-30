@@ -30,6 +30,16 @@ An original sender may receive updates to their own historical message after a
 transfer without receiving the rest of an otherwise inaccessible conversation.
 Deleting history from this app does not recall messages from WhatsApp.
 
+Click or tap a quoted reply to scroll to its original message and briefly highlight
+it. This works for text and attachments, including messages in accessible shared
+history. Older originals load on demand with their intervening messages; very long
+conversations may take several pages to load. Switching conversations or choosing
+another quote cancels the pending jump. Navigation preserves drafts, playback,
+assignment, and read state. Missing or locally hidden originals show an unavailable
+message; globally deleted originals show only their deletion placeholder.
+
+![Reply navigation with synthetic messages](screenshots/reply-navigation.png)
+
 Event streams use the authenticated staff session. Each incoming Redis event
 and idle heartbeat revalidates the session against MariaDB, including expiry,
 revocation, account activity, and current role. Ticket permissions are evaluated
