@@ -99,6 +99,11 @@ def harness(monkeypatch):
     monkeypatch.setattr(main.support_service, "route_human_inbound", route)
     monkeypatch.setattr(main.support_service, "capture_inbound_media", media)
     monkeypatch.setattr(main.support_service, "get_active_ticket", active_ticket)
+
+    async def reconcile(*_args, **_kwargs):
+        return None
+    # The live path syncs conversation mode through the service's own store.
+    monkeypatch.setattr(main.support_service, "reconcile_conversation_mode", reconcile)
     monkeypatch.setattr(main, "get_ai_reply", no_ai)
     monkeypatch.setattr(main.whatsapp_client, "send_text", no_send)
     return calls, state

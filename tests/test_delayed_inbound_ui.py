@@ -1,4 +1,5 @@
 """The dashboard marks customer messages received well after they were sent."""
+import os
 from pathlib import Path
 import subprocess
 
@@ -17,12 +18,15 @@ assert.equal(messageArrivedLate(inbound(15)), true);
 assert.equal(messageArrivedLate(inbound(29)), true);
 // Outgoing, missing or unusable times are never labelled.
 assert.equal(messageArrivedLate(inbound(29, {direction: 'OUTBOUND'})), false);
+// Without a send time, receipt time is used for both: never labelled, in any browser timezone.
 assert.equal(messageArrivedLate(inbound(29, {whatsapp_timestamp: null})), false);
 assert.equal(messageArrivedLate(inbound(29, {created_at: null})), false);
 assert.equal(messageArrivedLate(inbound(29, {created_at: 'not a date'})), false);
 // Shown at its send time, not its receipt time.
 assert.equal(messageOccurredAt(inbound(29)), new Date(sent * 1000).toISOString());
 '''
-    result = subprocess.run(['node', '-e', script], capture_output=True, text=True, timeout=10)
+    # Staff browsers run in Asia/Beirut; naive server times must still be read as UTC.
+    result = subprocess.run(['node', '-e', script], capture_output=True, text=True, timeout=10,
+                            env={**os.environ, 'TZ': 'Asia/Beirut'})
     assert result.returncode == 0, result.stderr
 
