@@ -936,6 +936,98 @@ test('missing reaction targets stay durable across restarts without inflating pe
   assert.equal(resumed.status().lines[0].pending_callbacks, 0);
 });
 
+const album = (expectedImageCount = 2) => ({ key: { id: 'ALBUM', remoteJid: `${PHONE}@s.whatsapp.net`, fromMe: false },
+  message: { albumMessage: { expectedImageCount } } });
+const albumItem = (id, parent = 'ALBUM', content = { imageMessage: { mimetype: 'image/jpeg' } }) => ({
+  key: { id, remoteJid: `${PHONE}@s.whatsapp.net`, fromMe: false },
+  message: { ...content, messageContextInfo: { messageAssociation: { associationType: 'MEDIA_ALBUM', parentMessageKey: { id: parent } } } } });
+const reactionEvent = (eventId, target, { type = 'outgoing_message', emoji = '👍' } = {}) => ({
+  event_id: eventId, line_id: LINE, type, from_me: type === 'outgoing_message',
+  payload: { entry: [{ changes: [{ value: { messages: [{ type: 'reaction', reaction: { message_id: target, emoji } }] } }] }] } });
+const reactionTarget = body => JSON.parse(body).payload.entry[0].changes[0].value.messages[0].reaction.message_id;
+
+test('reactions to a customer photo album are delivered against its first item without changing the durable event', async t => {
+  let status = 503;
+  const delivered = [];
+  const fetchCallback = async (_url, options) => {
+    const event = JSON.parse(options.body);
+    delivered.push([event.event_id, event.payload ? reactionTarget(options.body) : null]);
+    return new Response(null, { status });
+  };
+  const { bridge, config, line } = await fixture(t, 'ack', { fetch: fetchCallback });
+  const sent = Date.now() - 60_000;
+  await line.store.update(data => {
+    data.messages.ALBUM = { message: album(3), phone: PHONE, timestamp: sent, notified: false };
+    // Same timestamp: the native ID breaks the tie, so the choice is stable.
+    data.messages['ITEM-B'] = { message: albumItem('ITEM-B'), phone: PHONE, timestamp: sent + 1000, media_id: 'b', notified: true };
+    data.messages['ITEM-A'] = { message: albumItem('ITEM-A'), phone: PHONE, timestamp: sent + 1000, media_id: 'a', notified: true };
+    data.messages['ITEM-C'] = { message: albumItem('ITEM-C'), phone: PHONE, timestamp: sent + 2000, media_id: 'c', notified: true };
+    // Neither another album's item nor a non-media message is an item of this album.
+    data.messages.OTHER = { message: albumItem('OTHER', 'ANOTHER-ALBUM'), phone: PHONE, timestamp: sent, notified: true };
+    data.messages.NOTE = { message: albumItem('NOTE', 'ALBUM', { conversation: 'not an album item' }), phone: PHONE, timestamp: sent, notified: true };
+  });
+  const original = reactionEvent('album-reaction', `ld:${LINE}:ALBUM`);
+  await bridge.enqueue(original);
+  await bridge.deliverCallbacks();
+  // A temporary API failure keeps the original event durable for retry.
+  assert.deepEqual(delivered, [['album-reaction', `ld:${LINE}:ITEM-A`]]);
+  assert.deepEqual(bridge.outbox.data.entries[0].event, original);
+  assert.equal(bridge.outbox.data.entries[0].attempts, 1);
+  assert.equal(bridge.status().lines[0].pending_callbacks, 1);
+  await bridge.close();
+
+  // After a restart the queued entry is mapped again from the persisted store.
+  status = 200;
+  const resumed = await new Bridge(config, { makeSocket: () => mockSocket(), onError: () => {}, fetch: fetchCallback }).initialize({ autoConnect: false });
+  t.after(() => resumed.close());
+  await resumed.outbox.update(data => { data.entries[0].next_try = 0; });
+  await resumed.enqueue(reactionEvent('album-reaction-removed', `ld:${LINE}:ALBUM`, { emoji: '' }));
+  await resumed.enqueue(reactionEvent('customer-album-reaction', `ld:${LINE}:ALBUM`, { type: 'message' }));
+  await resumed.enqueue(reactionEvent('album-reaction', `ld:${LINE}:ALBUM`)); // duplicate event ID is not queued twice
+  await resumed.deliverCallbacks();
+  assert.deepEqual(delivered.slice(1), [
+    ['album-reaction', `ld:${LINE}:ITEM-A`],
+    ['album-reaction-removed', `ld:${LINE}:ITEM-A`],
+    ['customer-album-reaction', `ld:${LINE}:ITEM-A`],
+  ]);
+  assert.equal(resumed.outbox.data.entries.length, 0);
+  assert.equal(resumed.outbox.data.dead_letters.length, 0);
+});
+
+test('album reactions keep the original target until an item is stored, and other callbacks are unchanged', async t => {
+  const delivered = [];
+  const { bridge, line } = await fixture(t, 'ack', { fetch: async (_url, options) => {
+    const event = JSON.parse(options.body);
+    delivered.push([event.event_id, event.payload?.entry?.[0]?.changes?.[0]?.value?.messages?.[0]?.reaction ? reactionTarget(options.body) : null]);
+    if (event.event_id === 'early-album-reaction' && reactionTarget(options.body).endsWith(':ALBUM')) {
+      return new Response(null, { status: 503, headers: { 'X-WhatsApp-Callback-State': 'waiting_for_reaction_target' } });
+    }
+    return new Response(null, { status: 200 });
+  } });
+  await line.store.update(data => { data.messages.ALBUM = { message: album(), phone: PHONE, timestamp: Date.now(), notified: false }; });
+  await bridge.enqueue(reactionEvent('early-album-reaction', `ld:${LINE}:ALBUM`));
+  await bridge.enqueue(reactionEvent('ordinary-reaction', `ld:${LINE}:ORIGINAL`));
+  await bridge.enqueue(reactionEvent('unknown-target', `ld:${LINE}:NOT-STORED`));
+  await bridge.enqueue({ event_id: 'text-event', line_id: LINE, type: 'outgoing_message',
+    payload: { entry: [{ changes: [{ value: { messages: [{ type: 'text', text: { body: 'x' } }] } }] }] } });
+  await bridge.enqueue({ event_id: 'status-event', line_id: LINE, type: 'message_status', message_id: `ld:${LINE}:ALBUM`, status: 'read' });
+  await bridge.deliverCallbacks();
+  assert.deepEqual(delivered, [
+    ['early-album-reaction', `ld:${LINE}:ALBUM`],
+    ['ordinary-reaction', `ld:${LINE}:ORIGINAL`],
+    ['unknown-target', `ld:${LINE}:NOT-STORED`],
+    ['text-event', null],
+    ['status-event', null],
+  ]);
+  // No item yet: the existing history-wait state is preserved.
+  assert.equal(bridge.status().lines[0].waiting_history_reactions, 1);
+  await line.store.update(data => { data.messages['ITEM-1'] = { message: albumItem('ITEM-1'), phone: PHONE, timestamp: Date.now(), media_id: '1', notified: true }; });
+  await bridge.outbox.update(data => { data.entries[0].next_try = 0; });
+  await bridge.deliverCallbacks();
+  assert.deepEqual(delivered.at(-1), ['early-album-reaction', `ld:${LINE}:ITEM-1`]);
+  assert.equal(bridge.outbox.data.entries.length, 0);
+});
+
 test('a history-wait response cannot hide real messages or authorization failures', async t => {
   const { bridge } = await fixture(t, 'ack', { fetch: async (_url, options) => {
     const event = JSON.parse(options.body);

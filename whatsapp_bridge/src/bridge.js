@@ -21,6 +21,34 @@ function isReactionCallback(event) {
   return messages.length === 1 && messages[0].type === 'reaction';
 }
 
+// A photo/video album arrives as an envelope plus one message per item. The
+// envelope is never forwarded (events.js), so a reaction to it has no target
+// in support and the API would wait out its retry window for nothing. Deliver
+// such a reaction against the album's first item instead. Outbox entries keep
+// the original event; this mapping is recomputed on every delivery attempt.
+function albumReactionCallback(event, messages) {
+  if (!['message', 'outgoing_message'].includes(event.type) || !messages) return event;
+  const entries = event.payload?.entry;
+  const changes = entries?.length === 1 ? entries[0]?.changes : null;
+  const nodes = changes?.length === 1 ? changes[0]?.value?.messages : null;
+  if (nodes?.length !== 1 || nodes[0]?.type !== 'reaction' || typeof nodes[0].reaction?.message_id !== 'string') return event;
+  let albumId;
+  try { albumId = unwrapId(event.line_id, nodes[0].reaction.message_id); } catch { return event; }
+  if (!messages[albumId]?.message?.message?.albumMessage) return event;
+  const items = Object.entries(messages).filter(([, record]) => {
+    const content = record?.message?.message;
+    return content?.messageContextInfo?.messageAssociation?.parentMessageKey?.id === albumId &&
+      MEDIA_TYPES.some(type => content[`${type}Message`]);
+  }).sort(([leftId, left], [rightId, right]) =>
+    (left.timestamp ?? 0) - (right.timestamp ?? 0) || (leftId < rightId ? -1 : leftId > rightId ? 1 : 0));
+  // Items normally follow the envelope within seconds; until one is stored,
+  // keep the original target and the existing history-wait behavior.
+  if (!items.length) return event;
+  const mapped = structuredClone(event);
+  mapped.payload.entry[0].changes[0].value.messages[0].reaction.message_id = wrapId(event.line_id, items[0][0]);
+  return mapped;
+}
+
 // Host of the media URL stored in a WhatsApp message, if any.
 function mediaUrlHost(message) {
   const content = normalizeMessageContent(message?.message);
@@ -1426,9 +1454,10 @@ export class Bridge {
       if (!entry) return;
       let waitingForHistory = false;
       try {
+        const callback = albumReactionCallback(entry.event, this.lines.get(id)?.store?.data?.messages);
         const response = await this.fetch(this.config.callbackUrl, { method: 'POST', redirect: 'error',
           headers: { Authorization: `Bearer ${this.config.secret}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify(entry.event), signal: AbortSignal.timeout(5000) });
+          body: JSON.stringify(callback), signal: AbortSignal.timeout(5000) });
         await response.body?.cancel();
         if (!response.ok) {
           waitingForHistory = response.status === 503 && isReactionCallback(entry.event) &&
