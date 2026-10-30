@@ -176,9 +176,12 @@ overwrites a confirmed result or a newer attempt. A hard process kill, repeated
 cancellation, or unavailable database can prevent this cleanup; use the explicit
 recovery command below after inspecting the abandoned worker.
 
-1. Refresh the conversation and inspect the stored state. For `PENDING`, the
-   original sender can choose **Resume send** while still assigned. Claims older
-   than five minutes can be reclaimed; younger active claims cannot.
+1. Refresh the conversation and inspect the stored state. `PENDING` and
+   `DISPATCHING` show a sending indicator without a retry button. If preparation
+   is abandoned, an operator must inspect the worker before using the existing
+   authorized resend endpoint. It can reclaim `PENDING` claims older than five
+   minutes; younger active claims cannot be reclaimed. This does not authorize
+   replaying an uncertain dispatch.
 2. For `FAILED`, fix the reported preparation/configuration issue and choose
    **Resend**. Missing attachments must be restored before retrying; the server
    will not fabricate a replacement attachment.
