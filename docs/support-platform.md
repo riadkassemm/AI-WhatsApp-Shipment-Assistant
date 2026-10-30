@@ -735,6 +735,12 @@ or provider support; Cloud read events never imply playback.
 All dashboard voice recordings, including browser-native Ogg/Opus, are normalized
 by FFmpeg to **mono, 48 kHz Opus** before storage. Browser recordings can contain
 stereo audio that plays on WhatsApp Web but fails on mobile as a voice note.
+New converted recordings are saved/uploaded as `voice-note.opus` with the
+`audio/ogg; codecs=opus` MIME type. The `.opus` extension still uses the Ogg
+container ([RFC 7845 §9](https://www.rfc-editor.org/rfc/rfc7845.html#section-9));
+changing the extension alone is not a repair for corrupt audio. Existing `.ogg`
+history remains readable without a migration, rewrite or resend. The file picker,
+drag/drop and paste also accept `.opus` attachments for preview and normalization.
 Linked-device PTT retains `audio/ogg; codecs=opus` through upload and relay; the
 bridge rejects non-Opus or non-mono PTT before dispatch. Text, locations and all
 supported attachment kinds share delivery ownership and ACK handling. Explicit

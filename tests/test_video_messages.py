@@ -250,7 +250,7 @@ def test_dashboard_page_gets_the_configured_video_limit(monkeypatch) -> None:
     assert b"__VIDEO_MAX_BYTES__" not in response.body
     from app.support_ui import support_asset
     assert b"Number('12345')" in asyncio.run(support_asset("media.js")).body
-    assert 'accept="image/jpeg,image/png,image/webp,application/pdf,video/mp4,video/3gpp,audio/mpeg,audio/mp4,audio/aac,audio/amr,audio/ogg"' in _HTML
+    assert 'accept="image/jpeg,image/png,image/webp,application/pdf,video/mp4,video/3gpp,audio/mpeg,audio/mp4,audio/aac,audio/amr,audio/ogg,audio/opus,.opus"' in _HTML
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is unavailable")

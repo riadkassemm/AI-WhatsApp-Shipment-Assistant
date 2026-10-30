@@ -149,6 +149,7 @@ await fetch('/result',{method:'POST',body:JSON.stringify(results)});
             data, mime, filename, voice = asyncio.run(SupportMediaStore().prepare_voice_note(
                 base64.b64decode(result['base64']), result['type']))
             assert mime == 'audio/ogg; codecs=opus' and voice
+            assert filename == 'voice-note.opus'
             path = tmp_path / filename
             path.write_bytes(data)
             stream = json.loads(subprocess.check_output(['ffprobe', '-v', 'error', '-show_entries',

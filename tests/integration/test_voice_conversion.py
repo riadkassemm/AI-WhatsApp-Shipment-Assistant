@@ -25,6 +25,8 @@ async def test_invalid_mp4_then_fresh_recording_is_safe_and_idempotent(infrastru
     async def upload(**kwargs):
         calls.append(('upload', kwargs))
         assert kwargs['content'].startswith(b'OggS')
+        assert kwargs['filename'] == 'voice-note.opus'
+        assert kwargs['mime_type'] == 'audio/ogg; codecs=opus'
         return 'asset'
     async def send(**kwargs):
         calls.append(('send', kwargs))
@@ -46,6 +48,8 @@ async def test_invalid_mp4_then_fresh_recording_is_safe_and_idempotent(infrastru
     assert not await sql('SELECT id FROM support_ticket_messages WHERE ticket_id=42')
     result = await request(valid)
     assert result['send_status'] == 'SENT'
+    stored = service.support_media_store.get(42, result['id'])
+    assert stored.path.suffix == '.opus' and stored.filename == 'voice-note.opus'
     # Same logical request returns its result; key reuse for changed bytes is rejected.
     assert (await request(valid))['id'] == result['id']
     with pytest.raises(SupportConflictError):

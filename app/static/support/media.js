@@ -278,7 +278,7 @@ async function startVoiceRecording() {
       if (!keep) return;
       if (!chunks.length) { showError('No audio was recorded. Please record it again.'); return; }
       const blob = new Blob(chunks, {type});
-      const extension = type.includes('ogg') ? 'ogg' : type.includes('mp4') ? 'm4a' : 'webm';
+      const extension = type.includes('ogg') ? (type.includes('opus') ? 'opus' : 'ogg') : type.includes('mp4') ? 'm4a' : 'webm';
       const file = new File([blob], 'voice-note.' + extension, {type});
       setPendingMedia('audio', file);
       setAppStatus('Voice note recorded and ready to review.');
@@ -404,13 +404,14 @@ function attachComposerFile(file) {
   if (!canAttachToComposer()) { showError('Open a conversation you can reply to before attaching a file.'); return false; }
   const types = {'jpg':'image/jpeg', 'jpeg':'image/jpeg', 'png':'image/png', 'webp':'image/webp',
     'pdf':'application/pdf', 'mp4':'video/mp4', '3gp':'video/3gpp',
-    'mp3':'audio/mpeg', 'm4a':'audio/mp4', 'aac':'audio/aac', 'amr':'audio/amr', 'ogg':'audio/ogg'};
+    'mp3':'audio/mpeg', 'm4a':'audio/mp4', 'aac':'audio/aac', 'amr':'audio/amr', 'ogg':'audio/ogg', 'opus':'audio/ogg'};
+  if (['audio/opus', 'audio/x-opus+ogg'].includes(file.type)) file = new File([file], file.name, {type:'audio/ogg'});
   if (!file.type || file.type === 'application/octet-stream') {
     const type = types[String(file.name || '').split('.').pop().toLowerCase()];
     if (type) file = new File([file], file.name, {type});
   }
   if (!Object.values(types).includes(file.type)) {
-    showError('Use JPEG/PNG, WebP, MP4/3GP, PDF, or supported audio (MP3/M4A/AAC/AMR/OGG).'); return false;
+    showError('Use JPEG/PNG, WebP, MP4/3GP, PDF, or supported audio (MP3/M4A/AAC/AMR/OGG/OPUS).'); return false;
   }
   if (!file.size) { showError('This file is empty.'); return false; }
   const kind = file.type === 'application/pdf' ? 'document' : file.type === 'image/webp' ? 'sticker' : file.type.startsWith('video/') ? 'video' : file.type.startsWith('audio/') ? 'audio' : 'image';
