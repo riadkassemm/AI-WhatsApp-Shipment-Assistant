@@ -3450,6 +3450,8 @@ class SupportService:
                     await support_media_store.prepare_voice_note(content, content_type or normalized_mime)
                 )
             except SupportMediaError as exc:
+                logger.warning("Staff voice preparation rejected: ticket_id=%s agent_id=%s mime=%s bytes=%s",
+                               ticket_id, agent.id, normalized_mime, len(content))
                 raise SupportValidationError(str(exc)) from exc
             safe_caption = ""
             body = "Voice note" if send_as_voice else "Audio message"

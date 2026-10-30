@@ -1,27 +1,40 @@
-function stopMediaTracks() {
-  if (!state.mediaStream) return;
-  for (const track of state.mediaStream.getTracks()) track.stop();
-  state.mediaStream = null;
+function stopMediaTracks(stream = state.mediaStream) {
+  if (!stream) return;
+  for (const track of stream.getTracks()) track.stop();
+  if (state.mediaStream === stream) state.mediaStream = null;
 }
 
-function resetRecordingUi() {
-  if (state.recordingTimer) {
-    clearInterval(state.recordingTimer);
-    state.recordingTimer = null;
+function resetRecordingUi(session = state.voiceRecording) {
+  if (session) {
+    if (session.recorder) {
+      session.recorder.ondataavailable = null;
+      session.recorder.onstop = null;
+      session.recorder.onerror = null;
+    }
+    stopMediaTracks(session.stream);
+    if (state.voiceRecording !== session) return;
   }
+  if (state.recordingTimer) clearInterval(state.recordingTimer);
+  state.recordingTimer = null;
   state.mediaRecorder = null;
-  state.recordingChunks = [];
+  state.voiceRecording = null;
   state.recordingStartedAt = 0;
   $('recordingBar').classList.add('hidden');
   text($('recordingTime'), 'Recording 0:00');
-  stopMediaTracks();
   updateComposerControls();
 }
 
 function cancelVoiceRecording() {
-  if (!state.mediaRecorder) return;
-  state.discardRecording = true;
-  try { state.mediaRecorder.stop(); } catch (_) { resetRecordingUi(); }
+  const session = state.voiceRecording;
+  if (!session) return;
+  session.discard = true;
+  try {
+    if (session.recorder?.state === 'recording') session.recorder.stop();
+  } catch (_) {
+    // Cancellation still releases this session if the recorder already ended.
+  } finally {
+    resetRecordingUi(session);
+  }
 }
 
 function clearMediaDraft() {
@@ -181,7 +194,7 @@ function focusMessageComposer() {
 
 function updateComposerControls() {
   const enabled = (state.composerEnabled || Boolean(state.editTarget)) && !state.busy;
-  const recording = Boolean(state.mediaRecorder);
+  const recording = Boolean(state.mediaRecorder || state.voiceRecording);
   const draft = state.pendingMedia;
   const hasBody = Boolean($('message').value.trim());
   const canSend = enabled && !recording && (Boolean(draft) || hasBody);
@@ -216,42 +229,54 @@ function updateComposerControls() {
 }
 
 function recordingMimeType() {
-  if (typeof MediaRecorder === 'undefined') return '';
-  for (const type of ['audio/ogg;codecs=opus', 'audio/mp4', 'audio/webm;codecs=opus', 'audio/webm']) {
-    if (!MediaRecorder.isTypeSupported || MediaRecorder.isTypeSupported(type)) return type;
+  if (typeof MediaRecorder === 'undefined' || !MediaRecorder.isTypeSupported) return '';
+  // Prefer Opus containers that FFmpeg can reliably normalize. Keep MP4 for
+  // browsers without Ogg/WebM; do not force an untested codec on those browsers.
+  for (const type of ['audio/ogg;codecs=opus', 'audio/webm;codecs=opus', 'audio/webm', 'audio/mp4']) {
+    if (MediaRecorder.isTypeSupported(type)) return type;
   }
   return '';
 }
 
 async function startVoiceRecording() {
-  if (!state.composerEnabled || state.busy || state.mediaRecorder || state.pendingMedia) return;
+  if (!state.composerEnabled || state.busy || state.voiceRecording || state.mediaRecorder || state.pendingMedia) return;
   showError('');
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || typeof MediaRecorder === 'undefined') {
     showError('Voice recording is not supported by this browser.');
     return;
   }
   clearMediaDraft();
+  const session = {ticketId: state.ticketId, agentId: state.agent?.id, chunks: [], stream: null,
+    recorder: null, discard: false, stopping: false};
+  // Claim before microphone permission resolves: a second click cannot start
+  // another recorder, and navigation can cancel the pending permission request.
+  state.voiceRecording = session;
+  updateComposerControls();
+  const isCurrent = () => state.voiceRecording === session && !session.discard &&
+    String(state.ticketId) === String(session.ticketId) && state.agent?.id === session.agentId;
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({audio: true});
+    const stream = await navigator.mediaDevices.getUserMedia({audio: {channelCount: {ideal: 1}}});
+    session.stream = stream;
+    if (!isCurrent() || !state.composerEnabled) { resetRecordingUi(session); return; }
     state.mediaStream = stream;
     const mime = recordingMimeType();
     const recorder = mime ? new MediaRecorder(stream, {mimeType: mime}) : new MediaRecorder(stream);
-    state.recordingChunks = [];
-    state.discardRecording = false;
+    session.recorder = recorder;
     recorder.ondataavailable = event => {
-      if (event.data && event.data.size) state.recordingChunks.push(event.data);
+      if (isCurrent() && event.data?.size) session.chunks.push(event.data);
     };
     recorder.onerror = () => {
-      showError('The voice recording failed.');
-      state.discardRecording = true;
+      if (!isCurrent()) return;
+      showError('The voice recording failed. Please record it again.');
+      cancelVoiceRecording();
     };
     recorder.onstop = () => {
-      const discard = state.discardRecording;
-      const chunks = state.recordingChunks.slice();
-      const type = recorder.mimeType || mime || 'audio/webm';
-      resetRecordingUi();
-      state.discardRecording = false;
-      if (discard || !chunks.length) return;
+      const keep = isCurrent() && state.composerEnabled;
+      const chunks = session.chunks;
+      const type = chunks.find(chunk => chunk.type)?.type || recorder.mimeType || mime;
+      resetRecordingUi(session);
+      if (!keep) return;
+      if (!chunks.length) { showError('No audio was recorded. Please record it again.'); return; }
       const blob = new Blob(chunks, {type});
       const extension = type.includes('ogg') ? 'ogg' : type.includes('mp4') ? 'm4a' : 'webm';
       const file = new File([blob], 'voice-note.' + extension, {type});
@@ -265,22 +290,29 @@ async function startVoiceRecording() {
       const seconds = Math.max(0, Math.floor((Date.now() - state.recordingStartedAt) / 1000));
       text($('recordingTime'), 'Recording ' + Math.floor(seconds / 60) + ':' + String(seconds % 60).padStart(2, '0'));
     }, 250);
-    recorder.start(250);
+    // A finalized recording avoids fragmented-MP4 chunk assembly. UI timing
+    // is independent; wait for the final dataavailable event followed by stop.
+    recorder.start();
     updateComposerControls();
     setAppStatus('Voice recording started.');
   } catch (error) {
-    stopMediaTracks();
-    resetRecordingUi();
-    showError(error && error.name === 'NotAllowedError' ? 'Microphone permission was denied.' : 'Could not start the microphone.');
+    const current = isCurrent();
+    resetRecordingUi(session);
+    if (current) showError(error && error.name === 'NotAllowedError' ? 'Microphone permission was denied.' : 'Could not start the microphone.');
   }
 }
 
 function toggleVoiceRecording() {
-  if (state.mediaRecorder) {
-    state.discardRecording = false;
-    try { state.mediaRecorder.stop(); } catch (_) { resetRecordingUi(); }
-  } else {
-    startVoiceRecording();
+  const session = state.voiceRecording;
+  if (!session) { startVoiceRecording(); return; }
+  if (!session.recorder) { cancelVoiceRecording(); return; }
+  if (session.stopping) return;
+  session.stopping = true;
+  try {
+    if (session.recorder.state !== 'inactive') session.recorder.stop();
+  } catch (_) {
+    cancelVoiceRecording();
+    showError('The voice recording failed. Please record it again.');
   }
 }
 
@@ -291,7 +323,7 @@ function showLocationError(message) {
 }
 
 function openLocationModal() {
-  if (!state.composerEnabled || state.busy || state.mediaRecorder) return;
+  if (!state.composerEnabled || state.busy || state.mediaRecorder || state.voiceRecording) return;
   showLocationError('');
   $('locationForm').reset();
   openDialog('locationModal', 'useCurrentLocationBtn');
@@ -359,13 +391,13 @@ async function sendLocation(event) {
 }
 
 function chooseImage() {
-  if (state.composerEnabled && !state.busy && !state.mediaRecorder) $('imageInput').click();
+  if (state.composerEnabled && !state.busy && !state.mediaRecorder && !state.voiceRecording) $('imageInput').click();
 }
 
 const VIDEO_MAX_BYTES = Number('__VIDEO_MAX_BYTES__') || 16 * 1024 * 1024;
 
 function canAttachToComposer() {
-  return Boolean(state.ticketId && state.composerEnabled && !state.busy && !state.mediaRecorder && !state.editTarget);
+  return Boolean(state.ticketId && state.composerEnabled && !state.busy && !state.mediaRecorder && !state.voiceRecording && !state.editTarget);
 }
 
 function attachComposerFile(file) {

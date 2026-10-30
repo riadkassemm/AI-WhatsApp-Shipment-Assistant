@@ -2516,7 +2516,7 @@ updateComposerControls();
 updateQueueSummary();
 bootstrap();
 setInterval(() => {
-  if (!state.authenticated || state.busy || state.mediaRecorder || state.activeModal || state.conversationSearchOpen) return;
+  if (!state.authenticated || state.busy || state.mediaRecorder || state.voiceRecording || state.activeModal || state.conversationSearchOpen) return;
   const audioPlaying = [...document.querySelectorAll('#conversation audio')].some(audio => !audio.paused && !audio.ended);
   if (state.ticketId && !audioPlaying) openTicket(state.ticketId, {silent: true});
   else if (!state.ticketId) loadQueue({silent: true});
