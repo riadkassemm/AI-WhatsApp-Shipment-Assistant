@@ -5,6 +5,7 @@ import json
 import logging
 import time
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 
 from fastapi import FastAPI, Request, Response
 
@@ -53,7 +54,7 @@ from app.security import (
 from app.support_api import router as support_api_router
 from app.support_repository import SupportConflictError
 from app.support_media import SUPPORT_MEDIA_MESSAGE_TYPES, SupportMediaError
-from app.support_models import HandoffRequest
+from app.support_models import ACTIVE_TICKET_STATUSES, HandoffRequest
 from app.support_service import sanitize_support_text, support_service
 from app.support_contacts import format_shared_contacts
 from app.support_ui import SUPPORT_UI_VERSION, router as support_ui_router
@@ -176,6 +177,15 @@ async def _get_active_ticket_for_incoming(
     return await support_service.get_active_ticket(incoming.from_number)
 
 
+def _inbound_expired(value: str | None) -> bool:
+    """Whether a provider send time is older than the AI freshness cutoff."""
+    timestamp = _inbound_timestamp(value)
+    if timestamp is None:
+        return False
+    max_age = max(0, int(settings.whatsapp_max_inbound_age_seconds))
+    return bool(max_age and int(time.time()) - timestamp > max_age)
+
+
 def _stale_inbound_reason(
     conversation: Conversation,
     incoming: IncomingWhatsAppMessage,
@@ -183,12 +193,7 @@ def _stale_inbound_reason(
     if incoming.message_id and incoming.message_id in conversation.recent_inbound_message_ids:
         return "recent_duplicate"
 
-    timestamp = _inbound_timestamp(incoming.timestamp)
-    if timestamp is None:
-        return None
-
-    max_age = max(0, int(settings.whatsapp_max_inbound_age_seconds))
-    if max_age and int(time.time()) - timestamp > max_age:
+    if _inbound_expired(incoming.timestamp):
         return "expired"
 
     # Do not discard a unique message merely because its provider timestamp is
@@ -481,7 +486,9 @@ async def _process_inbound_burst(phone_number: str, items: list[dict]) -> Respon
 
     combined = None
     combined_ai_availability: EffectiveAIAvailability | None = None
-    if active_ticket is None:
+    # A late message may belong to a ticket that has since closed; it must keep
+    # its own identity and send time instead of being merged into an AI turn.
+    if active_ticket is None and not any(_inbound_expired(item.get("timestamp")) for item in items):
         candidate = _combine_inbound_burst(items)
         if candidate is not None:
             # Do not collapse several original WhatsApp messages into one synthetic
@@ -1731,6 +1738,113 @@ async def _handoff_incoming_without_ai(
     )
 
 
+async def _record_delayed_support_message(
+    incoming: IncomingWhatsAppMessage,
+    conversation: Conversation,
+) -> Response | None:
+    """Record a late customer message in the conversation open when it was sent.
+
+    Returns None when no single support conversation, on this business line,
+    was open at the provider send time; the caller then keeps the existing
+    stale-message behaviour. The message never reaches the AI, never reopens or
+    reassigns a ticket, and keeps its provider ID and send time.
+    """
+    timestamp = _inbound_timestamp(incoming.timestamp)
+    if timestamp is None:
+        return None
+    customer_ref = safe_log_identifier(incoming.from_number, "wa")
+    sent_at = datetime.fromtimestamp(timestamp, tz=timezone.utc).replace(tzinfo=None)
+    try:
+        ticket, match = await support_service.ticket_for_delayed_inbound(
+            phone_number=incoming.from_number,
+            business_phone_number_id=incoming.business_phone_number_id,
+            sent_at=sent_at,
+        )
+        existing = (
+            await support_service.get_message_by_whatsapp_id(incoming.message_id)
+            if ticket is not None and incoming.message_id else None
+        )
+    except Exception:
+        logger.exception("Could not match delayed inbound message to support: customer_ref=%s message_id=%s",
+                         customer_ref, incoming.message_id)
+        return _json_response(503, {"status": "support_state_unavailable"})
+    if ticket is None:
+        logger.warning(
+            "Delayed inbound WhatsApp message has no support conversation: customer_ref=%s message_id=%s reason=%s",
+            customer_ref, incoming.message_id, match,
+        )
+        return None
+    if existing is not None:
+        return _json_response(200, {"status": "duplicate_support_message", "ticket_id": existing["ticket_id"]})
+
+    # Same redaction as the live path; the late message never changes auth state.
+    parsed_auth = extract_credentials(
+        incoming.text,
+        auth_state=conversation.auth_state,
+        pending_username=conversation.pending_auth_userid,
+        has_pending_password=(conversation.auth_state == "awaiting_username"),
+    )
+    body = _human_inbound_body(incoming, parsed_auth)
+    active = ticket.get("active_key") is not None and ticket.get("status") in ACTIVE_TICKET_STATUSES
+
+    async def record(require_active: bool) -> tuple[dict, bool]:
+        return await support_service.route_human_inbound(
+            ticket=ticket,
+            body=body,
+            whatsapp_message_id=incoming.message_id,
+            whatsapp_timestamp=incoming.timestamp,
+            message_type=incoming.message_type,
+            reply_to_whatsapp_message_id=incoming.context_message_id,
+            location_latitude=incoming.location_latitude,
+            location_longitude=incoming.location_longitude,
+            location_name=incoming.location_name,
+            location_address=incoming.location_address,
+            require_active=require_active,
+            expected_phone=str(ticket.get("whatsapp_phone") or ""),
+            expected_line_id=str(ticket.get("business_phone_number_id") or ""),
+        )
+
+    try:
+        try:
+            message, created = await record(active)
+        except SupportConflictError:
+            if not active:
+                raise
+            # The conversation closed after the lookup. It still owned the
+            # message when it was sent, so record it there without reopening.
+            active = False
+            message, created = await record(False)
+        if incoming.message_type in SUPPORT_MEDIA_MESSAGE_TYPES and incoming.media_id:
+            await support_service.capture_inbound_media(
+                ticket=ticket,
+                message=message,
+                media_id=incoming.media_id,
+                message_type=incoming.message_type,
+                expected_mime_type=incoming.media_mime_type,
+                filename=incoming.media_filename,
+            )
+    except SupportMediaError as exc:
+        if exc.retryable:
+            logger.warning("Delayed inbound media capture will be retried: customer_ref=%s message_id=%s type=%s",
+                           customer_ref, incoming.message_id, incoming.message_type)
+            return _json_response(503, {"status": "media_capture_retry"})
+        logger.warning("Delayed inbound media could not be stored: customer_ref=%s message_id=%s type=%s",
+                       customer_ref, incoming.message_id, incoming.message_type)
+    except Exception:
+        logger.exception("Could not record delayed inbound message: customer_ref=%s message_id=%s",
+                         customer_ref, incoming.message_id)
+        return _json_response(503, {"status": "support_state_unavailable"})
+    logger.info(
+        "Delayed inbound WhatsApp message recorded: customer_ref=%s message_id=%s ticket_id=%s "
+        "age_seconds=%d ticket_active=%s created=%s",
+        customer_ref, incoming.message_id, ticket["id"], int(time.time()) - timestamp, active, created,
+    )
+    return _json_response(200, {
+        "status": "delayed_message_recorded" if created else "duplicate_support_message",
+        "ticket_id": message.get("ticket_id", ticket["id"]),
+    })
+
+
 async def _process_incoming_message(
     incoming: IncomingWhatsAppMessage,
     *,
@@ -1796,6 +1910,12 @@ async def _process_incoming_message(
     )
 
     stale_reason = _stale_inbound_reason(conversation, incoming)
+    if stale_reason == "expired":
+        # The cutoff keeps a late message away from the AI. It must not drop a
+        # message that provably belongs to a support conversation.
+        delayed = await _record_delayed_support_message(incoming, conversation)
+        if delayed is not None:
+            return delayed
     if stale_reason is not None:
         logger.warning(
             "Stale inbound WhatsApp message ignored: "

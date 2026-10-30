@@ -1902,6 +1902,13 @@ function addMessage(container, m, extraClass = '') {
   time.title = fmt(occurredAt);
   time.textContent = occurredAt ? fmt(occurredAt) : (extraClass ? 'Earlier context' : 'Time unavailable');
   meta.append(time);
+  if (messageArrivedLate(m)) {
+    const late = document.createElement('span');
+    late.className = 'arrived-late';
+    late.textContent = 'arrived late';
+    late.title = 'Sent ' + fmt(occurredAt) + ' · received ' + fmt(m.created_at);
+    meta.append(late);
+  }
   if (m.edited_at && !deleted) {
     const edited = document.createElement('span');
     edited.textContent = 'edited';

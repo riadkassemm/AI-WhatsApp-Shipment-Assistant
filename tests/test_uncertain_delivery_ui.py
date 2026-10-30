@@ -17,7 +17,7 @@ def test_uncertain_delivery_actions_in_browser(tmp_path):
 const state = {ticketId:42, agent:{id:'7'}, currentTicketData:{permissions:{can_reply:true}}};
 const messageClass = () => 'agent', messageActor = () => 'Staff';
 const initials = () => 'EX', renderReplyQuote = () => {}, canChangeWhatsAppMessage = () => false;
-const fmt = () => '12:00', messageOccurredAt = () => '2026-10-22T12:00:00Z';
+const fmt = () => '12:00', messageOccurredAt = () => '2026-10-22T12:00:00Z',messageArrivedLate=()=>false;
 const labelMessageAction = () => {}, messageReactionBar = () => null;
 const copyMessageText = () => {}, createIcon = () => document.createElement('span');
 const setButtonBusy = (button,busy) => {button.disabled=busy};

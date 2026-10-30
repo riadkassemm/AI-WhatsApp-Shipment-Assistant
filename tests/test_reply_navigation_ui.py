@@ -28,7 +28,7 @@ const MESSAGE_ROLE_LABELS={CUSTOMER:'Customer'},messagePreview=m=>m.body||m.mess
 const messageClass=()=>'customer',messageActor=()=>'Customer',initials=()=>'CU';
 const canChangeWhatsAppMessage=()=>false,messageReactionBar=()=>null;
 const messageTextForCopy=m=>m.deleted_for_everyone_at?'':m.body||'',appendMessageTextWithLinks=(e,t)=>e.textContent=t;
-const fmt=()=>'12:00',messageOccurredAt=()=>'2026-10-27T12:00:00Z';
+const fmt=()=>'12:00',messageOccurredAt=()=>'2026-10-27T12:00:00Z',messageArrivedLate=()=>false;
 const labelMessageAction=()=>{},createIcon=()=>document.createElement('span');
 const createVoiceNotePlayer=()=>{const player=document.createElement('div'),audio=document.createElement('audio');player.append(audio);return {player,audio};};
 const historyDetailBase=()=>'/api/support/tickets/'+state.ticketId,timelineSignature=()=>'';

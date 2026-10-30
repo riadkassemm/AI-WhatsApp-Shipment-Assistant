@@ -5,6 +5,7 @@ answer 502, drop the event stream, simulate an outage, expire the session and
 revoke ticket access. No real services, accounts or customer data are involved.
 """
 import asyncio
+from datetime import datetime, timedelta, timezone
 import json
 import os
 from pathlib import Path
@@ -24,11 +25,15 @@ QUEUE_ITEMS = [{
     'last_activity_at': '2026-10-30T10:00:00', 'created_at': '2026-10-30T09:00:00',
     'ai_summary': f'Synthetic summary {index}', 'unread_count': 0, 'dashboard_unread_count': 0,
 } for index in range(30)]
+# Relative to now: the dashboard ignores provider send times in the future.
+_RECEIVED = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(hours=1)
 TICKET = {**QUEUE_ITEMS[0], 'id': 42, 'ticket_reference': 'T-42', 'customer_name': 'Synthetic customer'}
 DETAIL = {
     'ticket': TICKET, 'context': {}, 'shipment': None, 'events': [],
     'messages': [{'id': 1001, 'ticket_id': 42, 'direction': 'INBOUND', 'sender_type': 'CUSTOMER',
-                  'message_type': 'text', 'body': 'Protected synthetic text', 'created_at': '2026-10-30T09:59:00',
+                  'message_type': 'text', 'body': 'Protected synthetic text', 'created_at': _RECEIVED.strftime('%Y-%m-%dT%H:%M:%S'),
+                  # Sent 29 minutes before it was received: shown at send time, marked late.
+                  'whatsapp_timestamp': str(int((_RECEIVED - timedelta(minutes=29)).timestamp())),
                   'reactions': []}],
     'messages_has_more': False, 'previous_ticket_history': [], 'previous_ticket_history_has_more': False,
     'customer_identity': {'source': 'guest', 'name': None, 'registered_user': False, 'saved_contact': False},
@@ -65,6 +70,8 @@ CHECKS = r'''<script>
   await bootstrap();
   await openTicket(42,{conversationOrigin:'CUSTOMER'});
   check($('conversation').textContent.includes('Protected synthetic text'),'Conversation did not render');
+  const late=$('conversation').querySelector('.arrived-late');
+  check(late&&late.textContent==='arrived late'&&late.title.includes('received'),'late-arrival marker missing');
   $('message').value='Unsent synthetic draft';
   const queueBox=$('queue');queueBox.style.height='120px';queueBox.scrollTop=200;
   const scrollTop=queueBox.scrollTop;

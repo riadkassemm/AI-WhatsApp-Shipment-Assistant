@@ -34,7 +34,7 @@ function openLocationModal(){openDialog('locationModal');$('locationForm').reset
 function check(ok,why){if(!ok)throw Error(why);}
 const messageClass=()=>'customer', messageActor=()=>'Customer', initials=()=>'EX';
 const renderReplyQuote=()=>{}, canChangeWhatsAppMessage=()=>false, messageReactionBar=()=>null;
-const fmt=()=>'12:00',messageOccurredAt=()=>'2026-10-24T12:00:00Z';
+const fmt=()=>'12:00',messageOccurredAt=()=>'2026-10-24T12:00:00Z',messageArrivedLate=()=>false;
 function labelMessageAction(button,action,label){button.dataset.action=action;button.setAttribute('aria-label',label);}
 let replies=[{id:1,title:'Hours',body:'Open daily'}, {id:2,title:'Guide',body:'',attachment_filename:'Guide.pdf'},
   {id:3,title:'Main office',body:'',location:{latitude:33.89,longitude:35.5,name:'Main office',address:'Reception desk'}}];
