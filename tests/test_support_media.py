@@ -341,6 +341,26 @@ def test_native_stereo_ogg_is_normalized_for_mobile_voice_playback(tmp_path: Pat
     assert store.get(42, 8).path.read_bytes() == content
 
 
+def test_voice_note_starts_at_zero_whatever_the_recording_timestamps(tmp_path: Path) -> None:
+    import json
+    import subprocess
+
+    # Like Chromium WebM, this recording does not start at zero, so the
+    # converted Ogg used to start off-zero and phones would not play it.
+    source = tmp_path / 'recording.webm'
+    subprocess.run(['ffmpeg', '-v', 'error', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=1.5',
+                    '-c:a', 'libopus', '-f', 'webm', str(source)], check=True, capture_output=True)
+    content, mime, filename, voice = asyncio.run(SupportMediaStore().prepare_voice_note(
+        source.read_bytes(), 'audio/webm;codecs=opus'))
+    output = tmp_path / filename
+    output.write_bytes(content)
+    stream = json.loads(subprocess.check_output(['ffprobe', '-v', 'error', '-show_entries',
+        'stream=start_pts,duration', '-of', 'json', str(output)]))['streams'][0]
+    assert stream['start_pts'] == 0
+    assert abs(float(stream['duration']) - 1.5) < 0.05
+    assert mime == 'audio/ogg; codecs=opus' and voice is True
+
+
 def test_native_ogg_does_not_trust_the_browser_codec_label():
     import pytest
     from app.support_media import SupportMediaError
