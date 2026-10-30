@@ -25,10 +25,11 @@ const original = (id = 'ORIGINAL', fromMe = true) => ({
 });
 function mockSocket(mode = 'ack') {
   const ws = new EventEmitter();
+  ws.isOpen = true;
   const socket = {
     ws, user: { id: '96170111111:1@s.whatsapp.net' }, calls: [],
     queries: [],
-    ev: { process: handler => { socket.eventHandler = handler; } },
+    ev: { process: handler => { socket.eventHandler = handler; return () => { socket.unsubscribeCount = (socket.unsubscribeCount || 0) + 1; }; } },
     end: () => {}, logout: async () => {},
     query: async (node, timeoutMs) => { socket.queries.push({ node, timeoutMs }); return { tag: 'iq', attrs: { type: 'result' } }; },
     relayMessage: async (jid, payload, options) => {
@@ -50,10 +51,10 @@ async function fixture(t, mode = 'ack', dependencies = {}) {
   const config = { secret: SECRET, lines: [{ line_id: LINE, expected_phone: '' }], dataDir,
     callbackUrl: 'http://127.0.0.1/callback', maxMediaBytes: 25 * 1024 * 1024, ackTimeoutMs: 30 };
   const socket = mockSocket(mode);
-  const bridge = await new Bridge(config, { makeSocket: () => socket, onError: () => {}, ...dependencies }).initialize({ autoConnect: false });
+  const bridge = await new Bridge(config, { makeSocket: () => socket, onError: () => {}, log: () => {}, ...dependencies }).initialize({ autoConnect: false });
   await bridge.connect(LINE);
   const line = bridge.getLine(LINE);
-  line.status = 'connected';
+  await bridge.connectionUpdate(line, socket, { connection: 'open' });
   line.display_phone_number = '96170111111';
   await line.store.update(data => { data.messages.ORIGINAL = { message: original(), phone: PHONE, timestamp: Date.now() - 1000, text: 'Original body', notified: true }; });
   t.after(async () => { await bridge.close(); await rm(dataDir, { recursive: true, force: true }); });
@@ -154,7 +155,8 @@ test('a damaged saved line cannot prevent another line from reconnecting or retu
   assert.equal(resumed.getLine(damagedState.line_id).status, 'error');
   assert.equal(resumed.status().lines.length, 3);
   assert.equal(resumed.lines.keys().next().value, damagedState.line_id);
-  resumed.getLine(LINE).status = 'connected';
+  if (resumed.getLine(LINE).socket) await resumed.connectionUpdate(resumed.getLine(LINE), resumed.getLine(LINE).socket, { connection: 'open' });
+  else resumed.getLine(LINE).status = 'connected';
   await resumed.recoverPending();
   assert.equal(resumed.getLine(LINE).store.data.messages['PENDING-RECOVERY'].pending_normalization, false);
   assert.equal(resumed.outbox.data.entries.at(-1).event.payload.entry[0].changes[0].value.messages[0].id, `ld:${LINE}:PENDING-RECOVERY`);
@@ -484,11 +486,17 @@ test('timeout never changes local content; retries reuse exact durable provider 
   assert.equal(line.store.data.messages.ORIGINAL.text, 'Original body');
   assert.equal(bridge.outbox.data.entries.length, 0);
   assert.equal(line.store.data.operations[payload.operation_id].status, 'uncertain');
-  await assert.rejects(bridge.mutate(LINE, `ld:${LINE}:ORIGINAL`, 'edit', payload));
-  assert.deepEqual(socket.calls[0], socket.calls[1]);
+  await assert.rejects(bridge.mutate(LINE, `ld:${LINE}:ORIGINAL`, 'edit', payload), {code:'NOT_CONNECTED'});
+  assert.equal(socket.calls.length,1,'closed transport cannot be reused');
+  const retrySocket=mockSocket('timeout');bridge.makeSocket=()=>retrySocket;
+  await bridge.connect(LINE);await bridge.connectionUpdate(line,retrySocket,{connection:'open'});
+  await assert.rejects(bridge.mutate(LINE, `ld:${LINE}:ORIGINAL`, 'edit', payload), {code:'CONFIRMATION_UNKNOWN'});
+  assert.deepEqual(socket.calls[0], retrySocket.calls[0]);
   await line.store.update(data => { data.messages.ORIGINAL.timestamp = Date.now() - 16 * 60_000; });
+  const thirdSocket=mockSocket('timeout');bridge.makeSocket=()=>thirdSocket;
+  await bridge.connect(LINE);await bridge.connectionUpdate(line,thirdSocket,{connection:'open'});
   await assert.rejects(bridge.mutate(LINE, `ld:${LINE}:ORIGINAL`, 'edit', payload), error => error.code === 'CONFIRMATION_UNKNOWN' && error.delivery_uncertain === true);
-  assert.deepEqual(socket.calls[0], socket.calls[2]);
+  assert.deepEqual(socket.calls[0], thirdSocket.calls[0]);
   line.status = 'disconnected';
   await assert.rejects(bridge.mutate(LINE, `ld:${LINE}:ORIGINAL`, 'edit', payload), error => error.code === 'NOT_CONNECTED' && error.delivery_uncertain === true);
 });
@@ -537,7 +545,8 @@ test('a sent chat reply can be edited again after restart and then deleted for e
   const resumed = await new Bridge(config, { makeSocket: () => socket, onError: () => {} }).initialize({ autoConnect: false });
   t.after(() => resumed.close());
   await resumed.connect(LINE);
-  resumed.getLine(LINE).status = 'connected';
+  if (resumed.getLine(LINE).socket) await resumed.connectionUpdate(resumed.getLine(LINE), resumed.getLine(LINE).socket, { connection: 'open' });
+  else resumed.getLine(LINE).status = 'connected';
   const second = await resumed.mutate(LINE, messageId, 'edit', {
     to: PHONE, body: 'Second correction', operation_id: 'operation-reply-edit-002',
   });
@@ -632,7 +641,8 @@ test('a WhatsApp app reply survives a bridge restart without duplicate callbacks
   t.after(() => resumed.close());
   assert.equal(resumed.outbox.data.entries[0].event.event_id, savedEvent.event_id);
   await resumed.connect(LINE);
-  resumed.getLine(LINE).status = 'connected';
+  if (resumed.getLine(LINE).socket) await resumed.connectionUpdate(resumed.getLine(LINE), resumed.getLine(LINE).socket, { connection: 'open' });
+  else resumed.getLine(LINE).status = 'connected';
   await resumed.receive(resumed.getLine(LINE), fromPhone);
   assert.equal(resumed.outbox.data.entries.length, 1);
 });
@@ -1273,7 +1283,8 @@ test('restart recovery forwards previously omitted content once and keeps delete
   await bridge.close();
   const resumed = await new Bridge(config, { makeSocket: () => mockSocket(), onError: () => {} }).initialize({ autoConnect: false });
   t.after(() => resumed.close());
-  resumed.getLine(LINE).status = 'connected';
+  if (resumed.getLine(LINE).socket) await resumed.connectionUpdate(resumed.getLine(LINE), resumed.getLine(LINE).socket, { connection: 'open' });
+  else resumed.getLine(LINE).status = 'connected';
   await resumed.recoverPending();
   await resumed.recoverPending();
   assert.equal(resumed.outbox.data.entries.length, 1);
@@ -1738,4 +1749,246 @@ test('recovery prioritizes retained revokes over slow history and coalesces over
   await Promise.all([first, overlapping]);
   assert.equal(passes, 2);
   assert.equal(bridge.recoveryTask, null);
+});
+
+// Recovery regressions use explicit barriers and virtual timers, never sleeps.
+function barrier() {
+  let resolve;
+  const promise = new Promise(done => { resolve = done; });
+  return { promise, resolve };
+}
+const recoveryPayload = key => ({ to: PHONE, type: 'text', text: { body: 'Synthetic recovery test' }, client_message_id: key });
+
+test('actual closed transport blocks a cached connected line before reserving or submitting', async t => {
+  const logs = [];
+  const { bridge, line, socket } = await fixture(t, 'ack', { log: item => logs.push(item) });
+  socket.ws.isOpen = false;
+  await assert.rejects(bridge.send(LINE, recoveryPayload('closed-transport')), error => error.code === 'NOT_CONNECTED' && error.delivery_uncertain === false);
+  assert.equal(socket.calls.length, 0);
+  assert.equal(line.status, 'disconnected');
+  assert.ok(line.reconnectTimer);
+  assert.equal(Object.values(line.store.data.messages).some(m => m.client_message_id), false);
+  assert.ok(logs.some(item => item.event === 'send_blocked'));
+  assert.equal(JSON.stringify(logs).includes('Synthetic recovery test'), false);
+  assert.equal(JSON.stringify(logs).includes(PHONE), false);
+});
+
+test('disconnect behind a blocked event queue fences immediately and reservation cannot dispatch', async t => {
+  const { bridge, line, socket } = await fixture(t);
+  const persisted = barrier(), release = barrier(), events = barrier();
+  const update = line.store.update.bind(line.store);
+  let paused = false;
+  line.store.update = async change => {
+    const result = await update(change);
+    if (!paused && Object.values(line.store.data.messages).some(m => m.client_message_id === 'before-submit')) {
+      paused = true; persisted.resolve(); await release.promise;
+    }
+    return result;
+  };
+  const payload = recoveryPayload('before-submit');
+  const sending = bridge.send(LINE, payload);
+  const rejected = assert.rejects(sending, error => error.code === 'NOT_CONNECTED' && error.delivery_uncertain === false);
+  await persisted.promise;
+  line.eventTail = events.promise;
+  const closing = socket.eventHandler({'connection.update': {connection:'close'}});
+  assert.equal(line.session.ready, false);
+  assert.equal(line.status, 'disconnected');
+  release.resolve(); await rejected;
+  assert.equal(socket.calls.length, 0);
+  assert.equal(Object.values(line.store.data.messages).some(m => m.client_message_id === 'before-submit'), false);
+  events.resolve(); await closing;
+  const fresh = mockSocket(); bridge.makeSocket = () => fresh;
+  await bridge.connect(LINE);
+  await bridge.connectionUpdate(line, fresh, {connection:'open'});
+  await bridge.send(LINE, payload);
+  assert.equal(fresh.calls.length, 1, 'a proven unsubmitted request can safely retry after readiness');
+});
+
+test('disconnect during an unresolved submission releases the queue but never resubmits uncertainty', async t => {
+  const { bridge, line, socket } = await fixture(t);
+  const entered = barrier(), finish = barrier();
+  let nativeId;
+  socket.sendMessage = async (jid, content, options) => {
+    socket.calls.push(options); nativeId = options.messageId; entered.resolve();
+    await finish.promise;
+    return {...original(nativeId), message:{conversation:content.text}};
+  };
+  const payload = recoveryPayload('during-submit');
+  const result = assert.rejects(bridge.send(LINE, payload), error => error.delivery_uncertain === true);
+  await entered.promise;
+  socket.ws.isOpen = false; socket.ws.emit('close');
+  await result;
+  assert.equal(line.ack.waiting.size, 0);
+  assert.equal(line.store.data.messages[nativeId].delivery_uncertain, true);
+  await assert.rejects(bridge.send(LINE, payload), {code:'DELIVERY_UNCERTAIN'});
+  assert.equal(socket.calls.length, 1);
+  const fresh = mockSocket(); bridge.makeSocket = () => fresh;
+  await bridge.connect(LINE); await bridge.connectionUpdate(line, fresh, {connection:'open'});
+  assert.equal(socket.ws.listenerCount('CB:ack,class:message'), 0);
+  assert.equal(socket.ws.listenerCount('close'), 0);
+  assert.equal(socket.unsubscribeCount,1);
+  socket.ws.emit('CB:ack,class:message', {attrs:{id:nativeId}});
+  assert.equal(bridge.deliveryStatus(LINE,{phone:PHONE,client_message_id:payload.client_message_id}).status,'unconfirmed');
+  // A real server ACK on the authenticated replacement transport can reconcile
+  // a reserved native ID. It does not create a new message or a delivery receipt.
+  fresh.ws.emit('CB:ack,class:message', {attrs:{id:nativeId}});
+  fresh.ws.emit('CB:ack,class:message', {attrs:{id:nativeId}});
+  await line.ackTail;
+  assert.equal(bridge.deliveryStatus(LINE,{phone:PHONE,client_message_id:payload.client_message_id}).status,'confirmed');
+  assert.equal(line.store.data.messages[nativeId].receipt, undefined);
+  assert.equal(bridge.outbox.data.entries.filter(e => e.event.type === 'outgoing_confirmation').length, 1);
+  const duplicate = await bridge.send(LINE,payload);
+  assert.equal(duplicate.messages[0].id,wrapId(LINE,nativeId));
+  assert.equal(fresh.calls.length,0);
+  finish.resolve(); await line.sendTail;
+});
+
+test('stale open event finishing storage cannot mark a newer generation ready', async t => {
+  const {bridge,line,socket} = await fixture(t);
+  const entered=barrier(), release=barrier();
+  const update=line.store.update.bind(line.store);
+  let pause=true;
+  line.store.update=async change=>{const result=await update(change);if(pause){pause=false;entered.resolve();await release.promise;}return result;};
+  const oldOpen=bridge.connectionUpdate(line,socket,{connection:'open'});
+  await entered.promise;
+  bridge.blockConnection(line,socket,'test_closed');
+  const next=mockSocket();let created=0;bridge.makeSocket=()=>{created++;return next;};
+  const [first,second]=await Promise.all([bridge.connect(LINE),bridge.connect(LINE)]);
+  assert.equal(first.status,'connecting');assert.equal(second.status,'connecting');assert.equal(created,1);
+  release.resolve();await oldOpen;
+  assert.equal(line.status,'connecting');assert.equal(line.session.ready,false);
+  await assert.rejects(bridge.send(LINE,recoveryPayload('new-generation')), {code:'NOT_CONNECTED'});
+  await bridge.connectionUpdate(line,socket,{connection:'open'});
+  await bridge.connectionUpdate(line,socket,{connection:'close'});
+  assert.equal(line.socket,next);assert.equal(line.status,'connecting');
+  await bridge.connectionUpdate(line,next,{connection:'open'});
+  await bridge.send(LINE,recoveryPayload('new-generation'));
+  assert.equal(next.calls.length,1);
+});
+
+test('a missing ACK has a bounded wait, keeps its ID, and accepts a late ACK without another send', async t => {
+  const {bridge,line,socket,config}=await fixture(t,'timeout');
+  const timerStarted=barrier();
+  const expect=line.ack.expect.bind(line.ack);
+  line.ack.expect=(...args)=>{const waiter=expect(...args);const start=waiter.startTimer;waiter.startTimer=()=>{start();timerStarted.resolve();};return waiter;};
+  t.mock.timers.enable({apis:['setTimeout']});
+  const payload=recoveryPayload('late-ack');
+  const rejection=assert.rejects(bridge.send(LINE,payload),e=>e.code==='CONFIRMATION_UNKNOWN'&&e.delivery_uncertain===true);
+  await timerStarted.promise;
+  t.mock.timers.tick(config.ackTimeoutMs);await rejection;
+  const nativeId=socket.calls[0].options.messageId;
+  assert.equal(line.ack.waiting.size,0);
+  await assert.rejects(bridge.send(LINE,payload),{code:'DELIVERY_UNCERTAIN'});
+  socket.ws.emit('CB:ack,class:message',{attrs:{id:nativeId}});
+  await line.ackTail;
+  assert.equal((await bridge.send(LINE,payload)).messages[0].id,wrapId(LINE,nativeId));
+  assert.equal(socket.calls.length,1);
+});
+
+test('submission timeout bounds a hung provider call without treating it as safe to resend', async t => {
+  const {bridge,line,socket,config}=await fixture(t);
+  config.submissionTimeoutMs=100;
+  const entered=barrier();
+  socket.sendMessage=()=>{entered.resolve();return new Promise(()=>{});};
+  t.mock.timers.enable({apis:['setTimeout']});
+  const rejection=assert.rejects(bridge.send(LINE,recoveryPayload('hung-call')),e=>e.delivery_uncertain===true);
+  await entered.promise;t.mock.timers.tick(100);await rejection;
+  assert.equal(line.ack.waiting.size,0);
+  assert.equal(line.session.ready,false);
+  await assert.rejects(bridge.send(LINE,recoveryPayload('hung-call')),{code:'DELIVERY_UNCERTAIN'});
+});
+
+test('blocked line recovery stays isolated and repeated worker starts do not duplicate timers', async t => {
+  const {bridge,line,socket}=await fixture(t);
+  const other=await bridge.addLine({request_id:randomUUID(),expected_phone:''});
+  const healthy=mockSocket();healthy.user.id='96170222222:1@s.whatsapp.net';bridge.makeSocket=()=>healthy;
+  await bridge.connect(other.line_id);await bridge.connectionUpdate(bridge.getLine(other.line_id),healthy,{connection:'open'});
+  socket.ws.isOpen=false;socket.ws.emit('close');
+  await assert.rejects(bridge.send(LINE,recoveryPayload('blocked')),{code:'NOT_CONNECTED'});
+  await bridge.send(other.line_id,recoveryPayload('healthy'));
+  assert.equal(healthy.calls.length,1);
+  bridge.recoverPending=async()=>{};bridge.deliverCallbacks=async()=>{};
+  bridge.startWorkers();const workers=[bridge.workerTimer,bridge.pendingTimer];bridge.startWorkers();
+  assert.deepEqual([bridge.workerTimer,bridge.pendingTimer],workers);
+  await bridge.close();
+  assert.equal(socket.ws.listenerCount('close'),0);assert.equal(healthy.ws.listenerCount('close'),0);
+  assert.equal(line.ack.waiting.size,0);
+});
+
+test('repeated disconnects back off per generation and a queued logout cancels recovery', async t => {
+  const {bridge,line,socket}=await fixture(t);
+  t.mock.timers.enable({apis:['setTimeout']});
+  const second=mockSocket(),third=mockSocket();let opened=0;
+  bridge.makeSocket=()=>++opened === 1 ? second : third;
+  socket.ws.isOpen=false;socket.ws.emit('close');socket.ws.emit('close');
+  assert.equal(line.reconnectAttempts,1);
+  t.mock.timers.tick(999);assert.equal(opened,0);
+  t.mock.timers.tick(1);await line.connectPromise;
+  await bridge.connectionUpdate(line,second,{connection:'open'});
+  second.ws.isOpen=false;second.ws.emit('close');
+  assert.equal(line.reconnectAttempts,2);
+  t.mock.timers.tick(1999);assert.equal(opened,1);
+  t.mock.timers.tick(1);await line.connectPromise;
+  await bridge.connectionUpdate(line,third,{connection:'open'});
+  third.ws.isOpen=false;third.ws.emit('close');
+  await bridge.connectionUpdate(line,third,{connection:'close',lastDisconnect:{error:{output:{statusCode:DisconnectReason.loggedOut}}}});
+  t.mock.timers.tick(60_000);assert.equal(opened,2);
+  assert.equal(line.status,'logged_out');assert.equal(line.store.data.enabled,false);
+});
+
+test('an old event failure cannot poison a replacement connection', async t => {
+  const {bridge,line,socket}=await fixture(t);
+  const entered=barrier(),release=barrier();
+  line.auth.saveCreds=async()=>{entered.resolve();await release.promise;throw Error('Synthetic storage failure');};
+  const oldEvent=socket.eventHandler({'creds.update':{}});await entered.promise;
+  bridge.blockConnection(line,socket,'test_closed');
+  const replacement=mockSocket();bridge.makeSocket=()=>replacement;
+  await bridge.connect(LINE);await bridge.connectionUpdate(line,replacement,{connection:'open'});
+  release.resolve();await oldEvent;
+  assert.equal(line.status,'connected');assert.equal(line.socket,replacement);
+  await bridge.send(LINE,recoveryPayload('new-after-stale-error'));
+  assert.equal(replacement.calls.length,1);
+});
+
+test('a mutation fenced after persistence has not submitted and can retry only after readiness', async t => {
+  const {bridge,line,socket}=await fixture(t);
+  const entered=barrier(),release=barrier();const update=line.store.update.bind(line.store);let paused=false;
+  line.store.update=async change=>{const result=await update(change);if(!paused&&line.store.data.operations['pre-submit-edit']){paused=true;entered.resolve();await release.promise;}return result;};
+  const payload={to:PHONE,body:'Synthetic edit',operation_id:'pre-submit-edit'};
+  const rejection=assert.rejects(bridge.mutate(LINE,wrapId(LINE,'ORIGINAL'),'edit',payload),e=>e.code==='NOT_CONNECTED'&&e.delivery_uncertain===false);
+  await entered.promise;socket.ws.isOpen=false;socket.ws.emit('close');release.resolve();await rejection;
+  assert.equal(socket.calls.length,0);assert.equal(line.store.data.operations[payload.operation_id].status,'not_submitted');
+  const fresh=mockSocket();bridge.makeSocket=()=>fresh;await bridge.connect(LINE);await bridge.connectionUpdate(line,fresh,{connection:'open'});
+  await bridge.mutate(LINE,wrapId(LINE,'ORIGINAL'),'edit',payload);assert.equal(fresh.calls.length,1);
+});
+
+test('HTTP recovery errors distinguish non-submission and never log raw provider failures', async t => {
+  const {bridge,line,socket,config}=await fixture(t);
+  const server=createServer(bridge,config);await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+  t.after(()=>new Promise(resolve=>{server.close(resolve);server.closeAllConnections();}));
+  const logs=[];t.mock.method(console,'warn',value=>logs.push(value));
+  const send=key=>fetch(`http://127.0.0.1:${server.address().port}/v1/lines/${LINE}/messages`,{
+    method:'POST',headers:{Authorization:`Bearer ${SECRET}`,'Content-Type':'application/json'},body:JSON.stringify(recoveryPayload(key))});
+  socket.ws.isOpen=false;
+  let response=await send('http-closed');assert.equal(response.status,503);assert.equal((await response.json()).delivery_uncertain,false);
+  assert.equal(socket.calls.length,0);
+  const replacement=mockSocket();bridge.makeSocket=()=>replacement;
+  await bridge.connect(LINE);await bridge.connectionUpdate(line,replacement,{connection:'open'});
+  replacement.sendMessage=async()=>{throw Error('PRIVATE-BODY '+SECRET+' '+PHONE);};
+  response=await send('http-after-invocation');assert.equal(response.status,500);assert.equal((await response.json()).delivery_uncertain,true);
+  assert.ok(logs.some(item=>JSON.parse(item).event==='request_failed'));
+  const text=logs.join('\n');for(const secret of ['PRIVATE-BODY',SECRET,PHONE])assert.equal(text.includes(secret),false);
+});
+
+test('a current session persistence failure cleans callbacks and halts reconnect', async t => {
+  const {bridge,line,socket}=await fixture(t);
+  line.auth.saveCreds=async()=>{throw Error('Synthetic persistence failure');};
+  await socket.eventHandler({'creds.update':{}});
+  assert.equal(line.status,'error');assert.equal(line.socket,null);assert.equal(line.reconnectTimer,null);
+  assert.equal(socket.ws.listenerCount('close'),0);
+  assert.equal(socket.ws.listenerCount('CB:ack,class:message'),0);
+  assert.equal(socket.unsubscribeCount,1);
+  assert.equal(line.ack.waiting.size,0);
+  await assert.rejects(bridge.send(LINE,recoveryPayload('storage-error')),{code:'NOT_CONNECTED'});
+  assert.equal(socket.calls.length,0);
 });
