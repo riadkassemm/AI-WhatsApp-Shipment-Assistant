@@ -51,7 +51,7 @@ const window={innerWidth:1440,innerHeight:1000};
 const nodes=[1,2,3].map(id=>({dataset:{messageId:String(id)},getBoundingClientRect:()=>({top:id===2?200:50,bottom:id===2?220:70,height:20})}));
 const $=id=>({getBoundingClientRect:()=>({top:0,bottom:100,width:visible?300:0,height:100}),querySelectorAll:()=>nodes});
 const api=async(path,options)=>{calls.push([path,JSON.parse(options.body)]);if(fail)throw Error('offline');return {dashboard_unread_count:1}};
-const loadQueue=async()=>{refreshes++};
+const requestDashboardRefresh=scope=>{assert.equal(scope,"queue");refreshes++};
 """+helper+"""
 (async()=>{
 focused=false; await markVisibleDashboardMessagesRead(); assert.equal(calls.length,0);

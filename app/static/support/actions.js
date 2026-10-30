@@ -1175,6 +1175,7 @@ async function openWhatsAppModal() {
   if (!canManageWhatsApp() || state.whatsappBusy) return;
   clearWhatsAppFeedback();
   openDialog('whatsappModal', 'wabaIdInput');
+  dashboardRefresh.request('linked-status');
   state.whatsappBusy = true;
   $('refreshWhatsAppBtn').disabled = true;
   try {
@@ -2499,13 +2500,6 @@ window.addEventListener('pageshow', event => {
   }
 });
 
-document.addEventListener('visibilitychange', () => {
-  if (!document.hidden) clearAttentionIndicator();
-  if (!document.hidden && state.authenticated && !state.busy && !state.activeModal) {
-    if (state.ticketId && !state.conversationSearchOpen) openTicket(state.ticketId, {silent: true});
-    else if (!state.ticketId) loadQueue({silent: true});
-  }
-});
 
 restoreLayoutPreferences();
 installColumnResizer({id: 'queueResizer', variableName: '--queue-width', storageKey: LAYOUT_STORAGE.queueWidth, minimum: 260, maximum: 520, direction: 1, enabled: () => window.innerWidth > 800});
@@ -2515,27 +2509,6 @@ updateMessagePreferenceCounts();
 updateComposerControls();
 updateQueueSummary();
 bootstrap();
-setInterval(() => {
-  if (!state.authenticated || state.busy || state.mediaRecorder || state.voiceRecording || state.activeModal || state.conversationSearchOpen) return;
-  const audioPlaying = [...document.querySelectorAll('#conversation audio')].some(audio => !audio.paused && !audio.ended);
-  if (state.ticketId && !audioPlaying) openTicket(state.ticketId, {silent: true});
-  else if (!state.ticketId) loadQueue({silent: true});
-}, Math.max(3000, __POLL_MS__));
-setInterval(() => {
-  if (state.authenticated && state.activeModal === 'whatsappModal' && !state.whatsappBusy && !state.linkedDeviceBusy) loadLinkedDeviceStatus();
-}, 2000);
-setInterval(() => {
-  if (!state.authenticated || state.busy || state.activeModal) return;
-  pollUnassignedActivity();
-}, Math.max(2000, __POLL_MS__));
-setInterval(() => {
-  if (!state.authenticated) return;
-  refreshAllQueueCounts();
-}, Math.max(5000, __POLL_MS__));
-setInterval(() => {
-  if (!state.authenticated || state.aiSettingsBusy || document.hidden) return;
-  loadAiSettings().catch(error => renderAiSettingsUnavailable(error.message));
-}, Math.max(30000, __POLL_MS__));
 
 $('cancelMessageSelectionBtn').addEventListener('click', clearMessageSelection);
 $('forwardSelectedBtn').addEventListener('click', () => openForwardModal([...state.selectedMessages.values()]));

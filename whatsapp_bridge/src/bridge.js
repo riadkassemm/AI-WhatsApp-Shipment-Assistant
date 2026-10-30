@@ -6,6 +6,7 @@ import pino from 'pino';
 import QRCode from 'qrcode';
 import { BridgeError, phoneDigits, wrapId, unwrapId, validateLineManifest, UUID_PATTERN, MANIFEST_MAX_BYTES } from './config.js';
 import { FileStore, createAuth } from './storage.js';
+import { JournalStore } from './journal-store.js';
 import { AckTracker } from './ack.js';
 import { inboundEvent, outgoingEvent, outgoingConfirmationEvent, messageTombstoneEvent, messageStatusEvent, mutationEvent, textBody, millis, eventId, MEDIA_TYPES, RECEIPT_STATUSES, RECEIPT_RANK } from './events.js';
 import { preserveNativeMutationMetadata } from './native-events.js';
@@ -50,7 +51,7 @@ export class Bridge {
   }
 
   async initialize({ autoConnect = true } = {}) {
-    this.outbox = await new FileStore(path.join(this.config.dataDir, 'outbox.json'), () => ({ entries: [], dead_letters: [] })).load();
+    this.outbox = await new JournalStore(path.join(this.config.dataDir, 'outbox.json'), () => ({ entries: [], dead_letters: [] })).load();
     this.manifest = await new FileStore(path.join(this.config.dataDir, 'lines.json'), () => ({ version: 1, lines: {}, requests: {} })).load();
     const manifest = validateLineManifest(this.manifest.data);
     // Confirmed removal tombstones also form a durable cleanup work queue.
@@ -104,12 +105,31 @@ export class Bridge {
     return { ...definition, directory: path.join(this.config.dataDir, definition.line_id),
       display_phone_number: definition.expected_phone, status: 'disconnected', socket: null, ack: null,
       generation: 0, session: null, ackTail: Promise.resolve(), confirmationTasks: new Map(),
-      eventTail: Promise.resolve(), sendTail: Promise.resolve(), readTail: Promise.resolve(), reconnectTimer: null };
+      eventTail: Promise.resolve(), sendTail: Promise.resolve(), sendPending: 0, sendTasks: new Map(), readTail: Promise.resolve(), reconnectTimer: null };
   }
   async prepareLine(line) {
     try {
       await mkdir(path.join(line.directory, 'media'), { recursive: true, mode: 0o700 });
-      line.store = await new FileStore(path.join(line.directory, 'state.json'), initialLine).load();
+      line.store = await new JournalStore(path.join(line.directory, 'state.json'), initialLine, { diagnostics: event => { if (event.persist_ms >= 100 || event.queue_wait_ms >= 100) this.trace(line, 'storage_slow', event); } }).load();
+      // Rebuild only missing index entries at startup, also after a rollback
+      // export was used by an older bridge. Never infer a legacy payload hash.
+      const requests = new Map();
+      for (const [nativeId, record] of Object.entries(line.store.data.messages)) if (record.client_message_id) {
+        const key = crypto.createHash('sha256').update(record.client_message_id).digest('hex');
+        const previous = requests.get(key) ?? line.store.data.send_requests?.[key];
+        if (previous?.native_id && previous.native_id !== nativeId) throw new Error('DUPLICATE_DURABLE_SEND_KEY');
+        requests.set(key, {native_id: nativeId, fingerprint: record.request_fingerprint ?? null});
+      }
+      if (!line.store.data.send_requests) await line.store.update(data => {data.send_requests = {};});
+      const entries = [...requests].filter(([key, value]) => {
+        const old = line.store.data.send_requests[key];
+        return !old || old.native_id !== value.native_id || old.fingerprint !== value.fingerprint;
+      });
+      for (let offset = 0; offset < entries.length; offset += 256) {
+        await line.store.update(data => {
+          for (const [key, value] of entries.slice(offset, offset + 256)) data.send_requests[key] = value;
+        });
+      }
       // Retained disconnected/error sessions must remain identifiable as paired
       // after restart so the manager can explicitly unlink their credentials.
       line.auth = await createAuth(line.directory);
@@ -662,7 +682,7 @@ export class Bridge {
       await this.enqueueOwnConfirmation(line, key.id);
     }
     await this.enqueue(messageStatusEvent(line, key.id, record.phone, status, timestamp));
-    await line.store.update(data => { if (data.messages[key.id]) data.messages[key.id].receipt = status; });
+    await line.store.update(data => { if (data.messages[key.id] && (RECEIPT_RANK[data.messages[key.id].receipt] ?? 0) < RECEIPT_RANK[status]) data.messages[key.id].receipt = status; });
   }
   async markRead(id, payload) {
     const line = this.getLine(id);
@@ -702,9 +722,9 @@ export class Bridge {
         typeof phone !== 'string' || !/^\d{6,20}$/.test(phone)) {
       throw new BridgeError(400, 'INVALID_DELIVERY_LOOKUP', 'A client message ID and recipient are required.');
     }
-    const found = Object.entries(line.store.data.messages).find(([, record]) => record.client_message_id === clientId);
-    if (!found) return { status: 'unknown' };
-    const [nativeId, record] = found;
+    const request = line.store.data.send_requests[crypto.createHash('sha256').update(clientId).digest('hex')];
+    if (!request?.native_id) return { status: 'unknown' };
+    const nativeId = request.native_id, record = line.store.data.messages[nativeId];
     if (record.phone !== phone) throw new BridgeError(409, 'CLIENT_ID_CONFLICT', 'The client ID belongs to another recipient.');
     // Read durable evidence only, even while disconnected. No socket send,
     // resend, queue mutation, or receipt upgrade occurs in this endpoint.
@@ -988,7 +1008,7 @@ export class Bridge {
     const mediaId = `ldmedia:${id}:${crypto.randomUUID()}`;
     const filename = this.mediaPath(line, mediaId);
     await this.writeBytes(filename, bytes);
-    await line.store.update(data => { data.media[mediaId] = { mime_type: mime, filename: path.basename(String(payload.filename ?? 'attachment')).slice(0, 255), downloaded: true }; });
+    await line.store.update(data => { data.media[mediaId] = { content_hash: crypto.createHash('sha256').update(bytes).digest('hex'), mime_type: mime, filename: path.basename(String(payload.filename ?? 'attachment')).slice(0, 255), downloaded: true }; });
     return { id: mediaId };
   }
   mediaPath(line, id) {
@@ -1042,7 +1062,57 @@ export class Bridge {
     return { content: await readFile(filename), mime_type: media.mime_type };
   }
 
+  sendFingerprint(line, payload) {
+    const canonical = value => Array.isArray(value) ? value.map(canonical) : value && typeof value === 'object'
+      ? Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])])) : value;
+    const normalized = {...payload, to: phoneDigits(payload?.to)};
+    delete normalized.client_message_id;
+    if (MEDIA_TYPES.includes(payload.type)) {
+      const media = line.store.data.media[payload[payload.type]?.id];
+      // Uploaded IDs are not logical content: the API can upload identical bytes
+      // again after a definitely-not-submitted failure.
+      if (media?.content_hash) normalized[payload.type] = {...payload[payload.type], id: media.content_hash, mime_type: media.mime_type};
+    }
+    return crypto.createHash('sha256').update(JSON.stringify(canonical(normalized))).digest('hex');
+  }
+  queueOwnConfirmation(line, nativeId) {
+    // The acknowledged record is already fsynced. Recovery scans this durable
+    // obligation after a crash; unrelated callback backlog cannot delay HTTP.
+    this.enqueueOwnConfirmation(line, nativeId).catch(error => this.onError(error));
+  }
   async send(id, payload) {
+    const line = this.getLine(id);
+    const clientId = payload?.client_message_id;
+    if (!clientId || typeof clientId !== 'string') return this.dispatchSend(id, payload);
+    const key = crypto.createHash('sha256').update(clientId).digest('hex');
+    const fingerprint = this.sendFingerprint(line, payload);
+    const durable = line.store.data.messages[line.store.data.send_requests[key]?.native_id];
+    if (durable?.ack_confirmed || durable?.echo_seen) return this.existingSend(line, payload, key, fingerprint);
+    const inFlight = line.sendTasks.get(key);
+    if (inFlight) {
+      if (inFlight.fingerprint !== fingerprint) throw new BridgeError(409, 'CLIENT_ID_CONFLICT', 'This send key belongs to another payload.');
+      return inFlight.task;
+    }
+    // Known durable results bypass unrelated sends queued on this line.
+    const known = this.existingSend(line, payload, key, fingerprint);
+    if (known) return known;
+    const task = this.dispatchSend(id, payload).finally(() => line.sendTasks.delete(key));
+    line.sendTasks.set(key, {fingerprint, task});
+    return task;
+  }
+  existingSend(line, payload, key, fingerprint) {
+    const previous = line.store.data.send_requests[key];
+    if (!previous) return null;
+    if (previous.native_id && line.store.data.messages[previous.native_id]?.phone !== phoneDigits(payload.to)) throw new BridgeError(409, 'CLIENT_ID_CONFLICT', 'The client ID belongs to another recipient.');
+    if (previous.fingerprint !== fingerprint) throw new BridgeError(409, 'CLIENT_ID_CONFLICT', 'This send key belongs to another payload or cannot be verified. Check the original send.');
+    if (previous.retry_safe && previous.native_id === null) return null;
+    const record = line.store.data.messages[previous.native_id];
+    if (record.ack_confirmed || record.echo_seen) return {messages: [{id: wrapId(line.line_id, previous.native_id)}]};
+    const error = new BridgeError(409, 'DELIVERY_UNCERTAIN', 'The original delivery is unconfirmed; it will not be sent again.');
+    error.delivery_uncertain = true;
+    throw error;
+  }
+  async dispatchSend(id, payload) {
     const line = this.getLine(id);
     return this.serialSend(line, async () => {
       const phone = phoneDigits(payload?.to);
@@ -1056,16 +1126,11 @@ export class Bridge {
       // The line send queue serializes this lookup with durable reservation.
       // A retry never invents a second native ID, even after a process restart.
       if (clientMessageId) {
-        const previous = Object.entries(line.store.data.messages).find(([, record]) => record.client_message_id === clientMessageId);
-        if (previous) {
-          const [nativeId, record] = previous;
-          if (record.phone !== phone) throw new BridgeError(409, 'CLIENT_ID_CONFLICT', 'The client ID belongs to another recipient.');
-          if (record.ack_confirmed || record.echo_seen) return { messages: [{ id: wrapId(id, nativeId) }] };
-          const error = new BridgeError(409, 'DELIVERY_UNCERTAIN', 'The original delivery is unconfirmed; it will not be sent again.');
-          error.delivery_uncertain = true;
-          throw error;
-        }
+        const key = crypto.createHash('sha256').update(clientMessageId).digest('hex');
+        const known = this.existingSend(line, payload, key, this.sendFingerprint(line, payload));
+        if (known) return known;
       }
+      const fingerprint = this.sendFingerprint(line, payload);
       const socket = this.connected(line);
       let content;
       if (payload.type === 'text') {
@@ -1110,41 +1175,48 @@ export class Bridge {
         // Reserve the native ID durably before the socket can emit a fromMe
         // upsert. A fast echo or crash must not mirror this dashboard send as
         // a second, unattributed WhatsApp-app message in the ticket.
-        await line.store.update(data => { data.messages[nativeId] = {
-          message: { key: { id: nativeId, remoteJid: jid, fromMe: true } },
+        await line.store.update(data => {
+          if (clientMessageId) data.send_requests[crypto.createHash('sha256').update(clientMessageId).digest('hex')] = {native_id: nativeId, fingerprint};
+          data.messages[nativeId] = {
+          request_fingerprint: fingerprint, message: { key: { id: nativeId, remoteJid: jid, fromMe: true } },
           phone, timestamp: Date.now(), notified: true, pending_send: true,
           ...(clientMessageId ? { client_message_id: clientMessageId } : {}),
         }; });
         this.connected(line, socket);
+        const sendStarted = Date.now();
         this.trace(line, 'send_attempt', { native_id: nativeId, content_type: payload.type });
         submitted = true;
         const message = await this.awaitSubmission(socket.sendMessage(jid, content, { ...options, messageId: nativeId }), waiter);
         waiter.startTimer();
         if (!message?.key?.id || message.key.id !== nativeId) throw new BridgeError(502, 'INVALID_PROVIDER_RESPONSE', 'WhatsApp did not return the expected message ID.');
         // Keep retry keys even if ACK is lost; no success is returned until confirmed.
-        await line.store.update(data => { data.messages[nativeId] = { message, phone, timestamp: millis(message.messageTimestamp), text: textBody(message.message), notified: true, pending_send: true,
+        await line.store.update(data => { data.messages[nativeId] = { request_fingerprint: fingerprint, message, phone, timestamp: millis(message.messageTimestamp), text: textBody(message.message), notified: true, pending_send: true,
           ...(clientMessageId ? { client_message_id: clientMessageId } : {}),
           ack_confirmed: Boolean(data.messages[nativeId]?.ack_confirmed), receipt: data.messages[nativeId]?.receipt, echo_seen: Boolean(data.messages[nativeId]?.echo_seen), confirmation_enqueued: Boolean(data.messages[nativeId]?.confirmation_enqueued),
           ...(MEDIA_TYPES.includes(payload.type) ? { media_id: payload[payload.type].id } : {}) }; });
         await waiter.promise;
+        const acknowledgedAt = waiter.confirmedAt ?? Date.now();
         await line.store.update(data => { data.messages[nativeId].pending_send = false; data.messages[nativeId].ack_confirmed = true; });
-        await this.enqueueOwnConfirmation(line, nativeId);
+        this.trace(line, 'send_result', {send_to_ack_ms: acknowledgedAt-sendStarted, ack_to_response_ms: Date.now()-acknowledgedAt});
+        this.queueOwnConfirmation(line, nativeId);
         return { messages: [{ id: wrapId(id, nativeId) }] };
       } catch (error) {
         waiter.cancel();
         if (!submitted) {
-          await line.store.update(data => { delete data.messages[nativeId]; });
+          try {
+            await line.store.update(data => { delete data.messages[nativeId]; if (clientMessageId) data.send_requests[crypto.createHash('sha256').update(clientMessageId).digest('hex')] = {native_id: null, fingerprint, retry_safe: true}; });
+          } catch (persistError) { error = persistError; }
           error.delivery_uncertain = false;
           this.trace(line, 'send_not_submitted', { native_id: nativeId });
           throw error;
         }
         if (line.store.data.messages[nativeId]?.ack_confirmed || line.store.data.messages[nativeId]?.echo_seen) {
           await line.store.update(data => { data.messages[nativeId].pending_send = false; });
-          await this.enqueueOwnConfirmation(line, nativeId);
+          this.queueOwnConfirmation(line, nativeId);
           return { messages: [{ id: wrapId(id, nativeId) }] };
         }
         if (error.code === 'WHATSAPP_REJECTED' && !line.store.data.messages[nativeId]?.receipt) {
-          await line.store.update(data => { delete data.messages[nativeId]; });
+          await line.store.update(data => { delete data.messages[nativeId]; if (clientMessageId) data.send_requests[crypto.createHash('sha256').update(clientMessageId).digest('hex')] = {native_id: null, fingerprint, retry_safe: true}; });
           error.delivery_uncertain = false;
           throw error;
         }
@@ -1153,8 +1225,8 @@ export class Bridge {
         // and source correlation, then await a real WhatsApp echo or callback.
         if (line.store.data.messages[nativeId]) {
           try {
-            await line.store.update(data => { data.messages[nativeId].pending_send = false; data.messages[nativeId].delivery_uncertain = true; });
-            await this.enqueueOwnConfirmation(line, nativeId);
+            await line.store.update(data => { data.messages[nativeId].pending_send = false; data.messages[nativeId].delivery_uncertain = !data.messages[nativeId].ack_confirmed && !data.messages[nativeId].echo_seen; });
+            this.queueOwnConfirmation(line, nativeId);
           } catch (persistError) {
             persistError.delivery_uncertain = true;
             throw persistError;
@@ -1174,7 +1246,9 @@ export class Bridge {
     this.scheduleReconnect(line);
   }
   serialSend(line, action) {
-    const task = line.sendTail.then(action);
+    if (line.sendPending >= 64) throw new BridgeError(503, 'SEND_QUEUE_FULL', 'This connection is busy. The request was not submitted.');
+    line.sendPending++;
+    const task = line.sendTail.then(action).finally(() => { line.sendPending--; });
     line.sendTail = task.catch(() => {});
     return task;
   }

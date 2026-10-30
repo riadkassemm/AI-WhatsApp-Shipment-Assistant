@@ -5,6 +5,7 @@ import subprocess
 import pytest
 
 from app.support_auth import SupportAgent
+from app.support_repository import SupportConflictError
 from app.support_media import SupportMediaStore
 from app.support_service import SupportValidationError, support_service
 import app.support_service as service
@@ -45,7 +46,9 @@ async def test_invalid_mp4_then_fresh_recording_is_safe_and_idempotent(infrastru
     assert not await sql('SELECT id FROM support_ticket_messages WHERE ticket_id=42')
     result = await request(valid)
     assert result['send_status'] == 'SENT'
-    # Duplicate/late retries cannot dispatch a second voice note, even with bad input.
-    assert (await request(invalid))['id'] == result['id']
+    # Same logical request returns its result; key reuse for changed bytes is rejected.
+    assert (await request(valid))['id'] == result['id']
+    with pytest.raises(SupportConflictError):
+        await request(invalid)
     assert [kind for kind, _ in calls] == ['upload','send']
     assert len(await sql('SELECT id FROM support_ticket_messages WHERE ticket_id=42')) == 1

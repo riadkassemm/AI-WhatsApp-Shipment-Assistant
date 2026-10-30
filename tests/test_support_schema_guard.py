@@ -18,7 +18,7 @@ def add_linked_device_schema(columns):
         if "20261027_quick_reply_images" in path or "20261025_statistics_investigation" in path or "20261023_agent_statistics" in path or "20261023_quick_reply_pdfs" in path or "20261024_quick_reply_" in path:
             for table, required in required_tables.items():
                 columns.setdefault(table, set()).update(required)
-    columns['support_ticket_messages'].add('replacement_for_message_id')
+    columns['support_ticket_messages'].update({'replacement_for_message_id', 'request_fingerprint'})
     columns["support_ticket_messages"].update({"transport_client_id", "sender_scope", "delivery_token", "delivery_claimed_at", "delivery_started_at", "delivery_retry_safe"})
     columns["support_ticket_messages"].update({"whatsapp_change_timestamp", "pending_change_operation_id"})
     columns["support_ticket_messages"].update({"delivery_status", "delivered_at", "read_at", "read_sync_pending", "read_sync_attempted_at"})

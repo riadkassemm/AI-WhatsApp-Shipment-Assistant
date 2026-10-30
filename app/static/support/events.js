@@ -63,6 +63,7 @@ function connectSupportEvents() {
   const source = new EventSource('/api/support/events', {withCredentials: true});
   state.supportEventSource = source;
   source.onmessage = event => {
+    if (state.supportEventSource !== source || !state.authenticated) return;
     let payload = {};
     try { payload = JSON.parse(event.data || '{}'); } catch (_) { return; }
     const type = String(payload.type || '');
@@ -76,16 +77,16 @@ function connectSupportEvents() {
       state.previousTicketHistory = [];
       state.previousHistoryExpanded = false;
       state.previousHistoryLoaded = false;
-      refreshAllQueueCounts().catch(() => {});
-      loadQueue({silent: true}).catch(() => {});
-      if (state.ticketId) openTicket(state.ticketId, {silent: true, refreshHistory: true}).catch(() => {});
+      requestDashboardRefresh('counts');
+      requestDashboardRefresh('queue');
+      if (state.ticketId) requestDashboardRefresh('history');
       return;
     }
     if (type === 'incoming_read' || type === 'dashboard_read') {
       if (payload.authorized !== true) return;
       state.ticketPrefetch.delete(String(payload.ticket_id));
-      loadQueue({silent: true}).catch(() => {});
-      if (String(state.ticketId) === String(payload.ticket_id)) openTicket(state.ticketId, {silent: true}).catch(() => {});
+      requestDashboardRefresh('queue');
+      if (String(state.ticketId) === String(payload.ticket_id)) requestDashboardRefresh('conversation');
       return;
     }
     if (type === 'message_status') {
@@ -99,7 +100,7 @@ function connectSupportEvents() {
       if (payload.message && state.ticketId && String(state.ticketId) === String(payload.ticket_id || '')) {
         upsertTimelineMessage(payload.message, payload.ticket_id);
       } else if (state.ticketId && String(state.ticketId) === String(payload.ticket_id || '')) {
-        openTicket(state.ticketId, {silent: true}).catch(() => {});
+        requestDashboardRefresh('conversation');
       } else if (type === 'message_media_ready' && state.previousTicketHistory.some(thread => String(thread.ticket?.id) === String(payload.ticket_id))) {
         if (payload.message) {
           changeCachedMessage(payload.ticket_id, payload.message.id, payload.message);
@@ -107,35 +108,35 @@ function connectSupportEvents() {
             state.timelineSignature = timelineSignature(state.currentTicketData);
             renderConversation(state.currentTicketData);
           }
-        } else if (state.ticketId) openTicket(state.ticketId, {silent: true, refreshHistory: true}).catch(() => {});
+        } else if (state.ticketId) requestDashboardRefresh('history');
       }
       if (type === 'outbound_message') {
         // Messages sent from the linked WhatsApp app can change a ticket's
         // preview and place in the queue even when another ticket is open.
         // Refreshing only the queue leaves any playing voice note untouched.
-        refreshAllQueueCounts().catch(() => {});
-        if (state.view !== 'contacts') loadQueue({silent: true}).catch(() => {});
+        requestDashboardRefresh('counts');
+        if (state.view !== 'contacts') requestDashboardRefresh('queue');
         return;
       }
       if (type !== 'customer_message') return;
-      loadQueue({silent: true}).catch(() => {});
+      requestDashboardRefresh('queue');
       if (payload.conversation_origin === 'STAFF') {
         handleAssignedChatNotification(payload);
         return;
       }
     }
-    refreshAllQueueCounts().catch(() => {});
+    requestDashboardRefresh('counts');
     if (type === 'ticket_updated') {
       if (payload.authorized !== true) return;
       if (state.ticketId && String(state.ticketId) === String(payload.ticket_id || '')) {
-        openTicket(state.ticketId, {silent: true}).catch(() => {});
+        requestDashboardRefresh('conversation');
       }
-      loadQueue({silent: true}).catch(() => {});
+      requestDashboardRefresh('queue');
       return;
     }
     if (type === 'contacts_synced' || type === 'contact_saved') {
       if (!payload.staff_id || String(payload.staff_id) === String(state.agent?.id || '')) {
-        if (state.view === 'contacts') loadQueue({silent: true}).catch(() => {});
+        if (state.view === 'contacts') requestDashboardRefresh('queue');
         loadGoogleContactsStatus().catch(() => {});
       }
       return;
@@ -161,10 +162,10 @@ function connectSupportEvents() {
           if (payload.message && type !== 'message_deleted_for_me') {
             upsertTimelineMessage(payload.message, payload.ticket_id);
             if (type === 'message_deleted_for_everyone' && state.replyTarget?.id === changedId) clearReplyTarget();
-          } else openTicket(state.ticketId, {silent: true}).catch(() => {});
+          } else requestDashboardRefresh('conversation');
         } else if (state.previousTicketHistory.some(thread => String(thread.ticket?.id) === String(payload.ticket_id))) {
           if (payload.message && type !== 'message_deleted_for_me') changeCachedMessage(payload.ticket_id, changedId, payload.message);
-          openTicket(state.ticketId, {silent: true, refreshHistory: true}).catch(() => {});
+          requestDashboardRefresh('history');
         }
       }
       return;
@@ -177,7 +178,7 @@ function connectSupportEvents() {
     if (type === 'ticket_created' && payload.phone_initiated === true) {
       // Started in the WhatsApp app, so someone is already talking to the
       // customer. It goes to Active without an unassigned alert.
-      if (state.view !== 'contacts') loadQueue({silent: true}).catch(() => {});
+      if (state.view !== 'contacts') requestDashboardRefresh('queue');
       return;
     }
     const customer = payload.customer_name || payload.customer_phone || 'customer';
@@ -188,10 +189,11 @@ function connectSupportEvents() {
         : 'New customer message from ' + customer + '.';
     notifyNewCustomerActivity(notificationText);
     state.unassignedSnapshot = null;
-    if (state.view === 'unassigned') loadQueue({silent: true}).catch(() => {});
-    else pollUnassignedActivity().catch(() => {});
-    if (type !== 'customer_message' && state.ticketId && String(state.ticketId) === String(payload.ticket_id || '')) openTicket(state.ticketId, {silent: true}).catch(() => {});
+    if (state.view === 'unassigned') requestDashboardRefresh('queue');
+    else requestDashboardRefresh('counts');
+    if (type !== 'customer_message' && state.ticketId && String(state.ticketId) === String(payload.ticket_id || '')) requestDashboardRefresh('conversation');
   };
+  source.onopen = () => requestDashboardRefresh('queue', 'conversation', 'counts');
   source.onerror = () => {
     // EventSource retries automatically. Polling remains active as a fallback.
   };
@@ -253,7 +255,7 @@ async function markVisibleDashboardMessagesRead() {
     if (key !== String(state.agent?.id) + ':' + ticketId) return;
     state.dashboardReadBoundaries.set(key, Math.max(boundary, state.dashboardReadBoundaries.get(key) || 0));
     // Fetch rather than clearing optimistically: a newer arrival may remain unread.
-    if (result && state.authenticated) loadQueue({silent: true}).catch(() => {});
+    if (result && state.authenticated) requestDashboardRefresh('queue');
   } catch (_) {
     // Failed requests do not clear the dot; the next visible refresh retries.
   }

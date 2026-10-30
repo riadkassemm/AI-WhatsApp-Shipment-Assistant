@@ -131,6 +131,7 @@ const loadQueue = async options => {
   queueRefreshes++;
 };
 const refreshAllQueueCounts = async () => {countRefreshes++};
+const requestDashboardRefresh = scope => {if(scope==='counts')refreshAllQueueCounts();else if(scope==='queue')loadQueue({silent:true});else openTicket(state.ticketId,{silent:true});};
 const openTicket = async () => {ticketReloads++};
 const upsertTimelineMessage = (message, ticketId) => upserts.push([message.id, ticketId]);
 const notifyNewCustomerActivity = () => {customerNotifications++};
@@ -1039,7 +1040,7 @@ const renderContext = () => {};
 const renderReadOnlyState = () => {};
 const renderActions = () => {};
 const showTicketOpening = () => {};
-const takeTicketPrefetch = () => null;
+const document = {hidden: false};
 const timelineSignature = () => 'rendered';
 const renderConversation = () => {};
 const isStaffChat = ticket => ticket.conversation_origin === 'STAFF';
@@ -1287,7 +1288,7 @@ const renderContext = () => {};
 const renderReadOnlyState = () => {};
 const renderActions = () => {};
 const showTicketOpening = () => {};
-const takeTicketPrefetch = () => null;
+const document = {hidden: false};
 const emptyMarkup = () => ({outer: {}});
 const timelineSignature = data => JSON.stringify((data.previous_ticket_history || []).map(item => item.ticket.id));
 const renderConversation = () => {};
@@ -1614,6 +1615,7 @@ const resetQueueFilters = () => {};
 let clearedSelections = 0;
 const clearSupportSelections = () => {clearedSelections++};
 const disconnectSupportEvents = () => {};
+const stopDashboardRefresh = () => {};
 const saveLinkedDeviceAddition = () => {};
 const cancelVoiceRecording = () => {};
 const clearMediaDraft = () => {};
@@ -1627,6 +1629,7 @@ const startSupportActivity = () => {};
 const stopSupportActivity = () => {};
 const clearAgentStatistics = () => {};
 const connectSupportEvents = () => {};
+const startDashboardRefresh = () => {};
 const syncThemeControls = () => {};
 const setAgentIdentity = () => {};
 const loadAiSettings = async () => {};
@@ -1797,48 +1800,8 @@ assert.equal(menu().open, false, 'switching tickets closes the menu');
     assert result.returncode == 0, result.stderr
 
 
-@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is unavailable")
-def test_ticket_prefetch_is_reused_once_retried_on_failure_and_expires() -> None:
-    helpers = _HTML[_HTML.index("const TICKET_PREFETCH_TTL_MS = "): _HTML.index("function showTicketOpening(")]
-    script = r"""
-const assert = require('node:assert/strict');
-const state = {ticketId: 7, view: 'unassigned', ticketPrefetch: new Map()};
-const calls = [];
-let failNext = false;
-const api = async path => {
-  calls.push(path);
-  if (failNext) {failNext = false; throw new Error('offline')}
-  return {path, n: calls.length};
-};
-let now = 1000;
-Date.now = () => now;
-""" + helpers + r"""
-(async () => {
-  prefetchTicketDetail(7, 'CUSTOMER');
-  assert.equal(calls.length, 0, 'the open ticket is never prefetched');
-
-  prefetchTicketDetail(9, 'CUSTOMER');
-  prefetchTicketDetail(9, 'CUSTOMER');
-  assert.deepEqual(calls, ['/api/support/tickets/9?include_previous_history=true'], 'one request per ticket');
-  const data = await takeTicketPrefetch('/api/support/tickets/9?include_previous_history=true');
-  assert.equal(data.n, 1, 'openTicket reuses the prefetched response');
-  assert.equal(takeTicketPrefetch('/api/support/tickets/9?include_previous_history=true'), null, 'a prefetch is used once');
-
-  state.view = 'chats';
-  prefetchTicketDetail(11);
-  assert.equal(calls.at(-1), '/api/support/chats/11?include_previous_history=true', 'chats view prefetches the chat route');
-  state.view = 'unassigned';
-
-  failNext = true;
-  prefetchTicketDetail(12, 'CUSTOMER');
-  const retried = await takeTicketPrefetch('/api/support/tickets/12?include_previous_history=true');
-  assert.equal(retried.path, '/api/support/tickets/12?include_previous_history=true');
-  assert.equal(calls.filter(path => path.includes('/12?')).length, 2, 'a failed prefetch is retried');
-
-  prefetchTicketDetail(13, 'CUSTOMER');
-  now += TICKET_PREFETCH_TTL_MS + 1;
-  assert.equal(takeTicketPrefetch('/api/support/tickets/13?include_previous_history=true'), null, 'stale data is not shown');
-})().catch(error => {console.error(error); process.exitCode = 1});
-"""
-    result = subprocess.run(["node", "-e", script], text=True, capture_output=True, timeout=10)
-    assert result.returncode == 0, result.stderr
+def test_ticket_details_load_only_after_selection_not_pointer_hover() -> None:
+    assert "prefetchTicketDetail" not in _HTML
+    assert "takeTicketPrefetch" not in _HTML
+    assert "const data = await api(detailPath);" in _HTML
+    assert "requestId !== state.ticketRequest || String(state.ticketId) !== String(id)" in _HTML

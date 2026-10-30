@@ -10,6 +10,7 @@ from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from typing import Any
 
+from app.support_idempotency import send_fingerprint, verify_send_fingerprint
 from app.config import settings
 from app.conversation_store import Conversation, conversation_store
 from app.customer_directory import ContactConflictError, ContactNotFoundError, customer_directory, normalize_phone
@@ -2024,6 +2025,7 @@ class SupportService:
                 page=1,
                 page_size=1,
                 include_filter_options=False,
+                count_only=True,
             )
             for view in views
         ), return_exceptions=True)
@@ -3142,8 +3144,14 @@ class SupportService:
 
         ticket = await self._prepare_agent_outbound_ticket(ticket_id, agent)
 
+        fingerprint = send_fingerprint(
+            "text", body=body, reply_id=reply_to_message_id,
+            forwarded=is_forwarded, source_ticket=forwarded_from_ticket_id,
+            source_message=forwarded_from_message_id,
+        )
         existing = await support_repository.get_message_by_client_id(client_message_id, ticket_id=ticket_id, sender_type="AGENT", sender_id=agent.id)
         if existing:
+            verify_send_fingerprint(existing, fingerprint)
             return _serialize_support_messages(ticket_id, [existing])[0] or {}
 
         _reply_local_id, reply_whatsapp_id = await self._resolve_reply_target(
@@ -3158,6 +3166,7 @@ class SupportService:
             direction="OUTBOUND",
             body=body,
             client_message_id=client_message_id,
+            request_fingerprint=fingerprint,
             message_type="text",
             reply_to_whatsapp_message_id=reply_whatsapp_id,
             send_status="PENDING",
@@ -3339,8 +3348,15 @@ class SupportService:
 
         ticket = await self._prepare_agent_outbound_ticket(ticket_id, agent)
 
+        fingerprint = send_fingerprint(
+            "location", latitude=float(latitude), longitude=float(longitude),
+            name=safe_name, address=safe_address, reply_id=reply_to_message_id,
+            forwarded=is_forwarded, source_ticket=forwarded_from_ticket_id,
+            source_message=forwarded_from_message_id,
+        )
         existing = await support_repository.get_message_by_client_id(client_message_id, ticket_id=ticket_id, sender_type="AGENT", sender_id=agent.id)
         if existing:
+            verify_send_fingerprint(existing, fingerprint)
             return _serialize_support_messages(ticket_id, [existing])[0] or {}
 
         _reply_local_id, reply_whatsapp_id = await self._resolve_reply_target(
@@ -3355,6 +3371,7 @@ class SupportService:
             direction="OUTBOUND",
             body=body,
             client_message_id=client_message_id,
+            request_fingerprint=fingerprint,
             message_type="location",
             reply_to_whatsapp_message_id=reply_whatsapp_id,
             location_latitude=float(latitude),
@@ -3398,8 +3415,15 @@ class SupportService:
 
         ticket = await self._prepare_agent_outbound_ticket(ticket_id, agent)
 
+        fingerprint = send_fingerprint(
+            media_type, content_hash=hashlib.sha256(content).hexdigest(),
+            mime=str(content_type or "").lower(), filename=filename, caption=caption,
+            reply_id=reply_to_message_id, forwarded=is_forwarded,
+            source_ticket=forwarded_from_ticket_id, source_message=forwarded_from_message_id,
+        )
         existing = await support_repository.get_message_by_client_id(client_message_id, ticket_id=ticket_id, sender_type="AGENT", sender_id=agent.id)
         if existing:
+            verify_send_fingerprint(existing, fingerprint)
             return _serialize_support_messages(ticket_id, [existing])[0] or {}
 
         normalized_mime = normalize_mime_type(content_type)
@@ -3482,6 +3506,7 @@ class SupportService:
             direction="OUTBOUND",
             body=body,
             client_message_id=client_message_id,
+            request_fingerprint=fingerprint,
             message_type=media_type,
             reply_to_whatsapp_message_id=reply_whatsapp_id,
             send_status="PENDING",

@@ -11,7 +11,7 @@ from app.config import settings
 router = APIRouter(tags=["support-ui"])
 _ROOT = Path(__file__).parent
 _ASSET_ROOT = _ROOT / "static" / "support"
-_SCRIPT_NAMES = ("state.js", "events.js", "dialogs.js", "api.js", "statistics.js", "rendering.js", "media.js", "actions.js")
+_SCRIPT_NAMES = ("state.js", "events.js", "dialogs.js", "api.js", "refresh.js", "statistics.js", "rendering.js", "media.js", "actions.js")
 _ASSETS = {name: (_ASSET_ROOT / name).read_text(encoding="utf-8")
            for name in ("theme.js", "support.css", *_SCRIPT_NAMES)}
 _TEMPLATE = (_ROOT / "templates" / "support.html").read_text(encoding="utf-8")

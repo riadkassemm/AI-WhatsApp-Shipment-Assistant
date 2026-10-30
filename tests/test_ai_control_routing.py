@@ -1025,7 +1025,7 @@ def test_latency_defaults_reduce_deliberate_wait_without_lowering_ai_reasoning()
 
     assert settings.whatsapp_message_burst_debounce_seconds <= 0.65
     assert settings.whatsapp_message_burst_max_wait_seconds <= 2.0
-    assert settings.support_queue_poll_seconds <= 2
+    assert settings.support_queue_poll_seconds == 30  # SSE drives updates; HTTP is a safety net.
     assert settings.openai_reasoning_effort == "medium"
     assert settings.max_conversation_messages >= 30
 

@@ -1,3 +1,4 @@
+import { JournalStore } from './journal-store.js';
 import { mkdir, readFile, open, rename, chmod } from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
@@ -49,7 +50,7 @@ export async function acquireDataDirectory(directory) {
 }
 
 export async function createAuth(directory) {
-  const store = await new FileStore(path.join(directory, 'auth.json'), () => ({ creds: initAuthCreds(), keys: {} })).load();
+  const store = await new JournalStore(path.join(directory, 'auth.json'), () => ({ creds: initAuthCreds(), keys: {} })).load();
   const creds = store.data.creds;
   return {
     store,
