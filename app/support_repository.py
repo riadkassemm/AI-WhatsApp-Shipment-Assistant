@@ -949,12 +949,35 @@ class SupportRepository(DashboardRepositoryMixin, DeliveryRepositoryMixin, ReadS
         Reopened chats and customer tickets can have multiple active intervals;
         lifecycle events identify which conversation owned a delayed message.
         """
+        tickets = await self._tickets_open_at_whatsapp_timestamp(
+            phone_number, business_phone_number_id, sent_at, first_only=True,
+        )
+        return tickets[0] if tickets else None
+
+    async def find_tickets_open_at_whatsapp_timestamp(
+        self, phone_number: str, business_phone_number_id: str,
+        sent_at: datetime,
+    ) -> list[dict[str, Any]]:
+        """Every conversation for this customer and line that was open at ``sent_at``.
+
+        Callers that must not guess (delayed inbound messages, recovery) treat
+        anything other than exactly one result as no match.
+        """
+        return await self._tickets_open_at_whatsapp_timestamp(
+            phone_number, business_phone_number_id, sent_at, first_only=False,
+        )
+
+    async def _tickets_open_at_whatsapp_timestamp(
+        self, phone_number: str, business_phone_number_id: str,
+        sent_at: datetime, *, first_only: bool,
+    ) -> list[dict[str, Any]]:
         if self._pool is None:
             await self.connect()
         assert self._pool is not None
         # WhatsApp normal messages carry whole seconds; include a ticket that
         # opened later within that same provider second.
         start_cutoff = sent_at + timedelta(seconds=1)
+        matches: list[dict[str, Any]] = []
         async with self._pool.acquire() as conn:
             async with conn.cursor(aiomysql.DictCursor) as cur:
                 await cur.execute(
@@ -967,40 +990,44 @@ class SupportRepository(DashboardRepositoryMixin, DeliveryRepositoryMixin, ReadS
                     (phone_number, business_phone_number_id, start_cutoff),
                 )
                 for ticket in await cur.fetchall():
-                    if str(ticket.get("conversation_origin") or "CUSTOMER") == "STAFF":
-                        await cur.execute(
-                            """
-                            SELECT event_type FROM support_ticket_events
-                            WHERE ticket_id = %s
-                              AND event_type IN ('CHAT_STARTED', 'CHAT_REOPENED', 'CHAT_CLOSED')
-                              AND created_at < %s
-                            ORDER BY created_at DESC, id DESC LIMIT 1
-                            """,
-                            (ticket["id"], start_cutoff),
-                        )
-                        lifecycle = await cur.fetchone()
-                        if lifecycle and lifecycle.get("event_type") in {"CHAT_STARTED", "CHAT_REOPENED"}:
-                            return ticket
-                    else:
-                        await cur.execute(
-                            """SELECT event_type FROM support_ticket_events
-                               WHERE ticket_id=%s AND (event_type IN ('TICKET_REOPENED', 'TICKET_RESOLVED') OR
-                                   (event_type='STATUS_CHANGED' AND JSON_VALID(details_json)
-                                    AND JSON_UNQUOTE(JSON_EXTRACT(details_json, '$.to'))='CLOSED'))
-                                 AND created_at < %s
-                               ORDER BY created_at DESC, id DESC LIMIT 1""",
-                            (ticket['id'], start_cutoff),
-                        )
-                        lifecycle = await cur.fetchone()
-                        if lifecycle and lifecycle['event_type'] == 'TICKET_REOPENED':
-                            return ticket
-                        if lifecycle and lifecycle['event_type'] in {'TICKET_RESOLVED', 'STATUS_CHANGED'}:
-                            continue
-                        resolved_at = ticket.get("resolved_at")
-                        closed_at = ticket.get("closed_at")
-                        if (resolved_at is None or resolved_at >= sent_at) and (closed_at is None or closed_at >= sent_at):
-                            return ticket
-        return None
+                    if await self._ticket_open_at(cur, ticket, sent_at, start_cutoff):
+                        matches.append(ticket)
+                        if first_only:
+                            break
+        return matches
+
+    @staticmethod
+    async def _ticket_open_at(cur: Any, ticket: dict[str, Any], sent_at: datetime, start_cutoff: datetime) -> bool:
+        if str(ticket.get("conversation_origin") or "CUSTOMER") == "STAFF":
+            await cur.execute(
+                """
+                SELECT event_type FROM support_ticket_events
+                WHERE ticket_id = %s
+                  AND event_type IN ('CHAT_STARTED', 'CHAT_REOPENED', 'CHAT_CLOSED')
+                  AND created_at < %s
+                ORDER BY created_at DESC, id DESC LIMIT 1
+                """,
+                (ticket["id"], start_cutoff),
+            )
+            lifecycle = await cur.fetchone()
+            return bool(lifecycle and lifecycle.get("event_type") in {"CHAT_STARTED", "CHAT_REOPENED"})
+        await cur.execute(
+            """SELECT event_type FROM support_ticket_events
+               WHERE ticket_id=%s AND (event_type IN ('TICKET_REOPENED', 'TICKET_RESOLVED') OR
+                   (event_type='STATUS_CHANGED' AND JSON_VALID(details_json)
+                    AND JSON_UNQUOTE(JSON_EXTRACT(details_json, '$.to'))='CLOSED'))
+                 AND created_at < %s
+               ORDER BY created_at DESC, id DESC LIMIT 1""",
+            (ticket['id'], start_cutoff),
+        )
+        lifecycle = await cur.fetchone()
+        if lifecycle and lifecycle['event_type'] == 'TICKET_REOPENED':
+            return True
+        if lifecycle and lifecycle['event_type'] in {'TICKET_RESOLVED', 'STATUS_CHANGED'}:
+            return False
+        resolved_at = ticket.get("resolved_at")
+        closed_at = ticket.get("closed_at")
+        return (resolved_at is None or resolved_at >= sent_at) and (closed_at is None or closed_at >= sent_at)
 
     async def list_previous_customer_tickets(
         self,

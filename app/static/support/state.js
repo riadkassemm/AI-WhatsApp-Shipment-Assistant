@@ -280,6 +280,18 @@ function messageOccurredAt(message) {
   return message?.created_at || null;
 }
 
+// Matches the server's AI freshness cutoff (WHATSAPP_MAX_INBOUND_AGE_SECONDS default).
+const LATE_ARRIVAL_NOTICE_MS = 15 * 60 * 1000;
+
+// A customer message received well after it was sent (for example after a
+// WhatsApp connection outage). It is still shown at its send time.
+function messageArrivedLate(message) {
+  if (message?.direction !== 'INBOUND' || !message.created_at) return false;
+  const sent = Date.parse(messageOccurredAt(message) || '');
+  const received = parseServerDate(message.created_at).getTime();
+  return Number.isFinite(sent) && Number.isFinite(received) && received - sent >= LATE_ARRIVAL_NOTICE_MS;
+}
+
 function fmt(value) {
   if (!value) return '—';
   const date = parseServerDate(value);

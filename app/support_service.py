@@ -865,7 +865,12 @@ class SupportService:
         location_address: str | None = None,
         current_language: str | None = None,
         communication_style: str | None = None,
+        require_active: bool = True,
+        expected_phone: str | None = None,
+        expected_line_id: str | None = None,
     ) -> tuple[dict[str, Any], bool]:
+        # require_active=False only records a delayed message in the closed
+        # conversation it belongs to; it never reopens or re-routes that ticket.
         message, created = await support_repository.add_ticket_message(
             ticket_id=int(ticket["id"]),
             sender_type="CUSTOMER",
@@ -880,12 +885,14 @@ class SupportService:
             location_name=sanitize_support_text(location_name).strip()[:255] or None,
             location_address=sanitize_support_text(location_address).strip()[:1000] or None,
             send_status="RECEIVED",
-            require_active=True,
+            require_active=require_active,
             current_language=current_language,
             communication_style=communication_style,
+            expected_phone=expected_phone,
+            expected_line_id=expected_line_id,
         )
 
-        if created and ticket.get("status") == "WAITING_CUSTOMER":
+        if created and require_active and ticket.get("status") == "WAITING_CUSTOMER":
             try:
                 await support_repository.mark_customer_replied(int(ticket["id"]))
             except Exception:
@@ -903,6 +910,26 @@ class SupportService:
                 message=_serialize_support_messages(int(ticket["id"]), [message])[0],
             )
         return message, created
+
+    async def ticket_for_delayed_inbound(
+        self, *, phone_number: str, business_phone_number_id: str | None, sent_at: datetime,
+    ) -> tuple[dict[str, Any] | None, str]:
+        """The single conversation, on this business line, open when a message was sent.
+
+        Being open when the message arrived, or now, is not evidence: a newer
+        ticket must never receive an older message. Without exactly one match
+        the caller keeps the existing behaviour for stale messages.
+        """
+        peer = normalize_phone(phone_number)
+        line_id = str(business_phone_number_id or "").strip()
+        if not peer or not line_id:
+            return None, "no_line_identity"
+        tickets = await support_repository.find_tickets_open_at_whatsapp_timestamp(peer, line_id, sent_at)
+        if not tickets:
+            return None, "no_ticket_at_send_time"
+        if len(tickets) > 1:
+            return None, "ambiguous_ticket_at_send_time"
+        return tickets[0], "matched"
 
     async def sync_linked_device_outbound(self, incoming: IncomingWhatsAppMessage) -> bool:
         """Mirror a message sent in the WhatsApp app without entering the AI flow.

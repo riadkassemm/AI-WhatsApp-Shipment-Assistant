@@ -5,6 +5,7 @@ answer 502, drop the event stream, simulate an outage, expire the session and
 revoke ticket access. No real services, accounts or customer data are involved.
 """
 import asyncio
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
@@ -29,6 +30,8 @@ DETAIL = {
     'ticket': TICKET, 'context': {}, 'shipment': None, 'events': [],
     'messages': [{'id': 1001, 'ticket_id': 42, 'direction': 'INBOUND', 'sender_type': 'CUSTOMER',
                   'message_type': 'text', 'body': 'Protected synthetic text', 'created_at': '2026-10-30T09:59:00',
+                  # Sent 29 minutes before it was received: shown at send time, marked late.
+                  'whatsapp_timestamp': str(int(datetime(2026, 10, 30, 9, 30, tzinfo=timezone.utc).timestamp())),
                   'reactions': []}],
     'messages_has_more': False, 'previous_ticket_history': [], 'previous_ticket_history_has_more': False,
     'customer_identity': {'source': 'guest', 'name': None, 'registered_user': False, 'saved_contact': False},
@@ -65,6 +68,8 @@ CHECKS = r'''<script>
   await bootstrap();
   await openTicket(42,{conversationOrigin:'CUSTOMER'});
   check($('conversation').textContent.includes('Protected synthetic text'),'Conversation did not render');
+  const late=$('conversation').querySelector('.arrived-late');
+  check(late&&late.textContent==='arrived late'&&late.title.includes('received'),'late-arrival marker missing');
   $('message').value='Unsent synthetic draft';
   const queueBox=$('queue');queueBox.style.height='120px';queueBox.scrollTop=200;
   const scrollTop=queueBox.scrollTop;
