@@ -144,6 +144,13 @@ const state = {
   notificationUnlocked: false,
   notificationPermissionRequested: false,
   supportEventSource: null,
+  // One reconnect lifecycle per page: at most one scheduled retry and one
+  // session check; a generation bump invalidates late results after sign-out.
+  supportEventsRetryTimer: null,
+  supportEventsAttempt: 0,
+  supportEventsGeneration: 0,
+  supportEventsProbe: null,
+  queueLoadedIdentity: null,
   mediaZoom: 1,
   mediaTranslateX: 0,
   mediaTranslateY: 0,

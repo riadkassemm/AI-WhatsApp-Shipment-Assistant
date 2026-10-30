@@ -20,9 +20,11 @@ def test_queue_footer_has_no_page_buttons() -> None:
 def test_queue_appends_pages_on_scroll_and_refresh_keeps_loaded_rows() -> None:
     start = _HTML.index("function queuePath(")
     end = _HTML.index("async function pollUnassignedActivity(")
-    script = r"""
+    transient = _HTML[_HTML.index("function transientReadError("):_HTML.index("function backgroundRetryDelay(")]
+    script = transient + r"""
 const assert = require('node:assert/strict');
 const document = {hidden:false};
+const noteBackgroundRead = () => {};
 const QUEUE_MAX_REQUEST_SIZE = 500;
 const tickets = Array.from({length: 120}, (_, index) => ({id: index + 1}));
 const requests = [];

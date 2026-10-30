@@ -52,18 +52,32 @@ test('account change while refresh is running does not lose the new timer',async
   await time.advance(30000);assert.equal(calls,2);scheduler.stop();
 });
 function apiHarness() {
-  const pending=[],counts=[];
+  const pending=[],counts=[],reads=[];
   const context=vm.createContext({FormData,DOMException,Date,Map,JSON,
     state:{authenticated:true,agent:{id:7,role:'agent'}}, document:{hidden:false},
     dashboardRefresh:{request:()=>{}}, csrf:()=> 'test', SUPPORT_UI_VERSION:'test',
     updateQueueCount:(view,total)=>counts.push([view,total]),
-    fetch:(path)=>new Promise(resolve=>pending.push({path,resolve})),
+    noteBackgroundRead:(scope,error=null)=>reads.push([scope,error?'failed':'ok']),
+    fetch:(path)=>new Promise((resolve,reject)=>pending.push({path,resolve,reject})),
     showLogin:()=>{}, noticeDashboardUpdate:()=>{}});
   vm.runInContext(apiSource.slice(0,apiSource.indexOf('// After a deploy')) + '\n' +
+    refresh.slice(refresh.indexOf('function transientReadError'),refresh.indexOf('function backgroundRetryDelay')) + '\n' +
     rendering.slice(rendering.indexOf('async function refreshAllQueueCounts'),rendering.indexOf('function updateQueueSummary')),context);
   const finish=(index,data={})=>pending[index].resolve({ok:true,status:200,json:async()=>data});
-  return {context,pending,counts,finish};
+  return {context,pending,counts,reads,finish};
 }
+test('count reads report connection health; code errors are not connection failures',async()=>{
+  const {context:c,pending,finish,reads}=apiHarness();
+  const ok=c.refreshAllQueueCounts();finish(0,{counts:{mine:1}});await ok;
+  c.invalidateQueueCounts();
+  const lost=c.refreshAllQueueCounts();pending[1].reject(new TypeError('Failed to fetch'));await lost;
+  c.invalidateQueueCounts();
+  const gateway=c.refreshAllQueueCounts();
+  pending[2].resolve({ok:false,status:502,json:async()=>{throw new SyntaxError('html')}});await gateway;
+  c.invalidateQueueCounts();c.updateQueueCount=()=>{throw new TypeError('render bug')};
+  const bug=c.refreshAllQueueCounts();finish(3,{counts:{mine:2}});await bug;
+  assert.deepEqual(reads,[['counts','ok'],['counts','failed'],['counts','failed']]);
+});
 test('GET singleflight scopes parameters and account; stale session responses rejected', async()=>{
   const {context:c,pending,finish}=apiHarness();
   const a=c.api('/api/support/tickets?view=mine'),b=c.api('/api/support/tickets?view=mine');
