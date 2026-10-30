@@ -29,6 +29,7 @@ async def deliver(repository, transport, media_store, ticket, message, *, retry=
 async def _deliver_claimed(repository, transport, media_store, ticket, message, token):
     message_id = int(message['id'])
     started = False
+    phase = "prepare"
     try:
         kind = message.get('message_type') or 'text'
         body = str(message.get('body') or '')
@@ -49,6 +50,7 @@ async def _deliver_claimed(repository, transport, media_store, ticket, message, 
             asset = media_store.get(int(ticket['id']), message_id)
             if asset is None:
                 raise ValueError('The stored attachment is unavailable. Restore it before retrying.')
+            phase = "upload"
             media_id = await transport.upload_media(content=asset.path.read_bytes(), mime_type=asset.mime_type,
                                                     filename=asset.filename, phone_number_id=common['phone_number_id'])
             defaults = {'image': {'Image'}, 'video': {'Video'}, 'document': {asset.filename, 'Document'}}
@@ -61,6 +63,7 @@ async def _deliver_claimed(repository, transport, media_store, ticket, message, 
         if not await repository.begin_delivery(message_id, token):
             return await repository.get_message(message_id)
         started = True
+        phase = "dispatch"
         response = await send(**common, **payload)
         messages = response.get('messages') if isinstance(response, dict) else None
         provider_id = messages[0].get('id') if isinstance(messages, list) and messages and isinstance(messages[0], dict) else None
@@ -68,6 +71,10 @@ async def _deliver_claimed(repository, transport, media_store, ticket, message, 
             raise WhatsAppSendError('Provider acceptance could not be confirmed.', delivery_uncertain=True)
     except Exception as exc:
         safe = not started or (isinstance(exc, WhatsAppSendError) and not exc.delivery_uncertain)
+        logging.getLogger('shipment-bot').warning(
+            'Support delivery failed: ticket_id=%s message_id=%s phase=%s error_type=%s retry_safe=%s',
+            ticket['id'], message_id, phase, type(exc).__name__, safe,
+        )
         # Never store raw transport exceptions (which may contain credentials).
         await repository.finish_delivery(message_id, token, status='FAILED' if safe else 'UNCERTAIN',
                                          error='Not sent; retry is available.' if safe else 'Delivery is uncertain; do not resend.',

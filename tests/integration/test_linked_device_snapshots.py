@@ -72,3 +72,39 @@ async def test_first_snapshot_opens_one_unassigned_ticket_without_customer_sends
     rows = await sql("SELECT * FROM support_tickets WHERE whatsapp_phone='155500042' AND business_phone_number_id='90005'")
     assert len(rows) == 1 and rows[0]['status'] == 'NEW' and rows[0]['current_assignee_id'] is None
     assert len(await repo.list_messages(rows[0]['id'])) == 1
+
+
+@pytest.mark.asyncio
+async def test_outgoing_tombstones_recover_missing_original_without_new_conversation(infrastructure, monkeypatch):
+    repo, sql, _ = infrastructure
+    monkeypatch.setattr(service, 'get_transport', lambda *_: 'linked_device')
+    monkeypatch.setattr(service, 'publish_support_event', AsyncMock())
+    monkeypatch.setattr(service, 'conversation_store', SimpleNamespace(mark_inbound_revoked=AsyncMock()))
+    await sql("UPDATE support_tickets SET created_at=UTC_TIMESTAMP(6)-INTERVAL 1 HOUR WHERE id=42")
+    await repo.resolve_ticket(42, agent_id='7', agent_name='Agent')
+    event = dict(type='message_tombstone', event_id='outgoing-tombstone', from_me=True,
+                 line_id='90005', sender_phone='155500042', message_id='ld:90005:DELETEDPHONE',
+                 timestamp=int(datetime.now(timezone.utc).timestamp()*1000)-60000,
+                 deleted_timestamp=int(datetime.now(timezone.utc).timestamp()*1000))
+    # Unknown original time must not be invented from the revoke time.
+    assert await support_service.sync_linked_device_tombstone({**event, 'original_timestamp_known': False})
+    assert await repo.get_message_by_whatsapp_id(event['message_id']) is None
+    for _ in range(2):
+        assert await support_service.sync_linked_device_tombstone(event)
+    rows = await sql('SELECT * FROM support_ticket_messages WHERE whatsapp_message_id=%s', (event['message_id'],))
+    assert len(rows) == 1
+    row = rows[0]
+    assert row['ticket_id'] == 42 and row['direction'] == 'OUTBOUND'
+    assert row['sender_type'] == 'AGENT' and row['sender_id'] is None
+    assert row['deleted_for_everyone_at'] is not None
+    assert row['send_status'] == 'SENT'
+    assert (await repo.get_ticket(42))['status'] == 'RESOLVED'
+    # Outside support history: terminal acknowledgement without opening a ticket.
+    assert await support_service.sync_linked_device_tombstone({**event, 'event_id': 'outside', 'message_id': 'ld:90005:OUTSIDE', 'sender_phone': '155599999'})
+    assert await repo.get_message_by_whatsapp_id('ld:90005:OUTSIDE') is None
+    service.conversation_store.mark_inbound_revoked.assert_not_awaited()
+    # Existing provider IDs cannot cross customers/directions.
+    with pytest.raises(SupportValidationError, match='another conversation'):
+        await support_service.sync_linked_device_tombstone({**event, 'sender_phone': '155599999'})
+    with pytest.raises(SupportValidationError, match='another conversation'):
+        await support_service.sync_linked_device_tombstone({**event, 'from_me': False})

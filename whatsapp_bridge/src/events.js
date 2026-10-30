@@ -131,12 +131,12 @@ export function messageStatusEvent(line, nativeId, senderPhone, status, timestam
   };
 }
 
-export function messageTombstoneEvent(line, nativeId, senderPhone, timestamp, deletedTimestamp) {
+export function messageTombstoneEvent(line, nativeId, senderPhone, timestamp, deletedTimestamp, fromMe = false, originalTimestampKnown = true) {
   return {
-    event_id: eventId('message_tombstone', line.line_id, nativeId, 0),
+    event_id: eventId('message_tombstone', line.line_id, nativeId, fromMe && originalTimestampKnown ? timestamp : 0),
     type: 'message_tombstone', line_id: line.line_id,
     display_phone_number: line.display_phone_number,
     message_id: wrapId(line.line_id, nativeId),
-    sender_phone: senderPhone, timestamp, deleted_timestamp: deletedTimestamp, from_me: false,
+    sender_phone: senderPhone, timestamp, deleted_timestamp: deletedTimestamp, from_me: fromMe, original_timestamp_known: originalTimestampKnown,
   };
 }

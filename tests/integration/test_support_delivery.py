@@ -43,7 +43,7 @@ async def test_concurrent_claims(infrastructure):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('kind', ['text', 'location', 'image'])
+@pytest.mark.parametrize('kind', ['text', 'location', 'image', 'document'])
 async def test_concurrent_sends_one_dispatch_and_scoped_ids(infrastructure, monkeypatch, tmp_path, kind):
     repo, sql, _ = infrastructure
     entered, release = asyncio.Event(), asyncio.Event()
@@ -65,6 +65,8 @@ async def test_concurrent_sends_one_dispatch_and_scoped_ids(infrastructure, monk
         common = dict(agent=AGENT, client_message_id='same-browser-key')
         if kind == 'text': return await support_service.send_agent_message(42, body='test', **common)
         if kind == 'location': return await support_service.send_agent_location(42, latitude=1, longitude=2, name=None, address=None, **common)
+        if kind == 'document':
+            return await support_service.send_agent_media(42, media_type='document', content=b'%PDF-1.4 test', content_type='application/pdf', filename='test.pdf', caption=None, **common)
         return await support_service.send_agent_media(42, media_type='image', content=b'image', content_type='image/png', filename='test.png', caption=None, **common)
     task = asyncio.create_task(request())
     await asyncio.wait_for(entered.wait(), 5)
@@ -363,3 +365,33 @@ async def test_cancellation_cleanup_failure_preserves_cancellation_and_recovery(
     assert await repo.recover_abandoned_deliveries() == 1
     result = await repo.get_message(row['id'])
     assert result['send_status'] == 'UNCERTAIN' and not result['delivery_retry_safe']
+
+
+@pytest.mark.asyncio
+async def test_pdf_upload_failure_is_safe_to_retry_without_duplicate_dispatch(infrastructure, tmp_path, caplog):
+    from app.whatsapp_client import WhatsAppMediaError
+    repo, _, _ = infrastructure
+    row, _ = await create(repo, message_type='document')
+    asset = tmp_path / 'document.pdf'
+    asset.write_bytes(b'%PDF-1.4\n')
+    media = SimpleNamespace(get=lambda *_: SimpleNamespace(path=asset, mime_type='application/pdf', filename='document.pdf'))
+    uploads, dispatches = [], []
+    async def upload(**kwargs):
+        uploads.append(kwargs)
+        if len(uploads) == 1:
+            raise WhatsAppMediaError('private provider response', retryable=True)
+        return 'stored-pdf'
+    async def send(**kwargs):
+        dispatches.append(kwargs)
+        return {'messages': [{'id': 'ld:90005:PDFRETRY'}]}
+    transport = SimpleNamespace(upload_media=upload, send_media=send)
+    ticket = await repo.get_ticket(42)
+    failed = await deliver(repo, transport, media, ticket, row)
+    assert failed['send_status'] == 'FAILED' and failed['delivery_retry_safe']
+    assert not dispatches and failed['delivery_started_at'] is None
+    assert 'phase=upload' in caplog.text and 'private provider response' not in caplog.text
+    sent = await deliver(repo, transport, media, ticket, failed, retry=True)
+    assert sent['send_status'] == 'SENT'
+    assert (await deliver(repo, transport, media, ticket, sent, retry=True))['send_status'] == 'SENT'
+    assert len(uploads) == 2 and len(dispatches) == 1
+    assert dispatches[0]['media_type'] == 'document' and dispatches[0]['filename'] == 'document.pdf'

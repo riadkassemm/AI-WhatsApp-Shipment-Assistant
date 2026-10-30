@@ -131,13 +131,14 @@ def test_linked_outgoing_callback_uses_support_sync_without_customer_ai(linked_c
     assert request("POST", "/api/whatsapp/linked-device/events", payload=event).status_code == 503
 
 
-def test_inbound_tombstone_bypasses_customer_ai_and_rejects_content(linked_config, monkeypatch):
+@pytest.mark.parametrize("from_me", [False, True])
+def test_inbound_tombstone_bypasses_customer_ai_and_rejects_content(linked_config, monkeypatch, from_me):
     import app.main as main_module
 
     event = {
         "event_id": "tombstone-1", "type": "message_tombstone",
         "line_id": "90001", "message_id": "ld:90001:REVOKED1",
-        "sender_phone": "96171111111", "from_me": False,
+        "sender_phone": "96171111111", "from_me": from_me,
         "timestamp": 1_700_000_000_000,
         "deleted_timestamp": 1_700_000_001_000,
     }
