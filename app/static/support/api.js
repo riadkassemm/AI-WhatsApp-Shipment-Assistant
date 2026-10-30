@@ -34,11 +34,12 @@ async function performApiRequest(path, options = {}, epoch = dashboardRequestEpo
     else if (/^\/api\/support\/(tickets|chats)\/\d+(?:\?|$)/.test(path)) dashboardHttpCounts.conversation++;
   }
   const response = await fetch(path, {credentials: 'same-origin', ...options, cache:'no-store', headers});
-  if (epoch !== dashboardRequestEpoch) throw new DOMException('Stale staff session', 'AbortError');
+  if (options.signal?.aborted || epoch !== dashboardRequestEpoch) throw new DOMException('Stale staff session', 'AbortError');
   const serverVersion = response.headers && typeof response.headers.get === 'function' ? response.headers.get('X-Support-UI-Version') : null;
   if (serverVersion && serverVersion !== SUPPORT_UI_VERSION) noticeDashboardUpdate(serverVersion);
   let data = {};
   try { data = await response.json(); } catch (_) {}
+  if (options.signal?.aborted || epoch !== dashboardRequestEpoch) throw new DOMException('Stale staff session', 'AbortError');
   if (response.status === 401 && path !== '/api/support/login') {
     if (!state.pageLeaving) showLogin();
     const error = new Error('Your staff session expired. Please sign in again.');

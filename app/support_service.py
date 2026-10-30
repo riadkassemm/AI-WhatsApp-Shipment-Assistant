@@ -2478,7 +2478,10 @@ class SupportService:
             await _gather_or_cancel(
                 load_identity_and_shipment(),
                 load_messages(),
-                support_repository.list_events(ticket_id, limit=150, include_private_activity=agent.is_supervisor),
+                # Read/view audits belong in manager investigation, not the
+                # operational timeline (including for managers). Filter before
+                # LIMIT so they cannot crowd out assignment/resolution events.
+                support_repository.list_events(ticket_id, limit=150, include_private_activity=False),
                 load_history(),
             )
         )
@@ -2493,7 +2496,7 @@ class SupportService:
             "messages_has_more": messages_has_more,
             **history,
             "events": [_safe_context_value(_normalize_row(row)) for row in events
-                       if agent.is_supervisor or row.get("event_type") not in {"CONVERSATION_VIEWED", "INCOMING_MARKED_READ"}],
+                       if row.get("event_type") not in {"CONVERSATION_VIEWED", "INCOMING_MARKED_READ"}],
             "customer_identity": {
                 "source": identity.source if identity is not None else "guest",
                 "name": identity.name if identity is not None else ticket.get("customer_name"),

@@ -2494,6 +2494,13 @@ window.addEventListener('beforeunload', () => {
 window.addEventListener('pagehide', markPageLeaving);
 window.addEventListener('pageshow', event => {
   state.pageLeaving = false;
+  if (event.persisted && !state.authenticated && $('loginPage').classList.contains('hidden')) {
+    // A page restored from the browser's back/forward cache may have cancelled
+    // its session check on pagehide. Let that check finish before starting one.
+    Promise.resolve(state.bootstrapTask).then(() => {
+      if (!state.pageLeaving && !state.authenticated) bootstrap();
+    });
+  }
   if (event.persisted && state.authenticated) {
     if (state.ticketId) openTicket(state.ticketId, {silent: true}).catch(() => {});
     else loadQueue({silent: true}).catch(() => {});

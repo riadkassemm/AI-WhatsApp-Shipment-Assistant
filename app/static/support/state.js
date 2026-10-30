@@ -357,6 +357,7 @@ function showError(message) {
 function markPageLeaving() {
   if (state.pageLeaving) return;
   state.pageLeaving = true;
+  state.sessionCheckController?.abort();
   state.queueRequest += 1;
   state.ticketRequest += 1;
 }

@@ -981,9 +981,18 @@ creator/participant access alone does not qualify. Duplicate event alerts are
 suppressed; messages predating the current event stream and provider messages
 older than two minutes synchronize silently
 (including reconnect backlog). Polling and navigation do not create chat alerts.
-Read/view activity remains recorded, but only Admins and Super Admins receive
-`CONVERSATION_VIEWED` and `INCOMING_MARKED_READ` timeline events. This does not
+Read/view activity remains recorded for manager-only statistics/investigation.
+`CONVERSATION_VIEWED` and `INCOMING_MARKED_READ` are excluded from operational
+chat/ticket timelines for every role, before applying the event limit. This does not
 change conversation visibility, sending permissions or WhatsApp receipt behavior.
+
+The initial session check retries temporary network failures and HTTP
+408/429/500/502/503/504 responses at most twice, after one and two seconds.
+Each attempt has a ten-second deadline; navigation cancels requests/retry timers.
+Concurrent checks share one bootstrap operation. Authentication remains required:
+401 opens sign-in immediately, 403 shows an access error, and exhausted retries
+leave a manual Retry button without clearing the saved workspace. These retries
+apply only to the read-only session check, never to outgoing messages or login.
 
 
 ### Active queue filters and permanent directory removal

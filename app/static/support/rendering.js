@@ -62,6 +62,7 @@ function clearTicketWorkspace() {
 }
 
 function showLogin() {
+  state.sessionCheckController?.abort();
   stopDashboardRefresh();
   state.dashboardReadBoundaries.clear();
   state.chatNotificationIds.clear();
@@ -183,14 +184,27 @@ async function login(event) {
 }
 
 async function bootstrap() {
+  if (state.pageLeaving) return;
+  if (state.bootstrapTask) return state.bootstrapTask;
+  const task = bootstrapSupportWorkspace();
+  state.bootstrapTask = task;
+  try { await task; }
+  finally { if (state.bootstrapTask === task) state.bootstrapTask = null; }
+}
+
+async function bootstrapSupportWorkspace() {
   syncThemeControls();
   text($('sessionLoadingStatus'), 'Checking your session…');
   $('sessionRetryBtn').classList.add('hidden');
   try {
-    state.agent = await api('/api/support/me');
+    const agent = await loadSupportSession();
+    if (state.pageLeaving) return;
+    state.agent = agent;
   } catch (error) {
-    if (state.pageLeaving || error.status === 401) return;
-    text($('sessionLoadingStatus'), 'Unable to check your session. Check your connection and try again.');
+    if (state.pageLeaving || error.status === 401 || error.name === 'AbortError') return;
+    text($('sessionLoadingStatus'), error.status === 403
+      ? 'Your account does not have access to this dashboard. Contact your administrator.'
+      : 'Unable to check your session. Check your connection and try again.');
     $('sessionRetryBtn').classList.remove('hidden');
     return;
   }
@@ -203,6 +217,60 @@ async function bootstrap() {
   } catch (error) {
     if (state.authenticated && !state.pageLeaving) showError(error.message);
   }
+}
+
+async function loadSupportSession() {
+  // Retry only this read-only session lookup. Never reuse a cached identity or
+  // apply these retries to login, message sends or other writes.
+  const controller = new AbortController();
+  state.sessionCheckController = controller;
+  const delays = [0, 1000, 2000];
+  try {
+    for (let attempt = 0; attempt < delays.length; attempt++) {
+      if (state.pageLeaving || controller.signal.aborted) throw new DOMException('Session check cancelled', 'AbortError');
+      if (delays[attempt]) await waitForSessionRetry(delays[attempt], controller.signal);
+      if (state.pageLeaving || controller.signal.aborted) throw new DOMException('Session check cancelled', 'AbortError');
+      const request = new AbortController();
+      const abort = () => request.abort();
+      controller.signal.addEventListener('abort', abort, {once: true});
+      let timedOut = false;
+      const timer = setTimeout(() => { timedOut = true; request.abort(); }, 10000);
+      try {
+        const agent = await api('/api/support/me', {signal: request.signal});
+        if (request.signal.aborted) throw new DOMException('Session request cancelled', 'AbortError');
+        if (state.pageLeaving || controller.signal.aborted) throw new DOMException('Session check cancelled', 'AbortError');
+        return agent;
+      } catch (error) {
+        if (state.pageLeaving || controller.signal.aborted) throw new DOMException('Session check cancelled', 'AbortError');
+        const transient = timedOut || (!error.status && error instanceof TypeError) ||
+          [408, 429, 500, 502, 503, 504].includes(error.status);
+        if (!transient || attempt === delays.length - 1) {
+          if (timedOut) throw new Error('Session check timed out.');
+          throw error;
+        }
+        text($('sessionLoadingStatus'), 'Connection interrupted. Retrying your session…');
+      } finally {
+        clearTimeout(timer);
+        controller.signal.removeEventListener('abort', abort);
+      }
+    }
+  } finally {
+    if (state.sessionCheckController === controller) state.sessionCheckController = null;
+  }
+}
+
+function waitForSessionRetry(delay, signal) {
+  return new Promise((resolve, reject) => {
+    let timer;
+    const finish = () => { clearTimeout(timer); signal.removeEventListener('abort', abort); resolve(); };
+    const abort = () => {
+      clearTimeout(timer); signal.removeEventListener('abort', abort);
+      reject(new DOMException('Session check cancelled', 'AbortError'));
+    };
+    if (signal.aborted) { abort(); return; }
+    signal.addEventListener('abort', abort, {once: true});
+    timer = setTimeout(finish, delay);
+  });
 }
 
 async function logout() {
@@ -2072,6 +2140,7 @@ function labelMessageAction(button, action, label) {
 }
 
 function addEvent(container, event) {
+  if (['CONVERSATION_VIEWED', 'INCOMING_MARKED_READ'].includes(event.event_type)) return;
   const element = document.createElement('div');
   element.className = 'event';
   let label = String(event.event_type || 'EVENT').replaceAll('_', ' ');
