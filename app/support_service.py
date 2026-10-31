@@ -947,7 +947,17 @@ class SupportService:
             raise SupportValidationError("Only contacts and unsupported inbound snapshots are accepted.")
         return await self._sync_linked_device_transcript(incoming, from_me=False)
 
-    async def _sync_linked_device_transcript(self, incoming: IncomingWhatsAppMessage, *, from_me: bool) -> bool:
+    async def sync_linked_device_recovered(self, incoming: IncomingWhatsAppMessage) -> bool:
+        """Record a customer message sent while the line was offline, for staff only.
+
+        It is hours or minutes old by now, so it never reaches the AI or triggers
+        an automatic reply. It joins the conversation open when it was sent, else
+        the live one, else a new unassigned ticket, so no recovered message is lost.
+        """
+        return await self._sync_linked_device_transcript(incoming, from_me=False, recovered=True)
+
+    async def _sync_linked_device_transcript(self, incoming: IncomingWhatsAppMessage, *, from_me: bool,
+                                             recovered: bool = False) -> bool:
         direction = "OUTBOUND" if from_me else "INBOUND"
         line_id = str(incoming.business_phone_number_id or "")
         peer = normalize_phone(incoming.from_number)
@@ -1045,8 +1055,12 @@ class SupportService:
                     business_phone_number_id=line_id,
                     business_display_phone_number=incoming.business_display_phone_number,
                     customer_id=None, customer_userid=None, customer_name=None,
-                    reason="Conversation started in WhatsApp app." if from_me else "WhatsApp message requires staff review.",
-                    ai_summary="Conversation started in WhatsApp app." if from_me else "Unsupported inbound WhatsApp content recovered for staff.",
+                    reason=("Conversation started in WhatsApp app." if from_me
+                            else "Customer message received while the WhatsApp line was offline." if recovered
+                            else "WhatsApp message requires staff review."),
+                    ai_summary=("Conversation started in WhatsApp app." if from_me
+                                else "Customer message received while the WhatsApp line was offline." if recovered
+                                else "Unsupported inbound WhatsApp content recovered for staff."),
                     tracking_reference=None, requested_action=None,
                     current_language=None, communication_style=None,
                     context_json="{}", source_whatsapp_message_id=None,
@@ -1331,6 +1345,46 @@ class SupportService:
                 # Do not log provider exceptions, recipient IDs or message text.
                 logger.warning('Delivery verification unavailable: message_id=%s', row['id'])
         return int(rows[-1]['id']) if len(rows) == 20 else 0
+
+    async def resend_held_replies(self) -> int:
+        """Send staff replies held while their line was offline, once it reconnects.
+
+        Only proven non-sends are held (the bridge refused them before dispatch),
+        and they go through the same fenced retry as the Resend button, oldest
+        first. Returns how many were sent.
+        """
+        for ticket_id in await support_repository.expire_held_replies():
+            await publish_support_event("ticket_updated", ticket_id=ticket_id)
+        held = await support_repository.list_held_replies()
+        if not held:
+            return 0
+        connected = {str(line.get("line_id")) for line in (await linked_device_client.get_status()).get("lines", [])
+                     if isinstance(line, dict) and line.get("status") == "connected"}
+        sent, stalled = 0, set()
+        for message in held:
+            ticket = await support_repository.get_ticket(int(message["ticket_id"]))
+            line_id = str((ticket or {}).get("business_phone_number_id") or "")
+            if not ticket or ticket.get("active_key") is None or line_id not in connected or line_id in stalled:
+                continue
+            kind = str(message.get("message_type") or "text")
+            if kind in SUPPORT_MEDIA_MESSAGE_TYPES and support_media_store.get(int(ticket["id"]), int(message["id"])) is None:
+                continue
+            try:
+                updated = await self._deliver_outbound(ticket, message, retry=True)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning("Held reply could not be resent: message_id=%s", message["id"])
+                stalled.add(line_id)
+                continue
+            if updated.get("send_status") == "SENT":
+                sent += 1
+            else:
+                # Keep order: later replies on this line wait for the next pass.
+                stalled.add(line_id)
+        if sent:
+            logger.info("Held replies sent after reconnect: count=%s", sent)
+        return sent
 
     async def check_message_delivery(self, ticket_id, message_id, *, agent):
         ticket, message = await self._delivery_action_context(ticket_id, message_id, agent)
@@ -2622,7 +2676,8 @@ class SupportService:
                 "Only resolved or closed history tickets can be deleted."
             )
 
-        deleted = await support_repository.delete_history_ticket(ticket_id)
+        deleted = await support_repository.delete_history_ticket(ticket_id, actor_id=agent.id, actor_name=agent.name)
+        logger.info("History ticket deleted: ticket_id=%s actor_staff_id=%s", ticket_id, agent.id)
         try:
             await asyncio.to_thread(support_media_store.delete_ticket_media, ticket_id)
         except Exception:
@@ -2669,7 +2724,8 @@ class SupportService:
         if chat.get("active_key") is not None or chat.get("status") not in {"RESOLVED", "CLOSED"}:
             raise SupportConflictError("Close this chat before deleting it.")
 
-        deleted = await support_repository.delete_staff_chat(chat_id)
+        deleted = await support_repository.delete_staff_chat(chat_id, actor_id=agent.id, actor_name=agent.name)
+        logger.info("Staff chat deleted: chat_id=%s actor_staff_id=%s", chat_id, agent.id)
         try:
             await asyncio.to_thread(support_media_store.delete_ticket_media, chat_id)
         except Exception:

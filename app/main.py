@@ -59,6 +59,7 @@ from app.support_service import sanitize_support_text, support_service
 from app.support_contacts import format_shared_contacts
 from app.support_ui import SUPPORT_UI_VERSION, router as support_ui_router
 from app.linked_device_api import router as linked_device_api_router
+from app.whatsapp_line_health import router as whatsapp_line_health_router
 from app.whatsapp_registry import WhatsAppRegistryError, whatsapp_registry_service
 from app.whatsapp_client import (
     IncomingWhatsAppMessage,
@@ -127,6 +128,7 @@ app = FastAPI(title="AI Shipment Assistant - WhatsApp Backend", lifespan=_lifesp
 app.include_router(support_api_router)
 app.include_router(support_ui_router)
 app.include_router(linked_device_api_router)
+app.include_router(whatsapp_line_health_router)
 
 
 @app.middleware("http")

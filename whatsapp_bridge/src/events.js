@@ -39,7 +39,18 @@ export function mutationEvent(line, message, senderPhone) {
   };
 }
 
-function chatMessageEvent(line, message, senderPhone, mediaId, type) {
+// A short, content-free label for why WhatsApp closed a connection, such as
+// "conflict:device_removed". Never carries payloads, JIDs or phone numbers.
+export function disconnectReason(error) {
+  let node = error?.data;
+  if (node?.tag === 'stream:error' && Array.isArray(node.content)) node = node.content.find(item => item?.tag) ?? node;
+  const parts = node?.tag ? [node.tag, node.attrs?.type] : [error?.output?.payload?.message ?? error?.message];
+  const label = parts.filter(part => typeof part === 'string' && part).join(':').toLowerCase()
+    .replace(/[^a-z0-9:]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 60);
+  return label && !/\d{5,}/.test(label) ? label : null;
+}
+
+function chatMessageEvent(line, message, senderPhone, mediaId, type, { recovered = false } = {}) {
   if (Boolean(message.key?.fromMe) !== (type === 'outgoing_message') || !message.key?.id || !senderPhone) return null;
   const content = normalizeMessageContent(message.message);
   if (!content || content.protocolMessage) return null;
@@ -88,17 +99,21 @@ function chatMessageEvent(line, message, senderPhone, mediaId, type) {
   };
   // Unknown inbound content must remain visible to staff, without entering AI
   // or sending an automatic response during recovery of previously missed rows.
-  const eventType = type === 'message' && ['unsupported', 'contacts'].includes(node.type) ? 'message_snapshot' : type;
+  // Messages recovered from history after an outage are old by now: same rule.
+  const snapshot = type === 'message' && (recovered || ['unsupported', 'contacts'].includes(node.type));
+  const eventType = snapshot ? 'message_snapshot' : type;
+  const variant = recovered && type === 'message' ? 'recovered' : node.type === 'contacts' ? 'contacts-v1' : '';
   return {
-    event_id: eventId(eventType, line.line_id, message.key.id, 0, node.type === 'contacts' ? 'contacts-v1' : ''), type: eventType, line_id: line.line_id,
+    event_id: eventId(eventType, line.line_id, message.key.id, 0, variant), type: eventType, line_id: line.line_id,
+    ...(recovered && type === 'message' ? { recovered: true } : {}),
     display_phone_number: line.display_phone_number, message_id: node.id,
     timestamp, from_me: type === 'outgoing_message', sender_phone: senderPhone,
     payload: { object: 'whatsapp_business_account', entry: [{ id: line.line_id, changes: [{ field: 'messages', value }] }] },
   };
 }
 
-export function inboundEvent(line, message, senderPhone, mediaId = null) {
-  return chatMessageEvent(line, message, senderPhone, mediaId, 'message');
+export function inboundEvent(line, message, senderPhone, mediaId = null, options = {}) {
+  return chatMessageEvent(line, message, senderPhone, mediaId, 'message', options);
 }
 
 export function outgoingEvent(line, message, senderPhone, mediaId = null) {

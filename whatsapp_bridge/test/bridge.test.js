@@ -12,7 +12,7 @@ import pino from 'pino';
 import { readJournal } from '../src/journal-store.js';
 import { Bridge } from '../src/bridge.js';
 import { readConfig, wrapId, unwrapId, validateLineManifest } from '../src/config.js';
-import { inboundEvent, outgoingEvent, mutationEvent } from '../src/events.js';
+import { inboundEvent, outgoingEvent, mutationEvent, disconnectReason } from '../src/events.js';
 import { acquireDataDirectory, FileStore } from '../src/storage.js';
 import { createServer } from '../src/server.js';
 import { preserveNativeMutationMetadata } from '../src/native-events.js';
@@ -2158,4 +2158,94 @@ test('reservation storage failure prevents submission and does not publish a fal
   assert.equal(bridge.deliveryStatus(LINE,{client_message_id:'disk-error',phone:PHONE}).status,'unknown');
   // Restore only the fixture for teardown; real storage failure requires restart.
   line.store.append=append;line.store.failed=false;
+});
+
+
+test('disconnect reasons are short labels without identifiers', () => {
+  assert.equal(disconnectReason({ data: { tag: 'stream:error', attrs: { code: '401' }, content: [{ tag: 'conflict', attrs: { type: 'device_removed' } }] } }), 'conflict:device_removed');
+  assert.equal(disconnectReason({ data: { tag: 'conflict', attrs: { type: 'replaced' } } }), 'conflict:replaced');
+  assert.equal(disconnectReason({ output: { payload: { message: 'Connection Failure' } } }), 'connection_failure');
+  assert.equal(disconnectReason({ message: 'Stream Errored (conflict)' }), 'stream_errored_conflict');
+  assert.equal(disconnectReason({ message: `session for ${PHONE}@s.whatsapp.net` }), null);
+  assert.equal(disconnectReason(undefined), null);
+});
+
+test('messages recovered after an outage become staff-only snapshots', () => {
+  const line = { line_id: LINE, display_phone_number: '96170111111' };
+  const message = original('LATE1', false);
+  const normal = inboundEvent(line, message, PHONE);
+  const recovered = inboundEvent(line, message, PHONE, null, { recovered: true });
+  assert.equal(normal.type, 'message');
+  assert.equal(normal.recovered, undefined);
+  assert.equal(recovered.type, 'message_snapshot');
+  assert.equal(recovered.recovered, true);
+  assert.notEqual(recovered.event_id, normal.event_id);
+  assert.equal(recovered.payload.entry[0].changes[0].value.messages[0].type, 'text');
+});
+
+test('a WhatsApp logout records why and when, and re-pairing recovers the gap', async t => {
+  const { bridge, line, socket } = await fixture(t);
+  const before = Date.now();
+  await bridge.connectionUpdate(line, socket, { connection: 'close', lastDisconnect: { error: {
+    output: { statusCode: DisconnectReason.loggedOut }, data: { tag: 'conflict', attrs: { type: 'device_removed' } } } } });
+  let status = bridge.lineStatus(line);
+  assert.equal(status.status, 'logged_out');
+  assert.equal(status.logout_reason, 'conflict:device_removed');
+  assert.ok(status.logged_out_at >= before && status.disconnected_since >= before);
+  assert.equal(status.recovering_history, false, 'nothing is recovered until it pairs again');
+  assert.ok(line.store.data.recover_since <= status.disconnected_since - 60_000);
+
+  let options;
+  const repaired = mockSocket();
+  bridge.makeSocket = value => { options = value; return repaired; };
+  await bridge.connect(LINE);
+  await bridge.connectionUpdate(line, repaired, { connection: 'open' });
+  status = bridge.lineStatus(line);
+  assert.equal(status.status, 'connected');
+  assert.equal(status.logged_out_at, null);
+  assert.equal(status.recovering_history, true);
+  assert.equal(options.shouldSyncHistoryMessage({ syncType: proto.HistorySync.HistorySyncType.RECENT }), true);
+  assert.equal(options.shouldSyncHistoryMessage({ syncType: proto.HistorySync.HistorySyncType.FULL }), false);
+
+  const at = ms => Math.floor(ms / 1000);
+  const old = { ...original('BEFORE', false), messageTimestamp: at(Date.now() - 2 * 60 * 60_000) };
+  const missed = { ...original('MISSED', false), messageTimestamp: at(Date.now() - 30_000) };
+  const fromPhone = { ...original('PHONEREPLY', true), messageTimestamp: at(Date.now() - 20_000) };
+  await repaired.eventHandler({ 'messaging-history.set': { messages: [fromPhone, old, missed] } });
+  const events = bridge.outbox.data.entries.map(entry => entry.event);
+  const missedEvent = events.find(event => event.message_id === wrapId(LINE, 'MISSED'));
+  assert.equal(missedEvent.type, 'message_snapshot');
+  assert.equal(missedEvent.recovered, true);
+  assert.equal(events.find(event => event.message_id === wrapId(LINE, 'PHONEREPLY')).type, 'outgoing_message');
+  assert.equal(events.some(event => event.message_id === wrapId(LINE, 'BEFORE')), false, 'already-handled history is skipped');
+  // Replayed history never produces a second event.
+  const count = bridge.outbox.data.entries.length;
+  await repaired.eventHandler({ 'messaging-history.set': { messages: [missed] } });
+  assert.equal(bridge.outbox.data.entries.length, count);
+
+  // After the window, history is no longer downloaded.
+  await line.store.update(data => { data.recover_until = Date.now() - 1; });
+  await bridge.recoverPendingOnce();
+  assert.equal(line.store.data.recover_since, undefined);
+  assert.equal(options.shouldSyncHistoryMessage({ syncType: proto.HistorySync.HistorySyncType.RECENT }), false);
+});
+
+test('linking a removed number again recovers what was sent while it was gone', async t => {
+  const { bridge, line } = await fixture(t);
+  line.status = 'disconnected';
+  line.disconnectedSince = Date.now() - 600_000;
+  await bridge.retirePhone(line);
+  const entry = bridge.retiredPhones.data.phones['96170111111'];
+  assert.ok(entry.offline_since <= Date.now() - 600_000 && entry.removed_at <= Date.now());
+  // The fresh line's second socket knows its phone before WhatsApp sends history.
+  await line.store.update(data => { data.bound_phone = ''; });
+  line.auth.state.creds.me = { id: '96170111111:2@s.whatsapp.net' };
+  await bridge.adoptRetiredPhone(line);
+  assert.equal(line.store.data.recover_since, entry.offline_since - 60_000);
+  assert.equal(bridge.retiredPhones.data.phones['96170111111'], undefined, 'adopted once');
+  // A line that was paired before is a re-pair, not a re-link.
+  await line.store.update(data => { delete data.recover_since; data.bound_phone = '96170111111'; });
+  await bridge.retirePhone(line);
+  await bridge.adoptRetiredPhone(line);
+  assert.equal(line.store.data.recover_since, undefined);
 });

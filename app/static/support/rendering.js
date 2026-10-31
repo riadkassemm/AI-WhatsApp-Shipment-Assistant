@@ -2052,9 +2052,16 @@ function addMessage(container, m, extraClass = '') {
     const failed = document.createElement('span');
     failed.className = 'send-state failed';
     failed.title = m.error_message || 'WhatsApp could not send this message.';
-    const failureLabel = String(m.error_message || '').startsWith('WhatsApp 131047:')
+    let failureLabel = String(m.error_message || '').startsWith('WhatsApp 131047:')
       ? 'Not sent · WhatsApp reply window closed' : 'Not sent';
-    failed.append(createIcon('alert', 'icon icon-sm'), document.createTextNode(failureLabel));
+    const heldUntil = m.held_until ? parseServerDate(m.held_until) : null;
+    if (heldUntil && !Number.isNaN(heldUntil.getTime())) {
+      failed.className = 'send-state held';
+      failureLabel = 'Waiting for the line to reconnect · sends automatically';
+      failed.title = 'This WhatsApp line was offline. The reply is sent automatically once it reconnects, until '
+        + heldUntil.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'}) + '.';
+    }
+    failed.append(createIcon(heldUntil ? 'clock' : 'alert', 'icon icon-sm'), document.createTextNode(failureLabel));
     meta.append(failed);
     if (!extraClass && canResendMessage(m)) {
       const resend = document.createElement('button');
@@ -2233,7 +2240,7 @@ function addDateDivider(container, value) {
 
 function timelineSignature(data) {
   const messageSignature = message => [
-    message.id, message.sender_name, message.reply_to?.sender_name, message.updated_at, message.send_status, message.delivery_status, message.error_message,
+    message.id, message.sender_name, message.reply_to?.sender_name, message.updated_at, message.send_status, message.delivery_status, message.error_message, message.held_until,
     message.media_available, message.body, message.version, message.edited_at,
     message.deleted_for_everyone_at, message.can_edit, message.can_delete_for_everyone,
     (message.reactions || []).map(reaction => [reaction.id, reaction.emoji, reaction.reactor_type, reaction.reactor_name, reaction.updated_at])
@@ -3267,6 +3274,7 @@ async function openTicket(id, {silent = false, refreshQueue = false, refreshHist
     if (data.permissions.can_reply && isStaffChat(ticket) && !ticket.active_key) {
       text($('composerHelp'), 'Sending will reopen this chat and preserve its full history.');
     }
+    if (data.permissions.can_reply) renderComposerLineNotice(ticket);
     if ((isNewSelection && !restoring) || !silent || refreshQueue) await loadQueue({silent: true});
     if (isNewSelection) setAppStatus(isStaffChat(ticket) ? ('Opened chat with ' + (ticket.customer_name || ticket.whatsapp_phone || 'customer') + '.') : ('Opened ' + (ticket.ticket_reference || 'ticket') + ' for ' + (ticket.customer_name || ticket.customer_userid || ticket.whatsapp_phone || 'customer') + '.'));
   } catch (e) {

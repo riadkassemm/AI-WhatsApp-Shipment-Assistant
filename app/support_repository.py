@@ -259,6 +259,11 @@ _SUPPORT_SCHEMA_MIGRATIONS: tuple[tuple[str, dict[str, set[str]]], ...] = (
     ("migrations/20261029_support_send_fingerprints.sql", {"support_ticket_messages": {"request_fingerprint"}}),
     ("migrations/20261029_support_dashboard_reads.sql", {"support_dashboard_reads": {"ticket_id", "staff_id", "last_message_id", "updated_at"}}),
     ("migrations/20261029_support_number_profile_deletion.sql", {"support_tickets": {"business_display_name", "business_number_retired_at"}}),
+    ("migrations/20261031_line_outage_resilience.sql", {
+        "support_ticket_messages": {"held_until"},
+        "support_deletion_audit": {"ticket_id", "ticket_reference", "conversation_origin", "status", "business_phone_number_id",
+                                   "message_count", "deleted_by_staff_id", "deleted_by_name", "deleted_at"},
+    }),
 )
 
 MAX_QUICK_REPLIES_PER_STAFF = 200
@@ -420,7 +425,8 @@ class SupportRepository(DashboardRepositoryMixin, DeliveryRepositoryMixin, ReadS
                     await attach_conversation_read_state(cur, [row])
                 return row
 
-    async def delete_history_ticket(self, ticket_id: int) -> dict[str, Any]:
+    async def delete_history_ticket(self, ticket_id: int, *, actor_id: str | None = None,
+                                    actor_name: str | None = None) -> dict[str, Any]:
         """Hard-delete one resolved/closed ticket and its support timeline.
 
         The row is locked and revalidated inside the same transaction so a
@@ -455,7 +461,7 @@ class SupportRepository(DashboardRepositoryMixin, DeliveryRepositoryMixin, ReadS
                             "Only resolved or closed history tickets can be deleted."
                         )
 
-                    if await self._delete_ticket_rows(cur, ticket_id) != 1:
+                    if await self._delete_ticket_rows(cur, ticket_id, actor_id=actor_id, actor_name=actor_name) != 1:
                         raise SupportRepositoryError("History ticket delete did not remove one ticket.")
                 await conn.commit()
             except Exception:
@@ -464,12 +470,22 @@ class SupportRepository(DashboardRepositoryMixin, DeliveryRepositoryMixin, ReadS
         return ticket
 
     @staticmethod
-    async def _delete_ticket_rows(cur: Any, ticket_id: int) -> int:
+    async def _delete_ticket_rows(cur: Any, ticket_id: int, *, actor_id: str | None = None,
+                                  actor_name: str | None = None) -> int:
         """Delete one ticket/chat and its timeline rows; return deleted ticket rows.
 
         Child rows are removed explicitly rather than depending on undocumented
-        foreign-key cascade behavior in existing deployments.
+        foreign-key cascade behavior in existing deployments. The deletion is
+        recorded first, without customer content, in a table it does not touch.
         """
+        await cur.execute(
+            """INSERT INTO support_deletion_audit (ticket_id, ticket_reference, conversation_origin, status,
+                   business_phone_number_id, message_count, deleted_by_staff_id, deleted_by_name, deleted_at)
+               SELECT t.id, t.ticket_reference, t.conversation_origin, t.status, t.business_phone_number_id,
+                   (SELECT COUNT(*) FROM support_ticket_messages m WHERE m.ticket_id = t.id), %s, %s, UTC_TIMESTAMP(6)
+               FROM support_tickets t WHERE t.id = %s""",
+            (actor_id, actor_name, ticket_id),
+        )
         for statement in (
             "DELETE FROM support_ticket_events WHERE ticket_id = %s",
             "DELETE FROM support_message_reactions WHERE ticket_id = %s",
@@ -482,7 +498,8 @@ class SupportRepository(DashboardRepositoryMixin, DeliveryRepositoryMixin, ReadS
         await cur.execute("DELETE FROM support_tickets WHERE id = %s", (ticket_id,))
         return int(cur.rowcount or 0)
 
-    async def delete_staff_chat(self, chat_id: int) -> dict[str, Any]:
+    async def delete_staff_chat(self, chat_id: int, *, actor_id: str | None = None,
+                                actor_name: str | None = None) -> dict[str, Any]:
         """Hard-delete one closed staff-initiated chat and its timeline.
 
         Like history tickets, the row is locked and revalidated in the same
@@ -513,7 +530,7 @@ class SupportRepository(DashboardRepositoryMixin, DeliveryRepositoryMixin, ReadS
                         or chat.get("active_key") is not None
                     ):
                         raise SupportConflictError("Close this chat before deleting it.")
-                    if await self._delete_ticket_rows(cur, chat_id) != 1:
+                    if await self._delete_ticket_rows(cur, chat_id, actor_id=actor_id, actor_name=actor_name) != 1:
                         raise SupportRepositoryError("Chat delete did not remove one chat.")
                 await conn.commit()
             except Exception:

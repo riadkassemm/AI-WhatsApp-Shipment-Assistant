@@ -1546,3 +1546,7 @@ button.message-quote.reply-loading { opacity: .65; cursor: progress; }
 .queue-filters select { display: block; width: 100%; margin-top: 0; }
 .unread-dot { display: inline-block; width: 8px; height: 8px; margin-inline-start: 7px; border-radius: 50%; background: #16a34a; flex-shrink: 0; }
 .toast-open { color: inherit; text-align: start; background: transparent; border: 0; cursor: pointer; font: inherit; padding: 0; }
+.line-alert-banner { position: fixed; top: 12px; left: 50%; transform: translateX(-50%); z-index: var(--z-toast, 1000); display: flex; align-items: center; gap: 10px; width: max-content; max-width: min(720px, calc(100vw - 32px)); padding: 8px 8px 8px 14px; border: 1px solid color-mix(in srgb, var(--danger) 45%, var(--border)); border-radius: var(--radius-md); background: var(--danger-soft); color: var(--text-strong); box-shadow: var(--shadow-md); font-size: var(--text-sm); }
+.line-alert-banner > .icon { flex: none; color: var(--danger); }
+.line-alert-banner .btn { flex: none; }
+.send-state.held { color: var(--warning); }
