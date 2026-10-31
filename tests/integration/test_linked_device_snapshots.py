@@ -108,3 +108,27 @@ async def test_outgoing_tombstones_recover_missing_original_without_new_conversa
         await support_service.sync_linked_device_tombstone({**event, 'sender_phone': '155599999'})
     with pytest.raises(SupportValidationError, match='another conversation'):
         await support_service.sync_linked_device_tombstone({**event, 'from_me': False})
+
+
+@pytest.mark.asyncio
+async def test_recovered_history_joins_the_open_ticket_or_opens_one_without_customer_sends(infrastructure, monkeypatch):
+    repo, sql, _ = infrastructure
+    from dataclasses import replace
+    monkeypatch.setattr(service, 'get_transport', lambda *_: 'linked_device')
+    sends = AsyncMock(side_effect=AssertionError('Recovered messages must not send customer messages'))
+    monkeypatch.setattr(service, 'whatsapp_client', SimpleNamespace(send_text=sends))
+    monkeypatch.setattr(service, 'publish_support_event', AsyncMock())
+    await sql("UPDATE support_tickets SET created_at=UTC_TIMESTAMP(6)-INTERVAL 1 HOUR WHERE id=42")
+    text = replace(snapshot('ld:90005:OFFLINE1'), message_type='text', text='Sent while the line was down')
+    assert await support_service.sync_linked_device_recovered(text)
+    assert await support_service.sync_linked_device_recovered(text)
+    rows = await sql('SELECT * FROM support_ticket_messages WHERE whatsapp_message_id=%s', (text.message_id,))
+    assert len(rows) == 1 and rows[0]['ticket_id'] == 42 and rows[0]['body'] == 'Sent while the line was down'
+    assert rows[0]['sender_type'] == 'CUSTOMER' and rows[0]['direction'] == 'INBOUND'
+    # A customer with no conversation gets one unassigned ticket for staff.
+    stranger = replace(text, from_number='155500099', message_id='ld:90005:OFFLINE2')
+    assert await support_service.sync_linked_device_recovered(stranger)
+    tickets = await sql("SELECT * FROM support_tickets WHERE whatsapp_phone='155500099'")
+    assert len(tickets) == 1 and tickets[0]['status'] == 'NEW' and tickets[0]['current_assignee_id'] is None
+    assert tickets[0]['reason'] == 'Customer message received while the WhatsApp line was offline.'
+    sends.assert_not_awaited()
