@@ -10,6 +10,7 @@ import aiomysql
 import httpx
 
 from app.whatsapp_registry_removal import RegistryMutationMixin, delete_number_profile, removed_number
+from app.whatsapp_relink import adopt_retired_history, removal_details
 from app.config import removed_linked_device_line_ids, settings
 from app.support_auth import SupportAgent
 from app.whatsapp_client import configured_linked_device_lines, get_transport, linked_device_client
@@ -242,8 +243,9 @@ class WhatsAppRegistryRepository(RegistryMutationMixin):
                     tickets = list(await cur.fetchall())
                     if tickets and not close_active_tickets:
                         raise WhatsAppRegistryConflictError("A conversation became active while unlinking. Confirm closing it and retry Remove and unlink.")
-                    details = json.dumps({"reason": "whatsapp_line_removed", "phone_number_id": line_id})
                     for ticket in tickets:
+                        # Record the prior state so re-linking this phone can restore it.
+                        details = json.dumps(removal_details(ticket, line_id))
                         await cur.execute(
                             """
                             UPDATE support_tickets SET status = 'CLOSED', active_key = NULL,
@@ -269,6 +271,40 @@ class WhatsAppRegistryRepository(RegistryMutationMixin):
                     await delete_number_profile(cur, row)
                 await conn.commit()
                 return tickets
+            except Exception:
+                await conn.rollback()
+                raise
+
+    async def adopt_retired_history(
+        self, line_id: str, phone: str, *, actor_id: int, actor_name: str, apply: bool = True,
+        archived_only: bool = False,
+    ) -> dict[str, Any]:
+        """Move a removed line's history for the same phone onto ``line_id``, atomically."""
+        async with self.mutation_connection() as conn:
+            await conn.begin()
+            try:
+                async with conn.cursor(aiomysql.DictCursor) as cur:
+                    summary = await adopt_retired_history(
+                        cur, line_id=line_id, phone=phone, actor_id=actor_id, actor_name=actor_name, apply=apply,
+                        archived_only=archived_only,
+                    )
+                    if apply and summary["from_lines"]:
+                        await cur.execute(
+                            """
+                            INSERT INTO whatsapp_integration_audit (action, actor_staff_id, phone_number_id, details_json)
+                            VALUES ('LINKED_DEVICE_HISTORY_RESTORED', %s, %s, %s)
+                            """, (actor_id, line_id, json.dumps({
+                                "from_phone_number_ids": summary["from_lines"], "archived_only": archived_only,
+                                "moved_conversations": summary["moved"],
+                                "restored_conversations": len(summary["restored"]),
+                                "conflicting_conversations": len(summary["conflicts"]),
+                            })),
+                        )
+                if apply:
+                    await conn.commit()
+                else:
+                    await conn.rollback()
+                return summary
             except Exception:
                 await conn.rollback()
                 raise
@@ -732,6 +768,39 @@ class WhatsAppRegistryService:
         await publish_support_event("ticket_queues_changed")
         return len(tickets)
 
+    async def restore_relinked_history(
+        self, agent: SupportAgent, line_id: str, phone: str, *, apply: bool = True, archived_only: bool = False,
+    ) -> dict[str, Any]:
+        """Bring a removed number's history back when the same phone is linked again."""
+        self._require_manager(agent)
+        summary = await self.repository.adopt_retired_history(
+            line_id, phone, actor_id=int(agent.id), actor_name=agent.name, apply=apply, archived_only=archived_only,
+        )
+        if not apply or not summary["from_lines"]:
+            return summary
+        from app.conversation_store import conversation_store
+        from app.support_events import publish_support_event
+        from app.support_service import support_service
+
+        for item in summary["restored"]:
+            try:
+                customer = str(item["whatsapp_phone"])
+                conversation = await conversation_store.get_or_create(
+                    customer, conversation_key=f"{line_id}:{customer}", business_phone_number_id=line_id,
+                    business_display_phone_number=phone,
+                )
+                await support_service.reconcile_conversation_mode(conversation, {"id": item["id"]})
+            except Exception:
+                # The database is authoritative; the next inbound message reconciles the mode.
+                logger.exception("Restored conversation cache could not be updated: ticket_id=%s", item["id"])
+            await publish_support_event("ticket_updated", ticket_id=int(item["id"]), status=item["status"])
+        await publish_support_event("ticket_queues_changed")
+        logger.info(
+            "Removed WhatsApp history adopted: line_id=%s from_lines=%s moved=%s restored=%s conflicts=%s",
+            line_id, ",".join(summary["from_lines"]), summary["moved"], len(summary["restored"]), len(summary["conflicts"]),
+        )
+        return summary
+
     async def sync_waba(self, agent: SupportAgent, waba_id: str) -> dict[str, Any]:
         self._require_manager(agent)
         waba_id = _clean_id(waba_id, label="WhatsApp Business Account ID")
@@ -858,6 +927,12 @@ class WhatsAppRegistryService:
             phone_number_id,
             enabled,
         )
+        if enabled and linked_display_number:
+            try:
+                await self.restore_relinked_history(agent, phone_number_id, linked_display_number)
+            except Exception:
+                # The number is live either way; scripts/restore_relinked_history.py can finish this.
+                logger.exception("Removed WhatsApp history could not be adopted: line_id=%s", phone_number_id)
         return await self.list_payload(agent)
 
     async def observe_inbound(

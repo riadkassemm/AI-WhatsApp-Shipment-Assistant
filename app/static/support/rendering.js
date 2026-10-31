@@ -2190,15 +2190,18 @@ function addEvent(container, event) {
   if (['CONVERSATION_VIEWED', 'INCOMING_MARKED_READ'].includes(event.event_type)) return;
   const element = document.createElement('div');
   element.className = 'event';
-  let label = String(event.event_type || 'EVENT').replaceAll('_', ' ');
-  if (event.event_type === 'TICKET_TRANSFERRED') {
-    try {
-      const details = typeof event.details_json === 'string' ? JSON.parse(event.details_json) : (event.details_json || {});
-      if (details.from_agent_name && details.to_agent_name) label = 'Transferred: ' + details.from_agent_name + ' → ' + details.to_agent_name;
-    } catch (_) {}
+  let label = formatStatus(String(event.event_type || 'EVENT').replaceAll('_', ' '));
+  let details = {};
+  try { details = (typeof event.details_json === 'string' ? JSON.parse(event.details_json) : event.details_json) || {}; } catch (_) {}
+  if (event.event_type === 'TICKET_TRANSFERRED' && details.from_agent_name && details.to_agent_name) {
+    label = 'Transferred: ' + details.from_agent_name + ' → ' + details.to_agent_name;
+  } else if (['TICKET_CLOSED', 'CHAT_CLOSED'].includes(event.event_type) && details.reason === 'whatsapp_line_removed') {
+    label = 'Archived: WhatsApp number removed';
+  } else if (['TICKET_RESTORED', 'CHAT_RESTORED'].includes(event.event_type)) {
+    label = 'Restored: WhatsApp number linked again' + (details.restored_status ? ' (' + formatStatus(details.restored_status) + ')' : '');
   }
   const actor = event.actor_name || event.actor_type || 'System';
-  element.textContent = formatStatus(label) + ' · ' + actor + ' · ' + fmt(event.created_at);
+  element.textContent = label + ' · ' + actor + ' · ' + fmt(event.created_at);
   container.append(element);
 }
 

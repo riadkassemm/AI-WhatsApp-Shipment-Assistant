@@ -5,7 +5,8 @@ from statistics import mean, median
 TIMING_METRICS = ('average_handling_seconds', 'median_handling_seconds',
                   'average_resolution_seconds', 'median_resolution_seconds')
 LIFECYCLE_EVENTS = ('TICKET_CLAIMED', 'TICKET_TRANSFERRED', 'TICKET_RESOLVED',
-                    'TICKET_REOPENED', 'CHAT_STARTED', 'CHAT_REOPENED', 'CHAT_CLOSED', 'STATUS_CHANGED')
+                    'TICKET_REOPENED', 'CHAT_STARTED', 'CHAT_REOPENED', 'CHAT_CLOSED', 'STATUS_CHANGED',
+                    'TICKET_RESTORED', 'CHAT_RESTORED')
 
 
 def details(event):
@@ -40,7 +41,19 @@ def responsibility_periods(events, as_of):
         if at > as_of or kind not in LIFECYCLE_EVENTS:
             continue
         actor = str(event.get('actor_id') or '') if event.get('actor_type') == 'AGENT' else ''
-        if kind in {'TICKET_CLAIMED', 'CHAT_STARTED', 'CHAT_REOPENED', 'TICKET_REOPENED'}:
+        if kind in {'TICKET_RESTORED', 'CHAT_RESTORED'}:
+            # Re-linking a removed number hands the conversation back to its
+            # assignee. An archived customer ticket never ended that period.
+            owner = str(data.get('current_assignee_id') or '')
+            if not owner or (active and active['agent_id'] == owner):
+                continue
+            if active:
+                finish(at, 'incomplete', valid=False)
+                issues.append('An assignment started before the preceding period was closed.')
+            cycle += 1
+            cycle_start = at
+            active = dict(agent_id=owner, started_at=at, start_event=kind, cycle=cycle)
+        elif kind in {'TICKET_CLAIMED', 'CHAT_STARTED', 'CHAT_REOPENED', 'TICKET_REOPENED'}:
             owner = str(data.get('current_assignee_id') or '') if kind == 'TICKET_REOPENED' else actor
             if kind == 'TICKET_CLAIMED' and original_claimant is None:
                 original_claimant = actor or None
