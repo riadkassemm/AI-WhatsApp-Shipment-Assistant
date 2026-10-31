@@ -96,7 +96,10 @@ def test_queue_controls_and_unread_dots_in_browser(tmp_path):
     from app.support_ui import _ASSETS, _TEMPLATE, _configure
     browser = shutil.which(os.environ.get('SUPPORT_TEST_BROWSER', 'chromium'))
     assert browser, 'Install Chromium for browser regressions'
-    script = _configure(_ASSETS['state.js'] + '\n' + _ASSETS['rendering.js']) + r'''
+    api = _ASSETS['api.js']
+    # The empty-state helper is shared from api.js, which loads before rendering.js.
+    empty_markup = api[api.index('function emptyMarkup('):api.index('return {outer, inner};\n}') + len('return {outer, inner};\n}')]
+    script = _configure(_ASSETS['state.js'] + '\n' + empty_markup + '\n' + _ASSETS['rendering.js']) + r'''
 const check=(ok,label)=>{if(!ok)throw Error(label)};
 try {
 state.authenticated=true;state.agent={id:'7',name:'Test Agent',role:'agent'};state.view='chats';
