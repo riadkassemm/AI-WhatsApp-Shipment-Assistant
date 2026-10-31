@@ -401,6 +401,11 @@ class SupportMediaStore:
                     "-vn",
                     "-map_metadata",
                     "-1",
+                    # Chromium WebM recordings start slightly before or after
+                    # zero. Kept as-is, the Ogg starts off-zero and WhatsApp
+                    # mobile does not play it. Restart timing from sample zero.
+                    "-af",
+                    "asetpts=N/SR/TB",
                     "-c:a",
                     "libopus",
                     "-application",
