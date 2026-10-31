@@ -622,7 +622,16 @@ function renderQueue() {
     return;
   }
 
-  if (!state.queueItems.length) {
+  if (!state.queueItems.length && queueUnreadOnly()) {
+    const empty = emptyMarkup('No unread conversations', 'You are all caught up.', 'message');
+    const showAll = document.createElement('button');
+    showAll.type = 'button';
+    showAll.className = 'btn';
+    showAll.textContent = 'Show all';
+    showAll.onclick = () => { state.queueFilters.read = 'all'; renderQueueFilters(); queueCriteriaChanged(); };
+    empty.inner.append(showAll);
+    queue.append(empty.outer);
+  } else if (!state.queueItems.length) {
     const config = QUEUE_CONFIG[state.view] || QUEUE_CONFIG.unassigned;
     queue.append(emptyMarkup(config.emptyTitle, config.emptyBody, config.icon).outer);
   } else if (!items.length) {
@@ -664,6 +673,7 @@ function renderQueueFilters(options = null) {
   $('queueFilters').classList.toggle('hidden', !supported);
   $('queueStaffLabel').classList.toggle('hidden', !['chats', 'active', 'history', 'waiting'].includes(state.view));
   $('queueStatusLabel').classList.toggle('hidden', state.view !== 'chats');
+  $('queueReadLabel').classList.toggle('hidden', !queueSupportsUnreadFilter());
   for (const [id, key, items, label] of [
     ['queueSupportNumber', 'supportNumber', options?.support_numbers, 'All support numbers'],
     ['queueStaff', 'staffId', options?.staff, 'All staff members']
@@ -679,11 +689,20 @@ function renderQueueFilters(options = null) {
     select.value = filters[key];
   }
   $('queueStatus').value = filters.status;
+  $('queueRead').value = filters.read || 'all';
   return reset;
 }
 
+function queueSupportsUnreadFilter() {
+  return ['mine', 'chats'].includes(state.view);
+}
+
+function queueUnreadOnly() {
+  return queueSupportsUnreadFilter() && state.queueFilters?.read === 'unread';
+}
+
 function resetQueueFilters() {
-  state.queueFilters = {supportNumber: '', staffId: '', status: 'all'};
+  state.queueFilters = {supportNumber: '', staffId: '', status: 'all', read: 'all'};
   renderQueueFilters();
 }
 
@@ -695,12 +714,16 @@ function queueCriteriaChanged() {
   state.globalSearchTimer = setTimeout(() => loadQueue({silent: true}), 220);
 }
 
-function queuePath(page, pageSize) {
+function queuePath(page, pageSize, {keepOpenTicket = true} = {}) {
   if (state.view === 'contacts') return '/api/support/contacts?page=' + page + '&page_size=' + pageSize + '&q=' + encodeURIComponent(state.query.trim());
   const params = new URLSearchParams({page, page_size: pageSize, q: state.query.trim()});
   const filters = state.queueFilters || {};
   if (filters.supportNumber) params.set('support_number', filters.supportNumber);
   if (filters.staffId && ['chats', 'active', 'history', 'waiting'].includes(state.view)) params.set('staff_id', filters.staffId);
+  if (queueUnreadOnly()) {
+    params.set('unread', 'true');
+    if (keepOpenTicket && Number(state.ticketId) > 0) params.set('keep_ticket_id', state.ticketId);
+  }
   if (state.view === 'chats') params.set('chat_status', filters.status || 'all');
   else params.set('view', state.view);
   return (state.view === 'chats' ? '/api/support/chats?' : '/api/support/tickets?') + params;
@@ -775,7 +798,7 @@ async function loadQueue({silent = false} = {}) {
   if (!state.authenticated || (silent && document.hidden)) return;
   const requestId = ++state.queueRequest;
   // View, filters and search, without paging: identifies what the rows show.
-  const identity = queuePath(1, 1);
+  const identity = queuePath(1, 1, {keepOpenTicket: false});
   const queue = $('queue');
   const previousScrollTop = queue.scrollTop;
   queue.setAttribute('aria-busy', 'true');

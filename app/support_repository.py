@@ -3445,6 +3445,8 @@ class SupportRepository(DashboardRepositoryMixin, DeliveryRepositoryMixin, ReadS
         support_number: str | None = None,
         chat_status: str = "all",
         query: str = "",
+        unread: bool = False,
+        keep_ticket_id: int | None = None,
         include_filter_options: bool = True,
         count_only: bool = False,
     ) -> dict[str, Any]:
@@ -3554,7 +3556,7 @@ class SupportRepository(DashboardRepositoryMixin, DeliveryRepositoryMixin, ReadS
             raise ValueError("Unknown ticket view.")
 
         base_where, base_params = where, tuple(params)
-        extra, values = queue_filters(view, staff_id, support_number, chat_status, query, agent_id)
+        extra, values = queue_filters(view, staff_id, support_number, chat_status, query, agent_id, unread, keep_ticket_id)
         where = f"({where}) AND ({extra})"
         params.extend(values)
 

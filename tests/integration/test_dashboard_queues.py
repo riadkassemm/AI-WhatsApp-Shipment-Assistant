@@ -108,6 +108,52 @@ async def test_read_boundaries_persist_isolate_and_never_include_newer_messages(
 
 
 @pytest.mark.asyncio
+async def test_unread_filter_follows_each_staff_read_boundary(infrastructure):
+    repo, sql, _ = infrastructure
+    await sessions(sql)
+    await sql("""INSERT INTO support_tickets (id,ticket_reference,active_key,whatsapp_phone,reason,ai_summary,status,
+        current_assignee_id,business_phone_number_id,created_at,updated_at,last_activity_at)
+        VALUES (44,'TEST-44','90005:44','155500044','test','test','ASSIGNED','7','90005',UTC_TIMESTAMP(6),UTC_TIMESTAMP(6),UTC_TIMESTAMP(6))""")
+    first = await incoming(sql, 42)
+    read = await incoming(sql, 44)
+    service = SupportService()
+    await service.mark_dashboard_read(44, read, AGENT)
+
+    async def unread_ids(**kwargs):
+        data = await repo.list_tickets(view='mine', agent_id='7', unread=True, **kwargs)
+        assert data['total'] == len(data['items'])
+        return sorted(row['id'] for row in data['items'])
+
+    assert sorted(row['id'] for row in (await repo.list_tickets(view='mine', agent_id='7'))['items']) == [42, 44]
+    assert await unread_ids() == [42]
+    # Reading clears it, but the open conversation stays listed for its reader.
+    await service.mark_dashboard_read(42, first, AGENT)
+    assert await unread_ids() == []
+    assert await unread_ids(keep_ticket_id=42) == [42]
+    # Keeping a ticket cannot widen the view beyond what the agent may see.
+    assert await unread_ids(keep_ticket_id=43) == []
+    # A hidden or deleted message never counts as unread.
+    hidden = await incoming(sql, 44, 'hidden for agent')
+    await sql('INSERT INTO support_message_user_deletions(message_id,user_id,deleted_at) VALUES (%s,7,UTC_TIMESTAMP(6))', (hidden,))
+    removed = await incoming(sql, 44, 'deleted for everyone')
+    await sql('UPDATE support_ticket_messages SET deleted_for_everyone_at=UTC_TIMESTAMP(6) WHERE id=%s', (removed,))
+    assert await unread_ids() == []
+    await incoming(sql, 44, 'new arrival')
+    assert await unread_ids() == [44]
+    # Chats use the same predicate, and read state is per staff member.
+    await sql("UPDATE support_tickets SET conversation_origin='STAFF' WHERE id IN (42,44)")
+    app = FastAPI(); app.include_router(router)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(httpx.ASGITransport(app=app).handle_async_request), base_url='http://test') as client:
+        client.cookies.set(settings.support_cookie_name, 'token-1')
+        data = (await client.get('/api/support/chats?unread=true')).json()
+        assert [row['id'] for row in data['items']] == [44] and data['total'] == 1
+        assert data['items'][0]['dashboard_unread_count'] == 1
+        client.cookies.set(settings.support_cookie_name, 'token-3')
+        data = (await client.get('/api/support/chats?unread=true')).json()
+        assert sorted(row['id'] for row in data['items']) == [42, 44]
+
+
+@pytest.mark.asyncio
 async def test_chat_event_assignment_is_current_and_backlog_silent(infrastructure):
     repo, sql, redis = infrastructure
     await sql("UPDATE support_tickets SET conversation_origin='STAFF',initiated_by_staff_id='7' WHERE id=42")

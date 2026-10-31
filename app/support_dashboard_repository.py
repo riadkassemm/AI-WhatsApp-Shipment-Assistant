@@ -8,9 +8,17 @@ def search_pattern(query: str) -> str:
     return '%' + query.strip().replace('=', '==').replace('%', '=%').replace('_', '=_') + '%'
 
 
+UNREAD_EXISTS = """EXISTS (SELECT 1 FROM support_ticket_messages um
+    LEFT JOIN support_dashboard_reads ur ON ur.ticket_id=um.ticket_id AND ur.staff_id=%s
+    WHERE um.ticket_id=support_tickets.id AND um.direction='INBOUND'
+      AND um.id>COALESCE(ur.last_message_id,0) AND um.deleted_for_everyone_at IS NULL
+      AND NOT EXISTS (SELECT 1 FROM support_message_user_deletions ud WHERE ud.message_id=um.id AND ud.user_id=%s))"""
+
+
 def queue_filters(
     view: str, staff_id: str | None, support_number: str | None,
     chat_status: str, query: str, agent_id: str,
+    unread: bool = False, keep_ticket_id: int | None = None,
 ) -> tuple[str, list[Any]]:
     clauses, values = ['1=1'], []
     if support_number:
@@ -22,6 +30,15 @@ def queue_filters(
     if view == 'chats' and chat_status != 'all':
         closed = "(support_tickets.active_key IS NULL OR support_tickets.status IN ('CLOSED','RESOLVED'))"
         clauses.append(closed if chat_status == 'closed' else f'NOT {closed}')
+    if unread and view in {'mine', 'chats'}:
+        # Same boundary as attach_dashboard_unread. The open conversation stays
+        # listed so reading it does not pull the row out from under the reader.
+        predicate = UNREAD_EXISTS
+        values.extend([agent_id, agent_id])
+        if keep_ticket_id:
+            predicate = f'({predicate} OR support_tickets.id=%s)'
+            values.append(keep_ticket_id)
+        clauses.append(predicate)
     if query.strip():
         # Literal substring search, including hidden/deleted-message boundaries.
         term = search_pattern(query)
