@@ -120,6 +120,11 @@ function canManageWhatsApp() {
   );
 }
 
+// Every staff role may view, link, pair and rename WhatsApp numbers.
+function canLinkWhatsApp() {
+  return Boolean(state.agent && (state.agent.can_link_whatsapp || canManageWhatsApp()));
+}
+
 function canViewActiveQueue() {
   return Boolean(state.agent && ['supervisor', 'admin'].includes(state.agent.role));
 }
@@ -129,7 +134,7 @@ function configureStaffAccess() {
   $('tabs').querySelector('button[data-view="active"]')?.classList.toggle('hidden', !canViewActiveQueue());
   if (state.view === 'active' && !canViewActiveQueue()) setQueueView('unassigned', {load: false, persist: false});
   $('manageStaffBtn').classList.toggle('hidden', !canManageStaff());
-  $('manageWhatsAppBtn').classList.toggle('hidden', !canManageWhatsApp());
+  $('manageWhatsAppBtn').classList.toggle('hidden', !canLinkWhatsApp());
   $('agentStatisticsBtn').classList.toggle('hidden', !canViewAgentStatistics());
   if (!canViewAgentStatistics()) clearAgentStatistics();
 }

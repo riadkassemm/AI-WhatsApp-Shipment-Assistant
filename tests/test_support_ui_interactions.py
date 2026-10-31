@@ -184,6 +184,8 @@ const state = {linkedDeviceBusy: false, whatsappBusy: false, whatsappRegistry: {
   {phone_number_id: '90001', is_enabled: true}, {phone_number_id: '90002', is_enabled: false}]}};
 const pendingLinkedDeviceAddition = () => null;
 const createSupportNumberLabel = line => {const node = element(); node.textContent = line.display_name || line.display_phone_number || line.line_id; return node};
+let manager = true;
+const canManageWhatsApp = () => manager;
 const changes = [];
 const changeLinkedDeviceConnection = (...args) => changes.push(args);
 const removeLinkedDeviceNumber = id => changes.push(['remove', id]);
@@ -212,6 +214,12 @@ assert.equal(rows[2].children[2].textContent, 'Re-pair (keeps all history)');
 assert.match(rows[2].children[2].className, /primary/);
 assert.equal(rows[3].children[1].textContent, 'Not paired');
 assert.equal(rows[3].children[2].textContent, 'Pair WhatsApp');
+// Agents pair and re-pair too; only managers see Remove and unlink.
+manager = false;
+renderLinkedDeviceStatus(state.linkedDeviceStatus);
+const agentRows = elements.linkedDeviceLines.children;
+assert.equal(agentRows[2].children[2].textContent, 'Re-pair (keeps all history)');
+assert.equal(agentRows.some(row => row.children.some(child => child.textContent === 'Remove and unlink')), false);
 """
     subprocess.run(["node", "-e", script], check=True, timeout=10)
 
@@ -289,6 +297,7 @@ const state = {agent: {id: '10', linked_device_available: true}, linkedDeviceBus
   linkedDeviceStatus: null};
 let manager = true;
 const canManageWhatsApp = () => manager;
+const canLinkWhatsApp = () => manager;
 let uuidCalls = 0;
 const crypto = {randomUUID() {return '00000000-0000-4000-8000-00000000000' + (++uuidCalls)}};
 const storage = new Map();
@@ -536,6 +545,7 @@ const state = {whatsappBusy: false, linkedDeviceBusy: false, whatsappRegistry: n
   chatLines: [{phone_number_id: '90005', display_name: null}],
   currentTicketData: data, previousTicketHistory: [historical], ticketId: 5};
 const canManageWhatsApp = () => true;
+const canLinkWhatsApp = () => true;
 const clearWhatsAppFeedback = () => {};
 const feedback = [];
 const showWhatsAppFeedback = (kind, value) => feedback.push([kind, value]);
