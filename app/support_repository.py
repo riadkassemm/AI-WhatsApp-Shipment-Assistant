@@ -1003,17 +1003,17 @@ class SupportRepository(DashboardRepositoryMixin, DeliveryRepositoryMixin, ReadS
                 """
                 SELECT event_type FROM support_ticket_events
                 WHERE ticket_id = %s
-                  AND event_type IN ('CHAT_STARTED', 'CHAT_REOPENED', 'CHAT_CLOSED')
+                  AND event_type IN ('CHAT_STARTED', 'CHAT_REOPENED', 'CHAT_CLOSED', 'CHAT_RESTORED')
                   AND created_at < %s
                 ORDER BY created_at DESC, id DESC LIMIT 1
                 """,
                 (ticket["id"], start_cutoff),
             )
             lifecycle = await cur.fetchone()
-            return bool(lifecycle and lifecycle.get("event_type") in {"CHAT_STARTED", "CHAT_REOPENED"})
+            return bool(lifecycle and lifecycle.get("event_type") in {"CHAT_STARTED", "CHAT_REOPENED", "CHAT_RESTORED"})
         await cur.execute(
             """SELECT event_type FROM support_ticket_events
-               WHERE ticket_id=%s AND (event_type IN ('TICKET_REOPENED', 'TICKET_RESOLVED') OR
+               WHERE ticket_id=%s AND (event_type IN ('TICKET_REOPENED', 'TICKET_RESOLVED', 'TICKET_CLOSED', 'TICKET_RESTORED') OR
                    (event_type='STATUS_CHANGED' AND JSON_VALID(details_json)
                     AND JSON_UNQUOTE(JSON_EXTRACT(details_json, '$.to'))='CLOSED'))
                  AND created_at < %s
@@ -1021,9 +1021,9 @@ class SupportRepository(DashboardRepositoryMixin, DeliveryRepositoryMixin, ReadS
             (ticket['id'], start_cutoff),
         )
         lifecycle = await cur.fetchone()
-        if lifecycle and lifecycle['event_type'] == 'TICKET_REOPENED':
+        if lifecycle and lifecycle['event_type'] in {'TICKET_REOPENED', 'TICKET_RESTORED'}:
             return True
-        if lifecycle and lifecycle['event_type'] in {'TICKET_RESOLVED', 'STATUS_CHANGED'}:
+        if lifecycle and lifecycle['event_type'] in {'TICKET_RESOLVED', 'TICKET_CLOSED', 'STATUS_CHANGED'}:
             return False
         resolved_at = ticket.get("resolved_at")
         closed_at = ticket.get("closed_at")

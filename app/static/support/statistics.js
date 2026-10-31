@@ -200,7 +200,7 @@ function investigationDate(value, options = {}) {
 }
 function investigationLabel(value) {
   return {NEW:'New',ASSIGNED:'Assigned',IN_PROGRESS:'In progress',WAITING_CUSTOMER:'Waiting for customer',
-    WAITING_INTERNAL:'Waiting internally',RESOLVED:'Resolved',CLOSED:'Closed',SENT:'Sent',RECEIVED:'Received',
+    WAITING_INTERNAL:'Waiting internally',RESOLVED:'Resolved',CLOSED:'Archived',SENT:'Sent',RECEIVED:'Received',
     PENDING:'Waiting to send',DISPATCHING:'Sending',UNCERTAIN:'Delivery uncertain',FAILED:'Send failed'}[value] || 'Not recorded';
 }
 function investigationActivity(event) {
@@ -216,7 +216,9 @@ function investigationActivity(event) {
     case 'TICKET_REOPENED': return actor + ' reopened the ticket' + (data.current_assignee_id && String(data.current_assignee_id) === String(event.actor_id) ? ' and took responsibility.' : '.');
     case 'CHAT_STARTED': return actor + ' started the conversation.';
     case 'CHAT_REOPENED': return actor + ' reopened the conversation.';
-    case 'CHAT_CLOSED': return actor + ' closed the conversation.';
+    case 'CHAT_CLOSED': return data.reason === 'whatsapp_line_removed' ? 'Archived when ' + actor + ' removed the WhatsApp number.' : actor + ' closed the conversation.';
+    case 'TICKET_CLOSED': return data.reason === 'whatsapp_line_removed' ? 'Archived when ' + actor + ' removed the WhatsApp number.' : actor + ' closed the ticket.';
+    case 'TICKET_RESTORED': case 'CHAT_RESTORED': return 'Restored when ' + actor + ' linked the WhatsApp number again' + (data.restored_status ? ' (' + investigationLabel(data.restored_status).toLowerCase() + ').' : '.');
     case 'RETURNED_TO_AI': return 'Staff handling ended.';
     case 'STATUS_CHANGED': return actor + ' changed the status' + (data.to ? ' to ' + investigationLabel(data.to).toLowerCase() : '') + '.';
     case 'CONVERSATION_VIEWED': return actor + ' opened the conversation.';

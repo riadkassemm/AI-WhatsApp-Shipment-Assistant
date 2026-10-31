@@ -15,7 +15,7 @@ const STATUS_LABELS = {
   WAITING_CUSTOMER: 'Waiting for customer',
   WAITING_INTERNAL: 'Waiting internally',
   RESOLVED: 'Resolved',
-  CLOSED: 'Closed'
+  CLOSED: 'Archived'
 };
 const MESSAGE_ROLE_LABELS = {
   CUSTOMER: 'Customer',
