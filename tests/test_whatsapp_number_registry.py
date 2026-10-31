@@ -123,13 +123,24 @@ def test_new_linked_number_requires_its_own_pairing_and_stores_paired_phone(monk
     assert result["numbers"][0]["is_enabled"] is True
 
 
-def test_only_supervisor_or_admin_can_manage_numbers() -> None:
-    service = WhatsAppRegistryService(FakeRepository())
+def test_every_staff_role_sees_numbers_but_only_managers_take_them_out() -> None:
+    repo = FakeRepository()
+    service = WhatsAppRegistryService(repo)
     with pytest.raises(WhatsAppRegistryForbiddenError):
-        asyncio.run(service.list_payload(actor("agent")))
-
-    assert asyncio.run(service.list_payload(actor("supervisor")))["numbers"]
-    assert asyncio.run(service.list_payload(actor("admin")))["numbers"]
+        asyncio.run(service.list_payload(actor("driver")))
+    for role in ("agent", "supervisor", "admin"):
+        assert asyncio.run(service.list_payload(actor(role)))["numbers"]
+    # Adding a number completes linking, so any staff member may do it.
+    assert asyncio.run(service.set_number_enabled(actor("agent"), "1375394715655384", True))["numbers"][0]["is_enabled"] is True
+    with pytest.raises(WhatsAppRegistryForbiddenError):
+        asyncio.run(service.set_number_enabled(actor("agent"), "1375394715655384", False))
+    for operation in (lambda: service.remove_saved_number(actor("agent"), "1375394715655384"),
+                      lambda: service.sync_waba(actor("agent"), "26526540993689063"),
+                      lambda: service.finish_linked_device_removal(actor("agent"), "90002", close_active_tickets=True),
+                      lambda: service.restore_relinked_history(actor("agent"), "90002", "96170111111")):
+        with pytest.raises(WhatsAppRegistryForbiddenError):
+            asyncio.run(operation())
+    assert repo.number["is_enabled"] is True
 
 
 def test_manager_can_enable_discovered_number() -> None:
@@ -175,11 +186,13 @@ def test_linked_number_rename_is_separate_from_paired_phone(monkeypatch) -> None
     assert asyncio.run(service.list_enabled_numbers(actor("agent")))[0]["display_name"] == "TestNumber"
 
 
-def test_number_rename_rejects_agent_unknown_number_and_invalid_name() -> None:
+def test_number_rename_allows_staff_and_rejects_others_unknown_number_and_invalid_name() -> None:
     repo = FakeRepository()
     service = WhatsAppRegistryService(repo)
     with pytest.raises(WhatsAppRegistryForbiddenError):
-        asyncio.run(service.set_number_display_name(actor("agent"), repo.number["phone_number_id"], "Label"))
+        asyncio.run(service.set_number_display_name(actor("driver"), repo.number["phone_number_id"], "Label"))
+    renamed = WhatsAppRegistryService(FakeRepository())
+    assert asyncio.run(renamed.set_number_display_name(actor("agent"), repo.number["phone_number_id"], "Label"))["numbers"][0]["display_name"] == "Label"
     with pytest.raises(WhatsAppRegistryValidationError, match="numeric"):
         asyncio.run(service.set_number_display_name(actor("admin"), "other", "Label"))
     with pytest.raises(WhatsAppRegistryValidationError, match="control characters"):
@@ -494,3 +507,26 @@ def test_registry_hides_confirmed_tombstones_and_preserves_finalize_retry_rows(m
     assert asyncio.run(service.list_payload(actor("admin")))["numbers"]
     repo.number["provider_present"] = False
     assert asyncio.run(service.list_payload(actor("admin")))["numbers"] == []
+
+
+def test_whatsapp_button_is_for_every_staff_role_and_removal_for_managers() -> None:
+    import subprocess
+    html = support_ui._HTML
+    helpers = html[html.index("function canManageWhatsApp("):html.index("function canViewActiveQueue(")]
+    script = """
+const assert = require('node:assert/strict');
+const state = {agent: null};
+""" + helpers + """
+assert.equal(canLinkWhatsApp(), false, 'signed out');
+state.agent = {role: 'agent', can_link_whatsapp: true, can_manage_whatsapp: false};
+assert.equal(canLinkWhatsApp(), true);
+assert.equal(canManageWhatsApp(), false);
+for (const role of ['admin', 'supervisor']) {
+  state.agent = {role, can_link_whatsapp: true, can_manage_whatsapp: true};
+  assert.equal(canLinkWhatsApp(), true);
+  assert.equal(canManageWhatsApp(), true);
+}
+"""
+    result = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    assert "$('manageWhatsAppBtn').classList.toggle('hidden', !canLinkWhatsApp());" in html

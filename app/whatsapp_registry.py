@@ -420,6 +420,13 @@ class WhatsAppRegistryService:
                 "Only Super Admins and Admins can manage WhatsApp numbers."
             )
 
+    @staticmethod
+    def _require_staff(agent: SupportAgent) -> None:
+        # Viewing, linking, pairing and renaming numbers is open to every staff
+        # role; disabling, removing and Meta sync stay with managers.
+        if not agent.is_staff:
+            raise WhatsAppRegistryForbiddenError("Only staff members can view and link WhatsApp numbers.")
+
     async def _ensure_schema(self) -> None:
         rows = await self.repository.fetch_all(
             """
@@ -636,7 +643,7 @@ class WhatsAppRegistryService:
         }
 
     async def list_payload(self, agent: SupportAgent) -> dict[str, Any]:
-        self._require_manager(agent)
+        self._require_staff(agent)
         await self._ensure_schema()
         await self._seed_legacy_number()
         accounts = await self.repository.fetch_all(
@@ -669,7 +676,7 @@ class WhatsAppRegistryService:
         phone_number_id: str,
         display_name: str | None,
     ) -> dict[str, Any]:
-        self._require_manager(agent)
+        self._require_staff(agent)
         phone_number_id = _clean_id(phone_number_id, label="phone-number ID")
         name = str(display_name or "").strip() or None
         if name is not None and (len(name) > 80 or any(ord(char) < 32 or ord(char) == 127 for char in name)):
@@ -773,6 +780,11 @@ class WhatsAppRegistryService:
     ) -> dict[str, Any]:
         """Bring a removed number's history back when the same phone is linked again."""
         self._require_manager(agent)
+        return await self._adopt_relinked_history(agent, line_id, phone, apply=apply, archived_only=archived_only)
+
+    async def _adopt_relinked_history(
+        self, agent: SupportAgent, line_id: str, phone: str, *, apply: bool = True, archived_only: bool = False,
+    ) -> dict[str, Any]:
         summary = await self.repository.adopt_retired_history(
             line_id, phone, actor_id=int(agent.id), actor_name=agent.name, apply=apply, archived_only=archived_only,
         )
@@ -838,7 +850,11 @@ class WhatsAppRegistryService:
         phone_number_id: str,
         enabled: bool,
     ) -> dict[str, Any]:
-        self._require_manager(agent)
+        # Adding a paired number to the app completes linking; taking one out stays with managers.
+        if enabled:
+            self._require_staff(agent)
+        else:
+            self._require_manager(agent)
         phone_number_id = _clean_id(phone_number_id, label="phone-number ID")
         await self._ensure_schema()
         row = await self.repository.fetch_one(
@@ -929,7 +945,8 @@ class WhatsAppRegistryService:
         )
         if enabled and linked_display_number:
             try:
-                await self.restore_relinked_history(agent, phone_number_id, linked_display_number)
+                # Whoever adds the re-linked number gets its history back; no extra role needed.
+                await self._adopt_relinked_history(agent, phone_number_id, linked_display_number)
             except Exception:
                 # The number is live either way; scripts/restore_relinked_history.py can finish this.
                 logger.exception("Removed WhatsApp history could not be adopted: line_id=%s", phone_number_id)

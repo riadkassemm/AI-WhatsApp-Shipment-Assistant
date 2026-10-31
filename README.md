@@ -832,7 +832,7 @@ The defaults are conservative starting points rather than a monetary spending gu
 
 ## Dynamic WhatsApp numbers
 
-The support app can manage multiple WhatsApp Cloud API phone numbers without code changes. Supervisors and Admins have a **WhatsApp numbers** control in the support UI.
+The support app can manage multiple WhatsApp Cloud API phone numbers without code changes. Every staff member has a **WhatsApp numbers** control in the support UI: any role can view, link, pair or re-pair, rename and add numbers to the app. Deactivating, removing and unlinking numbers, and syncing Meta accounts, remain Supervisor/Admin-only.
 
 The server keeps `WHATSAPP_TOKEN` and `WHATSAPP_VERIFY_TOKEN` private in `.env`. `WHATSAPP_PHONE_NUMBER_ID` remains only as a backwards-compatible bootstrap for the original line. Active lines are stored in MariaDB.
 
@@ -1162,7 +1162,7 @@ An empty expected phone value binds the line to the first account paired. To req
 
    If using `--reload` during development, keep `--timeout-graceful-shutdown 10` in that command. Open dashboard event streams can otherwise keep a replaced worker waiting indefinitely and prevent the next worker from serving requests.
 
-4. Sign in as a Supervisor or Admin. Open **WhatsApp numbers**, choose **Pair WhatsApp** for line `90001`, and scan the QR code using the separate test phone's **WhatsApp → Settings → Linked devices → Link a device**. Once its status is **Connected**, choose **Add to app** for that line. Pairing QR codes are available only to managers and are not cached.
+4. Sign in as any staff member. Open **WhatsApp numbers**, choose **Pair WhatsApp** for line `90001`, and scan the QR code using the separate test phone's **WhatsApp → Settings → Linked devices → Link a device**. Once its status is **Connected**, choose **Add to app** for that line. Pairing QR codes are available only to signed-in staff and are not cached.
 
 5. Message the test number from a second phone. Claim its ticket and send a text reply. Edit it within 15 minutes and verify the edited content on the second phone. Send another reply, choose **Delete → Delete for everyone**, and verify WhatsApp's deleted-message placeholder on both sides. Also edit/delete an incoming customer message from the second phone and verify its update in the dashboard. Check an image, voice note, PDF, reply, and reaction before relying on the new connection.
 
@@ -1170,7 +1170,7 @@ The bridge must stay running, and MariaDB and Redis must be available as in the 
 
 ### Link additional numbers from the dashboard
 
-1. Sign in as a Supervisor or Admin and open **WhatsApp numbers**.
+1. Sign in as any staff member and open **WhatsApp numbers**.
 2. Click **Link another number**. A new pairing entry and its QR code appear.
 3. On that number's phone, open **WhatsApp → Settings → Linked devices → Link a device** and scan its QR code.
 4. Once it shows **Connected**, click **Add to app** for the new number.
