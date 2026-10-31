@@ -101,8 +101,8 @@ function element() {return {textContent: '', classList: {hidden: true, toggle(_,
 const elements = {lineAlertBanner: element(), lineAlertText: element(), lineAlertActionBtn: element(), composerHelp: element()};
 const $ = id => elements[id];
 const text = (node, value) => {node.textContent = value};
-let manager = false;
-const canManageWhatsApp = () => manager;
+let staff = false;
+const canLinkWhatsApp = () => staff;
 const sounds = [];
 const notifyNewCustomerActivity = message => sounds.push(message);
 const state = {authenticated: true, lineHealthAt: 0, lineAlertsSeen: new Set(),
@@ -111,13 +111,13 @@ const state = {authenticated: true, lineHealthAt: 0, lineAlertsSeen: new Set(),
 const down = {lines: [{line_id: '90020', name: 'Saida Office', status: 'logged_out', since: '2026-10-31T08:10:27Z', alert: true}]};
 renderLineHealth(down);
 assert.equal(elements.lineAlertBanner.classList.hidden, false);
-assert.match(elements.lineAlertText.textContent, /^Saida Office was logged out by WhatsApp since .+\. Replies wait and are sent automatically/);
-assert.equal(elements.lineAlertActionBtn.classList.hidden, true, 'agents cannot re-pair');
-assert.deepEqual(sounds, [], 'agents are not paged');
+assert.match(elements.lineAlertText.textContent, /^Saida Office was logged out by WhatsApp since .+\. It keeps trying to reconnect\. Replies wait and are sent automatically/);
+assert.equal(elements.lineAlertActionBtn.classList.hidden, true, 'no re-pair button without link rights');
+assert.deepEqual(sounds, [], 'nobody who cannot fix it is paged');
 assert.match(elements.composerHelp.textContent, /^Saida Office is offline since .+ sent automatically when it reconnects/);
-manager = true; state.lineAlertsSeen.clear();
+staff = true; state.lineAlertsSeen.clear();  // every staff role can re-pair
 renderLineHealth(down); renderLineHealth(down);
-assert.match(elements.lineAlertText.textContent, /Re-pair it with the same phone/);
+assert.match(elements.lineAlertText.textContent, /Re-pair it with the same phone; every conversation and its history stays\. Replies wait/);
 assert.equal(elements.lineAlertActionBtn.classList.hidden, false);
 assert.equal(sounds.length, 1, 'one sound per outage');
 renderLineHealth({lines: [{line_id: '90020', name: 'Saida Office', status: 'connected', since: null, alert: false}]});

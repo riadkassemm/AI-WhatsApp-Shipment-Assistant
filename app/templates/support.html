@@ -417,9 +417,9 @@ __SUPPORT_STYLE__
         <div id="linkedDeviceLines"></div>
         <div class="form-note" id="linkedDeviceStatus" role="status"></div>
       </section>
+      <div id="whatsappMetaSection">
       <div class="section-title">
         <div><strong>Meta accounts</strong><div class="muted">The access token remains server-side. Add a WABA ID once, then Sync whenever numbers change in Meta.</div></div>
-        <button class="btn" id="refreshWhatsAppBtn" type="button"><svg class="icon" aria-hidden="true"><use href="#icon-refresh"></use></svg>Refresh</button>
       </div>
       <form class="whatsapp-sync-form" id="wabaSyncForm" novalidate>
         <div class="field"><label for="wabaIdInput">WhatsApp Business Account (WABA) ID</label><input id="wabaIdInput" type="text" inputmode="numeric" pattern="[0-9]+" maxlength="64" placeholder="Enter WABA ID" required /><div class="field-hint">Found in Meta Business Manager / WhatsApp Manager. This is not a secret.</div></div>
@@ -427,7 +427,9 @@ __SUPPORT_STYLE__
       </form>
       <div class="form-note">Newly discovered numbers are disabled by default. Select <strong>Add to app</strong> to allow customer messages on that line. Removing a line preserves its historical tickets.</div>
       <div class="whatsapp-account-list" id="whatsappAccounts"></div>
-      <div class="section-title section-spaced"><div><strong>Phone numbers</strong><div class="muted">Only enabled numbers are accepted for new inbound conversations.</div></div></div>
+      </div>
+      <div class="section-title section-spaced"><div><strong>Phone numbers</strong><div class="muted">Only enabled numbers are accepted for new inbound conversations.</div></div>
+        <button class="btn" id="refreshWhatsAppBtn" type="button"><svg class="icon" aria-hidden="true"><use href="#icon-refresh"></use></svg>Refresh</button></div>
       <div class="whatsapp-number-list" id="whatsappNumbers"></div>
     </div>
   </div>

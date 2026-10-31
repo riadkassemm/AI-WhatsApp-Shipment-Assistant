@@ -89,6 +89,12 @@ def _require_manager(agent: SupportAgent) -> None:
         raise HTTPException(403, "Only Super Admins and Admins can manage WhatsApp connections.")
 
 
+def _require_staff(agent: SupportAgent) -> None:
+    # Any staff role may view, link and (re-)pair numbers; unlinking and removal stay with managers.
+    if not agent.is_staff:
+        raise HTTPException(403, "Only staff members can link WhatsApp numbers.")
+
+
 def _require_line(line_id: str) -> None:
     if line_id not in configured_linked_device_lines():
         raise HTTPException(404, "This WhatsApp linked device line is not configured.")
@@ -96,7 +102,7 @@ def _require_line(line_id: str) -> None:
 
 @router.get("/api/support/whatsapp-linked-device/status")
 async def linked_device_status(agent: SupportAgent = Depends(get_current_agent)) -> dict:
-    _require_manager(agent)
+    _require_staff(agent)
     configured = bool(
         len(settings.whatsapp_linked_device_secret) >= 32
     )
@@ -140,7 +146,7 @@ async def add_linked_device_line(
     agent: SupportAgent = Depends(require_support_csrf),
 ) -> dict:
     """Allocate durably at the bridge, then prepare its QR without enabling sends."""
-    _require_manager(agent)
+    _require_staff(agent)
     if len(settings.whatsapp_linked_device_secret) < 32:
         raise HTTPException(503, "WhatsApp linked device connections are not configured.")
     from app.whatsapp_registry import WhatsAppRegistryError, whatsapp_registry_service
@@ -184,7 +190,7 @@ async def add_linked_device_line(
 async def connect_linked_device(
     line_id: str, agent: SupportAgent = Depends(require_support_csrf),
 ) -> dict:
-    _require_manager(agent)
+    _require_staff(agent)
     _require_line(line_id)
     try:
         await linked_device_client.connect(line_id)
