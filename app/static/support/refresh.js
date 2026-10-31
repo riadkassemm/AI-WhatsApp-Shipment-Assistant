@@ -56,6 +56,7 @@ const dashboardRefresh = new DashboardRefreshCoordinator({
       tasks.push(openTicket(state.ticketId, {silent: true, refreshHistory: scopes.has('history')}));
     }
     if (routine && !state.aiSettingsBusy) tasks.push(loadAiSettings().catch(error => renderAiSettingsUnavailable(error.message)));
+    if (routine) tasks.push(loadLineHealth());
     await Promise.allSettled(tasks);
   }
 });

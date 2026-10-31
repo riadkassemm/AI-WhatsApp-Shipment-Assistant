@@ -190,7 +190,9 @@ const removeLinkedDeviceNumber = id => changes.push(['remove', id]);
 """ + function + r"""
 renderLinkedDeviceStatus({configured: true, lines: [
   {line_id: '90001', status: 'connected', is_paired: true, waiting_history_reactions: 2},
-  {line_id: '90002', status: 'error', is_paired: true, error: 'Number already linked', pending_callbacks: 1, failed_callbacks: 1}]});
+  {line_id: '90002', status: 'error', is_paired: true, error: 'Number already linked', pending_callbacks: 1, failed_callbacks: 1},
+  {line_id: '90003', status: 'logged_out', is_paired: false, logged_out_at: Date.UTC(2026, 9, 31, 8, 10)},
+  {line_id: '90004', status: 'logged_out', is_paired: false, logged_out_at: null}]});
 const rows = elements.linkedDeviceLines.children;
 assert.equal(rows[0].children[1].textContent, 'Connected');
 assert.match(rows[0].children[1].title, /2 reactions are waiting for older messages/);
@@ -204,6 +206,12 @@ assert.equal(unlink.textContent, 'Remove and unlink');
 assert.equal(unlink.disabled, false);
 unlink.onclick();
 assert.deepEqual(changes, [['remove', '90002']]);
+// A WhatsApp logout points at re-pairing, which keeps everything; never-paired lines do not.
+assert.match(rows[2].children[1].textContent, /^Logged out by WhatsApp at .+Re-pair it with the same phone/);
+assert.equal(rows[2].children[2].textContent, 'Re-pair (keeps all history)');
+assert.match(rows[2].children[2].className, /primary/);
+assert.equal(rows[3].children[1].textContent, 'Not paired');
+assert.equal(rows[3].children[2].textContent, 'Pair WhatsApp');
 """
     subprocess.run(["node", "-e", script], check=True, timeout=10)
 
@@ -218,8 +226,8 @@ const state = {linkedDeviceBusy: false, whatsappBusy: false, linkedDeviceRequest
   whatsappRegistry: {numbers: [{phone_number_id: '90001'}, {phone_number_id: '90002'}]}};
 let manager = true;
 const canManageWhatsApp = () => manager;
-let consent = false;
-const confirmDialog = async ({message}) => {assert.match(message, /Active conversations.*closed/); assert.match(message, /history.*kept/); return consent};
+let typed = null;
+const promptDialog = async ({message, label}) => {assert.match(message, /Active conversations.*closed/); assert.match(message, /history.*kept/); assert.match(label, /Type REMOVE/); return typed};
 const clearWhatsAppFeedback = () => {};
 const renderLinkedDeviceStatus = payload => {state.linkedDeviceStatus = payload};
 const renderWhatsAppRegistry = payload => {state.whatsappRegistry = payload};
@@ -239,7 +247,11 @@ const api = async (path, options) => {
 (async () => {
   await removeLinkedDeviceNumber('90002');
   assert.equal(requests.length, 0); // Cancel keeps both numbers.
-  consent = true;
+  typed = 'yes';
+  await removeLinkedDeviceNumber('90002');
+  assert.equal(requests.length, 0); // Anything but REMOVE keeps both numbers.
+  assert.match(feedback.pop().message, /Nothing was removed/);
+  typed = ' remove ';
   manager = false;
   await removeLinkedDeviceNumber('90002');
   assert.equal(requests.length, 0);

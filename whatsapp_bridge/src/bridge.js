@@ -8,7 +8,7 @@ import { BridgeError, phoneDigits, wrapId, unwrapId, validateLineManifest, UUID_
 import { FileStore, createAuth } from './storage.js';
 import { JournalStore } from './journal-store.js';
 import { AckTracker } from './ack.js';
-import { inboundEvent, outgoingEvent, outgoingConfirmationEvent, messageTombstoneEvent, messageStatusEvent, mutationEvent, textBody, millis, eventId, MEDIA_TYPES, RECEIPT_STATUSES, RECEIPT_RANK } from './events.js';
+import { inboundEvent, outgoingEvent, outgoingConfirmationEvent, messageTombstoneEvent, messageStatusEvent, mutationEvent, textBody, millis, eventId, disconnectReason, MEDIA_TYPES, RECEIPT_STATUSES, RECEIPT_RANK } from './events.js';
 import { preserveNativeMutationMetadata } from './native-events.js';
 
 const silentLogger = pino({ level: 'silent' });
@@ -56,6 +56,14 @@ function mediaUrlHost(message) {
   try { return media?.url ? new URL(media.url).host : null; } catch { return null; }
 }
 const initialLine = () => ({ bound_phone: '', messages: {}, media: {}, operations: {}, enabled: false });
+// After a logout or a re-link, messages sent while the line was offline are
+// recovered from WhatsApp's recent history once it pairs again.
+const RECOVERY_MARGIN_MS = 60_000;
+const RECOVERY_WINDOW_MS = 15 * 60_000;
+const RETIRED_PHONE_MS = 7 * 24 * 60 * 60_000;
+const RECOVERY_SYNC_TYPES = [proto.HistorySync.HistorySyncType.INITIAL_BOOTSTRAP, proto.HistorySync.HistorySyncType.RECENT];
+// Recovery hints must never make a connection or removal fail.
+const knownPhone = value => { try { return phoneDigits(value, true); } catch { return ''; } };
 // A missing ACK or a timed-out/closed query usually means the WhatsApp
 // connection died without notice. Reconnecting lets the next send work.
 const staleConnectionError = error => error?.code === 'CONFIRMATION_UNKNOWN' ||
@@ -81,6 +89,8 @@ export class Bridge {
   async initialize({ autoConnect = true } = {}) {
     this.outbox = await new JournalStore(path.join(this.config.dataDir, 'outbox.json'), () => ({ entries: [], dead_letters: [] })).load();
     this.manifest = await new FileStore(path.join(this.config.dataDir, 'lines.json'), () => ({ version: 1, lines: {}, requests: {} })).load();
+    // Phones of removed lines and when they went offline, so linking one again recovers the gap.
+    this.retiredPhones = await new FileStore(path.join(this.config.dataDir, 'retired-phones.json'), () => ({ version: 1, phones: {} })).load();
     const manifest = validateLineManifest(this.manifest.data);
     // Confirmed removal tombstones also form a durable cleanup work queue.
     // Repeating the precise numeric directory/outbox purge is safe after a crash.
@@ -133,7 +143,8 @@ export class Bridge {
     return { ...definition, directory: path.join(this.config.dataDir, definition.line_id),
       display_phone_number: definition.expected_phone, status: 'disconnected', socket: null, ack: null,
       generation: 0, session: null, ackTail: Promise.resolve(), confirmationTasks: new Map(),
-      eventTail: Promise.resolve(), sendTail: Promise.resolve(), sendPending: 0, sendTasks: new Map(), readTail: Promise.resolve(), reconnectTimer: null };
+      eventTail: Promise.resolve(), sendTail: Promise.resolve(), sendPending: 0, sendTasks: new Map(), readTail: Promise.resolve(), reconnectTimer: null,
+      disconnectedSince: Date.now() };
   }
   async prepareLine(line) {
     try {
@@ -244,6 +255,7 @@ export class Bridge {
         await Promise.allSettled(line.confirmationTasks.values());
         await line.auth?.store.flush();
         await line.store.flush();
+        await this.retirePhone(line);
         // Only a remote-confirmed removal (or an unpaired line) enters the
         // durable tombstones. They suppress ENV/fallback routes on every restart.
         await this.manifest.update(data => {
@@ -350,7 +362,15 @@ export class Bridge {
       waiting_history_reactions: this.outbox.data.entries.filter(item => item.event.line_id === line.line_id && item.waiting_for_history).length,
       failed_callbacks: (this.outbox.data.dead_letters ?? []).filter(item => item.event.line_id === line.line_id).length,
       uncertain_sends: Object.values(line.store?.data?.messages ?? {}).filter(item => item.delivery_uncertain && !item.confirmation_enqueued).length,
+      disconnected_since: line.status === 'connected' ? null : line.disconnectedSince ?? null,
+      logout_reason: line.status === 'logged_out' ? line.store?.data?.logout_reason ?? null : null,
+      logged_out_at: line.status === 'logged_out' ? line.store?.data?.logged_out_at ?? null : null,
+      recovering_history: line.status === 'connected' && this.recovering(line),
       ...(line.qr ? { qr: line.qr, qr_data_url: line.qr_data_url } : {}), ...(line.error ? { error: line.error } : {}) };
+  }
+  recovering(line) {
+    const data = line.store?.data;
+    return Boolean(data?.recover_since) && !(data.recover_until && Date.now() > data.recover_until);
   }
   status() { return { lines: [...this.lines.values()].map(line => this.lineStatus(line)) }; }
 
@@ -376,6 +396,7 @@ export class Bridge {
       if (!line.store?.data) await this.prepareLine(line);
       await line.store.update(data => { data.enabled = true; });
       line.auth = await createAuth(line.directory);
+      await this.adoptRetiredPhone(line);
     } catch (error) {
       // Session persistence failures must never enter network retry loops.
       error.bridgePersistenceFailure = true;
@@ -389,7 +410,8 @@ export class Bridge {
     delete line.qr_data_url;
     const socket = this.makeSocket({ auth: line.auth.state, logger: silentLogger, browser: Browsers.ubuntu('Support Dashboard'),
       printQRInTerminal: false, emitOwnEvents: false, enableRecentMessageCache: false,
-      syncFullHistory: false, shouldSyncHistoryMessage: () => false,
+      // Only the recent history of a line recovering from an outage, never a full sync.
+      syncFullHistory: false, shouldSyncHistoryMessage: notification => this.recovering(line) && RECOVERY_SYNC_TYPES.includes(notification?.syncType),
       markOnlineOnConnect: false, connectTimeoutMs: 25_000, defaultQueryTimeoutMs: 20_000,
       shouldIgnoreJid: jid => /@(g\.us|broadcast|newsletter)$/.test(jid),
       getMessage: async key => line.store.data.messages[key.id]?.message?.message,
@@ -456,6 +478,8 @@ export class Bridge {
           } else await this.receive(line, message);
         }
         for (const update of events['messages.update'] ?? []) await this.receiveUpdate(line, update);
+        const history = events['messaging-history.set'];
+        if (history && this.recovering(line)) await this.recoverHistory(line, history.messages ?? []);
       }).catch(error => {
         if (line.socket !== socket || line.generation !== generation) { this.onError(error); return; }
         this.blockConnection(line, socket, 'persistence_failed');
@@ -480,7 +504,8 @@ export class Bridge {
     if (update.connection === 'close') {
       this.blockConnection(line, socket, 'connection_closed');
       const code = update.lastDisconnect?.error?.output?.statusCode;
-      this.trace(line, 'connection_closed', { provider_status: Number.isInteger(code) ? code : null });
+      this.trace(line, 'connection_closed', { provider_status: Number.isInteger(code) ? code : null,
+        provider_reason: disconnectReason(update.lastDisconnect?.error) });
     }
     if (update.connection !== 'close' && session.closed) return;
     if (line.removing) {
@@ -542,7 +567,14 @@ export class Bridge {
       line.display_phone_number = ownPhone;
       session.ready = true;
       line.status = 'connected';
+      line.disconnectedSince = null;
       this.trace(line, 'connection_transition', { state: 'ready' });
+      if (line.store.data.logged_out_at) await line.store.update(data => { delete data.logged_out_at; });
+      if (line.store.data.recover_since && !line.store.data.recover_until) {
+        // WhatsApp sends recent history right after pairing; accept it for a bounded time.
+        await line.store.update(data => { data.recover_until = Date.now() + RECOVERY_WINDOW_MS; delete data.logout_reason; });
+        this.trace(line, 'history_recovery_started', { since: line.store.data.recover_since });
+      }
       session.readyAt = Date.now();
       delete line.error;
       delete line.qr;
@@ -561,7 +593,16 @@ export class Bridge {
         line.status = 'logged_out';
         line.error = 'This linked device was logged out. Connect and scan a new QR code.';
         const auth = line.auth;
-        await line.store.update(data => { data.enabled = false; });
+        const reason = disconnectReason(update.lastDisconnect?.error);
+        const offlineSince = line.disconnectedSince ?? Date.now();
+        await line.store.update(data => {
+          data.enabled = false;
+          data.logout_reason = reason;
+          data.logged_out_at = Date.now();
+          // Re-pairing recovers what customers sent from here on. Keep the earliest point.
+          data.recover_since = Math.min(data.recover_since ?? Infinity, offlineSince - RECOVERY_MARGIN_MS);
+          delete data.recover_until;
+        });
         if (line.session !== session) return;
         await auth.reset();
       } else {
@@ -647,6 +688,7 @@ export class Bridge {
   }
   blockConnection(line, socket, reason) {
     if (line.socket !== socket || !line.session || line.session.closed) return;
+    line.disconnectedSince ??= Date.now();
     if (line.session.readyAt && Date.now() - line.session.readyAt >= 60_000) line.reconnectAttempts = 0;
     line.session.closed = true;
     line.session.ready = false;
@@ -914,7 +956,40 @@ export class Bridge {
       await line.store.update(data => { data.pending_media_deletions = data.pending_media_deletions.filter(id => id !== mediaId); });
     }
   }
-  async receive(line, message) {
+  async retirePhone(line) {
+    const phone = knownPhone(line.store.data.bound_phone || line.display_phone_number);
+    if (!phone) return;
+    const offlineSince = line.store.data.recover_since ?? (line.status === 'connected' ? Date.now() : line.disconnectedSince ?? Date.now());
+    await this.retiredPhones.update(data => {
+      const cutoff = Date.now() - RETIRED_PHONE_MS;
+      for (const [known, entry] of Object.entries(data.phones)) if (!(entry?.removed_at > cutoff)) delete data.phones[known];
+      data.phones[phone] = { offline_since: Math.min(data.phones[phone]?.offline_since ?? Infinity, offlineSince), removed_at: Date.now() };
+    });
+  }
+  async adoptRetiredPhone(line) {
+    // The second socket of a fresh pairing already knows its phone, before
+    // WhatsApp sends history. A line that was paired before is not a re-link.
+    const own = knownPhone(line.auth.state.creds.me?.id?.split('@')[0]?.split(':')[0]);
+    const entry = own && !line.store.data.bound_phone && !line.store.data.recover_since ? this.retiredPhones?.data.phones[own] : null;
+    if (!entry || !(entry.removed_at > Date.now() - RETIRED_PHONE_MS)) return;
+    await line.store.update(data => { data.recover_since = entry.offline_since - RECOVERY_MARGIN_MS; delete data.recover_until; });
+    await this.retiredPhones.update(data => { delete data.phones[own]; });
+  }
+  async recoverHistory(line, messages) {
+    const since = line.store.data.recover_since;
+    let recovered = 0;
+    const ordered = [...messages].sort((a, b) => millis(a.messageTimestamp) - millis(b.messageTimestamp));
+    for (const message of ordered) {
+      const sentAt = millis(message.messageTimestamp);
+      if (!sentAt || sentAt < since || sentAt > Date.now() + RECOVERY_MARGIN_MS) continue;
+      if (line.store.data.messages[message.key?.id]?.notified) continue;
+      await this.receive(line, message, { recovered: true });
+      if (line.store.data.messages[message.key?.id]?.notified) recovered++;
+    }
+    if (recovered) this.trace(line, 'history_recovered', { messages: recovered });
+  }
+
+  async receive(line, message, { recovered = false } = {}) {
     const key = message.key;
     if (!key?.id || !key.remoteJid || /@(g\.us|broadcast|newsletter)$/.test(key.remoteJid)) return;
     wrapId(line.line_id, key.id);
@@ -981,7 +1056,7 @@ export class Bridge {
       mediaId = `ldmedia:${line.line_id}:${crypto.randomUUID()}`;
       await line.store.update(data => { data.media[mediaId] = { message, mime_type: content[`${mediaType}Message`].mimetype ?? 'application/octet-stream', downloaded: false }; });
     }
-    const event = phone ? (key.fromMe ? outgoingEvent(line, message, phone, mediaId) : inboundEvent(line, message, phone, mediaId)) : null;
+    const event = phone ? (key.fromMe ? outgoingEvent(line, message, phone, mediaId) : inboundEvent(line, message, phone, mediaId, { recovered })) : null;
     if (event) await this.enqueue(event);
     await line.store.update(data => {
       data.messages[key.id] = { ...(data.messages[key.id] ?? {}), message, phone, media_id: mediaId,
@@ -1393,6 +1468,12 @@ export class Bridge {
     }
     for (const line of this.lines.values()) {
       if (!line.store?.data || line.status === 'error' || line.removing) continue;
+      if (line.store.data.recover_until && Date.now() > line.store.data.recover_until) {
+        try {
+          await line.store.update(data => { delete data.recover_since; delete data.recover_until; });
+          this.trace(line, 'history_recovery_finished', {});
+        } catch (error) { this.onError(error); }
+      }
       try {
         // Recover a crash between the durable tombstone and content/media purge.
         for (const [nativeId, record] of Object.entries(line.store.data.messages)) {

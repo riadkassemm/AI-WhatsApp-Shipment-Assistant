@@ -26,6 +26,9 @@ def add_linked_device_schema(columns):
         "operation_id", "message_id", "base_version", "user_id", "action", "content", "status", "lease_until", "provider_timestamp"
     }
     columns["support_message_change_events"] = {"event_id", "message_id", "provider_timestamp"}
+    columns["support_ticket_messages"].add("held_until")
+    columns["support_deletion_audit"] = {"ticket_id", "ticket_reference", "conversation_origin", "status", "business_phone_number_id",
+                                         "message_count", "deleted_by_staff_id", "deleted_by_name", "deleted_at"}
 
 
 def test_support_schema_guard_accepts_current_schema():
@@ -279,3 +282,15 @@ def test_support_schema_guard_requires_dashboard_reads():
             columns.setdefault(table, set()).update(required)
     columns.pop("support_dashboard_reads")
     assert _missing_support_schema_migrations(columns) == ["migrations/20261029_support_dashboard_reads.sql"]
+
+
+def test_support_schema_guard_requires_line_outage_columns():
+    columns = {}
+    for _, tables in _SUPPORT_SCHEMA_MIGRATIONS:
+        for table, required in tables.items():
+            columns.setdefault(table, set()).update(required)
+    columns["support_ticket_messages"].discard("held_until")
+    assert _missing_support_schema_migrations(columns) == ["migrations/20261031_line_outage_resilience.sql"]
+    columns["support_ticket_messages"].add("held_until")
+    columns.pop("support_deletion_audit")
+    assert _missing_support_schema_migrations(columns) == ["migrations/20261031_line_outage_resilience.sql"]

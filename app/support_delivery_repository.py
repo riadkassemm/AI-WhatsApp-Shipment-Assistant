@@ -7,6 +7,8 @@ import aiomysql
 
 
 DELIVERY_LEASE_MINUTES = 5
+# A reply refused because its line was offline is resent automatically within this window.
+HELD_REPLY_MINUTES = 30
 
 
 class DeliveryRepositoryMixin:
@@ -31,6 +33,34 @@ class DeliveryRepositoryMixin:
                       AND (m.send_status='UNCERTAIN' OR (m.send_status='DISPATCHING'
                            AND m.delivery_claimed_at < UTC_TIMESTAMP(6)-INTERVAL %s MINUTE))
                     ORDER BY m.id LIMIT %s""", (after_id, DELIVERY_LEASE_MINUTES, limit))
+                return list(await cur.fetchall())
+
+    async def expire_held_replies(self) -> list[int]:
+        """End holds past their window; return the affected ticket IDs."""
+        if self._pool is None:
+            await self.connect()
+        async with self._pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute("""SELECT DISTINCT ticket_id FROM support_ticket_messages
+                    WHERE send_status='FAILED' AND held_until IS NOT NULL AND held_until <= UTC_TIMESTAMP(6)""")
+                tickets = [int(row['ticket_id']) for row in await cur.fetchall()]
+                if tickets:
+                    await cur.execute("""UPDATE support_ticket_messages SET held_until=NULL, updated_at=UTC_TIMESTAMP(6)
+                        WHERE send_status='FAILED' AND held_until IS NOT NULL AND held_until <= UTC_TIMESTAMP(6)""")
+            await conn.commit()
+        return tickets
+
+    async def list_held_replies(self, limit: int = 50):
+        """Staff replies held for an offline line, oldest first, on live conversations."""
+        if self._pool is None:
+            await self.connect()
+        async with self._pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute("""SELECT m.* FROM support_ticket_messages m JOIN support_tickets t ON t.id=m.ticket_id
+                    WHERE m.send_status='FAILED' AND m.delivery_retry_safe=1 AND m.held_until > UTC_TIMESTAMP(6)
+                      AND m.direction='OUTBOUND' AND m.sender_type='AGENT' AND m.client_message_id IS NOT NULL
+                      AND m.deleted_for_everyone_at IS NULL AND t.active_key IS NOT NULL
+                    ORDER BY m.id LIMIT %s""", (limit,))
                 return list(await cur.fetchall())
 
     async def _lock_delivery_ticket(self, conn, cur, message_id: int):
@@ -158,7 +188,8 @@ class DeliveryRepositoryMixin:
         return changed
 
     async def finish_delivery(self, message_id: int, token: str, *, status: str,
-                              provider_id: str | None = None, error: str | None = None, failure_code: int | None = None) -> None:
+                              provider_id: str | None = None, error: str | None = None, failure_code: int | None = None,
+                              held: bool = False) -> None:
         from app.whatsapp_failures import failure_policy
         retry_safe = status == 'FAILED'
         if retry_safe and failure_code is not None:
@@ -169,12 +200,14 @@ class DeliveryRepositoryMixin:
                     UPDATE support_ticket_messages SET send_status = %s,
                         whatsapp_message_id = COALESCE(%s, whatsapp_message_id),
                         read_sync_pending = CASE WHEN %s='SENT' AND sender_type='AGENT' THEN 1 ELSE read_sync_pending END,
-                        error_message = %s, delivery_retry_safe = %s, updated_at = UTC_TIMESTAMP(6)
+                        error_message = %s, delivery_retry_safe = %s, updated_at = UTC_TIMESTAMP(6),
+                        held_until = CASE WHEN %s THEN COALESCE(held_until, UTC_TIMESTAMP(6) + INTERVAL %s MINUTE) ELSE NULL END
                     WHERE id = %s AND delivery_token = %s
                       AND ((%s = 'SENT' AND send_status IN ('DISPATCHING', 'UNCERTAIN'))
                            OR (%s IN ('FAILED', 'UNCERTAIN') AND send_status IN ('PENDING', 'DISPATCHING')
                                AND delivery_claimed_at >= UTC_TIMESTAMP(6) - INTERVAL %s MINUTE))
-                """, (status, provider_id, status, error, retry_safe, message_id, token, status, status, DELIVERY_LEASE_MINUTES))
+                """, (status, provider_id, status, error, retry_safe, bool(held and retry_safe), HELD_REPLY_MINUTES,
+                      message_id, token, status, status, DELIVERY_LEASE_MINUTES))
             await conn.commit()
 
     async def interrupt_delivery(self, message_id: int, token: str) -> None:

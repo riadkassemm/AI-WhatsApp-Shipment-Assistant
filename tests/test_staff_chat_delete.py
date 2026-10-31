@@ -60,7 +60,7 @@ def _patch_repo(monkeypatch, chat: dict[str, Any] | None, calls: list[str]) -> N
         calls.append("get")
         return dict(chat) if chat else None
 
-    async def delete_staff_chat(chat_id: int):
+    async def delete_staff_chat(chat_id: int, **_actor):
         calls.append(f"delete:{chat_id}")
         return dict(chat or {})
 
@@ -199,6 +199,8 @@ def test_repository_locks_revalidates_and_deletes_the_whole_chat_timeline() -> N
     ):
         assert any(f"DELETE FROM {table} " in statement for statement in deletes), table
     assert deletes[-1] == "DELETE FROM support_tickets WHERE id = %s"
+    audit = [index for index, statement in enumerate(conn.statements) if statement.startswith("INSERT INTO support_deletion_audit")]
+    assert len(audit) == 1 and audit[0] < conn.statements.index(deletes[0]), "who deleted it is recorded first"
     assert conn.committed and not conn.rolled_back
 
 

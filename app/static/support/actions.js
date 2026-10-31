@@ -1011,7 +1011,11 @@ function renderLinkedDeviceStatus(payload) {
     status.className = 'muted';
     const labels = {connected: 'Connected', connecting: 'Connecting…', qr: 'Scan this code with the phone you want to connect', logged_out: 'Not paired', disconnected: 'Disconnected', error: 'Connection failed'};
     status.textContent = labels[line.status] || 'Not paired';
-    if (line.error) status.textContent += ' · ' + line.error;
+    if (line.status === 'logged_out' && line.logged_out_at) {
+      status.textContent = 'Logged out by WhatsApp at ' + new Date(line.logged_out_at).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'})
+        + '. Re-pair it with the same phone: every conversation and its history stays.';
+    } else if (line.error) status.textContent += ' · ' + line.error;
+    if (line.recovering_history) status.textContent += ' · Recovering messages sent while offline';
     if (line.pending_callbacks) status.textContent += ' · ' + line.pending_callbacks + ' updates pending';
     if (line.waiting_history_reactions) status.title = line.waiting_history_reactions + ' reactions are waiting for older messages to sync. This does not block new messages.';
     if (line.failed_callbacks) status.textContent += ' · ' + line.failed_callbacks + ' failed updates need administrator attention';
@@ -1026,8 +1030,9 @@ function renderLinkedDeviceStatus(payload) {
     const connected = line.status === 'connected';
     if (!connected) {
       const pair = document.createElement('button');
-      pair.type = 'button'; pair.className = 'btn small';
-      pair.textContent = line.status === 'qr' ? 'Refresh pairing' : 'Pair WhatsApp';
+      const repair = line.status === 'logged_out' && Boolean(line.logged_out_at);
+      pair.type = 'button'; pair.className = repair ? 'btn small primary' : 'btn small';
+      pair.textContent = line.status === 'qr' ? 'Refresh pairing' : repair ? 'Re-pair (keeps all history)' : 'Pair WhatsApp';
       pair.disabled = state.linkedDeviceBusy || state.whatsappBusy || line.status === 'connecting';
       pair.onclick = () => changeLinkedDeviceConnection(line.line_id, 'connect');
       row.append(pair);
@@ -1055,6 +1060,54 @@ async function loadLinkedDeviceStatus() {
     $('linkedDeviceLines').replaceChildren();
     text($('linkedDeviceStatus'), error.message || 'The WhatsApp connection service is unavailable.');
     $('addLinkedDeviceBtn').disabled = state.linkedDeviceBusy || state.whatsappBusy;
+  }
+}
+
+const LINE_HEALTH_INTERVAL_MS = 30000;
+
+async function loadLineHealth({force = false} = {}) {
+  if (!state.authenticated || (!force && Date.now() - state.lineHealthAt < LINE_HEALTH_INTERVAL_MS)) return;
+  state.lineHealthAt = Date.now();
+  try {
+    renderLineHealth(await api('/api/support/whatsapp-lines/health'));
+  } catch (_) {
+    // An unreachable dashboard API already shows the connection banner.
+  }
+}
+
+function lineOfflineSince(line) {
+  const since = line?.since ? new Date(line.since) : null;
+  return since && !Number.isNaN(since.getTime()) ? ' since ' + since.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'}) : '';
+}
+
+function renderLineHealth(payload) {
+  state.lineHealth = payload;
+  const alerts = (payload?.lines || []).filter(line => line.alert);
+  $('lineAlertBanner').classList.toggle('hidden', !alerts.length);
+  if (alerts.length) {
+    const first = alerts[0];
+    const more = alerts.length > 1 ? ' and ' + (alerts.length - 1) + ' more' : '';
+    const problem = first.status === 'logged_out' ? ' was logged out by WhatsApp' : ' is offline';
+    const next = !canManageWhatsApp() ? ' Replies wait and are sent automatically when it reconnects.'
+      : first.status === 'logged_out' ? ' Re-pair it with the same phone; every conversation and its history stays.'
+      : ' It keeps trying to reconnect.';
+    text($('lineAlertText'), first.name + more + problem + lineOfflineSince(first) + '.' + next);
+    $('lineAlertActionBtn').classList.toggle('hidden', !canManageWhatsApp());
+  }
+  // Sound once per outage, for the people who can fix it.
+  const fresh = alerts.filter(line => !state.lineAlertsSeen.has(line.line_id + ':' + line.since));
+  for (const line of alerts) state.lineAlertsSeen.add(line.line_id + ':' + line.since);
+  if (fresh.length && canManageWhatsApp()) notifyNewCustomerActivity(fresh[0].name + ' needs attention: its WhatsApp line is offline.');
+  const ticket = state.currentTicketData?.ticket;
+  if (ticket && state.currentTicketData?.permissions?.can_reply) renderComposerLineNotice(ticket);
+}
+
+function renderComposerLineNotice(ticket) {
+  const line = (state.lineHealth?.lines || []).find(item => String(item.line_id) === String(ticket.business_phone_number_id || ''));
+  if (line && line.status !== 'connected') {
+    text($('composerHelp'), line.name + ' is offline' + lineOfflineSince(line) + '. Replies wait and are sent automatically when it reconnects (up to 30 minutes).');
+  } else if (String($('composerHelp').textContent || '').includes(' is offline')) {
+    text($('composerHelp'), 'Messages are sent from the WhatsApp number for this conversation.');
   }
 }
 
@@ -1120,7 +1173,14 @@ async function addLinkedDeviceNumber() {
 
 async function removeLinkedDeviceNumber(lineId) {
   if (!canManageWhatsApp() || state.linkedDeviceBusy || state.whatsappBusy) return;
-  if (!(await confirmDialog({title: 'Remove and unlink number?', message: 'Remove and unlink this WhatsApp number completely? It will be signed out and removed from the app. Active conversations on this number will be closed; their chat history will be kept.', confirmLabel: 'Remove and unlink', tone: 'danger'}))) return;
+  const line = (state.linkedDeviceStatus?.lines || []).find(item => String(item.line_id) === String(lineId));
+  const advice = line?.status === 'logged_out' ? 'If WhatsApp logged this number out, use Re-pair instead: nothing is closed. ' : '';
+  const typed = await promptDialog({title: 'Remove and unlink number?', label: 'Type REMOVE to confirm', confirmLabel: 'Remove and unlink', tone: 'danger',
+    message: advice + 'Remove and unlink this WhatsApp number completely? It will be signed out and removed from the app. Active conversations on this number will be closed; their chat history will be kept.'});
+  if (typeof typed !== 'string' || typed.trim().toUpperCase() !== 'REMOVE') {
+    if (typeof typed === 'string') showWhatsAppFeedback('whatsappError', 'Nothing was removed. Type REMOVE to confirm removal.');
+    return;
+  }
   state.linkedDeviceBusy = true;
   state.linkedDeviceRequest++;
   clearWhatsAppFeedback();
@@ -2188,6 +2248,7 @@ $('messagePreferencesBtn').addEventListener('click', openMessagePreferencesModal
 $('aiHeaderBtn').addEventListener('click', openAiSettingsModal);
 $('manageStaffBtn').addEventListener('click', openStaffModal);
 $('manageWhatsAppBtn').addEventListener('click', openWhatsAppModal);
+$('lineAlertActionBtn').addEventListener('click', openWhatsAppModal);
 $('googleContactsConnectBtn').addEventListener('click', connectGoogleContacts);
 $('importVcfContactsBtn').addEventListener('click', chooseVcfContactsFile);
 $('vcfContactsInput').addEventListener('change', importSelectedVcfContacts);

@@ -688,6 +688,27 @@ def test_inbound_snapshot_uses_transcript_sync_and_never_customer_ai(linked_conf
     assert sync.await_count == 1
 
 
+def test_recovered_history_message_is_recorded_for_staff_without_ai(linked_config, monkeypatch):
+    from unittest.mock import AsyncMock
+    import app.main as main_module
+    event = message_event()
+    event.update(type='message_snapshot', from_me=False, recovered=True, sender_phone='96171111111',
+                 message_id='ld:90001:MESSAGE1', timestamp=1_700_000_000_000)
+    node = event['payload']['entry'][0]['changes'][0]['value']['messages'][0]
+    node.update(timestamp='1700000000')  # ordinary text, sent while the line was offline
+    recovered = AsyncMock(return_value=True)
+    monkeypatch.setattr(api_module.whatsapp_registry_service, 'observe_inbound', AsyncMock(return_value=True))
+    monkeypatch.setattr(api_module.support_service, 'sync_linked_device_recovered', recovered)
+    monkeypatch.setattr(api_module.support_service, 'sync_linked_device_snapshot',
+                        AsyncMock(side_effect=AssertionError('Recovered text is not unsupported content')))
+    monkeypatch.setattr(main_module, 'process_whatsapp_payload',
+                        AsyncMock(side_effect=AssertionError('Recovered messages never reach the AI')))
+    assert request('POST', '/api/whatsapp/linked-device/events', payload=event).status_code == 200
+    recovered.assert_awaited_once()
+    assert request('POST', '/api/whatsapp/linked-device/events', payload=dict(event, recovered='yes')).status_code != 200
+    assert recovered.await_count == 1
+
+
 @pytest.mark.parametrize('event_type,from_me,sync_method', [
     ('outgoing_message', True, 'sync_linked_device_outbound'),
     ('message_snapshot', False, 'sync_linked_device_snapshot'),
