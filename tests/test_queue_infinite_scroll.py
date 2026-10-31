@@ -21,7 +21,8 @@ def test_queue_appends_pages_on_scroll_and_refresh_keeps_loaded_rows() -> None:
     start = _HTML.index("function queuePath(")
     end = _HTML.index("async function pollUnassignedActivity(")
     transient = _HTML[_HTML.index("function transientReadError("):_HTML.index("function backgroundRetryDelay(")]
-    script = transient + r"""
+    unread = _HTML[_HTML.index("function queueSupportsUnreadFilter("):_HTML.index("function resetQueueFilters(")]
+    script = transient + unread + r"""
 const assert = require('node:assert/strict');
 const document = {hidden:false};
 const noteBackgroundRead = () => {};

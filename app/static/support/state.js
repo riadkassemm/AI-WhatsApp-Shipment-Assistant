@@ -37,7 +37,7 @@ const state = {
   pageSize: 50,
   total: 0,
   queueItems: [],
-  queueFilters: {supportNumber: "", staffId: "", status: "all"},
+  queueFilters: {supportNumber: "", staffId: "", status: "all", read: "all"},
   dashboardReadBoundaries: new Map(),
   chatNotificationIds: new Set(),
   queueLoadingMore: false,

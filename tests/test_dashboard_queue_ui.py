@@ -70,7 +70,7 @@ assert.equal(calls.at(-1)[1].message_id,2,'only scrolling to the newer message a
 
 def test_filter_paths_combination_and_pagination_reset():
     source = Path('app/static/support/rendering.js').read_text()
-    helper = source[source.index('function queueCriteriaChanged('):source.index('function uniqueQueueItems(')]
+    helper = source[source.index('function queueSupportsUnreadFilter('):source.index('function uniqueQueueItems(')]
     run("""
 const assert=require('node:assert/strict');
 const state={view:'chats',query:'invoice',page:5,queueRequest:1,queueExhausted:true,queueFilters:{supportNumber:'90005',staffId:'7',status:'closed'}};
@@ -80,6 +80,13 @@ let params=new URL(queuePath(3,30),'http://x').searchParams;
 for(const [key,value] of Object.entries({page:'3',page_size:'30',q:'invoice',support_number:'90005',staff_id:'7',chat_status:'closed'})) assert.equal(params.get(key),value);
 queueCriteriaChanged(); assert.equal(state.page,1);assert.equal(state.queueRequest,2);assert.equal(state.queueExhausted,false);
 state.view='mine';params=new URL(queuePath(1,30),'http://x').searchParams;assert.equal(params.has('staff_id'),false);assert.equal(params.has('chat_status'),false);
+assert.equal(params.has('unread'),false);
+state.queueFilters.read='unread';params=new URL(queuePath(1,30),'http://x').searchParams;
+assert.equal(params.get('unread'),'true');assert.equal(params.has('keep_ticket_id'),false);
+state.ticketId=42;params=new URL(queuePath(1,30),'http://x').searchParams;assert.equal(params.get('keep_ticket_id'),'42');
+state.view='chats';params=new URL(queuePath(1,30),'http://x').searchParams;assert.equal(params.get('unread'),'true');
+state.view='history';params=new URL(queuePath(1,30),'http://x').searchParams;
+assert.equal(params.has('unread'),false,'unread applies to My tickets and Chats only');assert.equal(params.has('keep_ticket_id'),false);
 """)
 
 
@@ -89,7 +96,10 @@ def test_queue_controls_and_unread_dots_in_browser(tmp_path):
     from app.support_ui import _ASSETS, _TEMPLATE, _configure
     browser = shutil.which(os.environ.get('SUPPORT_TEST_BROWSER', 'chromium'))
     assert browser, 'Install Chromium for browser regressions'
-    script = _configure(_ASSETS['state.js'] + '\n' + _ASSETS['rendering.js']) + r'''
+    api = _ASSETS['api.js']
+    # The empty-state helper is shared from api.js, which loads before rendering.js.
+    empty_markup = api[api.index('function emptyMarkup('):api.index('return {outer, inner};\n}') + len('return {outer, inner};\n}')]
+    script = _configure(_ASSETS['state.js'] + '\n' + empty_markup + '\n' + _ASSETS['rendering.js']) + r'''
 const check=(ok,label)=>{if(!ok)throw Error(label)};
 try {
 state.authenticated=true;state.agent={id:'7',name:'Test Agent',role:'agent'};state.view='chats';
@@ -111,11 +121,19 @@ state.queueFilters.supportNumber='removed';state.queueFilters.staffId='deleted';
 check(renderQueueFilters({support_numbers:[{id:'90005',name:'Export Office'}],staff:[{id:'7',name:'Test Agent'}]}),'stale selection requests reload');
 check(state.queueFilters.supportNumber===''&&state.queueFilters.staffId==='','stale filters reset to All');
 check($('queueSupportNumber').options.length===2&&$('queueStaff').options.length===2,'no phantom options');
+check(!$('queueReadLabel').classList.contains('hidden'),'chats unread filter visible');
+check($('queueRead').labels[0].querySelector('.sr-only'),'unread filter retains accessible label');
 state.view='mine';renderQueueFilters();renderQueue();
 check($('queueStaffLabel').classList.contains('hidden')&&$('queueStatusLabel').classList.contains('hidden'),'mine cannot choose another staff');
+check(!$('queueReadLabel').classList.contains('hidden'),'mine unread filter visible');
+state.queueFilters.read='unread';renderQueueFilters();check($('queueRead').value==='unread','unread selection');
+const keptItems=state.queueItems;state.queueItems=[];state.total=0;renderQueue();
+check($('queue').textContent.includes('No unread conversations'),'unread empty state');
+state.queueItems=keptItems;state.total=1;state.queueFilters.read='all';renderQueueFilters();renderQueue();
 check($('queue').querySelector('.unread-dot'),'mine unread dot');
 state.queueItems[0].dashboard_unread_count=0;renderQueue();check(!$('queue').querySelector('.unread-dot'),'confirmed read clears dot');
 state.view='history';renderQueueFilters();check(!$('queueStaffLabel').classList.contains('hidden'),'history staff filter');
+check($('queueReadLabel').classList.contains('hidden'),'history has no unread filter');
 state.view='chats';state.queueItems[0].dashboard_unread_count=2;renderQueueFilters();renderQueue();
 $('sessionLoading').classList.add('hidden');$('dashboard').classList.remove('hidden');
 $('agentName').textContent='Test Agent';$('ticketTitle').textContent='Select a conversation';

@@ -2200,7 +2200,7 @@ $('queueSearch').addEventListener('input', event => {
   state.query = event.target.value;
   queueCriteriaChanged();
 });
-for (const [id, key] of [['queueSupportNumber', 'supportNumber'], ['queueStaff', 'staffId'], ['queueStatus', 'status']]) {
+for (const [id, key] of [['queueSupportNumber', 'supportNumber'], ['queueStaff', 'staffId'], ['queueStatus', 'status'], ['queueRead', 'read']]) {
   $(id).addEventListener('change', event => {
     state.queueFilters[key] = event.target.value;
     queueCriteriaChanged();

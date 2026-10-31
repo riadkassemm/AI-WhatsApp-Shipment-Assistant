@@ -2183,6 +2183,8 @@ class SupportService:
         support_number: str | None = None,
         chat_status: str = "all",
         query: str = "",
+        unread: bool = False,
+        keep_ticket_id: int | None = None,
     ) -> dict[str, Any]:
         if view == "active" and not agent.is_supervisor:
             # Active lists every live ticket for monitoring; agents work from their own queues.
@@ -2194,6 +2196,7 @@ class SupportService:
             page=page,
             page_size=page_size,
             staff_id=staff_id, support_number=support_number, chat_status=chat_status, query=query,
+            unread=unread, keep_ticket_id=keep_ticket_id,
         )
         result["items"] = [_safe_ticket_row(row) for row in result["items"]]
         return result
