@@ -90,7 +90,7 @@ document.body.dataset.attachmentsTest='passed';
 })().catch(error=>{document.body.dataset.attachmentsTest='FAILED: '+error.message});
 '''
     rendering = _ASSETS['rendering.js']
-    player = rendering[rendering.index('function createVoiceNotePlayer('):rendering.index('function addMessage(')]
+    player = _ASSETS['voice-player.js'] + rendering[rendering.index('function createVoiceNotePlayer('):rendering.index('function addMessage(')]
     script=setup+'function createIcon('+state_helpers+player+_ASSETS['media.js']+'const QUICK_REPLIES_LIST_SUBTITLE = '+quick+assertions
     html=_configure(_TEMPLATE.replace('__SUPPORT_STYLE__','<style>'+_ASSETS['support.css']+'</style>').replace('__SUPPORT_THEME__','').replace('__SUPPORT_SCRIPTS__','<script>'+script+'</script>'))
     path=tmp_path/'attachments.html';path.write_text(html)
