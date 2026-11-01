@@ -1684,33 +1684,8 @@ function highlightSearchTerm(root, term) {
   }
 }
 
-function createVoiceNotePlayer(src, label) {
-  const player = document.createElement('div');
-  player.className = 'voice-note-player';
-  const audio = document.createElement('audio');
-  audio.controls = true;
-  audio.preload = 'metadata';
-  audio.src = src;
-  audio.dataset.mediaUrl = src;
-  audio.setAttribute('aria-label', label);
-  const speed = document.createElement('button');
-  speed.type = 'button';
-  speed.className = 'voice-speed-btn';
-  const rates = [1, 1.5, 2];
-  let rateIndex = 0;
-  const updateSpeed = () => {
-    speed.textContent = rates[rateIndex] + 'x';
-    speed.setAttribute('aria-label', 'Playback speed ' + rates[rateIndex] + 'x. Click to change speed.');
-    speed.title = 'Playback speed ' + rates[rateIndex] + 'x';
-  };
-  speed.onclick = () => {
-    rateIndex = (rateIndex + 1) % rates.length;
-    audio.playbackRate = rates[rateIndex];
-    updateSpeed();
-  };
-  updateSpeed();
-  player.append(audio, speed);
-  return {player, audio};
+function createVoiceNotePlayer(src, label, options) {
+  return buildVoiceMessagePlayer(src, label, options);
 }
 
 function addMessage(container, m, extraClass = '') {
@@ -1825,32 +1800,18 @@ function addMessage(container, m, extraClass = '') {
         card.append(copy, view);
         media.append(card);
       } else {
-        const {player, audio} = createVoiceNotePlayer(m.media_url, 'Voice note from ' + messageActor(m));
+        bubble.className += ' voice-message';
+        const {player} = createVoiceNotePlayer(m.media_url, 'Voice note from ' + messageActor(m));
         if (outbound) {
           const mic = createIcon('mic', 'icon voice-playback' + (m.delivery_status === 'played' ? ' confirmed-played' : ''));
           mic.setAttribute('aria-label', m.delivery_status === 'played' ? 'Played by recipient' : 'Playback not confirmed');
           const indicator = document.createElement('span');
+          indicator.className = 'voice-receipt';
           indicator.title = mic.getAttribute('aria-label');
           indicator.append(mic);
-          player.prepend(indicator);
+          (player.querySelector?.('.voice-time') || player).append(indicator);
         }
-        const recovery = document.createElement('div');
-        recovery.className = 'media-unavailable hidden';
-        const recoveryText = document.createElement('span');
-        recoveryText.textContent = 'Playback failed. Retry the WhatsApp media download.';
-        const retry = document.createElement('button');
-        retry.type = 'button';
-        retry.className = 'btn small';
-        retry.textContent = 'Retry voice note';
-        retry.onclick = () => {
-          recovery.classList.add('hidden');
-          audio.src = m.media_url + (m.media_url.includes('?') ? '&' : '?') + 'retry=' + Date.now();
-          audio.load();
-        };
-        recovery.append(recoveryText, retry);
-        audio.onerror = () => recovery.classList.remove('hidden');
-        audio.oncanplay = () => recovery.classList.add('hidden');
-        media.append(player, recovery);
+        media.append(player);
       }
     } else {
       const unavailable = document.createElement('div');

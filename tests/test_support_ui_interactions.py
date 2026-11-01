@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from app.support_ui import _HTML, support_image_editor_script
+from app.support_ui import _ASSETS, _HTML, support_image_editor_script
 from app.config import settings
 
 # Connection-health hooks used by queue/conversation loading: the shipped error
@@ -673,7 +673,7 @@ def test_voice_note_survives_ticket_and_message_updates(tmp_path: Path, outbound
         assert browser, f"Configured SUPPORT_TEST_BROWSER is unavailable: {configured_browser}"
     if not browser:
         pytest.skip("Chrome/Chromium is unavailable")
-    player = _HTML[_HTML.index("function createVoiceNotePlayer("): _HTML.index("function addMessage(")]
+    player = _ASSETS['voice-player.js'] + _HTML[_HTML.index("function createVoiceNotePlayer("): _HTML.index("function addMessage(")]
     reconciliation = _HTML[_HTML.index("function updateAudioMessageRow("): _HTML.index("function renderConversation(")]
     script = 'const outbound = ' + str(outbound).lower() + ';\n' + r"""
 const conversation = document.getElementById('conversation');
@@ -727,11 +727,11 @@ try {
   const audio = original.querySelector('audio');
   const speed = original.querySelector('.voice-speed-btn');
   if (outbound) check(!original.querySelector('.voice-playback').classList.contains('confirmed-played'), 'read implied playback');
-  check(audio.playbackRate === 1 && speed.textContent === '1x', 'initial speed');
+  check(audio.playbackRate === 1 && speed.textContent === '1×', 'initial speed');
   speed.click();
-  check(audio.playbackRate === 1.5 && speed.textContent === '1.5x', '1.5x speed');
+  check(audio.playbackRate === 1.5 && speed.textContent === '1.5×', '1.5× speed');
   speed.click();
-  check(audio.playbackRate === 2 && speed.textContent === '2x', '2x speed');
+  check(audio.playbackRate === 2 && speed.textContent === '2×', '2× speed');
 
   const removed = [];
   const observer = new MutationObserver(records => {
@@ -764,7 +764,7 @@ try {
     check(original.querySelectorAll('.voice-playback').length === 1, 'duplicate playback indicators');
   } else check(!original.querySelector('.voice-playback'), 'incoming audio gained a recipient indicator');
   speed.click();
-  check(audio.playbackRate === 1 && speed.textContent === '1x', 'speed did not cycle');
+  check(audio.playbackRate === 1 && speed.textContent === '1×', 'speed did not cycle');
   setTimeout(() => {
     try {
       check(removed.length === 0, 'audio was removed during update');
