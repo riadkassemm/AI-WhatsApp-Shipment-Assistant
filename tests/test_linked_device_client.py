@@ -107,6 +107,20 @@ def test_provider_rejection_is_distinct_from_uncertain_delivery(bridge, status, 
     assert caught.value.http_status == status
 
 
+@pytest.mark.parametrize(("payload", "code"), [
+    ({"delivery_uncertain": False, "error": {"code": "NOT_CONNECTED", "message": "reconnecting"}}, "NOT_CONNECTED"),
+    ({"delivery_uncertain": False, "error": {"code": "not a code!", "message": "x"}}, None),
+    ({"error": "disconnected"}, None),
+])
+def test_bridge_error_code_identifies_an_offline_line(bridge, payload, code):
+    bridge(lambda _: httpx.Response(503, json=payload))
+    with pytest.raises(WhatsAppSendError) as caught:
+        asyncio.run(LinkedDeviceWhatsAppClient().send_text("96171111111", "Hello", phone_number_id="10001", client_message_id="request-1"))
+    assert caught.value.bridge_code == code
+    if code:
+        assert caught.value.delivery_uncertain is False  # nothing was sent, so it may be held and resent
+
+
 def test_network_timeout_leaves_mutation_uncertain(bridge):
     def fail(request):
         raise httpx.ReadTimeout("Timeout", request=request)

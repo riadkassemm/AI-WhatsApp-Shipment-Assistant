@@ -131,6 +131,11 @@ __SUPPORT_STYLE__
   <span id="connectionBannerText"></span>
   <button class="btn small" id="connectionRetryBtn" type="button">Retry now</button>
 </div>
+<div class="line-alert-banner hidden" id="lineAlertBanner" role="alert">
+  <svg class="icon icon-sm" aria-hidden="true"><use href="#icon-alert"></use></svg>
+  <span id="lineAlertText"></span>
+  <button class="btn small" id="lineAlertActionBtn" type="button">Re-pair now</button>
+</div>
 <div class="app-shell hidden" id="dashboard">
   <aside class="global-sidebar" aria-label="Support workspace navigation">
     <div class="brand-bar">
@@ -151,8 +156,8 @@ __SUPPORT_STYLE__
       <button class="queue-nav-btn" data-view="chats" type="button" aria-label="Staff initiated chats" title="Chats">
         <svg class="icon" aria-hidden="true"><use href="#icon-message"></use></svg><span class="queue-nav-label">Chats</span><span class="queue-nav-count" data-count-for="chats"></span>
       </button>
-      <button class="queue-nav-btn" data-view="watching" type="button" aria-label="Watching" title="Watching">
-        <svg class="icon" aria-hidden="true"><use href="#icon-eye"></use></svg><span class="queue-nav-label">Watching</span><span class="queue-nav-count" data-count-for="watching"></span>
+      <button class="queue-nav-btn" data-view="watching" type="button" aria-label="Transferred" title="Transferred">
+        <svg class="icon" aria-hidden="true"><use href="#icon-eye"></use></svg><span class="queue-nav-label">Transferred</span><span class="queue-nav-count" data-count-for="watching"></span>
       </button>
       <div class="nav-group-label" aria-hidden="true">Browse</div>
       <button class="queue-nav-btn" data-view="active" type="button" aria-label="Active tickets" title="Active">
@@ -238,6 +243,7 @@ __SUPPORT_STYLE__
       <div class="search-scope" id="searchScope">Searches customers, tickets and message text within this queue and the selected filters.</div>
     </div>
     <div class="queue-filters" id="queueFilters">
+      <label id="queueSortLabel"><span class="sr-only">Sort by ticket creation date</span><select class="input" id="queueSort" title="Sort by ticket creation date"><option value="newest">Newest</option><option value="oldest">Oldest</option></select></label>
       <label><span class="sr-only">Support Number</span><select class="input" id="queueSupportNumber"><option value="">All support numbers</option></select></label>
       <label class="hidden" id="queueStaffLabel"><span class="sr-only">Staff Member</span><select class="input" id="queueStaff"><option value="">All staff members</option></select></label>
       <label class="hidden" id="queueStatusLabel"><span class="sr-only">Status</span><select class="input" id="queueStatus"><option value="all">All</option><option value="open">Open</option><option value="closed">Closed</option></select></label>
@@ -412,9 +418,9 @@ __SUPPORT_STYLE__
         <div id="linkedDeviceLines"></div>
         <div class="form-note" id="linkedDeviceStatus" role="status"></div>
       </section>
+      <div id="whatsappMetaSection">
       <div class="section-title">
         <div><strong>Meta accounts</strong><div class="muted">The access token remains server-side. Add a WABA ID once, then Sync whenever numbers change in Meta.</div></div>
-        <button class="btn" id="refreshWhatsAppBtn" type="button"><svg class="icon" aria-hidden="true"><use href="#icon-refresh"></use></svg>Refresh</button>
       </div>
       <form class="whatsapp-sync-form" id="wabaSyncForm" novalidate>
         <div class="field"><label for="wabaIdInput">WhatsApp Business Account (WABA) ID</label><input id="wabaIdInput" type="text" inputmode="numeric" pattern="[0-9]+" maxlength="64" placeholder="Enter WABA ID" required /><div class="field-hint">Found in Meta Business Manager / WhatsApp Manager. This is not a secret.</div></div>
@@ -422,7 +428,9 @@ __SUPPORT_STYLE__
       </form>
       <div class="form-note">Newly discovered numbers are disabled by default. Select <strong>Add to app</strong> to allow customer messages on that line. Removing a line preserves its historical tickets.</div>
       <div class="whatsapp-account-list" id="whatsappAccounts"></div>
-      <div class="section-title section-spaced"><div><strong>Phone numbers</strong><div class="muted">Only enabled numbers are accepted for new inbound conversations.</div></div></div>
+      </div>
+      <div class="section-title section-spaced"><div><strong>Phone numbers</strong><div class="muted">Only enabled numbers are accepted for new inbound conversations.</div></div>
+        <button class="btn" id="refreshWhatsAppBtn" type="button"><svg class="icon" aria-hidden="true"><use href="#icon-refresh"></use></svg>Refresh</button></div>
       <div class="whatsapp-number-list" id="whatsappNumbers"></div>
     </div>
   </div>

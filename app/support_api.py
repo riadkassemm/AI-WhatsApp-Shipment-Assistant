@@ -386,6 +386,7 @@ async def support_login(payload: LoginRequest, response: Response) -> dict:
         "can_manage_staff": login.agent.is_supervisor,
         "can_manage_ai": login.agent.is_supervisor,
         "can_manage_whatsapp": login.agent.is_supervisor,
+        "can_link_whatsapp": login.agent.is_staff,
         "linked_device_available": len(settings.whatsapp_linked_device_secret) >= 32,
         "expires_at": login.expires_at.isoformat(),
     }
@@ -413,6 +414,7 @@ async def support_me(agent: SupportAgent = Depends(get_current_agent)) -> dict:
         "can_manage_staff": agent.is_supervisor,
         "can_manage_ai": agent.is_supervisor,
         "can_manage_whatsapp": agent.is_supervisor,
+        "can_link_whatsapp": agent.is_staff,
         "linked_device_available": len(settings.whatsapp_linked_device_secret) >= 32,
     }
 
@@ -1081,6 +1083,7 @@ async def list_tickets(
     q: str = Query(default="", max_length=200),
     unread: bool = Query(default=False),
     keep_ticket_id: int | None = Query(default=None, ge=1),
+    sort: str | None = Query(default=None, pattern="^(oldest|newest)$"),
     agent: SupportAgent = Depends(get_current_agent),
 ) -> dict:
     try:
@@ -1091,6 +1094,7 @@ async def list_tickets(
             page_size=page_size,
             staff_id=staff_id, support_number=support_number, chat_status=chat_status, query=q,
             unread=unread, keep_ticket_id=keep_ticket_id,
+            sort=sort,
         )
     except Exception as exc:
         raise _translate_error(exc) from exc

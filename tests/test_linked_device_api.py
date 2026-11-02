@@ -273,8 +273,9 @@ def test_linked_status_is_manager_only_and_filters_accounts(linked_config, monke
 
     monkeypatch.setattr(api_module.linked_device_client, "get_status", status)
     path = "/api/support/whatsapp-linked-device/status"
-    assert request("GET", path, role="agent").status_code == 403
+    assert request("GET", path, role="driver").status_code == 403
     assert calls == []
+    assert request("GET", path, role="agent").status_code == 200  # every staff role can pair
     payload = request("GET", path).json()
     assert len(payload["lines"]) == 1 and payload["lines"][0]["line_id"] == "90001"
     assert payload["lines"][0]["active_transport"] == "linked_device"
@@ -305,7 +306,7 @@ def allocation_bridge(linked_config, monkeypatch):
     manifest_path = Path(settings.whatsapp_linked_device_data_directory) / "lines.json"
 
     async def registry(agent):
-        assert agent.is_supervisor
+        assert agent.is_staff
         configured = api_module.configured_linked_device_lines()
         state["registry"] = [{"phone_number_id": "90002", "source": "LEGACY_ENV", "is_enabled": True}, *[
             {"phone_number_id": line, "source": "LINKED_DEVICE", "is_enabled": line == "90001"} for line in configured
@@ -400,10 +401,11 @@ def test_pairing_failure_preserves_registered_disabled_row_for_existing_pair(all
     assert state["lines"]["90001"] == "connected"
 
 
-@pytest.mark.parametrize("role", ["agent", "driver"])
-def test_add_number_is_manager_only(allocation_bridge, role):
-    response = request("POST", "/api/support/whatsapp-linked-device/lines", payload={"request_id": str(uuid4())}, role=role)
+def test_add_number_is_open_to_staff_only(allocation_bridge):
+    response = request("POST", "/api/support/whatsapp-linked-device/lines", payload={"request_id": str(uuid4())}, role="driver")
     assert response.status_code == 403 and allocation_bridge["calls"] == []
+    response = request("POST", "/api/support/whatsapp-linked-device/lines", payload={"request_id": str(uuid4())}, role="agent")
+    assert response.status_code == 200 and allocation_bridge["calls"]
 
 
 @pytest.mark.parametrize("body", [{}, {"request_id": "invalid"}, {"request_id": str(uuid4()), "expected_phone": "not-a-phone"}, {"request_id": str(uuid4()), "expected_phone": "123"}, {"request_id": str(uuid4()), "line_id": "90003"}])
@@ -686,6 +688,27 @@ def test_inbound_snapshot_uses_transcript_sync_and_never_customer_ai(linked_conf
     event['from_me'] = True
     assert request('POST', '/api/whatsapp/linked-device/events', payload=event).status_code == 400
     assert sync.await_count == 1
+
+
+def test_recovered_history_message_is_recorded_for_staff_without_ai(linked_config, monkeypatch):
+    from unittest.mock import AsyncMock
+    import app.main as main_module
+    event = message_event()
+    event.update(type='message_snapshot', from_me=False, recovered=True, sender_phone='96171111111',
+                 message_id='ld:90001:MESSAGE1', timestamp=1_700_000_000_000)
+    node = event['payload']['entry'][0]['changes'][0]['value']['messages'][0]
+    node.update(timestamp='1700000000')  # ordinary text, sent while the line was offline
+    recovered = AsyncMock(return_value=True)
+    monkeypatch.setattr(api_module.whatsapp_registry_service, 'observe_inbound', AsyncMock(return_value=True))
+    monkeypatch.setattr(api_module.support_service, 'sync_linked_device_recovered', recovered)
+    monkeypatch.setattr(api_module.support_service, 'sync_linked_device_snapshot',
+                        AsyncMock(side_effect=AssertionError('Recovered text is not unsupported content')))
+    monkeypatch.setattr(main_module, 'process_whatsapp_payload',
+                        AsyncMock(side_effect=AssertionError('Recovered messages never reach the AI')))
+    assert request('POST', '/api/whatsapp/linked-device/events', payload=event).status_code == 200
+    recovered.assert_awaited_once()
+    assert request('POST', '/api/whatsapp/linked-device/events', payload=dict(event, recovered='yes')).status_code != 200
+    assert recovered.await_count == 1
 
 
 @pytest.mark.parametrize('event_type,from_me,sync_method', [

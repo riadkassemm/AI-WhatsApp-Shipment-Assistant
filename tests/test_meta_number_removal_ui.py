@@ -25,6 +25,8 @@ const createMetaChip = element;
 const createIcon = element;
 const calls = [];
 const removeSavedWhatsAppNumber = id => calls.push(id);
+let manager = true;
+const canManageWhatsApp = () => manager;
 """ + source + r"""
 const entries = [
  {phone_number_id:'11111', source:'META_SYNC', is_enabled:false, provider_present:true},
@@ -43,6 +45,14 @@ assert.ok(rows[3].children[1].children.some(node => node.textContent === 'Remove
 state.whatsappBusy = true;
 renderWhatsAppRegistry({accounts:[], numbers:entries});
 assert.equal(removal(elements.whatsappNumbers.children[0]).disabled, true);
+// Agents rename and add numbers; deactivating and removing stay with managers.
+manager = false; state.whatsappBusy = false;
+renderWhatsAppRegistry({accounts:[], numbers:entries});
+rows = elements.whatsappNumbers.children;
+const labels = row => row.children[1].children.map(node => node.textContent);
+assert.deepEqual(labels(rows[0]), ['Rename', 'Add to app']);
+assert.deepEqual(labels(rows[2]), ['Rename'], 'no Remove from app for an active number');
+assert.deepEqual(labels(rows[3]), ['Rename', 'Add to app'], 'no Remove and unlink');
 """)
 
 

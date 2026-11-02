@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from app.support_ui import _HTML, support_image_editor_script
+from app.support_ui import _ASSETS, _HTML, support_image_editor_script
 from app.config import settings
 
 # Connection-health hooks used by queue/conversation loading: the shipped error
@@ -184,13 +184,17 @@ const state = {linkedDeviceBusy: false, whatsappBusy: false, whatsappRegistry: {
   {phone_number_id: '90001', is_enabled: true}, {phone_number_id: '90002', is_enabled: false}]}};
 const pendingLinkedDeviceAddition = () => null;
 const createSupportNumberLabel = line => {const node = element(); node.textContent = line.display_name || line.display_phone_number || line.line_id; return node};
+let manager = true;
+const canManageWhatsApp = () => manager;
 const changes = [];
 const changeLinkedDeviceConnection = (...args) => changes.push(args);
 const removeLinkedDeviceNumber = id => changes.push(['remove', id]);
 """ + function + r"""
 renderLinkedDeviceStatus({configured: true, lines: [
   {line_id: '90001', status: 'connected', is_paired: true, waiting_history_reactions: 2},
-  {line_id: '90002', status: 'error', is_paired: true, error: 'Number already linked', pending_callbacks: 1, failed_callbacks: 1}]});
+  {line_id: '90002', status: 'error', is_paired: true, error: 'Number already linked', pending_callbacks: 1, failed_callbacks: 1},
+  {line_id: '90003', status: 'logged_out', is_paired: false, logged_out_at: Date.UTC(2026, 9, 31, 8, 10)},
+  {line_id: '90004', status: 'logged_out', is_paired: false, logged_out_at: null}]});
 const rows = elements.linkedDeviceLines.children;
 assert.equal(rows[0].children[1].textContent, 'Connected');
 assert.match(rows[0].children[1].title, /2 reactions are waiting for older messages/);
@@ -204,6 +208,18 @@ assert.equal(unlink.textContent, 'Remove and unlink');
 assert.equal(unlink.disabled, false);
 unlink.onclick();
 assert.deepEqual(changes, [['remove', '90002']]);
+// A WhatsApp logout points at re-pairing, which keeps everything; never-paired lines do not.
+assert.match(rows[2].children[1].textContent, /^Logged out by WhatsApp at .+Re-pair it with the same phone/);
+assert.equal(rows[2].children[2].textContent, 'Re-pair (keeps all history)');
+assert.match(rows[2].children[2].className, /primary/);
+assert.equal(rows[3].children[1].textContent, 'Not paired');
+assert.equal(rows[3].children[2].textContent, 'Pair WhatsApp');
+// Agents pair and re-pair too; only managers see Remove and unlink.
+manager = false;
+renderLinkedDeviceStatus(state.linkedDeviceStatus);
+const agentRows = elements.linkedDeviceLines.children;
+assert.equal(agentRows[2].children[2].textContent, 'Re-pair (keeps all history)');
+assert.equal(agentRows.some(row => row.children.some(child => child.textContent === 'Remove and unlink')), false);
 """
     subprocess.run(["node", "-e", script], check=True, timeout=10)
 
@@ -218,8 +234,8 @@ const state = {linkedDeviceBusy: false, whatsappBusy: false, linkedDeviceRequest
   whatsappRegistry: {numbers: [{phone_number_id: '90001'}, {phone_number_id: '90002'}]}};
 let manager = true;
 const canManageWhatsApp = () => manager;
-let consent = false;
-const confirmDialog = async ({message}) => {assert.match(message, /Active conversations.*closed/); assert.match(message, /history.*kept/); return consent};
+let typed = null;
+const promptDialog = async ({message, label}) => {assert.match(message, /Active conversations.*closed/); assert.match(message, /history.*kept/); assert.match(label, /Type REMOVE/); return typed};
 const clearWhatsAppFeedback = () => {};
 const renderLinkedDeviceStatus = payload => {state.linkedDeviceStatus = payload};
 const renderWhatsAppRegistry = payload => {state.whatsappRegistry = payload};
@@ -239,7 +255,11 @@ const api = async (path, options) => {
 (async () => {
   await removeLinkedDeviceNumber('90002');
   assert.equal(requests.length, 0); // Cancel keeps both numbers.
-  consent = true;
+  typed = 'yes';
+  await removeLinkedDeviceNumber('90002');
+  assert.equal(requests.length, 0); // Anything but REMOVE keeps both numbers.
+  assert.match(feedback.pop().message, /Nothing was removed/);
+  typed = ' remove ';
   manager = false;
   await removeLinkedDeviceNumber('90002');
   assert.equal(requests.length, 0);
@@ -277,6 +297,7 @@ const state = {agent: {id: '10', linked_device_available: true}, linkedDeviceBus
   linkedDeviceStatus: null};
 let manager = true;
 const canManageWhatsApp = () => manager;
+const canLinkWhatsApp = () => manager;
 let uuidCalls = 0;
 const crypto = {randomUUID() {return '00000000-0000-4000-8000-00000000000' + (++uuidCalls)}};
 const storage = new Map();
@@ -524,6 +545,7 @@ const state = {whatsappBusy: false, linkedDeviceBusy: false, whatsappRegistry: n
   chatLines: [{phone_number_id: '90005', display_name: null}],
   currentTicketData: data, previousTicketHistory: [historical], ticketId: 5};
 const canManageWhatsApp = () => true;
+const canLinkWhatsApp = () => true;
 const clearWhatsAppFeedback = () => {};
 const feedback = [];
 const showWhatsAppFeedback = (kind, value) => feedback.push([kind, value]);
@@ -651,7 +673,7 @@ def test_voice_note_survives_ticket_and_message_updates(tmp_path: Path, outbound
         assert browser, f"Configured SUPPORT_TEST_BROWSER is unavailable: {configured_browser}"
     if not browser:
         pytest.skip("Chrome/Chromium is unavailable")
-    player = _HTML[_HTML.index("function createVoiceNotePlayer("): _HTML.index("function addMessage(")]
+    player = _ASSETS['voice-player.js'] + _HTML[_HTML.index("function createVoiceNotePlayer("): _HTML.index("function addMessage(")]
     reconciliation = _HTML[_HTML.index("function updateAudioMessageRow("): _HTML.index("function renderConversation(")]
     script = 'const outbound = ' + str(outbound).lower() + ';\n' + r"""
 const conversation = document.getElementById('conversation');
@@ -705,11 +727,11 @@ try {
   const audio = original.querySelector('audio');
   const speed = original.querySelector('.voice-speed-btn');
   if (outbound) check(!original.querySelector('.voice-playback').classList.contains('confirmed-played'), 'read implied playback');
-  check(audio.playbackRate === 1 && speed.textContent === '1x', 'initial speed');
+  check(audio.playbackRate === 1 && speed.textContent === '1×', 'initial speed');
   speed.click();
-  check(audio.playbackRate === 1.5 && speed.textContent === '1.5x', '1.5x speed');
+  check(audio.playbackRate === 1.5 && speed.textContent === '1.5×', '1.5× speed');
   speed.click();
-  check(audio.playbackRate === 2 && speed.textContent === '2x', '2x speed');
+  check(audio.playbackRate === 2 && speed.textContent === '2×', '2× speed');
 
   const removed = [];
   const observer = new MutationObserver(records => {
@@ -742,7 +764,7 @@ try {
     check(original.querySelectorAll('.voice-playback').length === 1, 'duplicate playback indicators');
   } else check(!original.querySelector('.voice-playback'), 'incoming audio gained a recipient indicator');
   speed.click();
-  check(audio.playbackRate === 1 && speed.textContent === '1x', 'speed did not cycle');
+  check(audio.playbackRate === 1 && speed.textContent === '1×', 'speed did not cycle');
   setTimeout(() => {
     try {
       check(removed.length === 0, 'audio was removed during update');
@@ -812,6 +834,7 @@ const updateComposerControls = () => {};
 const focusMessageComposer = () => {};
 const openDialog = () => {};
 const closeDialog = () => {};
+const setWorkspaceBusy = () => {};
 const setButtonBusy = () => {};
 const showError = () => {};
 const refreshMessageSearchAfterChange = () => {};

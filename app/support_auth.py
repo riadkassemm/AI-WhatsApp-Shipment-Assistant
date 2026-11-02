@@ -35,6 +35,11 @@ class SupportAgent:
     def is_supervisor(self) -> bool:
         return self.role in {"supervisor", "admin"}
 
+    @property
+    def is_staff(self) -> bool:
+        """Any staff role: agent, Admin or Super Admin."""
+        return self.role in _ALLOWED_ROLES
+
 
 @dataclass(frozen=True)
 class StaffLoginSession:

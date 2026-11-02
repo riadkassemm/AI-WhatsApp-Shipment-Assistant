@@ -75,10 +75,13 @@ async def _deliver_claimed(repository, transport, media_store, ticket, message, 
             'Support delivery failed: ticket_id=%s message_id=%s phase=%s error_type=%s retry_safe=%s',
             ticket['id'], message_id, phase, type(exc).__name__, safe,
         )
+        # The line was offline and nothing was sent: hold it for automatic resend.
+        held = safe and getattr(exc, 'bridge_code', None) == 'NOT_CONNECTED'
         # Never store raw transport exceptions (which may contain credentials).
         await repository.finish_delivery(message_id, token, status='FAILED' if safe else 'UNCERTAIN',
                                          error='Not sent; retry is available.' if safe else 'Delivery is uncertain; do not resend.',
-                                         **({'failure_code': exc.provider_code} if safe and isinstance(exc, WhatsAppSendError) and exc.provider_code else {}))
+                                         **({'failure_code': exc.provider_code} if safe and isinstance(exc, WhatsAppSendError) and exc.provider_code else {}),
+                                         **({'held': True} if held else {}))
         return await repository.get_message(message_id)
     # Persistence failure intentionally leaves DISPATCHING; recovery quarantines
     # it. It must never be classified as a provider rejection.

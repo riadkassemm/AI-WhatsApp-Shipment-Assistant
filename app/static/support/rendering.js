@@ -674,6 +674,7 @@ function renderQueueFilters(options = null) {
   $('queueStaffLabel').classList.toggle('hidden', !['chats', 'active', 'history', 'waiting'].includes(state.view));
   $('queueStatusLabel').classList.toggle('hidden', state.view !== 'chats');
   $('queueReadLabel').classList.toggle('hidden', !queueSupportsUnreadFilter());
+  $('queueSortLabel').classList.toggle('hidden', state.view !== 'unassigned');
   for (const [id, key, items, label] of [
     ['queueSupportNumber', 'supportNumber', options?.support_numbers, 'All support numbers'],
     ['queueStaff', 'staffId', options?.staff, 'All staff members']
@@ -690,6 +691,7 @@ function renderQueueFilters(options = null) {
   }
   $('queueStatus').value = filters.status;
   $('queueRead').value = filters.read || 'all';
+  $('queueSort').value = filters.sort || 'newest';
   return reset;
 }
 
@@ -702,7 +704,7 @@ function queueUnreadOnly() {
 }
 
 function resetQueueFilters() {
-  state.queueFilters = {supportNumber: '', staffId: '', status: 'all', read: 'all'};
+  state.queueFilters = {supportNumber: '', staffId: '', status: 'all', read: 'all', sort: 'newest'};
   renderQueueFilters();
 }
 
@@ -718,6 +720,7 @@ function queuePath(page, pageSize, {keepOpenTicket = true} = {}) {
   if (state.view === 'contacts') return '/api/support/contacts?page=' + page + '&page_size=' + pageSize + '&q=' + encodeURIComponent(state.query.trim());
   const params = new URLSearchParams({page, page_size: pageSize, q: state.query.trim()});
   const filters = state.queueFilters || {};
+  if (state.view === 'unassigned') params.set('sort', filters.sort || 'newest');
   if (filters.supportNumber) params.set('support_number', filters.supportNumber);
   if (filters.staffId && ['chats', 'active', 'history', 'waiting'].includes(state.view)) params.set('staff_id', filters.staffId);
   if (queueUnreadOnly()) {
@@ -824,11 +827,6 @@ async function loadQueue({silent = false} = {}) {
       return;
     }
     refreshAllQueueCounts().catch(() => {});
-    if (state.view === 'unassigned' && !(state.unassignedSnapshot instanceof Map)) {
-      state.unassignedSnapshot = new Map(
-        state.queueItems.map(item => [String(item.id), String(item.last_activity_at || '')])
-      );
-    }
     renderQueue();
     if (silent) queue.scrollTop = previousScrollTop;
     state.queueLoadedIdentity = identity;
@@ -855,6 +853,8 @@ async function loadQueue({silent = false} = {}) {
 async function pollUnassignedActivity() {
   if (!state.authenticated) return;
   try {
+    // Build notification snapshots from activity order, independently of the
+    // creation-date sorting and filters in the visible queue.
     const data = await api('/api/support/tickets?view=unassigned&page=1&page_size=30');
     const items = Array.isArray(data.items) ? data.items : [];
     updateQueueCount('unassigned', Number(data.total || 0));
@@ -1153,6 +1153,7 @@ async function deleteMessage(scope) {
   if (scope === 'everyone' && !target.canDeleteEveryone) return;
   const visibleTicketId = state.ticketId;
   state.busy = true;
+  setWorkspaceBusy(true);
   $('deleteMeBtn').disabled = true; $('deleteEveryoneBtn').disabled = true;
   try {
     const result = await api('/api/support/tickets/' + target.ticketId + '/messages/' + target.id + '/delete', {
@@ -1171,6 +1172,9 @@ async function deleteMessage(scope) {
     notify(error.message, 'error');
   } finally {
     state.busy = false;
+    // The silent refresh renders the composer and ticket actions while busy.
+    // Restore their availability without reopening the ticket or touching drafts.
+    setWorkspaceBusy(false);
     $('deleteMeBtn').disabled = false; $('deleteEveryoneBtn').disabled = false;
   }
 }
@@ -1684,33 +1688,8 @@ function highlightSearchTerm(root, term) {
   }
 }
 
-function createVoiceNotePlayer(src, label) {
-  const player = document.createElement('div');
-  player.className = 'voice-note-player';
-  const audio = document.createElement('audio');
-  audio.controls = true;
-  audio.preload = 'metadata';
-  audio.src = src;
-  audio.dataset.mediaUrl = src;
-  audio.setAttribute('aria-label', label);
-  const speed = document.createElement('button');
-  speed.type = 'button';
-  speed.className = 'voice-speed-btn';
-  const rates = [1, 1.5, 2];
-  let rateIndex = 0;
-  const updateSpeed = () => {
-    speed.textContent = rates[rateIndex] + 'x';
-    speed.setAttribute('aria-label', 'Playback speed ' + rates[rateIndex] + 'x. Click to change speed.');
-    speed.title = 'Playback speed ' + rates[rateIndex] + 'x';
-  };
-  speed.onclick = () => {
-    rateIndex = (rateIndex + 1) % rates.length;
-    audio.playbackRate = rates[rateIndex];
-    updateSpeed();
-  };
-  updateSpeed();
-  player.append(audio, speed);
-  return {player, audio};
+function createVoiceNotePlayer(src, label, options) {
+  return buildVoiceMessagePlayer(src, label, options);
 }
 
 function addMessage(container, m, extraClass = '') {
@@ -1825,32 +1804,18 @@ function addMessage(container, m, extraClass = '') {
         card.append(copy, view);
         media.append(card);
       } else {
-        const {player, audio} = createVoiceNotePlayer(m.media_url, 'Voice note from ' + messageActor(m));
+        bubble.className += ' voice-message';
+        const {player} = createVoiceNotePlayer(m.media_url, 'Voice note from ' + messageActor(m));
         if (outbound) {
           const mic = createIcon('mic', 'icon voice-playback' + (m.delivery_status === 'played' ? ' confirmed-played' : ''));
           mic.setAttribute('aria-label', m.delivery_status === 'played' ? 'Played by recipient' : 'Playback not confirmed');
           const indicator = document.createElement('span');
+          indicator.className = 'voice-receipt';
           indicator.title = mic.getAttribute('aria-label');
           indicator.append(mic);
-          player.prepend(indicator);
+          (player.querySelector?.('.voice-time') || player).append(indicator);
         }
-        const recovery = document.createElement('div');
-        recovery.className = 'media-unavailable hidden';
-        const recoveryText = document.createElement('span');
-        recoveryText.textContent = 'Playback failed. Retry the WhatsApp media download.';
-        const retry = document.createElement('button');
-        retry.type = 'button';
-        retry.className = 'btn small';
-        retry.textContent = 'Retry voice note';
-        retry.onclick = () => {
-          recovery.classList.add('hidden');
-          audio.src = m.media_url + (m.media_url.includes('?') ? '&' : '?') + 'retry=' + Date.now();
-          audio.load();
-        };
-        recovery.append(recoveryText, retry);
-        audio.onerror = () => recovery.classList.remove('hidden');
-        audio.oncanplay = () => recovery.classList.add('hidden');
-        media.append(player, recovery);
+        media.append(player);
       }
     } else {
       const unavailable = document.createElement('div');
@@ -2052,9 +2017,16 @@ function addMessage(container, m, extraClass = '') {
     const failed = document.createElement('span');
     failed.className = 'send-state failed';
     failed.title = m.error_message || 'WhatsApp could not send this message.';
-    const failureLabel = String(m.error_message || '').startsWith('WhatsApp 131047:')
+    let failureLabel = String(m.error_message || '').startsWith('WhatsApp 131047:')
       ? 'Not sent · WhatsApp reply window closed' : 'Not sent';
-    failed.append(createIcon('alert', 'icon icon-sm'), document.createTextNode(failureLabel));
+    const heldUntil = m.held_until ? parseServerDate(m.held_until) : null;
+    if (heldUntil && !Number.isNaN(heldUntil.getTime())) {
+      failed.className = 'send-state held';
+      failureLabel = 'Waiting for the line to reconnect · sends automatically';
+      failed.title = 'This WhatsApp line was offline. The reply is sent automatically once it reconnects, until '
+        + heldUntil.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'}) + '.';
+    }
+    failed.append(createIcon(heldUntil ? 'clock' : 'alert', 'icon icon-sm'), document.createTextNode(failureLabel));
     meta.append(failed);
     if (!extraClass && canResendMessage(m)) {
       const resend = document.createElement('button');
@@ -2233,7 +2205,7 @@ function addDateDivider(container, value) {
 
 function timelineSignature(data) {
   const messageSignature = message => [
-    message.id, message.sender_name, message.reply_to?.sender_name, message.updated_at, message.send_status, message.delivery_status, message.error_message,
+    message.id, message.sender_name, message.reply_to?.sender_name, message.updated_at, message.send_status, message.delivery_status, message.error_message, message.held_until,
     message.media_available, message.body, message.version, message.edited_at,
     message.deleted_for_everyone_at, message.can_edit, message.can_delete_for_everyone,
     (message.reactions || []).map(reaction => [reaction.id, reaction.emoji, reaction.reactor_type, reaction.reactor_name, reaction.updated_at])
@@ -2930,7 +2902,7 @@ function renderReadOnlyState(data) {
   const permissions = data.permissions;
   banner.replaceChildren();
   if (permissions.is_read_only_observer && ticket.active_key) {
-    banner.append(createIcon('eye'), document.createTextNode('Watching only — this conversation is assigned to ' + (ticket.current_assignee_name || 'another staff member') + '. You can follow it live, but only the current assignee can send messages.'));
+    banner.append(createIcon('eye'), document.createTextNode('Read only — this conversation is assigned to ' + (ticket.current_assignee_name || 'another staff member') + '. You can follow it live, but only the current assignee can send messages.'));
     banner.classList.remove('hidden');
   } else {
     banner.classList.add('hidden');
@@ -3267,6 +3239,7 @@ async function openTicket(id, {silent = false, refreshQueue = false, refreshHist
     if (data.permissions.can_reply && isStaffChat(ticket) && !ticket.active_key) {
       text($('composerHelp'), 'Sending will reopen this chat and preserve its full history.');
     }
+    if (data.permissions.can_reply) renderComposerLineNotice(ticket);
     if ((isNewSelection && !restoring) || !silent || refreshQueue) await loadQueue({silent: true});
     if (isNewSelection) setAppStatus(isStaffChat(ticket) ? ('Opened chat with ' + (ticket.customer_name || ticket.whatsapp_phone || 'customer') + '.') : ('Opened ' + (ticket.ticket_reference || 'ticket') + ' for ' + (ticket.customer_name || ticket.customer_userid || ticket.whatsapp_phone || 'customer') + '.'));
   } catch (e) {

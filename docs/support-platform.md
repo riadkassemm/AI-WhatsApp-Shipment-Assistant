@@ -14,7 +14,7 @@ The current visibility policy is unchanged by the hardening work:
 | --- | --- | --- |
 | Read claimable, unassigned NEW tickets | Yes | Yes |
 | Read own active tickets/chats | Yes | Yes |
-| Read active conversations previously participated in | Yes, including Watching | Yes |
+| Read active conversations previously participated in | Yes, including Transferred | Yes |
 | Read unrelated active assigned conversations | No | Yes |
 | List the global Active queue | No | Yes |
 | Read resolved/closed customer ticket and chat history | Yes, shared across staff | Yes |
@@ -965,9 +965,11 @@ Waiting and History also offer Staff Member; Chats includes All/Open/Closed.
 Staff Member means the current/retained assignee, including resolved history.
 Filters intersect the existing queue access rules and search customer names,
 phone numbers, references and visible message text across the entire matching
-queue. Results remain ordered by most recent activity. Changing a filter/search
-resets pagination. The queue heading/footer count matching conversations; sidebar
-badges continue showing the full queue totals. Message search within an open
+queue. Unassigned offers **Newest** (default) and **Oldest**, ordered by ticket
+creation date across all matching results. Other queues remain ordered by most
+recent activity. Changing a filter, sort or search resets pagination while keeping
+the selected conversation and its draft. The queue heading/footer count matching
+conversations; sidebar badges continue showing the full queue totals. Message search within an open
 conversation remains available for finding individual matching messages. Matching
 message previews in queue results open that message directly.
 

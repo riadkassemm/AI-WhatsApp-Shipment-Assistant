@@ -80,11 +80,19 @@ class LinkedDeviceEvent(BaseModel):
     from_me: bool | None = None
     sender_phone: str | None = Field(default=None, pattern=r"^[0-9]{5,20}$")
     status: Literal["delivered", "read", "played"] | None = None
+    # Sent while the line was offline and recovered from WhatsApp history after re-pairing.
+    recovered: bool = Field(default=False, strict=True)
 
 
 def _require_manager(agent: SupportAgent) -> None:
     if not agent.is_supervisor:
         raise HTTPException(403, "Only Super Admins and Admins can manage WhatsApp connections.")
+
+
+def _require_staff(agent: SupportAgent) -> None:
+    # Any staff role may view, link and (re-)pair numbers; unlinking and removal stay with managers.
+    if not agent.is_staff:
+        raise HTTPException(403, "Only staff members can link WhatsApp numbers.")
 
 
 def _require_line(line_id: str) -> None:
@@ -94,7 +102,7 @@ def _require_line(line_id: str) -> None:
 
 @router.get("/api/support/whatsapp-linked-device/status")
 async def linked_device_status(agent: SupportAgent = Depends(get_current_agent)) -> dict:
-    _require_manager(agent)
+    _require_staff(agent)
     configured = bool(
         len(settings.whatsapp_linked_device_secret) >= 32
     )
@@ -124,6 +132,10 @@ async def linked_device_status(agent: SupportAgent = Depends(get_current_agent))
             "waiting_history_reactions": item.get("waiting_history_reactions", 0),
             "failed_callbacks": item.get("failed_callbacks", 0),
             "uncertain_sends": item.get("uncertain_sends", 0),
+            "disconnected_since": item.get("disconnected_since") if isinstance(item.get("disconnected_since"), int) else None,
+            "logout_reason": item.get("logout_reason") if isinstance(item.get("logout_reason"), str) else None,
+            "logged_out_at": item.get("logged_out_at") if isinstance(item.get("logged_out_at"), int) else None,
+            "recovering_history": item.get("recovering_history") is True,
         })
     return {"configured": True, "lines": lines, "default_transport": settings.whatsapp_transport}
 
@@ -134,7 +146,7 @@ async def add_linked_device_line(
     agent: SupportAgent = Depends(require_support_csrf),
 ) -> dict:
     """Allocate durably at the bridge, then prepare its QR without enabling sends."""
-    _require_manager(agent)
+    _require_staff(agent)
     if len(settings.whatsapp_linked_device_secret) < 32:
         raise HTTPException(503, "WhatsApp linked device connections are not configured.")
     from app.whatsapp_registry import WhatsAppRegistryError, whatsapp_registry_service
@@ -178,7 +190,7 @@ async def add_linked_device_line(
 async def connect_linked_device(
     line_id: str, agent: SupportAgent = Depends(require_support_csrf),
 ) -> dict:
-    _require_manager(agent)
+    _require_staff(agent)
     _require_line(line_id)
     try:
         await linked_device_client.connect(line_id)
@@ -348,8 +360,12 @@ async def receive_linked_device_event(request: Request):
         if not line_enabled:
             return {"status": "ignored", "reason": "whatsapp_number_disabled"}
         try:
-            applied = await (support_service.sync_linked_device_outbound(incoming) if from_me
-                             else support_service.sync_linked_device_snapshot(incoming))
+            if from_me:
+                applied = await support_service.sync_linked_device_outbound(incoming)
+            elif event.recovered:
+                applied = await support_service.sync_linked_device_recovered(incoming)
+            else:
+                applied = await support_service.sync_linked_device_snapshot(incoming)
         except SupportValidationError as exc:
             raise HTTPException(400, str(exc)) from exc
         except (SupportConflictError, SupportMediaError) as exc:

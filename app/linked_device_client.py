@@ -133,12 +133,17 @@ class LinkedDeviceWhatsAppClient:
                             failure = None
                         if isinstance(failure, dict) and isinstance(failure.get("delivery_uncertain"), bool):
                             uncertain = mutating and failure["delivery_uncertain"]
-                        raise _send_error(
+                        error = _send_error(
                             f"The linked-device bridge rejected the request with HTTP {response.status_code}.",
                             uncertain=uncertain,
                             retryable=response.status_code >= 500 or response.status_code == 429,
                             http_status=response.status_code,
                         )
+                        # e.g. NOT_CONNECTED: the line is offline and nothing was sent.
+                        details = failure.get("error") if isinstance(failure, dict) else None
+                        code = details.get("code") if isinstance(details, dict) else None
+                        error.bridge_code = code if isinstance(code, str) and re.fullmatch(r"[A-Z_]{1,64}", code) else None
+                        raise error
                     return content, response.headers
             except httpx.RequestError as exc:
                 raise _send_error(

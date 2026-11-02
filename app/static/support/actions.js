@@ -841,7 +841,8 @@ function renderWhatsAppRegistry(payload) {
       sync.className = 'btn small';
       sync.append(createIcon('refresh', 'icon icon-sm'), document.createTextNode('Sync'));
       sync.onclick = () => syncWaba(account.waba_id);
-      row.append(copy, sync);
+      row.append(copy);
+      if (canManageWhatsApp()) row.append(sync);
       accountContainer.append(row);
     }
   }
@@ -885,15 +886,17 @@ function renderWhatsAppRegistry(payload) {
     action.disabled = state.whatsappBusy || state.linkedDeviceBusy || (!item.provider_present && !item.is_enabled);
     action.textContent = item.is_enabled ? (item.source === 'LINKED_DEVICE' ? 'Deactivate' : 'Remove from app') : 'Add to app';
     action.onclick = () => setWhatsAppNumberState(item.phone_number_id, !item.is_enabled);
-    actions.append(action);
-    if (item.source === 'LINKED_DEVICE') {
+    // Everyone can add a number to the app; deactivating and removing stay with managers.
+    const manager = canManageWhatsApp();
+    if (!item.is_enabled || manager) actions.append(action);
+    if (manager && item.source === 'LINKED_DEVICE') {
       const remove = document.createElement('button');
       remove.type = 'button'; remove.className = 'btn small danger';
       remove.textContent = 'Remove and unlink';
       remove.disabled = state.whatsappBusy || state.linkedDeviceBusy;
       remove.onclick = () => removeLinkedDeviceNumber(item.phone_number_id);
       actions.append(remove);
-    } else if (!item.is_enabled) {
+    } else if (manager && !item.is_enabled) {
       const remove = document.createElement('button');
       remove.type = 'button';
       remove.className = 'btn small danger';
@@ -909,7 +912,7 @@ function renderWhatsAppRegistry(payload) {
 }
 
 function openWhatsAppNumberNameEditor(item, row, button) {
-  if (!canManageWhatsApp() || state.whatsappBusy || state.linkedDeviceBusy || row.querySelector('.whatsapp-name-editor')) return;
+  if (!canLinkWhatsApp() || state.whatsappBusy || state.linkedDeviceBusy || row.querySelector('.whatsapp-name-editor')) return;
   const editor = document.createElement('form');
   editor.className = 'whatsapp-name-editor';
   const field = document.createElement('label');
@@ -964,7 +967,7 @@ function refreshVisibleSupportNumberName(phoneNumberId, displayName) {
 }
 
 async function renameWhatsAppNumber(phoneNumberId, value, button) {
-  if (!canManageWhatsApp() || state.whatsappBusy || state.linkedDeviceBusy) return;
+  if (!canLinkWhatsApp() || state.whatsappBusy || state.linkedDeviceBusy) return;
   const displayName = String(value || '').trim() || null;
   state.whatsappBusy = true;
   clearWhatsAppFeedback();
@@ -1011,7 +1014,11 @@ function renderLinkedDeviceStatus(payload) {
     status.className = 'muted';
     const labels = {connected: 'Connected', connecting: 'Connecting…', qr: 'Scan this code with the phone you want to connect', logged_out: 'Not paired', disconnected: 'Disconnected', error: 'Connection failed'};
     status.textContent = labels[line.status] || 'Not paired';
-    if (line.error) status.textContent += ' · ' + line.error;
+    if (line.status === 'logged_out' && line.logged_out_at) {
+      status.textContent = 'Logged out by WhatsApp at ' + new Date(line.logged_out_at).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'})
+        + '. Re-pair it with the same phone: every conversation and its history stays.';
+    } else if (line.error) status.textContent += ' · ' + line.error;
+    if (line.recovering_history) status.textContent += ' · Recovering messages sent while offline';
     if (line.pending_callbacks) status.textContent += ' · ' + line.pending_callbacks + ' updates pending';
     if (line.waiting_history_reactions) status.title = line.waiting_history_reactions + ' reactions are waiting for older messages to sync. This does not block new messages.';
     if (line.failed_callbacks) status.textContent += ' · ' + line.failed_callbacks + ' failed updates need administrator attention';
@@ -1026,25 +1033,28 @@ function renderLinkedDeviceStatus(payload) {
     const connected = line.status === 'connected';
     if (!connected) {
       const pair = document.createElement('button');
-      pair.type = 'button'; pair.className = 'btn small';
-      pair.textContent = line.status === 'qr' ? 'Refresh pairing' : 'Pair WhatsApp';
+      const repair = line.status === 'logged_out' && Boolean(line.logged_out_at);
+      pair.type = 'button'; pair.className = repair ? 'btn small primary' : 'btn small';
+      pair.textContent = line.status === 'qr' ? 'Refresh pairing' : repair ? 'Re-pair (keeps all history)' : 'Pair WhatsApp';
       pair.disabled = state.linkedDeviceBusy || state.whatsappBusy || line.status === 'connecting';
       pair.onclick = () => changeLinkedDeviceConnection(line.line_id, 'connect');
       row.append(pair);
     }
-    const remove = document.createElement('button');
-    remove.type = 'button'; remove.className = 'btn small danger';
-    remove.textContent = 'Remove and unlink';
-    remove.disabled = state.linkedDeviceBusy || state.whatsappBusy;
-    remove.onclick = () => removeLinkedDeviceNumber(line.line_id);
-    row.append(remove);
+    if (canManageWhatsApp()) {
+      const remove = document.createElement('button');
+      remove.type = 'button'; remove.className = 'btn small danger';
+      remove.textContent = 'Remove and unlink';
+      remove.disabled = state.linkedDeviceBusy || state.whatsappBusy;
+      remove.onclick = () => removeLinkedDeviceNumber(line.line_id);
+      row.append(remove);
+    }
     container.append(row);
   }
   text($('linkedDeviceStatus'), 'Only paired lines added to the app can send or receive messages here.');
 }
 
 async function loadLinkedDeviceStatus() {
-  if (!canManageWhatsApp() || !state.agent?.linked_device_available || state.linkedDeviceBusy) return;
+  if (!canLinkWhatsApp() || !state.agent?.linked_device_available || state.linkedDeviceBusy) return;
   const request = ++state.linkedDeviceRequest;
   try {
     const payload = await api('/api/support/whatsapp-linked-device/status');
@@ -1055,6 +1065,54 @@ async function loadLinkedDeviceStatus() {
     $('linkedDeviceLines').replaceChildren();
     text($('linkedDeviceStatus'), error.message || 'The WhatsApp connection service is unavailable.');
     $('addLinkedDeviceBtn').disabled = state.linkedDeviceBusy || state.whatsappBusy;
+  }
+}
+
+const LINE_HEALTH_INTERVAL_MS = 30000;
+
+async function loadLineHealth({force = false} = {}) {
+  if (!state.authenticated || (!force && Date.now() - state.lineHealthAt < LINE_HEALTH_INTERVAL_MS)) return;
+  state.lineHealthAt = Date.now();
+  try {
+    renderLineHealth(await api('/api/support/whatsapp-lines/health'));
+  } catch (_) {
+    // An unreachable dashboard API already shows the connection banner.
+  }
+}
+
+function lineOfflineSince(line) {
+  const since = line?.since ? new Date(line.since) : null;
+  return since && !Number.isNaN(since.getTime()) ? ' since ' + since.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'}) : '';
+}
+
+function renderLineHealth(payload) {
+  state.lineHealth = payload;
+  const alerts = (payload?.lines || []).filter(line => line.alert);
+  $('lineAlertBanner').classList.toggle('hidden', !alerts.length);
+  if (alerts.length) {
+    const first = alerts[0];
+    const more = alerts.length > 1 ? ' and ' + (alerts.length - 1) + ' more' : '';
+    const problem = first.status === 'logged_out' ? ' was logged out by WhatsApp' : ' is offline';
+    const next = (first.status === 'logged_out' && canLinkWhatsApp()
+      ? ' Re-pair it with the same phone; every conversation and its history stays.'
+      : ' It keeps trying to reconnect.') + ' Replies wait and are sent automatically when it reconnects.';
+    text($('lineAlertText'), first.name + more + problem + lineOfflineSince(first) + '.' + next);
+    $('lineAlertActionBtn').classList.toggle('hidden', !canLinkWhatsApp());
+  }
+  // Sound once per outage, for the people who can fix it (every staff role).
+  const fresh = alerts.filter(line => !state.lineAlertsSeen.has(line.line_id + ':' + line.since));
+  for (const line of alerts) state.lineAlertsSeen.add(line.line_id + ':' + line.since);
+  if (fresh.length && canLinkWhatsApp()) notifyNewCustomerActivity(fresh[0].name + ' needs attention: its WhatsApp line is offline.');
+  const ticket = state.currentTicketData?.ticket;
+  if (ticket && state.currentTicketData?.permissions?.can_reply) renderComposerLineNotice(ticket);
+}
+
+function renderComposerLineNotice(ticket) {
+  const line = (state.lineHealth?.lines || []).find(item => String(item.line_id) === String(ticket.business_phone_number_id || ''));
+  if (line && line.status !== 'connected') {
+    text($('composerHelp'), line.name + ' is offline' + lineOfflineSince(line) + '. Replies wait and are sent automatically when it reconnects (up to 30 minutes).');
+  } else if (String($('composerHelp').textContent || '').includes(' is offline')) {
+    text($('composerHelp'), 'Messages are sent from the WhatsApp number for this conversation.');
   }
 }
 
@@ -1080,7 +1138,7 @@ function saveLinkedDeviceAddition(requestId) {
 }
 
 async function addLinkedDeviceNumber() {
-  if (!canManageWhatsApp() || !state.agent?.linked_device_available || state.linkedDeviceBusy || state.whatsappBusy) return;
+  if (!canLinkWhatsApp() || !state.agent?.linked_device_available || state.linkedDeviceBusy || state.whatsappBusy) return;
   // Keep the same request ID after a lost response so retrying resumes its line.
   saveLinkedDeviceAddition(pendingLinkedDeviceAddition() || crypto.randomUUID());
   state.linkedDeviceBusy = true;
@@ -1120,7 +1178,14 @@ async function addLinkedDeviceNumber() {
 
 async function removeLinkedDeviceNumber(lineId) {
   if (!canManageWhatsApp() || state.linkedDeviceBusy || state.whatsappBusy) return;
-  if (!(await confirmDialog({title: 'Remove and unlink number?', message: 'Remove and unlink this WhatsApp number completely? It will be signed out and removed from the app. Active conversations on this number will be closed; their chat history will be kept.', confirmLabel: 'Remove and unlink', tone: 'danger'}))) return;
+  const line = (state.linkedDeviceStatus?.lines || []).find(item => String(item.line_id) === String(lineId));
+  const advice = line?.status === 'logged_out' ? 'If WhatsApp logged this number out, use Re-pair instead: nothing is closed. ' : '';
+  const typed = await promptDialog({title: 'Remove and unlink number?', label: 'Type REMOVE to confirm', confirmLabel: 'Remove and unlink', tone: 'danger',
+    message: advice + 'Remove and unlink this WhatsApp number completely? It will be signed out and removed from the app. Active conversations on this number will be closed; their chat history will be kept.'});
+  if (typeof typed !== 'string' || typed.trim().toUpperCase() !== 'REMOVE') {
+    if (typeof typed === 'string') showWhatsAppFeedback('whatsappError', 'Nothing was removed. Type REMOVE to confirm removal.');
+    return;
+  }
   state.linkedDeviceBusy = true;
   state.linkedDeviceRequest++;
   clearWhatsAppFeedback();
@@ -1147,7 +1212,8 @@ async function removeLinkedDeviceNumber(lineId) {
 }
 
 async function changeLinkedDeviceConnection(lineId, action) {
-  if (!canManageWhatsApp() || state.linkedDeviceBusy) return;
+  // Anyone may pair; unlinking a device stays with managers.
+  if (!(action === 'connect' ? canLinkWhatsApp() : canManageWhatsApp()) || state.linkedDeviceBusy) return;
   if (action === 'disconnect' && !(await confirmDialog({title: 'Unlink device?', message: 'Unlink this WhatsApp device? You will need to pair it again to use this connection.', confirmLabel: 'Unlink device', tone: 'danger'}))) return;
   state.linkedDeviceBusy = true;
   state.linkedDeviceRequest++;
@@ -1165,16 +1231,17 @@ async function changeLinkedDeviceConnection(lineId, action) {
 }
 
 async function loadWhatsAppRegistry() {
-  if (!canManageWhatsApp()) return;
+  if (!canLinkWhatsApp()) return;
   const payload = await api('/api/support/whatsapp-numbers');
   renderWhatsAppRegistry(payload);
   await loadLinkedDeviceStatus();
 }
 
 async function openWhatsAppModal() {
-  if (!canManageWhatsApp() || state.whatsappBusy) return;
+  if (!canLinkWhatsApp() || state.whatsappBusy) return;
   clearWhatsAppFeedback();
-  openDialog('whatsappModal', 'wabaIdInput');
+  $('whatsappMetaSection').classList.toggle('hidden', !canManageWhatsApp());
+  openDialog('whatsappModal', canManageWhatsApp() ? 'wabaIdInput' : state.agent?.linked_device_available ? 'addLinkedDeviceBtn' : 'closeWhatsAppBtn');
   dashboardRefresh.request('linked-status');
   state.whatsappBusy = true;
   $('refreshWhatsAppBtn').disabled = true;
@@ -1229,7 +1296,8 @@ async function syncWabaForm(event) {
 }
 
 async function setWhatsAppNumberState(phoneNumberId, enabled) {
-  if (!canManageWhatsApp() || state.whatsappBusy || state.linkedDeviceBusy) return;
+  // Adding a paired number completes linking; taking one out stays with managers.
+  if (!(enabled ? canLinkWhatsApp() : canManageWhatsApp()) || state.whatsappBusy || state.linkedDeviceBusy) return;
   if (!enabled && !(await confirmDialog({title: 'Remove number from app?', message: 'Remove this WhatsApp number from the chatbot and support app? Historical tickets will remain available.', confirmLabel: 'Remove from app', tone: 'danger'}))) return;
   state.whatsappBusy = true;
   clearWhatsAppFeedback();
@@ -1263,7 +1331,7 @@ async function removeSavedWhatsAppNumber(phoneNumberId) {
 }
 
 async function refreshWhatsAppRegistry() {
-  if (!canManageWhatsApp() || state.whatsappBusy) return;
+  if (!canLinkWhatsApp() || state.whatsappBusy) return;
   state.whatsappBusy = true;
   clearWhatsAppFeedback();
   setButtonBusy($('refreshWhatsAppBtn'), true, 'Refreshing…');
@@ -2188,6 +2256,7 @@ $('messagePreferencesBtn').addEventListener('click', openMessagePreferencesModal
 $('aiHeaderBtn').addEventListener('click', openAiSettingsModal);
 $('manageStaffBtn').addEventListener('click', openStaffModal);
 $('manageWhatsAppBtn').addEventListener('click', openWhatsAppModal);
+$('lineAlertActionBtn').addEventListener('click', openWhatsAppModal);
 $('googleContactsConnectBtn').addEventListener('click', connectGoogleContacts);
 $('importVcfContactsBtn').addEventListener('click', chooseVcfContactsFile);
 $('vcfContactsInput').addEventListener('change', importSelectedVcfContacts);
@@ -2200,7 +2269,7 @@ $('queueSearch').addEventListener('input', event => {
   state.query = event.target.value;
   queueCriteriaChanged();
 });
-for (const [id, key] of [['queueSupportNumber', 'supportNumber'], ['queueStaff', 'staffId'], ['queueStatus', 'status'], ['queueRead', 'read']]) {
+for (const [id, key] of [['queueSupportNumber', 'supportNumber'], ['queueStaff', 'staffId'], ['queueStatus', 'status'], ['queueRead', 'read'], ['queueSort', 'sort']]) {
   $(id).addEventListener('change', event => {
     state.queueFilters[key] = event.target.value;
     queueCriteriaChanged();

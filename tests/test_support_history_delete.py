@@ -96,7 +96,7 @@ def test_manager_can_delete_resolved_history_ticket(
             assert ticket_id == 52
             return _history_ticket()
 
-        async def fake_delete(ticket_id: int) -> dict[str, Any]:
+        async def fake_delete(ticket_id: int, **_actor) -> dict[str, Any]:
             seen["ticket_id"] = ticket_id
             return _history_ticket()
 
