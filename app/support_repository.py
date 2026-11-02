@@ -2183,6 +2183,33 @@ class SupportRepository(DashboardRepositoryMixin, DeliveryRepositoryMixin, ReadS
                 await conn.rollback()
                 raise
 
+    async def find_contact_forward(
+        self, *, source_ticket_id: int, source_message_id: int, sender_id: str,
+        client_message_id: str, phone: str, line_id: str,
+    ) -> dict[str, Any] | None:
+        """Find a prior attempt even if its destination has since closed.
+
+        Start with the indexed source provenance; normal client ID uniqueness
+        remains scoped to destination and sender. Never turn an uncertain old
+        attempt into a new send just because another ticket is now active.
+        """
+        if self._pool is None:
+            await self.connect()
+        assert self._pool is not None
+        async with self._pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute("""
+                    SELECT m.* FROM support_ticket_messages m
+                    JOIN support_tickets t ON t.id=m.ticket_id
+                    WHERE m.forwarded_from_ticket_id=%s AND m.forwarded_from_message_id=%s
+                      AND m.sender_type='AGENT' AND m.sender_id=%s AND m.is_forwarded=1
+                      AND m.client_message_id IN (%s,%s) AND m.direction='OUTBOUND'
+                      AND t.whatsapp_phone=%s AND t.business_phone_number_id=%s
+                    ORDER BY m.id LIMIT 1
+                """, (source_ticket_id, source_message_id, sender_id, client_message_id,
+                      client_message_id.replace("contact-forward:", "forward:", 1), phone, line_id))
+                return await cur.fetchone()
+
     async def get_message_by_client_id(
         self, client_message_id: str, *, ticket_id: int, sender_type: str, sender_id: str | None = None,
     ) -> dict[str, Any] | None:

@@ -2144,11 +2144,11 @@ async function confirmForward() {
       const item = state.forwardTarget[0];
       setButtonBusy($('confirmForwardBtn'), true, 'Forwarding ' + (total - state.forwardTarget.length + 1) + ' of ' + total + '…');
       const path = '/api/support/tickets/' + item.ticketId + '/messages/' + item.messageId;
+      // Resolve every contact forward through its route, including chats owned by another staff member.
       const result = destination.kind === 'conversation'
         ? await api(path + '/forward', {method: 'POST', body: JSON.stringify({destination_ticket_id: Number(destination.id), client_message_id: item.clientId})})
         : await api(path + '/forward-contact', {method: 'POST', body: JSON.stringify({phone_number: destination.phone, customer_name: destination.name || null, client_message_id: item.clientId})});
       if (!result.message?.id) throw new Error('Could not confirm forwarding. Try again to check the same attempt.');
-      if (result.destination) { destination.kind = 'conversation'; destination.id = result.destination.id; state.forwardSelection = {...destination}; }
       state.forwardTarget.shift();
       state.selectedMessages.delete(String(item.messageId));
       updateMessageSelection();

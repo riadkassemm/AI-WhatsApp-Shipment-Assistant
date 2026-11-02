@@ -129,6 +129,9 @@ class DeliveryRepositoryMixin:
                     """, (message_id, DELIVERY_LEASE_MINUTES))
                     await cur.execute("SELECT whatsapp_message_id FROM support_ticket_messages WHERE id=%s FOR UPDATE", (message_id,))
                     prior = await cur.fetchone()
+                    # Only the validated contact-forward service writes both this
+                    # namespace and forwarding provenance. Ordinary client IDs
+                    # cannot grant delivery rights into another owner's ticket.
                     await cur.execute("""
                         UPDATE support_ticket_messages
                         SET whatsapp_message_id = NULL, delivery_token = %s, delivery_claimed_at = UTC_TIMESTAMP(6),
@@ -141,10 +144,19 @@ class DeliveryRepositoryMixin:
                                 AND (delivery_token IS NULL OR delivery_claimed_at < UTC_TIMESTAMP(6) - INTERVAL %s MINUTE))
                                OR (%s AND send_status = 'FAILED' AND delivery_retry_safe = 1 AND delivery_token <=> %s))
                           AND (sender_type = 'SYSTEM' OR
-                               (sender_type = 'AGENT' AND sender_id = %s AND %s))
+                               (sender_type = 'AGENT' AND (
+                                   (sender_id = %s AND %s)
+                                   OR (%s AND sender_id IS NOT NULL AND sender_id <> ''
+                                       AND is_forwarded = 1
+                                       AND forwarded_from_ticket_id > 0 AND forwarded_from_message_id > 0
+                                       AND BINARY client_message_id LIKE CONCAT(
+                                           'contact-forward:', forwarded_from_ticket_id, ':',
+                                           forwarded_from_message_id, ':_%%')))))
                     """, (token, message_id, retry, DELIVERY_LEASE_MINUTES, retry, expected_token,
                           ticket['current_assignee_id'], bool(ticket['active_key']) and ticket['status'] in
-                          ('ASSIGNED', 'IN_PROGRESS', 'WAITING_CUSTOMER', 'WAITING_INTERNAL')))
+                          ('ASSIGNED', 'IN_PROGRESS', 'WAITING_CUSTOMER', 'WAITING_INTERNAL'),
+                          bool(ticket['active_key']) and ticket['status'] in
+                          ('NEW', 'ASSIGNED', 'IN_PROGRESS', 'WAITING_CUSTOMER', 'WAITING_INTERNAL')))
                     claimed = cur.rowcount == 1
                     if claimed and prior and prior.get('whatsapp_message_id'):
                         await cur.execute("""INSERT INTO support_ticket_events
@@ -167,6 +179,8 @@ class DeliveryRepositoryMixin:
                     if not ticket:
                         await conn.rollback()
                         return False
+                    # Recheck the persisted contact-forward capability at the
+                    # provider boundary as well as during the delivery claim.
                     await cur.execute("""
                         UPDATE support_ticket_messages
                         SET send_status = 'DISPATCHING', delivery_started_at = UTC_TIMESTAMP(6),
@@ -176,10 +190,19 @@ class DeliveryRepositoryMixin:
                           AND whatsapp_message_id IS NULL AND delivery_started_at IS NULL
                           AND delivery_claimed_at >= UTC_TIMESTAMP(6) - INTERVAL %s MINUTE
                           AND (sender_type = 'SYSTEM' OR
-                               (sender_type = 'AGENT' AND sender_id = %s AND %s))
+                               (sender_type = 'AGENT' AND (
+                                   (sender_id = %s AND %s)
+                                   OR (%s AND sender_id IS NOT NULL AND sender_id <> ''
+                                       AND is_forwarded = 1
+                                       AND forwarded_from_ticket_id > 0 AND forwarded_from_message_id > 0
+                                       AND BINARY client_message_id LIKE CONCAT(
+                                           'contact-forward:', forwarded_from_ticket_id, ':',
+                                           forwarded_from_message_id, ':_%%')))))
                     """, (message_id, token, DELIVERY_LEASE_MINUTES, ticket['current_assignee_id'],
                           bool(ticket['active_key']) and ticket['status'] in
-                          ('ASSIGNED', 'IN_PROGRESS', 'WAITING_CUSTOMER', 'WAITING_INTERNAL')))
+                          ('ASSIGNED', 'IN_PROGRESS', 'WAITING_CUSTOMER', 'WAITING_INTERNAL'),
+                          bool(ticket['active_key']) and ticket['status'] in
+                          ('NEW', 'ASSIGNED', 'IN_PROGRESS', 'WAITING_CUSTOMER', 'WAITING_INTERNAL')))
                     changed = cur.rowcount == 1
                 await conn.commit()
             except BaseException:
