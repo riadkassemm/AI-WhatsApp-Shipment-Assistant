@@ -1083,6 +1083,7 @@ async def list_tickets(
     q: str = Query(default="", max_length=200),
     unread: bool = Query(default=False),
     keep_ticket_id: int | None = Query(default=None, ge=1),
+    sort: str | None = Query(default=None, pattern="^(oldest|newest)$"),
     agent: SupportAgent = Depends(get_current_agent),
 ) -> dict:
     try:
@@ -1093,6 +1094,7 @@ async def list_tickets(
             page_size=page_size,
             staff_id=staff_id, support_number=support_number, chat_status=chat_status, query=q,
             unread=unread, keep_ticket_id=keep_ticket_id,
+            sort=sort,
         )
     except Exception as exc:
         raise _translate_error(exc) from exc

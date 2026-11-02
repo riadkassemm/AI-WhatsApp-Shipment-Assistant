@@ -3,7 +3,7 @@ const QUEUE_CONFIG = {
   mine: {label: 'My tickets', emptyTitle: 'No tickets assigned to you', emptyBody: 'Claim an unassigned ticket or wait for a transfer from another agent.', icon: 'user-check'},
   chats: {label: 'Chats', emptyTitle: 'No staff chats yet', emptyBody: 'Use New chat to start a WhatsApp conversation with a customer.', icon: 'message'},
   contacts: {label: 'Contacts', emptyTitle: 'No contacts yet', emptyBody: 'Save a customer contact, sync Google Contacts, or import a VCF address book.', icon: 'users'},
-  watching: {label: 'Watching', emptyTitle: 'No watched conversations', emptyBody: 'Tickets you previously transferred remain here while they are active.', icon: 'eye'},
+  watching: {label: 'Transferred', emptyTitle: 'No transferred conversations', emptyBody: 'Tickets you previously transferred remain here while they are active.', icon: 'eye'},
   active: {label: 'Active', emptyTitle: 'No active tickets', emptyBody: 'There are no active conversations available in this view.', icon: 'activity'},
   waiting: {label: 'Waiting', emptyTitle: 'Nothing is waiting', emptyBody: 'Tickets waiting on a customer or internal follow-up will appear here.', icon: 'clock'},
   history: {label: 'History', emptyTitle: 'No ticket history', emptyBody: 'Resolved and closed conversations will appear here.', icon: 'history'}
@@ -37,7 +37,7 @@ const state = {
   pageSize: 50,
   total: 0,
   queueItems: [],
-  queueFilters: {supportNumber: "", staffId: "", status: "all", read: "all"},
+  queueFilters: {supportNumber: "", staffId: "", status: "all", read: "all", sort: "newest"},
   lineHealth: null,
   lineHealthAt: 0,
   lineAlertsSeen: new Set(),

@@ -674,6 +674,7 @@ function renderQueueFilters(options = null) {
   $('queueStaffLabel').classList.toggle('hidden', !['chats', 'active', 'history', 'waiting'].includes(state.view));
   $('queueStatusLabel').classList.toggle('hidden', state.view !== 'chats');
   $('queueReadLabel').classList.toggle('hidden', !queueSupportsUnreadFilter());
+  $('queueSortLabel').classList.toggle('hidden', state.view !== 'unassigned');
   for (const [id, key, items, label] of [
     ['queueSupportNumber', 'supportNumber', options?.support_numbers, 'All support numbers'],
     ['queueStaff', 'staffId', options?.staff, 'All staff members']
@@ -690,6 +691,7 @@ function renderQueueFilters(options = null) {
   }
   $('queueStatus').value = filters.status;
   $('queueRead').value = filters.read || 'all';
+  $('queueSort').value = filters.sort || 'newest';
   return reset;
 }
 
@@ -702,7 +704,7 @@ function queueUnreadOnly() {
 }
 
 function resetQueueFilters() {
-  state.queueFilters = {supportNumber: '', staffId: '', status: 'all', read: 'all'};
+  state.queueFilters = {supportNumber: '', staffId: '', status: 'all', read: 'all', sort: 'newest'};
   renderQueueFilters();
 }
 
@@ -718,6 +720,7 @@ function queuePath(page, pageSize, {keepOpenTicket = true} = {}) {
   if (state.view === 'contacts') return '/api/support/contacts?page=' + page + '&page_size=' + pageSize + '&q=' + encodeURIComponent(state.query.trim());
   const params = new URLSearchParams({page, page_size: pageSize, q: state.query.trim()});
   const filters = state.queueFilters || {};
+  if (state.view === 'unassigned') params.set('sort', filters.sort || 'newest');
   if (filters.supportNumber) params.set('support_number', filters.supportNumber);
   if (filters.staffId && ['chats', 'active', 'history', 'waiting'].includes(state.view)) params.set('staff_id', filters.staffId);
   if (queueUnreadOnly()) {
@@ -824,11 +827,6 @@ async function loadQueue({silent = false} = {}) {
       return;
     }
     refreshAllQueueCounts().catch(() => {});
-    if (state.view === 'unassigned' && !(state.unassignedSnapshot instanceof Map)) {
-      state.unassignedSnapshot = new Map(
-        state.queueItems.map(item => [String(item.id), String(item.last_activity_at || '')])
-      );
-    }
     renderQueue();
     if (silent) queue.scrollTop = previousScrollTop;
     state.queueLoadedIdentity = identity;
@@ -855,6 +853,8 @@ async function loadQueue({silent = false} = {}) {
 async function pollUnassignedActivity() {
   if (!state.authenticated) return;
   try {
+    // Build notification snapshots from activity order, independently of the
+    // creation-date sorting and filters in the visible queue.
     const data = await api('/api/support/tickets?view=unassigned&page=1&page_size=30');
     const items = Array.isArray(data.items) ? data.items : [];
     updateQueueCount('unassigned', Number(data.total || 0));
@@ -1153,6 +1153,7 @@ async function deleteMessage(scope) {
   if (scope === 'everyone' && !target.canDeleteEveryone) return;
   const visibleTicketId = state.ticketId;
   state.busy = true;
+  setWorkspaceBusy(true);
   $('deleteMeBtn').disabled = true; $('deleteEveryoneBtn').disabled = true;
   try {
     const result = await api('/api/support/tickets/' + target.ticketId + '/messages/' + target.id + '/delete', {
@@ -1171,6 +1172,9 @@ async function deleteMessage(scope) {
     notify(error.message, 'error');
   } finally {
     state.busy = false;
+    // The silent refresh renders the composer and ticket actions while busy.
+    // Restore their availability without reopening the ticket or touching drafts.
+    setWorkspaceBusy(false);
     $('deleteMeBtn').disabled = false; $('deleteEveryoneBtn').disabled = false;
   }
 }
@@ -2898,7 +2902,7 @@ function renderReadOnlyState(data) {
   const permissions = data.permissions;
   banner.replaceChildren();
   if (permissions.is_read_only_observer && ticket.active_key) {
-    banner.append(createIcon('eye'), document.createTextNode('Watching only — this conversation is assigned to ' + (ticket.current_assignee_name || 'another staff member') + '. You can follow it live, but only the current assignee can send messages.'));
+    banner.append(createIcon('eye'), document.createTextNode('Read only — this conversation is assigned to ' + (ticket.current_assignee_name || 'another staff member') + '. You can follow it live, but only the current assignee can send messages.'));
     banner.classList.remove('hidden');
   } else {
     banner.classList.add('hidden');

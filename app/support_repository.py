@@ -3464,12 +3464,20 @@ class SupportRepository(DashboardRepositoryMixin, DeliveryRepositoryMixin, ReadS
         query: str = "",
         unread: bool = False,
         keep_ticket_id: int | None = None,
+        sort: str | None = None,
         include_filter_options: bool = True,
         count_only: bool = False,
     ) -> dict[str, Any]:
         page = max(page, 1)
         page_size = max(1, min(page_size, 500))
         offset = (page - 1) * page_size
+
+        order_by = "last_activity_at DESC, support_tickets.id DESC"
+        if view == "unassigned" and sort in ("oldest", "newest"):
+            # Sort the full result before pagination; tied creation timestamps
+            # use the ticket ID so page boundaries remain deterministic.
+            direction = "ASC" if sort == "oldest" else "DESC"
+            order_by = f"support_tickets.created_at {direction}, support_tickets.id {direction}"
 
         where = "1=1"
         params: list[Any] = []
@@ -3613,7 +3621,7 @@ class SupportRepository(DashboardRepositoryMixin, DeliveryRepositoryMixin, ReadS
                     LEFT JOIN whatsapp_phone_numbers n
                       ON n.phone_number_id = support_tickets.business_phone_number_id
                     WHERE {where}
-                    ORDER BY last_activity_at DESC, support_tickets.id DESC
+                    ORDER BY {order_by}
                     LIMIT %s OFFSET %s
                     """,
                     tuple(list_params),

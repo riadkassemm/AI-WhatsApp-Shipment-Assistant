@@ -834,6 +834,7 @@ const updateComposerControls = () => {};
 const focusMessageComposer = () => {};
 const openDialog = () => {};
 const closeDialog = () => {};
+const setWorkspaceBusy = () => {};
 const setButtonBusy = () => {};
 const showError = () => {};
 const refreshMessageSearchAfterChange = () => {};
