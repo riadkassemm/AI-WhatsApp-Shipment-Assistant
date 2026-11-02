@@ -327,6 +327,26 @@ def _same_customer_phone(left: dict[str, Any], right: dict[str, Any]) -> bool:
     return bool(phone and phone == normalize_phone(str(right.get("whatsapp_phone") or "")))
 
 
+def _same_whatsapp_conversation(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    """Visible customer history can span lines; WhatsApp message actions cannot."""
+    line_id = str(left.get("business_phone_number_id") or "").strip()
+    return bool(
+        line_id
+        and line_id == str(right.get("business_phone_number_id") or "").strip()
+        and _same_customer_phone(left, right)
+    )
+
+
+def _validate_history_provider_reference(ticket: dict[str, Any], provider_id: str) -> None:
+    """Reject retired/foreign provider references before persisting a reply."""
+    line_id = str(ticket.get("business_phone_number_id") or "").strip()
+    if is_linked_device_message(provider_id):
+        if provider_id.split(":", 2)[1] != line_id or get_transport(line_id) != "linked_device":
+            raise SupportValidationError("This message belongs to a different WhatsApp connection.")
+    elif get_transport(line_id) == "linked_device":
+        raise SupportValidationError("This message belongs to a different WhatsApp connection.")
+
+
 async def _historical_ticket_accessible(
     previous: dict[str, Any], current: dict[str, Any], agent: SupportAgent,
 ) -> bool:
@@ -3145,17 +3165,33 @@ class SupportService:
         self,
         ticket_id: int,
         reply_to_message_id: int | None,
+        *,
+        agent: SupportAgent,
     ) -> tuple[int | None, str | None]:
         if reply_to_message_id is None:
             return None, None
         target = await support_repository.get_message(int(reply_to_message_id))
-        if not target or int(target.get("ticket_id") or 0) != int(ticket_id):
+        if not target:
             raise SupportValidationError("The replied-to message is not part of this conversation.")
+        current = None
+        if int(target.get("ticket_id") or 0) != int(ticket_id):
+            current = await support_repository.get_ticket(ticket_id)
+            previous = await support_repository.get_ticket(int(target.get("ticket_id") or 0))
+            if (
+                not current or not previous
+                or not _same_whatsapp_conversation(previous, current)
+                or not await _historical_ticket_accessible(previous, current, agent)
+            ):
+                raise SupportValidationError("The replied-to message is not part of this WhatsApp conversation.")
         if target.get("deleted_for_everyone_at"):
             raise SupportValidationError("This message was deleted.")
+        if await support_repository.message_hidden_for_user(int(target["id"]), agent.id):
+            raise SupportValidationError("The replied-to message is unavailable.")
         whatsapp_message_id = str(target.get("whatsapp_message_id") or "").strip()
         if not whatsapp_message_id:
             raise SupportValidationError("That message cannot be replied to on WhatsApp yet.")
+        if current is not None:
+            _validate_history_provider_reference(current, whatsapp_message_id)
         return int(target["id"]), whatsapp_message_id
 
     async def _prepare_agent_outbound_ticket(
@@ -3246,7 +3282,7 @@ class SupportService:
             return _serialize_support_messages(ticket_id, [existing])[0] or {}
 
         _reply_local_id, reply_whatsapp_id = await self._resolve_reply_target(
-            ticket_id, reply_to_message_id
+            ticket_id, reply_to_message_id, agent=agent,
         )
 
         message, created = await support_repository.add_ticket_message(
@@ -3266,6 +3302,8 @@ class SupportService:
             forwarded_from_message_id=forwarded_from_message_id,
             require_active=True,
             require_assignee_id=agent.id,
+            expected_phone=str(ticket.get("whatsapp_phone") or ""),
+            expected_line_id=str(ticket.get("business_phone_number_id") or ""),
         )
         if not created:
             return _serialize_support_messages(ticket_id, [message])[0] or {}
@@ -3451,7 +3489,7 @@ class SupportService:
             return _serialize_support_messages(ticket_id, [existing])[0] or {}
 
         _reply_local_id, reply_whatsapp_id = await self._resolve_reply_target(
-            ticket_id, reply_to_message_id
+            ticket_id, reply_to_message_id, agent=agent,
         )
         body = safe_name or safe_address or "Location"
         message, created = await support_repository.add_ticket_message(
@@ -3475,6 +3513,8 @@ class SupportService:
             forwarded_from_message_id=forwarded_from_message_id,
             require_active=True,
             require_assignee_id=agent.id,
+            expected_phone=str(ticket.get("whatsapp_phone") or ""),
+            expected_line_id=str(ticket.get("business_phone_number_id") or ""),
         )
         if not created:
             return _serialize_support_messages(ticket_id, [message])[0] or {}
@@ -3586,7 +3626,7 @@ class SupportService:
             body = safe_caption or prepared_filename
 
         _reply_local_id, reply_whatsapp_id = await self._resolve_reply_target(
-            ticket_id, reply_to_message_id
+            ticket_id, reply_to_message_id, agent=agent,
         )
 
         message, created = await support_repository.add_ticket_message(
@@ -3606,6 +3646,8 @@ class SupportService:
             forwarded_from_message_id=forwarded_from_message_id,
             require_active=True,
             require_assignee_id=agent.id,
+            expected_phone=str(ticket.get("whatsapp_phone") or ""),
+            expected_line_id=str(ticket.get("business_phone_number_id") or ""),
         )
         if not created:
             return _serialize_support_messages(ticket_id, [message])[0] or {}
@@ -3622,6 +3664,26 @@ class SupportService:
         return _serialize_support_messages(ticket_id, [updated])[0] or {}
 
 
+    async def _prepare_history_reaction_ticket(
+        self, ticket_id: int, context_ticket_id: int, agent: SupportAgent,
+    ) -> dict[str, Any]:
+        """Authorize a source history row without reopening or claiming it."""
+        ticket = await support_repository.get_ticket(ticket_id)
+        context = await support_repository.get_ticket(context_ticket_id)
+        if not context or not _is_assignee(context, agent):
+            raise SupportForbiddenError("Only the currently assigned agent can react in this conversation.")
+        if context.get("active_key") is None or context.get("status") not in ACTIVE_TICKET_STATUSES:
+            raise SupportConflictError("Claim an active ticket before reacting to its history.")
+        if (
+            not ticket or not _same_whatsapp_conversation(ticket, context)
+            or not await _historical_ticket_accessible(ticket, context, agent)
+        ):
+            raise SupportNotFoundError("Message is not part of this WhatsApp conversation.")
+        line_id = str(ticket.get("business_phone_number_id") or "")
+        if ticket.get("business_number_removed_at") or context.get("business_number_removed_at") or get_transport(line_id) == "removed":
+            raise SupportConflictError("This WhatsApp number has been removed. Its history is read-only.")
+        return ticket
+
     async def send_agent_reaction(
         self,
         ticket_id: int,
@@ -3630,6 +3692,7 @@ class SupportService:
         agent: SupportAgent,
         emoji: str,
         client_reaction_id: str,
+        context_ticket_id: int | None = None,
     ) -> dict[str, Any]:
         rendered_emoji = str(emoji or "").strip()
         if rendered_emoji and rendered_emoji not in SUPPORTED_REACTION_EMOJIS:
@@ -3637,22 +3700,36 @@ class SupportService:
         if not client_reaction_id or len(client_reaction_id) > 191:
             raise SupportValidationError("A valid client_reaction_id is required.")
 
-        ticket = await self._prepare_agent_outbound_ticket(ticket_id, agent)
+        historical = context_ticket_id is not None and int(context_ticket_id) != int(ticket_id)
+        ticket = (
+            await self._prepare_history_reaction_ticket(ticket_id, int(context_ticket_id), agent)
+            if historical else await self._prepare_agent_outbound_ticket(ticket_id, agent)
+        )
         target = await support_repository.get_message(message_id)
         if not target or int(target.get("ticket_id") or 0) != int(ticket_id) or target.get("deleted_for_everyone_at") or await support_repository.message_hidden_for_user(message_id, agent.id):
             raise SupportNotFoundError("Message not found.")
         target_whatsapp_id = str(target.get("whatsapp_message_id") or "").strip()
         if not target_whatsapp_id:
             raise SupportValidationError("That message cannot be reacted to on WhatsApp yet.")
+        if historical:
+            _validate_history_provider_reference(ticket, target_whatsapp_id)
 
         existing = await support_repository.get_reaction_by_client_id(client_reaction_id)
         if existing:
             if (
                 int(existing.get("ticket_id") or 0) != int(ticket_id)
                 or int(existing.get("message_id") or 0) != int(message_id)
+                or str(existing.get("reactor_id") or "") != agent.id
+                or str(existing.get("emoji") or "") != rendered_emoji
             ):
                 raise SupportConflictError("That reaction request ID was already used.")
             return _normalize_row(existing) or {}
+
+        if historical:
+            # Source/idempotency reads can yield to a transfer or close. Check
+            # the selected ticket again immediately before the provider call.
+            ticket = await self._prepare_history_reaction_ticket(ticket_id, int(context_ticket_id), agent)
+            _validate_history_provider_reference(ticket, target_whatsapp_id)
 
         try:
             response = await whatsapp_client.send_reaction(
@@ -3693,6 +3770,7 @@ class SupportService:
             client_reaction_id=client_reaction_id,
             provider_timestamp=int(datetime.now(timezone.utc).timestamp()),
         )
+        await publish_support_event("message_reaction", ticket_id=ticket_id, message_id=message_id, reactor_type="AGENT")
         return _normalize_row(reaction) or {}
 
     async def reopen_ticket(

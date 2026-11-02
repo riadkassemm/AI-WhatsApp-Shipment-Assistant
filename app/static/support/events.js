@@ -228,6 +228,12 @@ function openSupportEventSource() {
         if (type === 'message_deleted_for_me') {
           state.realtimeMessages.delete(String(payload.ticket_id) + ':' + changedId);
           changeCachedMessage(payload.ticket_id, changedId, null, true);
+        } else if (payload.message) {
+          changeCachedMessage(payload.ticket_id, changedId, payload.message);
+        }
+        if (type !== 'message_updated') {
+          if (state.selectedMessages?.delete(String(changedId))) updateMessageSelection();
+          if (state.replyTarget?.id === changedId) clearReplyTarget();
         }
         if (type !== 'message_updated' && state.mediaSource && state.mediaSource.includes('/messages/' + changedId + '/media')) {
           if (state.imageEditor) notify('The original image was deleted. Your edits remain open, but it cannot be sent.', 'error');
@@ -237,10 +243,8 @@ function openSupportEventSource() {
         if (state.ticketId && String(state.ticketId) === String(payload.ticket_id || '')) {
           if (payload.message && type !== 'message_deleted_for_me') {
             upsertTimelineMessage(payload.message, payload.ticket_id);
-            if (type === 'message_deleted_for_everyone' && state.replyTarget?.id === changedId) clearReplyTarget();
           } else requestDashboardRefresh('conversation');
         } else if (state.previousTicketHistory.some(thread => String(thread.ticket?.id) === String(payload.ticket_id))) {
-          if (payload.message && type !== 'message_deleted_for_me') changeCachedMessage(payload.ticket_id, changedId, payload.message);
           requestDashboardRefresh('history');
         }
       }
@@ -263,11 +267,14 @@ function openSupportEventSource() {
       : type === 'message_reaction'
         ? 'New WhatsApp reaction from ' + customer + '.'
         : 'New customer message from ' + customer + '.';
-    notifyNewCustomerActivity(notificationText);
+    if (type !== 'message_reaction' || payload.reactor_type !== 'AGENT') notifyNewCustomerActivity(notificationText);
     state.unassignedSnapshot = null;
     if (state.view === 'unassigned') requestDashboardRefresh('queue');
     else requestDashboardRefresh('counts');
     if (type !== 'customer_message' && state.ticketId && String(state.ticketId) === String(payload.ticket_id || '')) requestDashboardRefresh('conversation');
+    else if (type === 'message_reaction' && state.previousTicketHistory.some(thread => String(thread.ticket?.id) === String(payload.ticket_id))) {
+      refreshHistoricalMessage(payload.ticket_id, payload.message_id).catch(() => requestDashboardRefresh('history'));
+    }
   };
 }
 

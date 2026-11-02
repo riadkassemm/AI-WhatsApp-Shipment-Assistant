@@ -2087,19 +2087,19 @@ function clearMessageSelection() {
 }
 
 function selectChatMessage(message, checked = true) {
-  if (state.forwardBusy || state.busy) return;
+  if (state.forwardBusy || state.busy || !message?.id || message.deleted_for_everyone_at) return;
   if (checked && state.selectedMessages.size >= 20 && !state.selectedMessages.has(String(message.id))) {
     showError('Select up to 20 messages at a time.'); updateMessageSelection(); return;
   }
   state.selectingMessages = true;
-  if (checked) state.selectedMessages.set(String(message.id), message);
+  if (checked) state.selectedMessages.set(String(message.id), {...message, ticket_id: Number(message.ticket_id || state.ticketId)});
   else state.selectedMessages.delete(String(message.id));
   updateMessageSelection();
 }
 
 async function openForwardModal(message) {
   const messages = Array.isArray(message) ? message : [message];
-  if (!messages.length || messages.some(item => !item?.id) || state.forwardBusy) return;
+  if (!messages.length || messages.some(item => !item?.id || item.deleted_for_everyone_at) || state.forwardBusy || state.busy) return;
   state.forwardTarget = messages.sort((a, b) => String(messageOccurredAt(a) || '').localeCompare(String(messageOccurredAt(b) || '')) || Number(a.id) - Number(b.id)).map(item => ({
     ticketId: Number(item.ticket_id || state.ticketId), messageId: Number(item.id),
     preview: messagePreview(item), clientId: crypto.randomUUID()

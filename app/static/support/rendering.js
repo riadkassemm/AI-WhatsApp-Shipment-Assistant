@@ -1088,9 +1088,10 @@ function clearReplyTarget() {
 }
 
 function startReplyToMessage(message) {
-  if (!state.composerEnabled || !message || !message.id || !message.whatsapp_message_id) return;
+  if (!state.composerEnabled || state.busy || !message || !message.id || !message.whatsapp_message_id || message.deleted_for_everyone_at) return;
   state.replyTarget = {
     id: Number(message.id),
+    ticketId: messageTicketId(message),
     actor: messageActor(message),
     preview: messagePreview(message)
   };
@@ -1180,22 +1181,34 @@ async function deleteMessage(scope) {
 }
 
 async function sendMessageReaction(message, selectedEmoji, menu = null) {
-  if (!state.composerEnabled || state.busy || !state.ticketId || !message?.id || !message.whatsapp_message_id) return;
+  if (!state.composerEnabled || state.busy || !state.ticketId || !message?.id || !message.whatsapp_message_id || message.deleted_for_everyone_at) return;
+  const visibleTicketId = state.ticketId;
+  const ticketId = messageTicketId(message);
   const ownReaction = (Array.isArray(message.reactions) ? message.reactions : []).find(item => String(item.reactor_type || '').toUpperCase() === 'AGENT');
   const emoji = ownReaction && ownReaction.emoji === selectedEmoji ? '' : selectedEmoji;
   if (menu) menu.open = false;
   state.busy = true;
   setWorkspaceBusy(true);
   showError('');
-  let succeeded = false;
   try {
-    await api('/api/support/tickets/' + state.ticketId + '/messages/' + message.id + '/reaction', {
+    const result = await api('/api/support/tickets/' + ticketId + '/messages/' + message.id + '/reaction', {
       method: 'POST',
-      body: JSON.stringify({emoji, client_reaction_id: crypto.randomUUID()})
+      body: JSON.stringify({emoji, client_reaction_id: crypto.randomUUID(),
+        ...(ticketId !== Number(visibleTicketId) ? {context_ticket_id: Number(visibleTicketId)} : {})})
     });
     notify(emoji ? 'Reaction sent.' : 'Reaction removed.');
-    succeeded = true;
-    await openTicket(state.ticketId, {silent: true, refreshQueue: true});
+    if (String(state.ticketId) === String(visibleTicketId)) {
+      const messages = ticketId === Number(visibleTicketId) ? state.currentTicketData?.messages
+        : state.previousTicketHistory.find(thread => Number(thread.ticket?.id) === ticketId)?.messages;
+      const current = (messages || []).find(item => Number(item.id) === Number(message.id));
+      if (current && result.reaction) {
+        changeCachedMessage(ticketId, message.id, {...current, reactions: [
+          ...(current.reactions || []).filter(item => String(item.reactor_type || '').toUpperCase() !== 'AGENT'), result.reaction
+        ]});
+        renderConversation(state.currentTicketData);
+      }
+      await openTicket(visibleTicketId, {silent: true, refreshQueue: true, refreshHistory: ticketId !== Number(visibleTicketId)});
+    }
   } catch (error) {
     showError(error.message);
     notify(error.message, 'error');
@@ -1203,7 +1216,6 @@ async function sendMessageReaction(message, selectedEmoji, menu = null) {
     state.busy = false;
     setWorkspaceBusy(false);
   }
-  if (succeeded) focusMessageComposer();
 }
 
 function messageReactionBar(message) {
@@ -1692,12 +1704,16 @@ function createVoiceNotePlayer(src, label, options) {
   return buildVoiceMessagePlayer(src, label, options);
 }
 
-function addMessage(container, m, extraClass = '') {
+function addMessage(container, m, extraClass = '', {allowReply = true} = {}) {
   const outbound = m.direction === 'OUTBOUND';
   const deleted = Boolean(m.deleted_for_everyone_at);
+  // Persisted shared history has the same actions as the current conversation.
+  // AI context and investigation previews remain outside the action workspace.
+  const actionable = Boolean(m.id && (!extraClass || extraClass === 'previous-ticket-msg'));
   const row = document.createElement('article');
   row.className = 'message-row ' + (outbound ? 'outbound ' : 'inbound ') + messageClass(m) + (extraClass ? ' ' + extraClass : '');
   if (m.id) row.dataset.messageId = String(m.id);
+  if (actionable) row.dataset.ticketId = String(m.ticket_id || state.ticketId);
 
   const avatar = document.createElement('div');
   avatar.className = 'avatar message-avatar ' + (messageClass(m) === 'customer' ? 'customer' : messageClass(m) === 'ai' ? 'ai' : '');
@@ -1907,7 +1923,7 @@ function addMessage(container, m, extraClass = '') {
   actions.className = 'message-actions';
   actions.setAttribute('role', 'group');
   actions.setAttribute('aria-label', 'Message actions');
-  if (canChangeWhatsAppMessage(m, 'edit')) {
+  if (actionable && canChangeWhatsAppMessage(m, 'edit')) {
     const edit = document.createElement('button');
     edit.type = 'button'; edit.className = 'btn message-action-btn'; edit.textContent = 'Edit';
     labelMessageAction(edit, 'edit', 'Edit message');
@@ -1937,7 +1953,7 @@ function addMessage(container, m, extraClass = '') {
     saveLocation.onclick = () => saveLocationQuickReply(m);
     actions.append(saveLocation);
   }
-  if (m.id && (!extraClass || canChangeWhatsAppMessage(m, 'everyone'))) {
+  if (actionable) {
     const remove = document.createElement('button');
     remove.type = 'button'; remove.className = 'btn message-action-btn'; remove.textContent = 'Delete';
     labelMessageAction(remove, 'delete', 'Delete message');
@@ -1956,22 +1972,25 @@ function addMessage(container, m, extraClass = '') {
     labelMessageAction(dismiss, 'dismiss', 'Dismiss failed message');
     actions.append(dismiss);
   }
-  if (!extraClass && m.id && m.whatsapp_message_id && !deleted) {
+  if (actionable && allowReply && m.whatsapp_message_id && !deleted) {
     const reply = document.createElement('button');
     reply.type = 'button';
     reply.className = 'btn message-action-btn message-reply-btn';
     reply.append(createIcon('reply', 'icon icon-sm'), document.createTextNode('Reply'));
     labelMessageAction(reply, 'reply', 'Reply');
+    reply.disabled = !state.composerEnabled || state.busy;
     reply.onclick = () => startReplyToMessage(m);
     actions.append(reply);
   }
-  if (!extraClass && m.id && m.whatsapp_message_id && !deleted) {
+  if (actionable && allowReply && m.whatsapp_message_id && !deleted) {
     const reactionMenu = document.createElement('details');
     reactionMenu.className = 'message-reaction-menu';
     const summary = document.createElement('summary');
     summary.className = 'btn message-action-btn message-reaction-btn';
     summary.append(document.createTextNode('React'));
     labelMessageAction(summary, 'react', 'React');
+    reactionMenu.classList.toggle('disabled', !state.composerEnabled || state.busy);
+    summary.setAttribute('aria-disabled', state.composerEnabled && !state.busy ? 'false' : 'true');
     const picker = document.createElement('div');
     picker.className = 'message-reaction-picker';
     const ownReaction = (Array.isArray(m.reactions) ? m.reactions : []).find(item => String(item.reactor_type || '').toUpperCase() === 'AGENT');
@@ -1992,7 +2011,7 @@ function addMessage(container, m, extraClass = '') {
     reactionMenu.append(summary, picker);
     actions.append(reactionMenu);
   }
-  if (!extraClass && m.id && !deleted && state.currentTicketData?.permissions?.can_forward !== false) {
+  if (actionable && !deleted && state.currentTicketData?.permissions?.can_forward !== false) {
     const forward = document.createElement('button');
     forward.type = 'button';
     forward.className = 'btn message-action-btn message-forward-btn';
@@ -2261,6 +2280,31 @@ function changeCachedMessage(ticketId, messageId, updated = null, hidden = false
     const thread = state.previousTicketHistory.find(item => String(item.ticket?.id) === String(ticketId));
     if (thread) thread.messages = change(thread.messages);
   }
+  const selected = state.selectedMessages?.get(String(messageId));
+  if (selected && messageTicketId(selected) === Number(ticketId)) {
+    if (hidden || updated?.deleted_for_everyone_at) state.selectedMessages.delete(String(messageId));
+    else if (updated) state.selectedMessages.set(String(messageId), {...updated, ticket_id: Number(ticketId)});
+    updateMessageSelection();
+  }
+  if ((hidden || updated?.deleted_for_everyone_at) && state.replyTarget?.id === Number(messageId)) clearReplyTarget();
+}
+
+async function refreshHistoricalMessage(ticketId, messageId) {
+  if (!state.ticketId || !Number.isSafeInteger(Number(messageId)) || Number(messageId) <= 0 ||
+      !state.previousTicketHistory.some(thread => Number(thread.ticket?.id) === Number(ticketId))) return;
+  const selectedTicketId = state.ticketId;
+  const selectionEpoch = state.historySelectionEpoch;
+  // Refresh the exact row even when it was loaded beyond the first history page.
+  const result = await api(historyDetailBase() + '/history/' + Number(ticketId) +
+    '/messages?before_message_id=' + (Number(messageId) + 1) + '&limit=1');
+  if (String(state.ticketId) !== String(selectedTicketId) || state.historySelectionEpoch !== selectionEpoch) return;
+  const message = (result.messages || []).find(item => Number(item.id) === Number(messageId));
+  if (!message) return;
+  changeCachedMessage(ticketId, messageId, message);
+  if (state.currentTicketData) {
+    renderConversation(state.currentTicketData);
+    state.timelineSignature = timelineSignature(state.currentTicketData);
+  }
 }
 
 function upsertTimelineMessage(message, ticketId) {
@@ -2462,6 +2506,8 @@ function renderConversation(data, {forceScroll = false, preserveAudio = true, pr
   }
   for (const thread of previousThreads) {
     const historicalTicket = thread.ticket || {};
+    const historicalLineId = String(historicalTicket.business_phone_number_id || '').trim();
+    const sameWhatsAppLine = Boolean(historicalLineId && historicalLineId === String(data.ticket?.business_phone_number_id || '').trim());
     const divider = document.createElement('div');
     divider.className = 'previous-ticket-divider';
     divider.dataset.historyTicketId = String(historicalTicket.id || '');
@@ -2492,7 +2538,10 @@ function renderConversation(data, {forceScroll = false, preserveAudio = true, pr
         'Load older messages in ' + (historicalTicket.ticket_reference || ('conversation #' + historicalTicket.id))));
     }
     for (const message of [...historicalMessages].sort((left, right) => String(messageOccurredAt(left) || '').localeCompare(String(messageOccurredAt(right) || '')))) {
-      addMessage(inner, message, 'previous-ticket-msg');
+      const providerId = String(message.whatsapp_message_id || '');
+      addMessage(inner, {...message, ticket_id: Number(historicalTicket.id)}, 'previous-ticket-msg', {
+        allowReply: sameWhatsAppLine && (!providerId.startsWith('ld:') || providerId.split(':')[1] === historicalLineId)
+      });
     }
   }
   if (previousThreads.length) {
@@ -3210,7 +3259,15 @@ async function openTicket(id, {silent = false, refreshQueue = false, refreshHist
     mergeLiveMessages(data, id);
     state.currentTicketData = data;
     noteBackgroundRead('conversation');
-    if (state.replyTarget && (data.messages || []).some(item => Number(item.id) === state.replyTarget.id && item.deleted_for_everyone_at)) {
+    const visibleMessages = [...(data.messages || []), ...state.previousTicketHistory.flatMap(thread =>
+      (thread.messages || []).map(message => ({...message, ticket_id: Number(thread.ticket.id)})))];
+    for (const message of visibleMessages) {
+      if (!state.selectedMessages?.has(String(message.id))) continue;
+      if (message.deleted_for_everyone_at) state.selectedMessages.delete(String(message.id));
+      else state.selectedMessages.set(String(message.id), {...message, ticket_id: Number(message.ticket_id || id)});
+    }
+    if (state.selectingMessages) updateMessageSelection();
+    if (state.replyTarget && visibleMessages.some(item => Number(item.id) === state.replyTarget.id && item.deleted_for_everyone_at)) {
       clearReplyTarget();
       notify('The replied-to message was deleted.', 'error');
     }

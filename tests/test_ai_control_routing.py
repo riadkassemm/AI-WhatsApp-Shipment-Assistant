@@ -9,6 +9,7 @@ import types
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import HTTPException
@@ -1115,6 +1116,7 @@ def test_assigned_staff_can_send_pdf_with_reply_context(monkeypatch, outbound_un
         monkeypatch.setattr(support_service_module.support_repository, "add_ticket_message", add_message)
         monkeypatch.setattr(support_service_module.support_repository, "update_message_send_state", update_send_state)
         monkeypatch.setattr(support_service_module.support_media_store, "save", save)
+        monkeypatch.setattr(support_service_module.support_repository, "message_hidden_for_user", AsyncMock(return_value=False))
         monkeypatch.setattr(support_service_module.whatsapp_client, "upload_media", upload_media)
         monkeypatch.setattr(support_service_module.whatsapp_client, "send_media", send_media)
 
