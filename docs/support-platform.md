@@ -958,6 +958,26 @@ repeat application is safe. Restart only the API for this update. Existing
 bridge sessions, provider configuration, and media files are unchanged. Include
 both legacy `.pdf` files and new image `.bin` files in quick-reply backups.
 
+### Sending multiple quick replies
+
+In a conversation you can reply to, open **Quick replies → Select**. Tick any
+combination of Text, PDF, Locations, and Images, using tabs or search to find
+them. **Send selected** sends separate messages in the order you selected them;
+the current conversation, composer text, attachments, and reply draft stay intact.
+**Cancel** leaves selection mode. Single-reply copy, attachment preview, and
+location preview remain available outside selection mode.
+
+Sending stops at the first failure or unconfirmed delivery. Replies recorded by
+the server leave the selection; inspect their delivery status in the conversation
+before sending the remaining replies. After a lost HTTP response, **Send selected**
+checks the same attempt with its original content and ID. Closing and reopening
+Quick replies retains that selection for the original conversation; automatic
+dashboard updates wait while selected replies remain. Signing out, manually
+reloading, or cancelling discards the selection. Each send still checks the
+staff member's permission to reply. No database migration is needed for selection.
+
+![Multiple quick replies selected using synthetic examples](screenshots/quick-reply-selection.png)
+
 ### Queue filters and dashboard unread state
 
 Unassigned and My Tickets can be filtered by Support Number. Chats, Activity,
