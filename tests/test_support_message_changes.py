@@ -489,7 +489,7 @@ def test_successful_staff_send_returns_message_change_capabilities(outbound_unit
         async def no_existing(_client_id: str, **_scope) -> None:
             return None
 
-        async def no_reply(_ticket_id: int, _message_id: int | None) -> tuple[None, None]:
+        async def no_reply(_ticket_id: int, _message_id: int | None, **_kwargs: Any) -> tuple[None, None]:
             return None, None
 
         async def update_state(_message_id: int, **_kwargs: Any) -> None:

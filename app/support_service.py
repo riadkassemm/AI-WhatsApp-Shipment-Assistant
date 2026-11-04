@@ -327,6 +327,35 @@ def _same_customer_phone(left: dict[str, Any], right: dict[str, Any]) -> bool:
     return bool(phone and phone == normalize_phone(str(right.get("whatsapp_phone") or "")))
 
 
+def _is_contact_forward(message: dict[str, Any]) -> bool:
+    source_ticket = int(message.get("forwarded_from_ticket_id") or 0)
+    source_message = int(message.get("forwarded_from_message_id") or 0)
+    prefix = f"contact-forward:{source_ticket}:{source_message}:"
+    client_id = str(message.get("client_message_id") or "")
+    return bool(message.get("is_forwarded") and source_ticket > 0 and source_message > 0
+                and client_id.startswith(prefix) and len(client_id) > len(prefix))
+
+
+def _same_whatsapp_conversation(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    """Visible customer history can span lines; WhatsApp message actions cannot."""
+    line_id = str(left.get("business_phone_number_id") or "").strip()
+    return bool(
+        line_id
+        and line_id == str(right.get("business_phone_number_id") or "").strip()
+        and _same_customer_phone(left, right)
+    )
+
+
+def _validate_history_provider_reference(ticket: dict[str, Any], provider_id: str) -> None:
+    """Reject retired/foreign provider references before persisting a reply."""
+    line_id = str(ticket.get("business_phone_number_id") or "").strip()
+    if is_linked_device_message(provider_id):
+        if provider_id.split(":", 2)[1] != line_id or get_transport(line_id) != "linked_device":
+            raise SupportValidationError("This message belongs to a different WhatsApp connection.")
+    elif get_transport(line_id) == "linked_device":
+        raise SupportValidationError("This message belongs to a different WhatsApp connection.")
+
+
 async def _historical_ticket_accessible(
     previous: dict[str, Any], current: dict[str, Any], agent: SupportAgent,
 ) -> bool:
@@ -1298,7 +1327,9 @@ class SupportService:
         if updated:
             await publish_support_event("outbound_message", ticket_id=int(ticket["id"]),
                 message_id=int(message["id"]), message=_serialize_support_messages(int(ticket["id"]), [updated])[0])
-            if updated.get("send_status") == "SENT" and ticket.get("status") == "ASSIGNED" and message.get("sender_type") == "AGENT":
+            if (updated.get("send_status") == "SENT" and ticket.get("status") == "ASSIGNED"
+                    and message.get("sender_type") == "AGENT"
+                    and not _is_contact_forward(message)):
                 try:
                     await support_repository.mark_agent_reply_started(int(ticket["id"]),
                         agent_id=str(message["sender_id"]), agent_name=str(message.get("sender_name") or ""))
@@ -2007,6 +2038,8 @@ class SupportService:
         source_message_id: int,
         destination_ticket_id: int,
         agent: SupportAgent, client_message_id: str | None = None,
+        _contact_destination: tuple[str, str] | None = None,
+        _contact_retry_id: str | None = None,
     ) -> dict[str, Any]:
         source_ticket = await support_repository.get_ticket(source_ticket_id)
         if not source_ticket:
@@ -2017,10 +2050,25 @@ class SupportService:
         if not source or int(source.get("ticket_id") or 0) != int(source_ticket_id) or source.get("deleted_for_everyone_at") or await support_repository.message_hidden_for_user(source_message_id, agent.id):
             raise SupportNotFoundError("Message not found.")
 
-        destination = await support_repository.get_ticket(destination_ticket_id)
+        prefix = "contact-forward" if _contact_destination is not None else "forward"
+        client_id = f"{prefix}:{source_ticket_id}:{source_message_id}:{client_message_id or uuid.uuid4()}"
+        contact_options = {}
+        if _contact_destination is not None:
+            if _contact_retry_id is not None:
+                client_id = _contact_retry_id
+            if str(source_ticket.get("business_phone_number_id") or "") != _contact_destination[1]:
+                raise SupportConflictError("The source WhatsApp line changed. Refresh before forwarding.")
+            contact_options["_contact_forward"] = _contact_destination
+            destination = await self._prepare_contact_forward_ticket(
+                destination_ticket_id, agent, context=_contact_destination,
+                client_message_id=client_id, is_forwarded=True,
+                source_ticket_id=source_ticket_id, source_message_id=source_message_id,
+            )
+        else:
+            destination = await support_repository.get_ticket(destination_ticket_id)
         if not destination:
             raise SupportNotFoundError("Destination conversation not found.")
-        if not (
+        if _contact_destination is None and not (
             _is_assignee(destination, agent)
             and destination.get("active_key") is not None
             and destination.get("status") in ACTIVE_TICKET_STATUSES
@@ -2030,7 +2078,6 @@ class SupportService:
             raise SupportValidationError("Choose a different destination conversation.")
 
         kind = str(source.get("message_type") or "text").lower()
-        client_id = f"forward:{source_ticket_id}:{source_message_id}:{client_message_id or uuid.uuid4()}"
         if kind == "location":
             if source.get("location_latitude") is None or source.get("location_longitude") is None:
                 raise SupportValidationError("This location message cannot be forwarded.")
@@ -2046,6 +2093,7 @@ class SupportService:
                 is_forwarded=True,
                 forwarded_from_ticket_id=source_ticket_id,
                 forwarded_from_message_id=source_message_id,
+                **contact_options,
             )
         elif kind in SUPPORT_MEDIA_MESSAGE_TYPES:
             asset = await self.get_ticket_media(source_ticket_id, source_message_id, agent)
@@ -2065,6 +2113,7 @@ class SupportService:
                 is_forwarded=True,
                 forwarded_from_ticket_id=source_ticket_id,
                 forwarded_from_message_id=source_message_id,
+                **contact_options,
             )
         else:
             body = str(source.get("body") or "").strip()
@@ -2079,6 +2128,7 @@ class SupportService:
                 is_forwarded=True,
                 forwarded_from_ticket_id=source_ticket_id,
                 forwarded_from_message_id=source_message_id,
+                **contact_options,
             )
         try:
             await support_repository.add_event(
@@ -2152,28 +2202,33 @@ class SupportService:
         if phone == normalize_phone(str(source_ticket.get("whatsapp_phone") or "")):
             raise SupportValidationError("Choose a different contact to forward this message to.")
 
-        destination = await support_repository.find_active_ticket_by_phone(phone, line_id)
+        client_message_id = client_message_id or uuid.uuid4().hex
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", client_message_id):
+            raise SupportValidationError("A valid forwarding request ID is required.")
+        client_id = f"contact-forward:{source_ticket_id}:{source_message_id}:{client_message_id}"
+        prior = await support_repository.find_contact_forward(
+            source_ticket_id=source_ticket_id, source_message_id=source_message_id,
+            sender_id=agent.id, client_message_id=client_id, phone=phone, line_id=line_id,
+        )
+        destination = (await support_repository.get_ticket(int(prior["ticket_id"])) if prior
+                       else await support_repository.find_active_ticket_by_phone(phone, line_id))
         reopened = False
-        if destination:
-            if not (
-                _is_assignee(destination, agent)
-                and destination.get("active_key") is not None
-                and destination.get("status") in ACTIVE_TICKET_STATUSES
-            ):
-                raise SupportForbiddenError(
-                    "That contact already has an active conversation owned by another staff member."
-                )
-        else:
+        if not destination:
             identity = await customer_directory.resolve(phone)
             name = str(customer_name or "").strip() or identity.name
             previous = await support_repository.find_latest_staff_chat_by_phone(phone, line_id)
             if previous:
-                destination, reopened = await support_repository.reopen_staff_chat(
-                    int(previous["id"]),
-                    agent_id=agent.id,
-                    agent_name=agent.name,
-                )
-                if name and name != destination.get("customer_name"):
+                try:
+                    destination, reopened = await support_repository.reopen_staff_chat(
+                        int(previous["id"]),
+                        agent_id=agent.id,
+                        agent_name=agent.name,
+                    )
+                except SupportConflictError:
+                    destination = await support_repository.find_active_ticket_by_phone(phone, line_id)
+                    if not destination:
+                        raise
+                if reopened and name and name != destination.get("customer_name"):
                     destination = await support_repository.update_customer_identity(
                         int(destination["id"]),
                         customer_name=name,
@@ -2183,23 +2238,32 @@ class SupportService:
             else:
                 line_rows = await whatsapp_registry_service.list_enabled_numbers(agent)
                 line = next((item for item in line_rows if str(item.get("phone_number_id")) == line_id), None)
-                destination = await support_repository.create_staff_chat(
-                    ticket_reference=_chat_reference(),
-                    phone_number=phone,
-                    business_phone_number_id=line_id,
-                    business_display_phone_number=(line or {}).get("display_phone_number"),
-                    customer_id=(identity.user_id if identity.source == "registered_user" else None),
-                    customer_userid=(identity.userid if identity.source == "registered_user" else None),
-                    customer_name=name,
-                    agent_id=agent.id,
-                    agent_name=agent.name,
-                )
+                try:
+                    destination = await support_repository.create_staff_chat(
+                        ticket_reference=_chat_reference(),
+                        phone_number=phone,
+                        business_phone_number_id=line_id,
+                        business_display_phone_number=(line or {}).get("display_phone_number"),
+                        customer_id=(identity.user_id if identity.source == "registered_user" else None),
+                        customer_userid=(identity.userid if identity.source == "registered_user" else None),
+                        customer_name=name,
+                        agent_id=agent.id,
+                        agent_name=agent.name,
+                    )
+                except SupportConflictError:
+                    # Another staff member/inbound message can win creation
+                    # after our lookup. Reuse that conversation without claiming it.
+                    destination = await support_repository.find_active_ticket_by_phone(phone, line_id)
+                    if not destination:
+                        raise
 
         message = await self.forward_message(
             source_ticket_id=source_ticket_id,
             source_message_id=source_message_id,
             destination_ticket_id=int(destination["id"]),
             agent=agent, client_message_id=client_message_id,
+            _contact_destination=(phone, line_id),
+            _contact_retry_id=str(prior["client_message_id"]) if prior else None,
         )
         await publish_support_event(
             "staff_chat_reopened" if reopened else "staff_chat_updated",
@@ -2210,7 +2274,8 @@ class SupportService:
         )
         return {
             "message": message,
-            "destination": _safe_ticket_row(destination),
+            "destination": (_safe_ticket_row(destination) if await _can_view_ticket(destination, agent)
+                            else {"id": int(destination["id"])}),
             "reopened": reopened,
         }
 
@@ -3145,17 +3210,33 @@ class SupportService:
         self,
         ticket_id: int,
         reply_to_message_id: int | None,
+        *,
+        agent: SupportAgent,
     ) -> tuple[int | None, str | None]:
         if reply_to_message_id is None:
             return None, None
         target = await support_repository.get_message(int(reply_to_message_id))
-        if not target or int(target.get("ticket_id") or 0) != int(ticket_id):
+        if not target:
             raise SupportValidationError("The replied-to message is not part of this conversation.")
+        current = None
+        if int(target.get("ticket_id") or 0) != int(ticket_id):
+            current = await support_repository.get_ticket(ticket_id)
+            previous = await support_repository.get_ticket(int(target.get("ticket_id") or 0))
+            if (
+                not current or not previous
+                or not _same_whatsapp_conversation(previous, current)
+                or not await _historical_ticket_accessible(previous, current, agent)
+            ):
+                raise SupportValidationError("The replied-to message is not part of this WhatsApp conversation.")
         if target.get("deleted_for_everyone_at"):
             raise SupportValidationError("This message was deleted.")
+        if await support_repository.message_hidden_for_user(int(target["id"]), agent.id):
+            raise SupportValidationError("The replied-to message is unavailable.")
         whatsapp_message_id = str(target.get("whatsapp_message_id") or "").strip()
         if not whatsapp_message_id:
             raise SupportValidationError("That message cannot be replied to on WhatsApp yet.")
+        if current is not None:
+            _validate_history_provider_reference(current, whatsapp_message_id)
         return int(target["id"]), whatsapp_message_id
 
     async def _prepare_agent_outbound_ticket(
@@ -3213,6 +3294,44 @@ class SupportService:
             raise SupportConflictError("Ticket is no longer active.")
         return ticket
 
+    async def _prepare_contact_forward_ticket(
+        self, ticket_id: int, agent: SupportAgent, *, context: tuple[str, str],
+        client_message_id: str, is_forwarded: bool,
+        source_ticket_id: int | None, source_message_id: int | None,
+    ) -> dict[str, Any]:
+        """Permit only a source-authorized contact forward, without taking ownership.
+
+        The public send/forward routes never supply this internal context. The
+        durable namespace and provenance also distinguish this permission from
+        ordinary replies at the delivery claim and dispatch boundaries.
+        """
+        prefix = f"contact-forward:{source_ticket_id}:{source_message_id}:"
+        legacy_prefix = f"forward:{source_ticket_id}:{source_message_id}:"
+        legacy_retry = client_message_id.startswith(legacy_prefix) and len(client_message_id) > len(legacy_prefix)
+        if (not is_forwarded or int(source_ticket_id or 0) <= 0 or int(source_message_id or 0) <= 0
+                or not (legacy_retry or (client_message_id.startswith(prefix) and len(client_message_id) > len(prefix)))):
+            raise SupportForbiddenError("Invalid contact forward.")
+        phone, line_id = context
+        ticket = await support_repository.get_ticket(ticket_id)
+        if not ticket:
+            raise SupportNotFoundError("Destination conversation not found.")
+        if (str(ticket.get("whatsapp_phone") or "") != phone
+                or str(ticket.get("business_phone_number_id") or "") != line_id):
+            raise SupportConflictError("The contact conversation changed. Refresh before forwarding.")
+        if ticket.get("business_number_removed_at") or get_transport(line_id) == "removed":
+            raise SupportConflictError("This WhatsApp number has been removed. Its history is read-only.")
+        if legacy_retry or ticket.get("active_key") is None or ticket.get("status") not in ACTIVE_TICKET_STATUSES:
+            # A retry must report its original attempt, even after that ticket
+            # closes. Inserts still require an active ticket under its row lock.
+            existing = await support_repository.get_message_by_client_id(
+                client_message_id, ticket_id=ticket_id, sender_type="AGENT", sender_id=agent.id,
+            )
+            if (not existing or not existing.get("is_forwarded")
+                    or int(existing.get("forwarded_from_ticket_id") or 0) != source_ticket_id
+                    or int(existing.get("forwarded_from_message_id") or 0) != source_message_id):
+                raise SupportConflictError("The contact conversation is no longer active.")
+        return ticket
+
     async def send_agent_message(
         self,
         ticket_id: int,
@@ -3224,6 +3343,7 @@ class SupportService:
         is_forwarded: bool = False,
         forwarded_from_ticket_id: int | None = None,
         forwarded_from_message_id: int | None = None,
+        _contact_forward: tuple[str, str] | None = None,
     ) -> dict[str, Any]:
         body = body.strip()
         if not body:
@@ -3233,7 +3353,11 @@ class SupportService:
         if not client_message_id or len(client_message_id) > 191:
             raise SupportValidationError("A valid client_message_id is required.")
 
-        ticket = await self._prepare_agent_outbound_ticket(ticket_id, agent)
+        ticket = (await self._prepare_contact_forward_ticket(
+            ticket_id, agent, context=_contact_forward, client_message_id=client_message_id,
+            is_forwarded=is_forwarded, source_ticket_id=forwarded_from_ticket_id,
+            source_message_id=forwarded_from_message_id,
+        ) if _contact_forward is not None else await self._prepare_agent_outbound_ticket(ticket_id, agent))
 
         fingerprint = send_fingerprint(
             "text", body=body, reply_id=reply_to_message_id,
@@ -3246,7 +3370,7 @@ class SupportService:
             return _serialize_support_messages(ticket_id, [existing])[0] or {}
 
         _reply_local_id, reply_whatsapp_id = await self._resolve_reply_target(
-            ticket_id, reply_to_message_id
+            ticket_id, reply_to_message_id, agent=agent,
         )
 
         message, created = await support_repository.add_ticket_message(
@@ -3265,7 +3389,9 @@ class SupportService:
             forwarded_from_ticket_id=forwarded_from_ticket_id,
             forwarded_from_message_id=forwarded_from_message_id,
             require_active=True,
-            require_assignee_id=agent.id,
+            require_assignee_id=agent.id if _contact_forward is None else None,
+            expected_phone=str(ticket.get("whatsapp_phone") or ""),
+            expected_line_id=str(ticket.get("business_phone_number_id") or ""),
         )
         if not created:
             return _serialize_support_messages(ticket_id, [message])[0] or {}
@@ -3429,6 +3555,7 @@ class SupportService:
         is_forwarded: bool = False,
         forwarded_from_ticket_id: int | None = None,
         forwarded_from_message_id: int | None = None,
+        _contact_forward: tuple[str, str] | None = None,
     ) -> dict[str, Any]:
         if not (-90 <= float(latitude) <= 90) or not (-180 <= float(longitude) <= 180):
             raise SupportValidationError("Invalid location coordinates.")
@@ -3437,7 +3564,11 @@ class SupportService:
         safe_name = sanitize_support_text(name).strip()[:255] or None
         safe_address = sanitize_support_text(address).strip()[:1000] or None
 
-        ticket = await self._prepare_agent_outbound_ticket(ticket_id, agent)
+        ticket = (await self._prepare_contact_forward_ticket(
+            ticket_id, agent, context=_contact_forward, client_message_id=client_message_id,
+            is_forwarded=is_forwarded, source_ticket_id=forwarded_from_ticket_id,
+            source_message_id=forwarded_from_message_id,
+        ) if _contact_forward is not None else await self._prepare_agent_outbound_ticket(ticket_id, agent))
 
         fingerprint = send_fingerprint(
             "location", latitude=float(latitude), longitude=float(longitude),
@@ -3451,7 +3582,7 @@ class SupportService:
             return _serialize_support_messages(ticket_id, [existing])[0] or {}
 
         _reply_local_id, reply_whatsapp_id = await self._resolve_reply_target(
-            ticket_id, reply_to_message_id
+            ticket_id, reply_to_message_id, agent=agent,
         )
         body = safe_name or safe_address or "Location"
         message, created = await support_repository.add_ticket_message(
@@ -3474,7 +3605,9 @@ class SupportService:
             forwarded_from_ticket_id=forwarded_from_ticket_id,
             forwarded_from_message_id=forwarded_from_message_id,
             require_active=True,
-            require_assignee_id=agent.id,
+            require_assignee_id=agent.id if _contact_forward is None else None,
+            expected_phone=str(ticket.get("whatsapp_phone") or ""),
+            expected_line_id=str(ticket.get("business_phone_number_id") or ""),
         )
         if not created:
             return _serialize_support_messages(ticket_id, [message])[0] or {}
@@ -3497,6 +3630,7 @@ class SupportService:
         is_forwarded: bool = False,
         forwarded_from_ticket_id: int | None = None,
         forwarded_from_message_id: int | None = None,
+        _contact_forward: tuple[str, str] | None = None,
     ) -> dict[str, Any]:
         media_type = str(media_type or "").lower().strip()
         if media_type not in SUPPORT_MEDIA_MESSAGE_TYPES:
@@ -3504,7 +3638,11 @@ class SupportService:
         if not client_message_id or len(client_message_id) > 191:
             raise SupportValidationError("A valid client_message_id is required.")
 
-        ticket = await self._prepare_agent_outbound_ticket(ticket_id, agent)
+        ticket = (await self._prepare_contact_forward_ticket(
+            ticket_id, agent, context=_contact_forward, client_message_id=client_message_id,
+            is_forwarded=is_forwarded, source_ticket_id=forwarded_from_ticket_id,
+            source_message_id=forwarded_from_message_id,
+        ) if _contact_forward is not None else await self._prepare_agent_outbound_ticket(ticket_id, agent))
 
         fingerprint = send_fingerprint(
             media_type, content_hash=hashlib.sha256(content).hexdigest(),
@@ -3586,7 +3724,7 @@ class SupportService:
             body = safe_caption or prepared_filename
 
         _reply_local_id, reply_whatsapp_id = await self._resolve_reply_target(
-            ticket_id, reply_to_message_id
+            ticket_id, reply_to_message_id, agent=agent,
         )
 
         message, created = await support_repository.add_ticket_message(
@@ -3605,7 +3743,9 @@ class SupportService:
             forwarded_from_ticket_id=forwarded_from_ticket_id,
             forwarded_from_message_id=forwarded_from_message_id,
             require_active=True,
-            require_assignee_id=agent.id,
+            require_assignee_id=agent.id if _contact_forward is None else None,
+            expected_phone=str(ticket.get("whatsapp_phone") or ""),
+            expected_line_id=str(ticket.get("business_phone_number_id") or ""),
         )
         if not created:
             return _serialize_support_messages(ticket_id, [message])[0] or {}
@@ -3622,6 +3762,26 @@ class SupportService:
         return _serialize_support_messages(ticket_id, [updated])[0] or {}
 
 
+    async def _prepare_history_reaction_ticket(
+        self, ticket_id: int, context_ticket_id: int, agent: SupportAgent,
+    ) -> dict[str, Any]:
+        """Authorize a source history row without reopening or claiming it."""
+        ticket = await support_repository.get_ticket(ticket_id)
+        context = await support_repository.get_ticket(context_ticket_id)
+        if not context or not _is_assignee(context, agent):
+            raise SupportForbiddenError("Only the currently assigned agent can react in this conversation.")
+        if context.get("active_key") is None or context.get("status") not in ACTIVE_TICKET_STATUSES:
+            raise SupportConflictError("Claim an active ticket before reacting to its history.")
+        if (
+            not ticket or not _same_whatsapp_conversation(ticket, context)
+            or not await _historical_ticket_accessible(ticket, context, agent)
+        ):
+            raise SupportNotFoundError("Message is not part of this WhatsApp conversation.")
+        line_id = str(ticket.get("business_phone_number_id") or "")
+        if ticket.get("business_number_removed_at") or context.get("business_number_removed_at") or get_transport(line_id) == "removed":
+            raise SupportConflictError("This WhatsApp number has been removed. Its history is read-only.")
+        return ticket
+
     async def send_agent_reaction(
         self,
         ticket_id: int,
@@ -3630,6 +3790,7 @@ class SupportService:
         agent: SupportAgent,
         emoji: str,
         client_reaction_id: str,
+        context_ticket_id: int | None = None,
     ) -> dict[str, Any]:
         rendered_emoji = str(emoji or "").strip()
         if rendered_emoji and rendered_emoji not in SUPPORTED_REACTION_EMOJIS:
@@ -3637,22 +3798,36 @@ class SupportService:
         if not client_reaction_id or len(client_reaction_id) > 191:
             raise SupportValidationError("A valid client_reaction_id is required.")
 
-        ticket = await self._prepare_agent_outbound_ticket(ticket_id, agent)
+        historical = context_ticket_id is not None and int(context_ticket_id) != int(ticket_id)
+        ticket = (
+            await self._prepare_history_reaction_ticket(ticket_id, int(context_ticket_id), agent)
+            if historical else await self._prepare_agent_outbound_ticket(ticket_id, agent)
+        )
         target = await support_repository.get_message(message_id)
         if not target or int(target.get("ticket_id") or 0) != int(ticket_id) or target.get("deleted_for_everyone_at") or await support_repository.message_hidden_for_user(message_id, agent.id):
             raise SupportNotFoundError("Message not found.")
         target_whatsapp_id = str(target.get("whatsapp_message_id") or "").strip()
         if not target_whatsapp_id:
             raise SupportValidationError("That message cannot be reacted to on WhatsApp yet.")
+        if historical:
+            _validate_history_provider_reference(ticket, target_whatsapp_id)
 
         existing = await support_repository.get_reaction_by_client_id(client_reaction_id)
         if existing:
             if (
                 int(existing.get("ticket_id") or 0) != int(ticket_id)
                 or int(existing.get("message_id") or 0) != int(message_id)
+                or str(existing.get("reactor_id") or "") != agent.id
+                or str(existing.get("emoji") or "") != rendered_emoji
             ):
                 raise SupportConflictError("That reaction request ID was already used.")
             return _normalize_row(existing) or {}
+
+        if historical:
+            # Source/idempotency reads can yield to a transfer or close. Check
+            # the selected ticket again immediately before the provider call.
+            ticket = await self._prepare_history_reaction_ticket(ticket_id, int(context_ticket_id), agent)
+            _validate_history_provider_reference(ticket, target_whatsapp_id)
 
         try:
             response = await whatsapp_client.send_reaction(
@@ -3693,6 +3868,7 @@ class SupportService:
             client_reaction_id=client_reaction_id,
             provider_timestamp=int(datetime.now(timezone.utc).timestamp()),
         )
+        await publish_support_event("message_reaction", ticket_id=ticket_id, message_id=message_id, reactor_type="AGENT")
         return _normalize_row(reaction) or {}
 
     async def reopen_ticket(

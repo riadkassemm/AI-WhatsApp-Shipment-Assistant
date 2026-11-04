@@ -486,7 +486,7 @@ __SUPPORT_STYLE__
 <section class="modal-backdrop hidden" id="quickRepliesModal" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="quickRepliesTitle" aria-describedby="quickRepliesSubtitle">
   <div class="modal-card quick-replies-card" role="document" tabindex="-1">
     <div class="modal-head">
-      <div><h2 id="quickRepliesTitle">Quick replies</h2><div class="modal-subtitle" id="quickRepliesSubtitle">Copy text, attach a PDF, or preview a saved location. Only you can see your quick replies.</div></div>
+      <div><h2 id="quickRepliesTitle">Quick replies</h2><div class="modal-subtitle" id="quickRepliesSubtitle">Use one reply or select several to send together. Only you can see your quick replies.</div></div>
       <button class="icon-btn modal-close" id="closeQuickRepliesBtn" type="button" aria-label="Close quick replies"><svg class="icon" aria-hidden="true"><use href="#icon-x"></use></svg></button>
     </div>
     <div class="modal-body">
@@ -505,7 +505,16 @@ __SUPPORT_STYLE__
             <label class="sr-only" for="quickRepliesSearch">Search quick replies</label>
             <input id="quickRepliesSearch" type="search" autocomplete="off" placeholder="Search quick replies" />
           </div>
+          <button class="btn" id="selectQuickRepliesBtn" type="button" aria-controls="quickReplySelectionBar quickRepliesList" aria-pressed="false"><svg class="icon" aria-hidden="true"><use href="#icon-check"></use></svg>Select</button>
           <button class="btn primary" id="addQuickReplyBtn" type="button"><svg class="icon" aria-hidden="true"><use href="#icon-plus"></use></svg>New reply</button>
+        </div>
+        <div class="quick-reply-selection-bar hidden" id="quickReplySelectionBar" role="group" aria-label="Selected quick replies" aria-describedby="quickReplySelectionHint">
+          <strong id="quickReplySelectionCount" role="status" aria-live="polite" aria-atomic="true">0 selected</strong>
+          <div class="quick-reply-selection-actions">
+            <button class="btn primary" id="sendSelectedQuickRepliesBtn" type="button" disabled><svg class="icon" aria-hidden="true"><use href="#icon-send"></use></svg>Send selected</button>
+            <button class="btn" id="cancelQuickReplySelectionBtn" type="button">Cancel</button>
+          </div>
+          <div class="quick-reply-selection-hint" id="quickReplySelectionHint">Choose replies across tabs or search results. They send as separate messages in selection order.</div>
         </div>
         <div class="quick-reply-list" id="quickRepliesList" role="list" aria-label="Your quick replies" aria-busy="false"></div>
         </div>

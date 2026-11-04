@@ -153,6 +153,7 @@ class SendReactionRequest(BaseModel):
 
     emoji: str = Field(default="", max_length=64)
     client_reaction_id: str = Field(min_length=1, max_length=191)
+    context_ticket_id: int | None = Field(default=None, ge=1)
 
 
 class SaveContactRequest(BaseModel):
@@ -1393,6 +1394,7 @@ async def react_to_ticket_message(
                 agent=agent,
                 emoji=request.emoji,
                 client_reaction_id=request.client_reaction_id,
+                context_ticket_id=request.context_ticket_id,
             )
         }
     except Exception as exc:

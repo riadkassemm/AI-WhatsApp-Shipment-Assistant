@@ -110,10 +110,149 @@ async function saveMessagePreferences(event) {
 }
 
 // Manager assignments create independent copies; existing replies stay owner-scoped.
-const QUICK_REPLIES_LIST_SUBTITLE = 'Copy text, attach an image or PDF, or preview a saved location. Only you can see your quick replies.';
+const QUICK_REPLIES_LIST_SUBTITLE = 'Use one reply or select several to send together. Only you can see your quick replies.';
 
 function quickReplyKind(reply) {
   return reply?.location ? 'location' : reply?.attachment_filename ? (reply.attachment_mime_type?.startsWith('image/') ? 'image' : 'pdf') : 'text';
+}
+
+function updateQuickReplySelection() {
+  const selecting = Boolean(state.quickReplySelecting);
+  const count = state.quickReplySelection?.size || 0;
+  $('quickReplySelectionBar').classList.toggle('hidden', !selecting);
+  $('selectQuickRepliesBtn').setAttribute('aria-pressed', String(selecting));
+  $('selectQuickRepliesBtn').disabled = selecting || state.quickRepliesBusy || !state.ticketId || !state.composerEnabled;
+  $('addQuickReplyBtn').disabled = selecting || state.quickRepliesBusy;
+  $('cancelQuickReplySelectionBtn').disabled = state.quickRepliesBusy;
+  $('sendSelectedQuickRepliesBtn').disabled = !count || state.quickRepliesBusy || !state.composerEnabled;
+  text($('quickReplySelectionCount'), count + ' selected');
+}
+
+function startQuickReplySelection() {
+  if (state.quickRepliesBusy || state.quickReplySelecting) return;
+  if (!canAttachToComposer()) { showQuickRepliesError('Open a conversation you can reply to first.'); return; }
+  state.quickReplySelecting = true;
+  state.quickReplySelection = new Map();
+  state.quickReplyBatch = {ticketId: state.ticketId, agentId: state.agent.id, started: false};
+  showQuickRepliesError('');
+  renderQuickReplies();
+  $('quickRepliesList').querySelector('.quick-reply-select')?.focus();
+}
+
+function cancelQuickReplySelection() {
+  if (state.quickRepliesBusy) return;
+  state.quickReplySelecting = false;
+  state.quickReplySelection = new Map();
+  state.quickReplyBatch = null;
+  showQuickRepliesError('');
+  renderQuickReplies();
+  $('selectQuickRepliesBtn').focus();
+}
+
+function toggleQuickReplySelection(reply) {
+  if (!state.quickReplySelecting || state.quickRepliesBusy || state.quickReplyBatch?.started) return;
+  const id = String(reply.id);
+  if (state.quickReplySelection.has(id)) state.quickReplySelection.delete(id);
+  else state.quickReplySelection.set(id, {reply: {...reply, location: reply.location ? {...reply.location} : null}, clientId: crypto.randomUUID()});
+  renderQuickReplies();
+  $('quickRepliesList').querySelector('[data-quick-reply-id="' + CSS.escape(id) + '"] .quick-reply-select')?.focus();
+}
+
+function quickReplyBatchIsCurrent(batch) {
+  return state.quickReplyBatch === batch && state.authenticated && String(state.agent?.id) === String(batch.agentId);
+}
+
+function requireQuickReplyDestination(batch) {
+  if (!quickReplyBatchIsCurrent(batch) || state.pageLeaving || state.activeModal !== 'quickRepliesModal' ||
+      String(state.ticketId) !== String(batch.ticketId) || !state.composerEnabled) {
+    throw new Error('Sending paused. Return to the original conversation with permission to reply, or cancel the selection.');
+  }
+}
+
+async function sendSelectedQuickReplies() {
+  const batch = state.quickReplyBatch;
+  if (!batch || !state.quickReplySelection?.size || state.quickRepliesBusy || state.busy) return;
+  if (state.mediaRecorder || state.voiceRecording || state.editTarget) {
+    showQuickRepliesError('Finish recording or editing before sending selected replies.'); return;
+  }
+  try { requireQuickReplyDestination(batch); }
+  catch (error) { showQuickRepliesError(error.message); return; }
+  state.quickRepliesBusy = true;
+  state.busy = true;
+  batch.started = true;
+  setWorkspaceBusy(true);
+  showQuickRepliesError('');
+  renderQuickReplies();
+  const total = state.quickReplySelection.size;
+  let completed = 0;
+  let succeeded = false;
+  try {
+    // Finish already queued composer text before sending this ordered batch.
+    await state.textSendChain;
+    while (state.quickReplySelection.size) {
+      requireQuickReplyDestination(batch);
+      const [id, item] = state.quickReplySelection.entries().next().value;
+      const reply = item.reply;
+      const kind = quickReplyKind(reply);
+      const path = '/api/support/tickets/' + batch.ticketId;
+      setButtonBusy($('sendSelectedQuickRepliesBtn'), true, 'Sending ' + (completed + 1) + ' of ' + total + '…');
+      let result;
+      if (kind === 'pdf' || kind === 'image') {
+        // Keep the exact bytes and caption with the key after an ambiguous response.
+        if (!item.file) {
+          const response = await fetch('/api/support/quick-replies/' + encodeURIComponent(reply.id) + '/' + kind, {credentials: 'same-origin', cache: 'no-store'});
+          if (!response.ok) {
+            if (response.status === 401 && quickReplyBatchIsCurrent(batch)) showLogin();
+            throw new Error('Could not load the saved attachment. Try again.');
+          }
+          item.file = new File([await response.blob()], reply.attachment_filename, {type: reply.attachment_mime_type || (kind === 'pdf' ? 'application/pdf' : 'image/jpeg')});
+        }
+        requireQuickReplyDestination(batch);
+        const form = new FormData();
+        form.append('media_type', kind === 'pdf' ? 'document' : 'image');
+        form.append('client_message_id', item.clientId);
+        form.append('caption', reply.body || '');
+        form.append('file', item.file, item.file.name);
+        result = await api(path + '/media', {method: 'POST', body: form});
+      } else {
+        const payload = kind === 'location' ? {
+          latitude: reply.location.latitude, longitude: reply.location.longitude,
+          name: reply.location.name || reply.title || null, address: reply.location.address || null
+        } : {body: reply.body};
+        result = await api(path + (kind === 'location' ? '/location' : '/messages'), {
+          method: 'POST', body: JSON.stringify({...payload, client_message_id: item.clientId})
+        });
+      }
+      if (!quickReplyBatchIsCurrent(batch)) return;
+      if (!result.message?.id) throw new Error('Could not confirm this reply. Click Send selected again to check the same attempt.');
+      state.quickReplySelection.delete(id);
+      completed++;
+      // Rendering is separate from delivery; a UI failure must not retry a send.
+      try { if (String(state.ticketId) === String(batch.ticketId)) upsertTimelineMessage(result.message, batch.ticketId); } catch (_) {}
+      renderQuickReplies();
+      if (!['SENT', 'DELIVERED', 'READ', 'PLAYED'].includes(result.message.send_status)) {
+        throw new Error('Sending paused. Check this reply’s delivery status in the conversation before sending the remaining selection.');
+      }
+    }
+    succeeded = true;
+    notify(completed + (completed === 1 ? ' quick reply sent.' : ' quick replies sent.'));
+  } catch (error) {
+    if (quickReplyBatchIsCurrent(batch)) showQuickRepliesError(error.message);
+  } finally {
+    if (quickReplyBatchIsCurrent(batch)) {
+      state.quickRepliesBusy = false;
+      state.busy = false;
+      setButtonBusy($('sendSelectedQuickRepliesBtn'), false);
+      setWorkspaceBusy(false);
+      updateQuickReplySelection();
+      if (succeeded) {
+        cancelQuickReplySelection();
+        closeDialog('quickRepliesModal', false);
+        if (String(state.ticketId) === String(batch.ticketId) && state.composerEnabled) $('message').focus({preventScroll: true});
+      }
+      refreshAllQueueCounts().catch(() => {});
+    }
+  }
 }
 
 function quickReplyAssignmentNotice(result) {
@@ -204,10 +343,14 @@ function quickReplyLabel(reply) {
 }
 
 function resetQuickReplies() {
+  if (state.quickReplyBatch && state.quickRepliesBusy) state.busy = false;
   state.quickReplies = [];
   state.quickRepliesLoaded = false;
   state.quickRepliesBusy = false;
   state.quickRepliesRequest += 1;
+  state.quickReplySelecting = false;
+  state.quickReplySelection = new Map();
+  state.quickReplyBatch = null;
   state.quickReplyEditing = null;
   state.quickReplySharing = null;
   state.quickReplyTab = 'text';
@@ -219,6 +362,8 @@ function resetQuickReplies() {
   $('quickRepliesList').replaceChildren();
   $('quickReplyPdf').value = '';
   setButtonBusy($('saveQuickReplyBtn'), false);
+  setButtonBusy($('sendSelectedQuickRepliesBtn'), false);
+  updateQuickReplySelection();
 }
 
 function updateQuickReplyCount() {
@@ -236,11 +381,25 @@ function quickReplyRow(reply) {
   row.dataset.quickReplyId = String(reply.id);
   const label = quickReplyLabel(reply);
   const location = Boolean(reply.location);
+  const selecting = Boolean(state.quickReplySelecting);
+  const selected = Boolean(state.quickReplySelection?.has(String(reply.id)));
+  const locked = state.quickRepliesBusy || Boolean(state.quickReplyBatch?.started);
+  row.classList.toggle('selected', selected);
+  if (selecting) {
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox'; checkbox.className = 'quick-reply-select';
+    checkbox.checked = selected; checkbox.disabled = locked;
+    checkbox.setAttribute('aria-label', 'Select quick reply: ' + label);
+    checkbox.addEventListener('change', () => toggleQuickReplySelection(reply));
+    row.append(checkbox);
+  }
 
   const copy = document.createElement('button');
   copy.type = 'button';
   copy.className = 'quick-reply-copy';
   copy.setAttribute('aria-label', (location ? 'Preview location: ' : reply.attachment_filename ? (quickReplyKind(reply) === 'image' ? 'Attach image: ' : 'Attach PDF: ') : 'Copy quick reply: ') + label);
+  if (selecting) { copy.setAttribute('aria-label', 'Select quick reply: ' + label); copy.setAttribute('aria-pressed', String(selected)); }
+  copy.disabled = state.quickRepliesBusy || (selecting && locked);
   const copyText = document.createElement('span');
   copyText.className = 'quick-reply-text';
   if (String(reply.title || '').trim()) {
@@ -257,7 +416,7 @@ function quickReplyRow(reply) {
   const hint = document.createElement('span');
   hint.className = 'quick-reply-copy-hint';
   hint.setAttribute('aria-hidden', 'true');
-  hint.append(createIcon(location ? 'map-pin' : reply.attachment_filename ? 'paperclip' : 'copy', 'icon icon-sm'), document.createTextNode(location ? 'Preview' : reply.attachment_filename ? (quickReplyKind(reply) === 'image' ? 'Attach image' : 'Attach PDF') : 'Copy'));
+  hint.append(createIcon(selecting ? 'check' : location ? 'map-pin' : reply.attachment_filename ? 'paperclip' : 'copy', 'icon icon-sm'), document.createTextNode(selecting ? (selected ? 'Selected' : 'Select') : location ? 'Preview' : reply.attachment_filename ? (quickReplyKind(reply) === 'image' ? 'Attach image' : 'Attach PDF') : 'Copy'));
   if (quickReplyKind(reply) === 'image') {
     const thumbnail = document.createElement('img');
     thumbnail.className = 'quick-reply-thumbnail'; thumbnail.alt = label; thumbnail.loading = 'lazy';
@@ -265,10 +424,11 @@ function quickReplyRow(reply) {
     copy.append(thumbnail);
   }
   copy.append(copyText, hint);
-  copy.addEventListener('click', () => location ? previewQuickReplyLocation(reply) : reply.attachment_filename ? attachQuickReplyPdf(reply) : copyQuickReply(reply));
+  copy.addEventListener('click', () => selecting ? toggleQuickReplySelection(reply) : location ? previewQuickReplyLocation(reply) : reply.attachment_filename ? attachQuickReplyPdf(reply) : copyQuickReply(reply));
 
   const actions = document.createElement('div');
   actions.className = 'quick-reply-actions';
+  actions.classList.toggle('hidden', selecting);
   const edit = document.createElement('button');
   edit.type = 'button';
   edit.className = 'icon-btn';
@@ -299,6 +459,7 @@ function quickReplyRow(reply) {
 }
 
 function renderQuickReplies() {
+  updateQuickReplySelection();
   const list = $('quickRepliesList');
   const query = $('quickRepliesSearch').value.trim().toLocaleLowerCase();
   const tab = state.quickReplyTab || 'text';
@@ -364,7 +525,7 @@ function showQuickReplyList() {
 }
 
 function showQuickReplyForm(reply, draft = null) {
-  if (state.quickRepliesBusy) return;
+  if (state.quickRepliesBusy || state.quickReplySelecting) return;
   state.quickReplySharing = null;
   $('quickReplyContentFields').classList.remove('hidden');
   $('quickReplyShareSummary').classList.add('hidden');
@@ -481,6 +642,7 @@ function closeQuickRepliesModal() {
 }
 
 async function copyQuickReply(reply) {
+  if (state.quickRepliesBusy || state.quickReplySelecting) return;
   if (!await copyMessageText(String(reply.body || ''), 'Quick reply copied. Paste it into the chat.')) return;
   closeDialog('quickRepliesModal', !state.composerEnabled);
   if (state.composerEnabled) focusMessageComposer();
@@ -2087,19 +2249,19 @@ function clearMessageSelection() {
 }
 
 function selectChatMessage(message, checked = true) {
-  if (state.forwardBusy || state.busy) return;
+  if (state.forwardBusy || state.busy || !message?.id || message.deleted_for_everyone_at) return;
   if (checked && state.selectedMessages.size >= 20 && !state.selectedMessages.has(String(message.id))) {
     showError('Select up to 20 messages at a time.'); updateMessageSelection(); return;
   }
   state.selectingMessages = true;
-  if (checked) state.selectedMessages.set(String(message.id), message);
+  if (checked) state.selectedMessages.set(String(message.id), {...message, ticket_id: Number(message.ticket_id || state.ticketId)});
   else state.selectedMessages.delete(String(message.id));
   updateMessageSelection();
 }
 
 async function openForwardModal(message) {
   const messages = Array.isArray(message) ? message : [message];
-  if (!messages.length || messages.some(item => !item?.id) || state.forwardBusy) return;
+  if (!messages.length || messages.some(item => !item?.id || item.deleted_for_everyone_at) || state.forwardBusy || state.busy) return;
   state.forwardTarget = messages.sort((a, b) => String(messageOccurredAt(a) || '').localeCompare(String(messageOccurredAt(b) || '')) || Number(a.id) - Number(b.id)).map(item => ({
     ticketId: Number(item.ticket_id || state.ticketId), messageId: Number(item.id),
     preview: messagePreview(item), clientId: crypto.randomUUID()
@@ -2144,11 +2306,11 @@ async function confirmForward() {
       const item = state.forwardTarget[0];
       setButtonBusy($('confirmForwardBtn'), true, 'Forwarding ' + (total - state.forwardTarget.length + 1) + ' of ' + total + '…');
       const path = '/api/support/tickets/' + item.ticketId + '/messages/' + item.messageId;
+      // Resolve every contact forward through its route, including chats owned by another staff member.
       const result = destination.kind === 'conversation'
         ? await api(path + '/forward', {method: 'POST', body: JSON.stringify({destination_ticket_id: Number(destination.id), client_message_id: item.clientId})})
         : await api(path + '/forward-contact', {method: 'POST', body: JSON.stringify({phone_number: destination.phone, customer_name: destination.name || null, client_message_id: item.clientId})});
       if (!result.message?.id) throw new Error('Could not confirm forwarding. Try again to check the same attempt.');
-      if (result.destination) { destination.kind = 'conversation'; destination.id = result.destination.id; state.forwardSelection = {...destination}; }
       state.forwardTarget.shift();
       state.selectedMessages.delete(String(item.messageId));
       updateMessageSelection();
@@ -2349,6 +2511,9 @@ $('cancelQuickReplyBtn').addEventListener('click', showQuickReplyList);
 $('quickReplyForm').addEventListener('submit', saveQuickReply);
 $('quickRepliesSearch').addEventListener('input', renderQuickReplies);
 $('quickReplyAudience').addEventListener('change', updateQuickReplyAudience);
+$('selectQuickRepliesBtn').addEventListener('click', startQuickReplySelection);
+$('cancelQuickReplySelectionBtn').addEventListener('click', cancelQuickReplySelection);
+$('sendSelectedQuickRepliesBtn').addEventListener('click', sendSelectedQuickReplies);
 for (const [index, [kind, suffix]] of Object.entries({text: 'Text', pdf: 'Pdf', location: 'Location', image: 'Image'}).entries()) {
   const button = $('quickReplyTab' + suffix);
   button.addEventListener('click', () => selectQuickReplyTab(kind));

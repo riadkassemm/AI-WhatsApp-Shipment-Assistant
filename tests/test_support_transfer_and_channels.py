@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import sys
 import types
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -426,6 +427,7 @@ def test_agent_text_reply_uses_whatsapp_context_and_persists_reference(outbound_
         monkeypatch.setattr(support_service_module.support_repository, "get_ticket", get_ticket)
         monkeypatch.setattr(support_service_module.support_repository, "get_message_by_client_id", no_existing)
         monkeypatch.setattr(support_service_module.support_repository, "get_message", get_message)
+        monkeypatch.setattr(support_service_module.support_repository, "message_hidden_for_user", AsyncMock(return_value=False))
         monkeypatch.setattr(support_service_module.support_repository, "add_ticket_message", add_message)
         monkeypatch.setattr(support_service_module.support_repository, "update_message_send_state", update_state)
         monkeypatch.setattr(support_service_module.whatsapp_client, "send_text", send_text)

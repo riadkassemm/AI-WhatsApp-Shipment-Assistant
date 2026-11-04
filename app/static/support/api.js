@@ -69,7 +69,7 @@ async function performApiRequest(path, options = {}, epoch = dashboardRequestEpo
 // recording, unsent message or open dialog). Otherwise offer a Reload button.
 function dashboardIsIdle() {
   return !state.busy && !state.activeModal && !state.mediaRecorder && !state.voiceRecording && !state.pendingMedia && !state.editTarget &&
-    !state.imageEditor && !state.localMessages.size && !String($('message').value || '').trim();
+    !state.imageEditor && !state.localMessages.size && !state.quickReplySelection?.size && !String($('message').value || '').trim();
 }
 
 function noticeDashboardUpdate(version) {
