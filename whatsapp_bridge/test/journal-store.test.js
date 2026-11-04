@@ -3,9 +3,14 @@ import assert from 'node:assert/strict';
 import {mkdtemp, readFile, writeFile, appendFile, rm, stat} from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import {JournalStore} from '../src/journal-store.js';
+import crypto from 'node:crypto';
+import {JournalStore, readJournal} from '../src/journal-store.js';
 import {storageTool} from '../src/storage-tool.js';
 const gate = () => { let resolve; const promise = new Promise(r => {resolve = r}); return {promise,resolve}; };
+const journalLine = (seq, ops) => {
+ const record=JSON.stringify({version:1,seq,ops});
+ return JSON.stringify({record,checksum:crypto.createHash('sha256').update(record).digest('hex')})+'\n';
+};
 async function setup(t, options) {
  const dir = await mkdtemp(path.join(os.tmpdir(), 'bridge-journal-'));
  t.after(()=>rm(dir,{recursive:true,force:true}));
@@ -98,4 +103,79 @@ test('invalid storage errors do not expose JSON contents',async t=>{
  await writeFile(store.filename, '{"secret":"synthetic-private-value" broken');
  await assert.rejects(new JournalStore(store.filename,()=>({})).load(), error=>
    error.message==='INVALID_STORAGE_JSON' && !error.message.includes('private'));
+});
+
+test('streamed journal replay preserves large records and UTF-8 across read chunks',async t=>{
+ const {store}=await setup(t);
+ const body='Synthetic \u{1f9a6} \u0628\u064a\u0631\u0648\u062a\n'.repeat(12000);
+ await store.update(data=>{data.messages.large={body,key:Buffer.from([0,128,255])}});
+ await store.update(data=>{data.messages.large.ack=true;data.enabled=false});
+ await store.update(data=>{data.messages.small={body:'after the large record'}});
+ assert((await stat(store.filename+'.journal')).size>4*64*1024);
+ const recovered=await readJournal(store.filename,()=>({}));
+ assert.equal(recovered.seq,3);
+ assert.equal(recovered.incompleteTailBytes,0);
+ assert.deepEqual(recovered.data,store.data);
+});
+
+test('replay never converts the whole journal and handles exact chunk boundaries and blank lines',async t=>{
+ const {store}=await setup(t);
+ const messageLine=(seq,name,body)=>journalLine(seq,[{path:['messages',name],value:{body}}]);
+ const emoji=Buffer.from('\u{1f9a6}');
+ const emojiOffset=Buffer.from(messageLine(2,'first','\u{1f9a6}')).indexOf(emoji);
+ const body='a'.repeat(64*1024-1-emojiOffset)+'\u{1f9a6}'.repeat(20000);
+ const firstMessage=Buffer.from(messageLine(2,'first',body));
+ assert.equal(firstMessage[64*1024-1],emoji[0]);
+ assert.equal(firstMessage[64*1024],emoji[1],'UTF-8 character must cross a stream chunk');
+ const boundaryLine=journalLine(1,[{path:['enabled'],value:false}]).trimEnd().padEnd(64*1024-1,' ')+'\n';
+ const journal=boundaryLine+firstMessage.toString('utf8')+'\n'+messageLine(3,'second',body)+'\n';
+ const maxStringBytes=256*1024;
+ assert(Buffer.byteLength(journal)>maxStringBytes);
+ assert(firstMessage.length<maxStringBytes);
+ await writeFile(store.filename+'.journal',journal);
+ // Model V8's whole-string ceiling cheaply: individual transactions fit,
+ // but converting the complete journal must fail with the old reader.
+ const toString=Buffer.prototype.toString;
+ t.mock.method(Buffer.prototype,'toString',function(...args){
+   assert(this.length<=maxStringBytes,'reader converted the whole journal into one string');
+   return toString.apply(this,args);
+ });
+ const recovered=await readJournal(store.filename,()=>({}));
+ assert.equal(recovered.seq,3);
+ assert.equal(recovered.incompleteTailBytes,0);
+ assert.equal(recovered.data.enabled,false);
+ assert.deepEqual(recovered.data.messages,{first:{body},second:{body}});
+});
+
+test('streamed replay reports and repairs an incomplete tail spanning read chunks',async t=>{
+ const {store}=await setup(t);
+ await store.update(data=>{data.messages.saved={body:'committed'}});
+ const committedSize=(await stat(store.filename+'.journal')).size;
+ const tail=Buffer.from('{"record":"'+ 'synthetic-incomplete-\u{1f9a6}'.repeat(20000));
+ await appendFile(store.filename+'.journal',tail);
+ const inspected=await readJournal(store.filename,()=>({}));
+ assert.equal(inspected.incompleteTailBytes,tail.length);
+ assert.deepEqual(inspected.data,store.data);
+ assert.equal((await stat(store.filename+'.journal')).size,committedSize+tail.length,'inspection must remain read-only');
+ const repaired=await new JournalStore(store.filename,()=>({})).load();
+ assert.equal(repaired.incompleteTailBytes,tail.length);
+ assert.equal((await stat(store.filename+'.journal')).size,committedSize);
+ await repaired.update(data=>{data.messages.next={body:'after repair'}});
+ assert.deepEqual((await readJournal(store.filename,()=>({}))).data,repaired.data);
+});
+
+test('streamed replay keeps checksum and sequence failures after large records fail closed',async t=>{
+ const {store}=await setup(t);
+ await store.update(data=>{data.messages.large={body:'synthetic'.repeat(30000)}});
+ const committed=await readFile(store.filename+'.journal');
+ const record=JSON.stringify({version:1,seq:3,ops:[{path:['enabled'],value:false}]});
+ const checksum=crypto.createHash('sha256').update(record).digest('hex');
+ await appendFile(store.filename+'.journal',JSON.stringify({record,checksum})+'\n');
+ await assert.rejects(readJournal(store.filename,()=>({})),/JOURNAL_SEQUENCE_GAP/);
+ await writeFile(store.filename+'.journal',committed);
+ await appendFile(store.filename+'.journal',JSON.stringify({record,checksum:'wrong'})+'\n');
+ await appendFile(store.filename+'.journal','{"partial":');
+ const corruptSize=(await stat(store.filename+'.journal')).size;
+ await assert.rejects(readJournal(store.filename,()=>({}),{repairTail:true}),/JOURNAL_CHECKSUM_FAILED/);
+ assert.equal((await stat(store.filename+'.journal')).size,corruptSize,'a corrupt complete record must not allow tail repair');
 });

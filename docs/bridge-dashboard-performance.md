@@ -58,6 +58,30 @@ before new writes. A bad checksum or sequence gap fails closed. Startup imports
 legacy state and rebuilds missing send-index entries in bounded batches, including
 messages created by an older release after rollback.
 
+Journal replay reads chunks and decodes one transaction at a time. It must never
+convert the entire journal to one JavaScript string: an otherwise valid journal
+can exceed Node's maximum string length and prevent a saved session reconnecting.
+Replay memory still includes the materialized state and the largest transaction;
+legacy JSON and snapshots are still loaded as complete documents. Checksums,
+sequence validation, and incomplete-tail recovery are unchanged.
+
+The Beirut Office incident on 2026-11-04 reached this limit: its auth journal
+contained 551,334,970 ASCII bytes, above the installed Node limit of 536,870,888
+characters. Read-only inspection found 13,637 consecutive checksummed records and
+no incomplete tail. The status reported a session-storage failure and manual
+pairing returned HTTP 500. This storage failure does not require deleting
+credentials or forcing a new pairing. Recovery requires deploying the streaming
+reader and restarting the bridge during an approved DEV VPS deployment,
+preserving the complete data directory.
+Continue monitoring journal growth and use approved offline compaction as needed.
+
+Verification for this fix ran in an isolated DEV VPS temporary directory:
+all 114 mocked bridge tests passed. A 536,956,308-byte synthetic journal reproduced
+`ERR_STRING_TOO_LONG` with the deployed reader; the streaming reader replayed all
+512 records. A read-only replay of Beirut's actual auth journal also succeeded,
+retained paired credentials, and left the journal unchanged. These checks did not
+deploy the fix, restart the running bridge, or contact WhatsApp.
+
 Existing JSON files remain immutable import sources. Active state is now the
 legacy file (or latest `.snapshot`) **plus** `.journal`; reading only `state.json`,
 `auth.json`, or `outbox.json` is no longer a valid diagnostic/backup strategy.
