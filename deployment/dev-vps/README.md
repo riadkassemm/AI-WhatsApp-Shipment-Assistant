@@ -11,6 +11,50 @@ cutover are separate deployment steps.
 | `whatsapp-bridge.service` | `/etc/systemd/system/whatsapp-bridge.service` |
 | `whatsapp-dev.target` | `/etc/systemd/system/whatsapp-dev.target` |
 | `ngrok-dev-stack.conf` | `/etc/systemd/system/ngrok.service.d/dev-stack.conf` |
+| `whatsapp-storage-watchdog.service` | `/etc/systemd/system/whatsapp-storage-watchdog.service` |
+| `whatsapp-storage-watchdog.timer` | `/etc/systemd/system/whatsapp-storage-watchdog.timer` |
+
+## Storage watchdog rollout — approval required
+
+The lifecycle change also requires installing `scripts/check_bridge_storage.py`
+as root-owned, mode `0755`, at
+`/usr/local/libexec/whatsapp-support/check_bridge_storage.py`. Keep this path
+independent of `/opt/whatsapp-support/current` so rollback retains monitoring.
+The two prepared watchdog units have not been installed or enabled by the
+implementation task. During the approved DEV rollout, install the script and
+units, validate them, reload systemd, and enable/start
+`whatsapp-storage-watchdog.timer`. Verify a fresh private
+`/run/whatsapp-storage-watchdog/status.json` owned by `whatsapp-support`, the
+journald result, and the API's storage-health banner. The timer must remain
+independent of the bridge service and continue running during failed startup.
+
+Follow the [lifecycle backup, recovery, and rollback procedure](../../docs/bridge-dashboard-performance.md#staged-deployment-and-rollback--explicit-approval-required)
+for the eight existing sessions; the original fresh-account instructions below
+do not authorize re-pairing them. Preserve `.auth-active`, `.auth-intent`, and
+`.auth-failure` evidence. Unclean termination requires recovery review; a reader
+downgrade must never bypass those fences. The bridge's existing 35-second stop
+budget remains unchanged.
+
+Install the bridge dependencies into the new release's own directory. Its
+`postinstall` applies the checksum-verified patch for pinned Baileys
+`7.0.0-rc14`; verify with
+`node whatsapp_bridge/scripts/patch-baileys-lifecycle.js --verify` before
+activation. Do not reuse a symlink to the current release's dependency tree.
+Direct systemd startup also verifies the patch before accessing session data.
+Review the provider hooks again before any dependency upgrade.
+
+Before this rollout, use the [measured capacity and encrypted restore
+plan](../../docs/bridge-backup-capacity.md). Its cleanup manifest requires explicit
+approval and preserves both active releases: the bridge/current release and the
+older release still used by the running API. Actual reclaimed space must meet
+the 20 GB admission floor and the freshly recalculated backup budget.
+
+The preflight found the running API uses `redis-server.service` on
+`127.0.0.1:6379/0`, rather than the separate `shipment-redis.service`. Verify the
+actual runtime configuration before backing up Redis. Do not change the URL,
+stop a potentially shared Redis instance, or restore over it as part of this
+storage lifecycle rollout. Restore verification uses isolated database and
+Redis instances; ordinary code rollback preserves current application state.
 
 ## Required release and private configuration
 

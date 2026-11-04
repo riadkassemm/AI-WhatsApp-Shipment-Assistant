@@ -7,6 +7,8 @@
     "node": ">=20"
   },
   "scripts": {
+    "postinstall": "node scripts/patch-baileys-lifecycle.js",
+    "prestart": "node scripts/patch-baileys-lifecycle.js --verify",
     "start": "node src/index.js",
     "test": "node --test"
   },

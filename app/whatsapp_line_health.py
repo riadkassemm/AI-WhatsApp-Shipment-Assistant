@@ -6,6 +6,10 @@ codes, pairing state details or session data, only whether each line can send.
 from __future__ import annotations
 
 import asyncio
+import json
+import math
+import os
+import stat
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -26,6 +30,12 @@ _STATES = {"connected": "connected", "logged_out": "logged_out", "error": "offli
 _cache: dict[str, Any] = {"at": 0.0, "payload": None}
 _first_seen_down: dict[str, float] = {}
 _lock = asyncio.Lock()
+_STORAGE_CODES = {"MONITOR_UNAVAILABLE", "DISK_SPACE_LOW", "INODES_LOW", "STORE_UNAVAILABLE",
+                  "JOURNAL_LIMIT", "SNAPSHOT_LIMIT", "COMPACTION_FAILED", "RECOVERY_ATTENTION",
+                  "STORAGE_HEALTH_UNAVAILABLE", "BRIDGE_UNAVAILABLE", "WATCHDOG_CONFIG_INVALID",
+                  "WATCHDOG_REPORT_FAILED"}
+_WATCHDOG_REPORT = "/run/whatsapp-storage-watchdog/status.json"
+_WATCHDOG_MAX_AGE_SECONDS = 180
 
 
 def _iso(epoch_seconds: float | None) -> str | None:
@@ -58,6 +68,58 @@ def summarize(registry: list[dict[str, Any]], bridge_lines: list[dict[str, Any]]
     return lines
 
 
+def summarize_storage(value: Any, registry: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Expose only operational severity/codes, never bridge paths or session state."""
+    if not isinstance(value, dict) or not isinstance(value.get("level"), str) or value["level"] not in {"ok", "warning", "critical"}:
+        return None
+    by_id = {str(row["phone_number_id"]): row.get("name") or str(row["phone_number_id"]) for row in registry}
+    issues = []
+    for issue in value.get("issues", []) if isinstance(value.get("issues"), list) else []:
+        if (not isinstance(issue, dict) or not isinstance(issue.get("code"), str) or issue["code"] not in _STORAGE_CODES
+                or not isinstance(issue.get("level"), str) or issue["level"] not in {"warning", "critical"}):
+            continue
+        line_id = issue.get("line_id")
+        if line_id is not None and str(line_id) not in by_id:
+            continue
+        issues.append({"code": issue["code"], "level": issue["level"],
+                       "line_id": str(line_id) if line_id is not None else None,
+                       "name": by_id.get(str(line_id)) if line_id is not None else None})
+    level = "critical" if any(issue["level"] == "critical" for issue in issues) else "warning" if issues else "ok"
+    return {"level": level, "issues": issues}
+
+
+def watchdog_storage(registry: list[dict[str, Any]], now: float) -> dict[str, Any]:
+    """Read a bounded, fresh operational report when bridge startup/status fails.
+
+    Runtime telemetry is never evidence that the currently unreachable bridge
+    can send. Missing/stale reports explicitly expose the monitoring gap.
+    """
+    issues = [{"code": "BRIDGE_UNAVAILABLE", "level": "critical"}]
+    try:
+        filename = os.environ.get("WHATSAPP_LINKED_DEVICE_STORAGE_WATCHDOG_REPORT", _WATCHDOG_REPORT)
+        descriptor = os.open(filename, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(descriptor, "rb") as handle:
+            info = os.fstat(handle.fileno())
+            if (not stat.S_ISREG(info.st_mode) or info.st_size > 65536 or info.st_uid != os.geteuid()
+                    or stat.S_IMODE(info.st_mode) & 0o077):
+                raise ValueError("INVALID_WATCHDOG_REPORT")
+            contents = handle.read(65537)
+        if len(contents) > 65536:
+            raise ValueError("INVALID_WATCHDOG_REPORT")
+        report = json.loads(contents)
+        checked = report.get("checked_at") if isinstance(report, dict) else None
+        if (not isinstance(checked, (int, float)) or isinstance(checked, bool) or not math.isfinite(checked)
+                or not 0 <= now - checked <= _WATCHDOG_MAX_AGE_SECONDS or report.get("version") != 1):
+            raise ValueError("STALE_WATCHDOG_REPORT")
+        summary = summarize_storage(report, registry)
+        if summary is None:
+            raise ValueError("INVALID_WATCHDOG_REPORT")
+        issues.extend(issue for issue in summary["issues"] if issue["code"] != "BRIDGE_UNAVAILABLE")
+    except (OSError, ValueError, TypeError):
+        issues.append({"code": "MONITOR_UNAVAILABLE", "level": "critical"})
+    return summarize_storage({"level": "critical", "issues": issues}, registry)
+
+
 async def line_health() -> dict[str, Any]:
     async with _lock:
         now = time.time()
@@ -72,13 +134,17 @@ async def line_health() -> dict[str, Any]:
                WHERE source = 'LINKED_DEVICE' AND is_enabled = 1 AND removed_at IS NULL
                ORDER BY name, phone_number_id""") if str(row["phone_number_id"]) in configured]
         bridge_lines = None
+        storage = None
         if registry and len(settings.whatsapp_linked_device_secret) >= 32:
             try:
-                bridge_lines = (await linked_device_client.get_status()).get("lines", [])
+                bridge_status = await linked_device_client.get_status()
+                bridge_lines = bridge_status.get("lines", [])
+                storage = summarize_storage(bridge_status.get("storage"), registry)
             except Exception:
                 bridge_lines = None
+                storage = await asyncio.to_thread(watchdog_storage, registry, now)
         payload = {"available": not registry or bridge_lines is not None,
-                   "lines": summarize(registry, bridge_lines, now), "checked_at": _iso(now)}
+                   "lines": summarize(registry, bridge_lines, now), "storage": storage, "checked_at": _iso(now)}
         _cache.update(at=now, payload=payload)
         return payload
 

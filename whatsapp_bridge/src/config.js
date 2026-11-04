@@ -46,6 +46,56 @@ export function phoneDigits(value, allowEmpty = false) {
   return phone;
 }
 
+export function readStorageConfig(env = process.env) {
+  const prefix = 'WHATSAPP_LINKED_DEVICE_STORAGE_';
+  const number = (name, fallback, minimum = 1) => {
+    const raw = env[prefix + name];
+    const value = raw === undefined ? fallback : Number(raw);
+    if (!Number.isSafeInteger(value) || value < minimum) throw new Error(`${prefix + name} must be an integer of at least ${minimum}.`);
+    return value;
+  };
+  const enabled = env[prefix + 'AUTO_COMPACT'] ?? 'true';
+  if (!['true', 'false'].includes(enabled)) throw new Error(`${prefix}AUTO_COMPACT must be true or false.`);
+  const maintenance = {
+    enabled: enabled === 'true',
+    maxJournalBytes: number('COMPACT_BYTES', 64 * 1024 * 1024),
+    maxTransactions: number('COMPACT_TRANSACTIONS', 10000),
+    maxAgeMs: number('COMPACT_AGE_MS', 6 * 60 * 60 * 1000),
+    retryMs: number('RETRY_MS', 60 * 1000),
+    finalCatchupBytes: number('FINAL_CATCHUP_BYTES', 1024 * 1024),
+    minFreeBytes: number('RESERVE_BYTES', 128 * 1024 * 1024),
+    minFreeInodes: number('RESERVE_INODES', 64),
+    workerMemoryMb: number('WORKER_MEMORY_MB', 512, 64),
+    maxSnapshotBytes: number('MAX_SNAPSHOT_BYTES', 128 * 1024 * 1024),
+    maxReplayRecordBytes: number('MAX_REPLAY_RECORD_BYTES', 64 * 1024 * 1024, 8 * 1024 * 1024),
+    timeoutMs: number('COMPACTION_TIMEOUT_MS', 300000, 1000),
+  };
+  const monitoring = {
+    intervalMs: number('MONITOR_INTERVAL_MS', 30000, 1000),
+    probeTimeoutMs: number('MONITOR_TIMEOUT_MS', 5000, 100),
+    journalWarnBytes: number('JOURNAL_WARN_BYTES', 128 * 1024 * 1024),
+    journalCriticalBytes: number('JOURNAL_CRITICAL_BYTES', 256 * 1024 * 1024),
+    snapshotWarnBytes: number('SNAPSHOT_WARN_BYTES', 96 * 1024 * 1024),
+    snapshotCriticalBytes: number('SNAPSHOT_CRITICAL_BYTES', 120 * 1024 * 1024),
+    diskWarnBytes: number('DISK_WARN_BYTES', 2 * 1024 * 1024 * 1024),
+    diskCriticalBytes: number('DISK_CRITICAL_BYTES', 512 * 1024 * 1024),
+    diskWarnPercent: number('DISK_WARN_PERCENT', 5),
+    diskCriticalPercent: number('DISK_CRITICAL_PERCENT', 1),
+    inodeWarnPercent: number('INODE_WARN_PERCENT', 10),
+    inodeCriticalPercent: number('INODE_CRITICAL_PERCENT', 5),
+    alertRepeatMs: number('ALERT_REPEAT_MS', 15 * 60 * 1000, 1000),
+  };
+  if (monitoring.probeTimeoutMs > monitoring.intervalMs ||
+      maintenance.maxJournalBytes > monitoring.journalWarnBytes || monitoring.journalWarnBytes >= monitoring.journalCriticalBytes ||
+      monitoring.snapshotWarnBytes >= monitoring.snapshotCriticalBytes || monitoring.snapshotCriticalBytes > maintenance.maxSnapshotBytes ||
+      maintenance.minFreeBytes >= monitoring.diskCriticalBytes || monitoring.diskCriticalBytes >= monitoring.diskWarnBytes ||
+      monitoring.diskCriticalPercent >= monitoring.diskWarnPercent || monitoring.diskWarnPercent > 100 ||
+      monitoring.inodeCriticalPercent >= monitoring.inodeWarnPercent || monitoring.inodeWarnPercent > 100) {
+    throw new Error('Linked-device storage thresholds must reserve space below critical limits and warn before critical pressure.');
+  }
+  return {maintenance, monitoring};
+}
+
 export function readConfig(env = process.env) {
   const secret = env.WHATSAPP_LINKED_DEVICE_SECRET ?? '';
   if (secret.length < 32) throw new Error('WHATSAPP_LINKED_DEVICE_SECRET must contain at least 32 characters.');
@@ -73,6 +123,7 @@ export function readConfig(env = process.env) {
     secret, lines, fallbackLineId, host, port: Number(endpoint.port || (endpoint.protocol === 'https:' ? 443 : 80)), callbackUrl: callbackUrl.href,
     dataDir: path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..', env.WHATSAPP_LINKED_DEVICE_DATA_DIRECTORY ?? 'whatsapp_bridge/data'),
     maxMediaBytes: 25 * 1024 * 1024, ackTimeoutMs: 20_000,
+    storage: readStorageConfig(env),
   };
 }
 

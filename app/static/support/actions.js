@@ -1250,8 +1250,18 @@ function lineOfflineSince(line) {
 function renderLineHealth(payload) {
   state.lineHealth = payload;
   const alerts = (payload?.lines || []).filter(line => line.alert);
-  $('lineAlertBanner').classList.toggle('hidden', !alerts.length);
-  if (alerts.length) {
+  const storage = payload?.storage;
+  const storageAlert = ['warning', 'critical'].includes(storage?.level);
+  $('lineAlertBanner').classList.toggle('hidden', !alerts.length && !storageAlert);
+  if (storageAlert) {
+    const affected = [...new Set((storage.issues || []).map(issue => issue.name).filter(Boolean))];
+    const scope = affected.length && !(storage.issues || []).some(issue => !issue.line_id) ? ' for ' + affected.join(', ') : '';
+    const pause = storage.level === 'critical' ? ' New sends on affected lines are paused.' : '';
+    text($('lineAlertText'), 'WhatsApp storage needs attention' + scope + '.' + pause +
+      ' Contact your server administrator to check disk space and automatic session maintenance. Saved sessions are retained.' +
+      (alerts.length ? ' ' + alerts.length + ' WhatsApp line' + (alerts.length > 1 ? 's are' : ' is') + ' also offline.' : ''));
+    $('lineAlertActionBtn').classList.toggle('hidden', true);
+  } else if (alerts.length) {
     const first = alerts[0];
     const more = alerts.length > 1 ? ' and ' + (alerts.length - 1) + ' more' : '';
     const problem = first.status === 'logged_out' ? ' was logged out by WhatsApp' : ' is offline';
@@ -1265,15 +1275,27 @@ function renderLineHealth(payload) {
   const fresh = alerts.filter(line => !state.lineAlertsSeen.has(line.line_id + ':' + line.since));
   for (const line of alerts) state.lineAlertsSeen.add(line.line_id + ':' + line.since);
   if (fresh.length && canLinkWhatsApp()) notifyNewCustomerActivity(fresh[0].name + ' needs attention: its WhatsApp line is offline.');
+  const storageKey = storageAlert ? 'storage:' + storage.level + ':' + (storage.issues || [])
+    .map(issue => [issue.line_id || 'shared', issue.code, issue.level].join(':')).sort().join(',') : null;
+  for (const key of state.lineAlertsSeen) if (key.startsWith('storage:') && key !== storageKey) state.lineAlertsSeen.delete(key);
+  if (storageKey && !state.lineAlertsSeen.has(storageKey)) {
+    state.lineAlertsSeen.add(storageKey);
+    if (canLinkWhatsApp()) notifyNewCustomerActivity('WhatsApp storage needs attention. Contact your server administrator; saved sessions are retained.');
+  }
   const ticket = state.currentTicketData?.ticket;
   if (ticket && state.currentTicketData?.permissions?.can_reply) renderComposerLineNotice(ticket);
 }
 
 function renderComposerLineNotice(ticket) {
   const line = (state.lineHealth?.lines || []).find(item => String(item.line_id) === String(ticket.business_phone_number_id || ''));
-  if (line && line.status !== 'connected') {
+  const storageBlocked = (state.lineHealth?.storage?.issues || []).some(issue => issue.level === 'critical' &&
+    (!issue.line_id || String(issue.line_id) === String(ticket.business_phone_number_id || '')));
+  if (storageBlocked) {
+    text($('composerHelp'), 'New replies are paused while WhatsApp storage needs attention. Contact your server administrator. Saved sessions and delivery records are retained.');
+  } else if (line && line.status !== 'connected') {
     text($('composerHelp'), line.name + ' is offline' + lineOfflineSince(line) + '. Replies wait and are sent automatically when it reconnects (up to 30 minutes).');
-  } else if (String($('composerHelp').textContent || '').includes(' is offline')) {
+  } else if (String($('composerHelp').textContent || '').includes(' is offline') ||
+      String($('composerHelp').textContent || '').includes('WhatsApp storage needs attention')) {
     text($('composerHelp'), 'Messages are sent from the WhatsApp number for this conversation.');
   }
 }

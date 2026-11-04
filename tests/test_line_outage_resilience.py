@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import shutil
 import subprocess
@@ -51,6 +52,133 @@ def test_health_treats_an_unreachable_bridge_as_offline_from_first_sight(monkeyp
     assert health.summarize(REGISTRY[:1], None, now + 120)[0]["alert"] is True
     assert health.summarize(REGISTRY[:1], [{"line_id": "90020", "status": "connected"}], now + 130)[0]["alert"] is False
     assert health._first_seen_down == {}
+
+
+def test_storage_health_exposes_only_known_operational_issues_for_enabled_lines():
+    summary = health.summarize_storage({
+        "level": "critical", "disk": {"private": "path"}, "secret": "credentials",
+        "issues": [
+            {"level": "warning", "code": "COMPACTION_FAILED", "line_id": "90020", "error": "private auth bytes"},
+            {"level": "critical", "code": "STORE_UNAVAILABLE", "line_id": "removed-line"},
+            {"level": "critical", "code": "DISK_SPACE_LOW"},
+            {"level": "critical", "code": "untrusted text"},
+            None,
+        ],
+    }, REGISTRY)
+    assert summary == {"level": "critical", "issues": [
+        {"level": "warning", "code": "COMPACTION_FAILED", "line_id": "90020", "name": "Saida Office"},
+        {"level": "critical", "code": "DISK_SPACE_LOW", "line_id": None, "name": None},
+    ]}
+    assert health.summarize_storage(None, REGISTRY) is None
+    assert health.summarize_storage({"level": "warning", "issues": "private payload"}, REGISTRY) == {"level": "ok", "issues": []}
+
+
+def test_unreachable_bridge_uses_fresh_independent_storage_report_and_redacts_details(tmp_path, monkeypatch):
+    filename = tmp_path / "status.json"
+    filename.write_text(json.dumps({"version": 1, "checked_at": 1000, "level": "critical", "secret": "private",
+                                   "issues": [{"code": "DISK_SPACE_LOW", "level": "critical", "path": "/private"},
+                                              {"code": "COMPACTION_FAILED", "level": "warning", "line_id": "90020"},
+                                              {"code": "STORE_UNAVAILABLE", "level": "critical", "line_id": "90099"}]}))
+    filename.chmod(0o600)
+    monkeypatch.setenv("WHATSAPP_LINKED_DEVICE_STORAGE_WATCHDOG_REPORT", str(filename))
+    result = health.watchdog_storage(REGISTRY, 1010)
+    assert result["level"] == "critical"
+    assert [issue["code"] for issue in result["issues"]] == ["BRIDGE_UNAVAILABLE", "DISK_SPACE_LOW", "COMPACTION_FAILED"]
+    assert result["issues"][2]["name"] == "Saida Office"
+    assert "private" not in json.dumps(result) and "90099" not in json.dumps(result)
+
+
+def test_missing_stale_untrusted_and_future_watchdog_reports_expose_monitoring_gap(tmp_path, monkeypatch):
+    filename = tmp_path / "status.json"
+    monkeypatch.setenv("WHATSAPP_LINKED_DEVICE_STORAGE_WATCHDOG_REPORT", str(filename))
+
+    def gap():
+        result = health.watchdog_storage(REGISTRY, 1000)
+        assert [issue["code"] for issue in result["issues"]] == ["BRIDGE_UNAVAILABLE", "MONITOR_UNAVAILABLE"]
+
+    gap()
+    for checked in [100, 1001, float("nan"), True]:
+        filename.write_text(json.dumps({"version": 1, "checked_at": checked, "level": "ok", "issues": []}))
+        filename.chmod(0o600)
+        gap()
+    filename.write_text(json.dumps({"version": 1, "checked_at": 1000, "level": "ok", "issues": []}))
+    filename.chmod(0o644)
+    gap()
+    filename.chmod(0o600)
+    target = tmp_path / "private.json"
+    filename.rename(target)
+    filename.symlink_to(target)
+    gap()
+    filename.unlink()
+    filename.write_bytes(b"x" * 65537)
+    filename.chmod(0o600)
+    gap()
+
+
+def test_api_health_reports_independent_storage_failure_when_bridge_status_fails(tmp_path, monkeypatch):
+    from app.whatsapp_registry import whatsapp_registry_repository
+
+    filename = tmp_path / "status.json"
+    filename.write_text(json.dumps({"version": 1, "checked_at": 1000, "level": "critical",
+                                   "issues": [{"code": "INODES_LOW", "level": "critical"}]}))
+    filename.chmod(0o600)
+    monkeypatch.setenv("WHATSAPP_LINKED_DEVICE_STORAGE_WATCHDOG_REPORT", str(filename))
+    monkeypatch.setattr(health, "_cache", {"at": 0.0, "payload": None})
+    monkeypatch.setattr(health, "_lock", asyncio.Lock())
+    monkeypatch.setattr(health, "configured_linked_device_lines", lambda: {"90020": "", "90021": ""})
+    monkeypatch.setattr(health.settings, "whatsapp_linked_device_secret", "s" * 32)
+    monkeypatch.setattr(health.time, "time", lambda: 1001)
+
+    async def registry(*_args):
+        return REGISTRY
+
+    async def unavailable():
+        raise OSError("private provider failure")
+
+    monkeypatch.setattr(whatsapp_registry_repository, "fetch_all", registry)
+    monkeypatch.setattr(health.linked_device_client, "get_status", unavailable)
+    result = asyncio.run(health.line_health())
+    assert result["available"] is False
+    assert result["storage"]["level"] == "critical"
+    assert [issue["code"] for issue in result["storage"]["issues"]] == ["BRIDGE_UNAVAILABLE", "INODES_LOW"]
+    assert all(line["status"] == "offline" for line in result["lines"])
+    assert "private" not in json.dumps(result)
+
+
+def test_storage_banner_warns_before_outage_without_suggesting_pairing():
+    source = Path("app/static/support/actions.js").read_text()
+    helpers = source[source.index("const LINE_HEALTH_INTERVAL_MS"):source.index("function linkedDeviceAdditionStorageKey(")]
+    script = r"""
+const assert = require('node:assert/strict');
+function element() {return {textContent: '', classList: {hidden: true, toggle(_, value) {this.hidden = value}}}}
+const elements = {lineAlertBanner: element(), lineAlertText: element(), lineAlertActionBtn: element(), composerHelp: element()};
+const $ = id => elements[id], text = (node, value) => {node.textContent = value};
+const canLinkWhatsApp = () => true, sounds = [], notifyNewCustomerActivity = value => sounds.push(value);
+const state = {lineAlertsSeen: new Set(), currentTicketData: {ticket: {business_phone_number_id: '90020'}, permissions: {can_reply: true}}};
+""" + helpers + r"""
+const payload = {lines: [{line_id:'90020', name:'Saida Office', status:'connected', alert:false}],
+  storage:{level:'warning', issues:[{line_id:'90020', name:'Saida Office', level:'warning', code:'COMPACTION_FAILED'}]}};
+renderLineHealth(payload); renderLineHealth(payload);
+assert.equal(elements.lineAlertBanner.classList.hidden, false);
+assert.match(elements.lineAlertText.textContent, /Saida Office.*Contact your server administrator/);
+assert.ok(!elements.lineAlertText.textContent.includes('Re-pair'));
+assert.equal(elements.lineAlertActionBtn.classList.hidden, true);
+assert.equal(sounds.length, 1, 'one notification for the same storage issue');
+payload.storage = {level:'critical', issues:[{line_id:null, level:'critical', code:'DISK_SPACE_LOW'}]};
+renderLineHealth(payload);
+assert.equal(sounds.length, 2, 'escalation alerts immediately');
+assert.match(elements.composerHelp.textContent, /New replies are paused.*Saved sessions and delivery records are retained/);
+payload.storage = {level:'ok', issues:[]};
+renderLineHealth(payload);
+assert.equal(elements.lineAlertBanner.classList.hidden, true);
+assert.equal(elements.composerHelp.textContent, 'Messages are sent from the WhatsApp number for this conversation.');
+payload.storage = {level:'critical', issues:[{line_id:'90021', name:'Tyre Office', level:'critical', code:'JOURNAL_LIMIT'}]};
+renderLineHealth(payload);
+assert.equal(sounds.length, 3, 'a recurrence notifies again');
+assert.equal(elements.composerHelp.textContent, 'Messages are sent from the WhatsApp number for this conversation.');
+"""
+    result = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
 
 
 class Repository:

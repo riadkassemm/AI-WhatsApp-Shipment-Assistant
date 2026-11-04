@@ -4,7 +4,7 @@ This companion process uses the pinned Baileys `7.0.0-rc14` linked-device protoc
 
 ## Install and start
 
-Use Node.js 22 or newer (a maintained release is recommended). Install the exact lockfile, including optional platform binaries needed for image processing:
+Use Node.js 22 or newer (a maintained release is recommended). Run installation, tests, and services on the DEV VPS; the developer PC is for source editing and Git. Install the exact lockfile, including optional platform binaries needed for image processing:
 
 ```sh
 cd whatsapp_bridge
@@ -34,7 +34,19 @@ Complete number removal uses an authenticated native `remove-companion-device` I
 
 Both processes must use the same `WHATSAPP_LINKED_DEVICE_DATA_DIRECTORY` so Python sees new registrations immediately. Preserve `lines.json` along with the saved sessions during backups and moves.
 
-The data directory resolves relative to the project root, regardless of the current working directory. It stores session credentials, native message keys, captured customer media, operation results, and a callback outbox. Active stores combine legacy JSON/snapshots with fsynced incremental journals; JSON files alone are no longer current. See [incremental storage operations and rollback](../docs/bridge-dashboard-performance.md). The process uses directory permissions `0700`, file permissions `0600`, atomic writes with filesystem synchronization, and one process lock. A restart preserves its linked session. Run one process per data directory.
+The data directory resolves relative to the project root, regardless of the current working directory. It stores session credentials, native message keys, captured customer media, operation results, and a callback outbox. Active stores combine legacy JSON/snapshots with fsynced incremental journals; JSON files alone are no longer current. See [incremental storage operations and rollback](../docs/bridge-dashboard-performance.md). The process uses directory permissions `0700`, file permissions `0600`, atomic writes with filesystem synchronization, and one process lock. A clean restart preserves its linked session; an unclean exit requires checking the authentication recovery fences described below. Run one process per data directory.
+
+### Automatic storage maintenance
+
+Every auth store, line-state store, and the shared callback outbox automatically checkpoints at **64 MiB**, **10,000 transactions**, or **six hours** since the previous checkpoint. A 30-second monitor also triggers maintenance on idle stores. One worker at a time reconstructs a durable journal prefix while normal writes continue. After copying concurrent writes into a replacement journal, a short per-store write barrier publishes the fsynced snapshot, syncs its directory, then atomically replaces the journal and syncs the directory again. This needs no WhatsApp logout or re-pairing. Socket generations share one auth journal owner; retired sockets cannot append keys or credentials.
+
+Maintenance preserves current credentials, keys, callbacks, pending sends, delivery evidence, and deduplication records. It removes obsolete journal revisions, not authoritative state. Snapshot size and live-state memory can still grow as retained records grow. Worker memory, snapshot size, workspace, final catch-up bytes, and execution time have explicit limits; a blocked checkpoint retains the original journal and reports an alert. See the [protocol, limits, and recovery procedure](../docs/bridge-dashboard-performance.md#automatic-journal-lifecycle) before changing them.
+
+Configuration uses the `WHATSAPP_LINKED_DEVICE_STORAGE_` prefix. Defaults and every option appear in [`.env.example`](../.env.example). `COMPACT_BYTES`, `COMPACT_TRANSACTIONS`, and `COMPACT_AGE_MS` trigger checkpoints; `RETRY_MS` controls backoff. Leave `AUTO_COMPACT=true`. Free-space checks retain a 128 MiB reserve and 64 inodes after planned worker writes. Default journal warning/critical limits are 128/256 MiB, snapshot limits are 96/120 MiB before the 128 MiB new-checkpoint cap, disk limits are 2 GiB/512 MiB or 5%/1% available, and inode limits are 10%/5% available. Either byte or percentage threshold applies.
+
+The authenticated `GET /v1/storage` endpoint exposes per-line auth/state and shared-outbox sizes, growth rate, replay duration, checkpoint status/failures, recovery errors, available disk bytes, and inodes. `GET /v1/status` includes the same storage health. Structured systemd logs emit `storage_alert`, `storage_recovered`, replay, compaction, and recovery events. Repeated unchanged alerts are limited to every 15 minutes. The existing staff dashboard health banner and local notification report storage pressure automatically while the dashboard is active. No external alert service or message destination is configured by this change.
+
+Critical pressure rejects new outbound submissions with HTTP 503 `STORAGE_PRESSURE` and `delivery_uncertain:false` before provider invocation. A line-specific issue blocks that line; a filesystem or outbox issue affects all lines. Auth updates, receipts, callbacks, and reconciliation still persist. Existing uncertain sends retain their evidence and are never blindly resent. An unavailable filesystem probe becomes critical after 90 seconds without a successful sample. Resolve capacity or compaction problems through the operator procedure; a storage alert never calls for deleting credentials or pairing again.
 
 Start the Python app and open the manager's **WhatsApp numbers** controls. Select the configured test line, click **Pair WhatsApp**, and scan its QR from the test phone's WhatsApp **Linked devices** screen. After pairing, click **Add to app** to register the test line before accepting customer callbacks. QR codes and all bridge endpoints require the shared bearer secret. The bridge binds only to loopback; do not expose this port directly.
 
@@ -82,7 +94,8 @@ All endpoints require `Authorization: Bearer <WHATSAPP_LINKED_DEVICE_SECRET>`. A
 
 | Endpoint | Result |
 | --- | --- |
-| `GET /v1/status` | Lines, status, phone, pairing QR, callback counters |
+| `GET /v1/status` | Lines, status, phone, pairing QR, callback counters, storage health |
+| `GET /v1/storage` | Cached filesystem sample, live per-store storage counters, warning/critical issue codes; no credentials or file paths |
 | `POST /v1/lines` | `{request_id:UUID,expected_phone:"",reserved_line_ids:[]}`; allocate and durably register a line, return its status |
 | `DELETE /v1/lines/:line` | Confirm remote unlink, purge this number and persist removal; returns `{line_id,removed:true,unlinked:true}` |
 | `POST /v1/lines/:line/connect` | Start or resume pairing; query status for the QR |
@@ -96,6 +109,35 @@ All endpoints require `Authorization: Bearer <WHATSAPP_LINKED_DEVICE_SECRET>`. A
 Statuses are `disconnected`, `connecting`, `qr`, `connected`, `logged_out`, and `error`. Status objects include `is_paired` so retained disconnected sessions can offer explicit unlinking, and `uncertain_sends` counts dashboard sends still awaiting confirmation. Number registration returns per-call `created:true` for a new number and `created:false` for a UUID retry. Complete removal is idempotent for tombstoned IDs, including after a crash during cleanup; a removed registration UUID cannot be reused. Callback events contain stable `event_id`, `type`, `line_id`, `display_phone_number`, and integer millisecond timestamps. `outgoing_message` events include the wrapped `message_id`, `from_me:true`, the chat counterpart's `sender_phone`, and a normalized `payload`. `outgoing_confirmation` events include the wrapped `message_id`, original `client_message_id`, counterpart's `sender_phone`, and `from_me:true`. `message_tombstone` events contain only the original wrapped `message_id`, customer `sender_phone`, `from_me:false`, original timestamp, and `deleted_timestamp`; they carry no message body or media. Mutation events include the wrapped original `message_id`, `from_me`, the chat counterpart's `sender_phone`, and edited `body`. App-initiated changes also include their `operation_id`.
 
 ## Verify and roll back
+
+Create and verify a complete private backup before changing session storage. Rehearse synthetic and copied-state compaction on the DEV VPS using mocked sockets and isolated directories; never connect a copied live WhatsApp session to the provider. Capture all eight lines' pairing state, callback queues, uncertain-send counts, and durable-state hashes before and after the isolated rehearsal. Tests and source preparation do not authorize a service restart, deployment, commit, push, or PR. DEV deployment requires explicit review and approval; do not modify production services or data.
+
+The snapshot and journal remain version 1, and published snapshot/full-journal and snapshot/suffix-journal combinations are readable by the streaming reader in `2a6a225`. Older readers ignore the new optional snapshot checksum, so they do not provide the same protection. During an approved rollback, stop and drain first, validate with the new storage tool, and preserve current data. For pre-journal releases, export current materialized state into a new private directory with the current tool. Never restore only an old backup over new delivery records; never delete journals or quarantined tails to force startup. Full steps are in [deployment and rollback](../docs/bridge-dashboard-performance.md#staged-deployment-and-rollback--explicit-approval-required).
+
+The new authentication owner tracks the installed Baileys transaction wrapper, including buffered keys and commit retries. Already admitted incoming messages and receipts drain even if credential persistence retires the socket. Private `.auth-active`, `.auth-intent`, and `.auth-failure` fences prevent reconnecting with uncertain authentication state. A clean shutdown clears completed work; an unclean process exit can require recovery review for every connected line. Back up these files, retain their evidence, and never bypass them with `2a6a225`, which does not understand the fences. Offline validation and export refuse unresolved fences.
+
+The pinned Baileys `7.0.0-rc14` dependency requires the checked-in lifecycle patch. `npm ci` installs it through `postinstall`; direct `node src/index.js` startup verifies it before loading the provider or session storage. The patch exposes complete native callback and detached-task lifetimes so retirement can drain them safely. Unknown versions/source hashes and symlinked dependency roots are rejected. Install into a private release dependency directory, never shared running dependencies. If installation disables scripts, run `node scripts/patch-baileys-lifecycle.js` and then the same command with `--verify` before activation. Provider upgrades require reviewing this patch and its real-provider regressions.
+
+Startup signal handling is installed before asynchronous verification or lock
+acquisition. The runtime owns a bridge before initialization, and all configured
+stores finish preparation before any provider socket opens. SIGTERM/SIGINT stop
+new admission and cancel replay reads, then drain accepted events, credentials,
+background recovery, media publication and HTTP handlers. Repeated signals share
+the same shutdown result. A disconnected HTTP client does not release ownership
+of its unfinished handler. The storage lock is released only after cleanup has
+settled successfully; a failed cleanup remains unsuccessful on repeated calls.
+
+The runtime reports `shutdown_deadline_exceeded` after 30 seconds and exits
+unsuccessfully even if cleanup later finishes. It never releases a still-live
+owner's lock just to meet a deadline. DEV's unchanged systemd stop limit is
+35 seconds: uninterruptible filesystem I/O can still cause a forced termination
+and require authentication recovery review. Replay cancellation finishes any
+already-started tail-evidence synchronization protocol. Checkpoint publication
+receives a five-second grace period; interrupted publication fails closed.
+The [measured backup capacity plan](../docs/bridge-backup-capacity.md) requires
+separate cleanup and deployment approval; it does not authorize live changes.
+
+The prepared independent systemd watchdog checks capacity and bridge availability even when the bridge fails to start. Install its script outside release directories and enable its timer only during the approved DEV deployment. Its private `/run` report feeds the existing staff health banner; safe alerts also reach journald. Outgoing uploads are rejected before attachment allocation under critical pressure, reserve capacity across concurrent requests, and reuse identical media on retries. Essential authentication, incoming-message, and delivery-evidence writes remain enabled.
 
 The Node tests use mock WhatsApp sockets and temporary local HTTP servers. They cover real protocol dispatch/ACK gating, timeout and rejection behavior, durable idempotence, rapid edits, ownership and time windows, incoming changes, LID mapping, protected media, request limits, callback retries, phone binding, corruption detection, process locking, concurrent registration, restart-safe allocation, and isolation of broken line storage. They never send messages to a real number.
 

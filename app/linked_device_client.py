@@ -245,6 +245,32 @@ class LinkedDeviceWhatsAppClient:
     def _media_limit() -> int:
         return max(int(settings.support_image_max_bytes), int(settings.support_audio_max_bytes), int(settings.support_document_max_bytes), int(settings.support_sticker_max_bytes), int(settings.support_video_max_bytes))
 
+    async def check_media_storage(self, *, phone_number_id: str | None = None) -> None:
+        """Check before the delivery layer reads/encodes an outgoing attachment."""
+        line = self._phone_number_id(phone_number_id)
+        status = await self._json_request("GET", "/v1/status")
+        storage = status.get("storage")
+        # The approved rollback target predates storage telemetry. Its existing
+        # status route remains compatible; upgraded bridges also gate uploads.
+        if storage is None:
+            return
+        level = storage.get("level") if isinstance(storage, dict) else None
+        invalid = not isinstance(level, str) or level not in {"ok", "warning", "critical"}
+        issues = storage.get("issues") if isinstance(storage, dict) else None
+        blocked = invalid or not isinstance(issues, list)
+        if not blocked and storage["level"] == "critical":
+            blocked = not issues or any(
+                not isinstance(issue, dict) or (
+                    issue.get("level") == "critical" and
+                    (issue.get("line_id") is None or str(issue["line_id"]) == line)
+                ) for issue in issues
+            )
+        if blocked:
+            error = _send_error("WhatsApp storage needs attention before uploading attachments.",
+                                uncertain=False, retryable=True, http_status=503)
+            error.bridge_code = "STORAGE_PRESSURE"
+            raise error
+
     async def upload_media(self, *, content: bytes, mime_type: str, filename: str, phone_number_id: str | None = None) -> str:
         from app.whatsapp_client import WhatsAppMediaError, WhatsAppSendError
         try:

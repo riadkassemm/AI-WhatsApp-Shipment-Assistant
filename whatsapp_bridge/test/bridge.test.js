@@ -1,13 +1,14 @@
-import test from 'node:test';
+import test, { after } from 'node:test';
 import { Readable } from 'node:stream';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, stat, readFile } from 'node:fs/promises';
+import { mkdtemp, rm, stat, readFile, readdir } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
 import { randomUUID, createHash } from 'node:crypto';
-import { proto, makeEventBuffer, DisconnectReason } from '@whiskeysockets/baileys';
+import { proto, makeEventBuffer, DisconnectReason, addTransactionCapability } from '@whiskeysockets/baileys';
 import processMessage from '@whiskeysockets/baileys/lib/Utils/process-message.js';
+import { makeMutex } from '@whiskeysockets/baileys/lib/Utils/make-mutex.js';
 import pino from 'pino';
 import { readJournal } from '../src/journal-store.js';
 import { Bridge } from '../src/bridge.js';
@@ -20,6 +21,13 @@ import { preserveNativeMutationMetadata } from '../src/native-events.js';
 const LINE = '90001';
 const PHONE = '96170123456';
 const SECRET = 'a-test-secret-that-is-long-enough-123456';
+const healthyStorage = async () => ({bsize: 4096, blocks: 10_000_000, bavail: 5_000_000, files: 1_000_000, ffree: 900_000});
+const deferredFixtureCleanup = new Set();
+after(async () => {
+  // Restart tests register their replacement's close hook after the original
+  // fixture hook. Keep its active-session fence until that owner closes.
+  for (const directory of deferredFixtureCleanup) await rm(directory, { recursive: true, force: true });
+});
 const original = (id = 'ORIGINAL', fromMe = true) => ({
   key: { id, remoteJid: `${PHONE}@s.whatsapp.net`, fromMe },
   message: { conversation: 'Original body' }, messageTimestamp: Math.floor(Date.now() / 1000),
@@ -52,13 +60,22 @@ async function fixture(t, mode = 'ack', dependencies = {}) {
   const config = { secret: SECRET, lines: [{ line_id: LINE, expected_phone: '' }], dataDir,
     callbackUrl: 'http://127.0.0.1/callback', maxMediaBytes: 25 * 1024 * 1024, ackTimeoutMs: 30 };
   const socket = mockSocket(mode);
-  const bridge = await new Bridge(config, { makeSocket: () => socket, onError: () => {}, log: () => {}, ...dependencies }).initialize({ autoConnect: false });
+  const bridge = await new Bridge(config, { makeSocket: () => socket, onError: () => {}, log: () => {}, storageFilesystem: healthyStorage, ...dependencies }).initialize({ autoConnect: false });
   await bridge.connect(LINE);
   const line = bridge.getLine(LINE);
   await bridge.connectionUpdate(line, socket, { connection: 'open' });
   line.display_phone_number = '96170111111';
   await line.store.update(data => { data.messages.ORIGINAL = { message: original(), phone: PHONE, timestamp: Date.now() - 1000, text: 'Original body', notified: true }; });
-  t.after(async () => { await bridge.close(); await rm(dataDir, { recursive: true, force: true }); });
+  t.after(async () => {
+    // Tests that explicitly asserted a failed shutdown retain that same
+    // rejected promise on subsequent calls; do not mask their original result.
+    if (!bridge.closed) await bridge.close();
+    const lines = (await readdir(dataDir, { withFileTypes: true })).filter(entry => entry.isDirectory() && /^\d+$/.test(entry.name));
+    const active = await Promise.all(lines.map(entry => stat(path.join(dataDir, entry.name, 'auth.json.auth-active'))
+      .then(() => true, error => { if (error.code === 'ENOENT') return false; throw error; })));
+    if (active.some(Boolean)) deferredFixtureCleanup.add(dataDir);
+    else await rm(dataDir, { recursive: true, force: true });
+  });
   return { bridge, config, socket, line, dataDir };
 }
 
@@ -149,7 +166,15 @@ test('a damaged saved line cannot prevent another line from reconnecting or retu
   let socketCount = 0;
   const resumed = await new Bridge({ ...config, lines: [{ line_id: damagedState.line_id, expected_phone: '' }, ...config.lines] },
     { makeSocket: () => { socketCount++; return mockSocket(); }, onError: () => {} }).initialize();
-  t.after(() => resumed.close());
+  t.after(async () => {
+    const closing = resumed.close();
+    await assert.rejects(closing, error => error instanceof AggregateError && error.message === 'BRIDGE_SHUTDOWN_FAILED' &&
+      error.errors.some(failure => failure.message === 'STORAGE_RESTART_REQUIRED'));
+    assert.equal(resumed.close(), closing, 'the failed partial store must remain a shutdown failure');
+    await assert.rejects(resumed.close(), /BRIDGE_SHUTDOWN_FAILED/);
+    assert.equal(resumed.getLine(LINE).store.closed, true);
+    assert.ok([...resumed.ownedStores].every(store => store.closed));
+  });
   assert.equal(socketCount, 1);
   assert.equal(resumed.getLine(LINE).status, 'connecting');
   assert.equal(resumed.getLine(damaged.line_id).status, 'error');
@@ -375,7 +400,15 @@ test('valid line state with corrupt auth cannot be treated as unpaired or purged
   const authPath = path.join(dataDir, added.line_id, 'auth.json');
   await writeFile(authPath, '{corrupt-auth', { mode: 0o600 });
   const resumed = await new Bridge(config, { makeSocket: () => mockSocket(), onError: () => {} }).initialize({ autoConnect: false });
-  t.after(() => resumed.close());
+  t.after(async () => {
+    const closing = resumed.close();
+    await assert.rejects(closing, error => error instanceof AggregateError && error.message === 'BRIDGE_SHUTDOWN_FAILED' &&
+      error.errors.some(failure => failure.message === 'STORAGE_RESTART_REQUIRED'));
+    assert.equal(resumed.close(), closing, 'unresolved corrupt authentication must not become a successful shutdown');
+    await assert.rejects(resumed.close(), /BRIDGE_SHUTDOWN_FAILED/);
+    assert.equal(resumed.getLine(LINE).store.closed, true);
+    assert.ok([...resumed.ownedStores].every(store => store.closed));
+  });
   const healthy = resumed.getLine(LINE);
   const healthyState = JSON.stringify(healthy.store.data);
   assert.equal(resumed.getLine(added.line_id).status, 'error');
@@ -2041,8 +2074,9 @@ test('an old event failure cannot poison a replacement connection', async t => {
   const oldEvent=socket.eventHandler({'creds.update':{}});await entered.promise;
   bridge.blockConnection(line,socket,'test_closed');
   const replacement=mockSocket();bridge.makeSocket=()=>replacement;
-  await bridge.connect(LINE);await bridge.connectionUpdate(line,replacement,{connection:'open'});
+  const reconnect=bridge.connect(LINE);
   release.resolve();await oldEvent;
+  await reconnect;await bridge.connectionUpdate(line,replacement,{connection:'open'});
   assert.equal(line.status,'connected');assert.equal(line.socket,replacement);
   await bridge.send(LINE,recoveryPayload('new-after-stale-error'));
   assert.equal(replacement.calls.length,1);
@@ -2248,4 +2282,555 @@ test('linking a removed number again recovers what was sent while it was gone', 
   await bridge.retirePhone(line);
   await bridge.adoptRetiredPhone(line);
   assert.equal(line.store.data.recover_since, undefined);
+});
+
+test('repeated socket replacement keeps one auth journal owner and rejects stale socket writes', async t => {
+  const { bridge, line } = await fixture(t);
+  const store = line.auth.store;
+  line.auth.state.creds.registered = true;
+  await line.auth.saveCreds();
+  const identity = Buffer.from(store.data.creds.signedIdentityKey.public);
+  let sequence = store.seq;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const previous = line.auth;
+    bridge.blockConnection(line, line.socket, 'synthetic_reconnect');
+    const socket = mockSocket();
+    let options;
+    bridge.makeSocket = value => { options = value; return socket; };
+    await bridge.connect(LINE);
+    assert.equal(line.auth.store, store);
+    assert.equal(options.auth, line.auth.state);
+    assert.notEqual(line.auth, previous);
+    assert.equal(options.auth.creds.registered, true);
+    assert.deepEqual(options.auth.creds.signedIdentityKey.public, identity);
+    await assert.rejects(previous.state.keys.set({ session: { stale: Buffer.from([0]) } }), { code: 'AUTH_SESSION_RETIRED' });
+    await options.auth.keys.set({ session: { ['generation' + attempt]: Buffer.from([attempt]) } });
+    assert.equal(store.seq, ++sequence);
+    await bridge.connectionUpdate(line, socket, { connection: 'open' });
+  }
+  assert.equal(Object.keys(store.data.keys.session).length, 4);
+  assert.deepEqual((await readJournal(store.filename, () => ({}))).data, store.data);
+});
+
+test('replacement waits for an admitted old auth transaction before creating its socket', async t => {
+  const { bridge, line, socket } = await fixture(t);
+  const previous = line.auth, store = previous.store;
+  const entered = gate(), release = gate();
+  const append = store.append;
+  store.append = async bytes => { entered.resolve(); await release.promise; return append(bytes); };
+  const writing = previous.state.keys.set({ session: { admitted: Buffer.from([4]) } });
+  await entered.promise;
+  let created = 0;
+  const replacement = mockSocket();
+  bridge.makeSocket = () => { created++; return replacement; };
+  bridge.blockConnection(line, socket, 'synthetic_reconnect');
+  const connecting = bridge.connect(LINE);
+  try {
+    await assert.rejects(previous.state.keys.set({ session: { tooLate: Buffer.from([5]) } }), { code: 'AUTH_SESSION_RETIRED' });
+    assert.equal(created, 0);
+  } finally { release.resolve(); }
+  await Promise.all([writing, connecting]);
+  assert.equal(created, 1);
+  assert.equal(line.auth.store, store);
+  assert.deepEqual(await line.auth.state.keys.get('session', ['admitted']), { admitted: Buffer.from([4]) });
+  assert.equal(store.data.keys.session.tooLate, undefined);
+  await bridge.connectionUpdate(line, replacement, { connection: 'open' });
+});
+
+test('a final credentials update sharing a close event commits before auth retirement', async t => {
+  const { bridge, line, socket } = await fixture(t);
+  const previous = line.auth;
+  await socket.eventHandler({ 'creds.update': { registered: true }, 'connection.update': { connection: 'close' } });
+  assert.equal(previous.store.data.creds.registered, true);
+  await assert.rejects(previous.saveCreds(), { code: 'AUTH_SESSION_RETIRED' });
+  assert.equal(bridge.lineStatus(line).is_paired, true);
+  const replacement = mockSocket();
+  bridge.makeSocket = () => replacement;
+  await bridge.connect(LINE);
+  assert.equal(line.auth.state.creds.registered, true);
+});
+
+test('failed socket creation retires its auth view and retries on the same journal', async t => {
+  const { bridge, line, socket } = await fixture(t);
+  const store = line.auth.store;
+  bridge.blockConnection(line, socket, 'synthetic_reconnect');
+  let abandoned;
+  bridge.makeSocket = options => { abandoned = options.auth; throw Object.assign(new Error('synthetic connect failure'), { code: 'ECONNRESET' }); };
+  await assert.rejects(bridge.connect(LINE), { code: 'ECONNRESET' });
+  await assert.rejects(abandoned.keys.set({ session: { stale: Buffer.from([8]) } }), { code: 'AUTH_SESSION_RETIRED' });
+  const replacement = mockSocket();
+  bridge.makeSocket = () => replacement;
+  await bridge.connect(LINE);
+  assert.equal(line.auth.store, store);
+  await line.auth.state.keys.set({ session: { current: Buffer.from([9]) } });
+  assert.deepEqual((await readJournal(store.filename, () => ({}))).data.keys, store.data.keys);
+});
+
+test('removed and stopped sockets cannot recreate or append their retired authentication stores', async t => {
+  const { bridge, line } = await fixture(t);
+  const removedAuth = line.auth;
+  await bridge.removeLine(LINE);
+  await assert.rejects(removedAuth.state.keys.set({ session: { late: Buffer.from([1]) } }), { code: 'AUTH_SESSION_RETIRED' });
+  await assert.rejects(stat(line.directory), { code: 'ENOENT' });
+  const added = await bridge.addLine({ request_id: randomUUID(), expected_phone: '' });
+  const active = bridge.getLine(added.line_id);
+  const stoppedAuth = active.auth;
+  await bridge.close();
+  await assert.rejects(stoppedAuth.state.keys.set({ session: { late: Buffer.from([2]) } }), { code: 'AUTH_SESSION_RETIRED' });
+  assert.equal((await readJournal(stoppedAuth.store.filename, () => ({}))).seq, stoppedAuth.store.seq);
+});
+
+test('failed registration drains prepared checkpoint owners before reusing the line ID without deleting credentials', async t => {
+  const { bridge } = await fixture(t);
+  const snapshotReady = gate(), release = gate(), closing = gate();
+  const prepare = bridge.prepareLine.bind(bridge), manifestUpdate = bridge.manifest.update.bind(bridge.manifest);
+  let prepared, preparationCount = 0, manifestAttempts = 0;
+  bridge.prepareLine = async line => {
+    await prepare(line);
+    if (++preparationCount !== 1) return;
+    prepared = line;
+    line.store.compactionHook = async stage => {
+      if (stage === 'snapshot_ready') { snapshotReady.resolve(); await release.promise; }
+    };
+    const close = line.store.close.bind(line.store);
+    line.store.close = async () => { closing.resolve(); return close(); };
+    line.store.compact().catch(() => {});
+    await snapshotReady.promise;
+  };
+  bridge.manifest.update = change => {
+    if (++manifestAttempts === 1) return Promise.reject(Object.assign(new Error('Synthetic manifest write failure'), { code: 'EIO' }));
+    return manifestUpdate(change);
+  };
+  t.after(() => { bridge.prepareLine = prepare; bridge.manifest.update = manifestUpdate; });
+  const request = { request_id: randomUUID(), expected_phone: '' };
+  const first = assert.rejects(bridge.addLine(request), { code: 'EIO' });
+  await closing.promise;
+  const identity = Buffer.from(prepared.auth.store.data.creds.signedIdentityKey.public);
+  const retry = bridge.addLine(request);
+  try {
+    await assert.rejects(prepared.auth.state.keys.set({ session: { stale: Buffer.from([9]) } }), { code: 'AUTH_SESSION_RETIRED' });
+    assert.equal(preparationCount, 1, 'the next registration cannot race an old checkpoint owner');
+  } finally { release.resolve(); }
+  await first;
+  const result = await retry;
+  const current = bridge.getLine(result.line_id);
+  assert.equal(result.line_id, prepared.line_id);
+  assert.equal(prepared.store.closed, true);
+  assert.equal(prepared.auth.store.closed, true);
+  assert.notEqual(current.store, prepared.store);
+  assert.deepEqual(current.auth.store.data.creds.signedIdentityKey.public, identity);
+  assert.equal([...bridge.storageMonitor.stores.values()].filter(entry => entry.lineId === result.line_id).length, 2);
+  assert.equal([...bridge.storageMonitor.stores.values()].some(entry => entry.store === prepared.store), false);
+});
+
+test('shutdown closes every store and maintenance owner even when one auth store has failed', async t => {
+  const { bridge, line } = await fixture(t);
+  const added = await bridge.addLine({ request_id: randomUUID(), expected_phone: '' });
+  const other = bridge.getLine(added.line_id);
+  const auth = line.auth;
+  auth.store.failed = true;
+  try {
+    await assert.rejects(bridge.close(), error => error instanceof AggregateError && error.message === 'BRIDGE_SHUTDOWN_FAILED');
+    assert.equal(auth.store.closed, true);
+    assert.equal(line.store.closed, true);
+    assert.equal(other.auth.store.closed, true);
+    assert.equal(other.store.closed, true);
+    assert.equal(bridge.outbox.closed, true);
+    await assert.rejects(other.auth.state.keys.set({ session: { late: Buffer.from([1]) } }), { code: 'AUTH_SESSION_RETIRED' });
+  } finally { auth.store.failed = false; }
+});
+
+test('credential events admitted behind slow message work survive a proactive socket replacement', async t => {
+  const { bridge, line, socket } = await fixture(t);
+  const messages = gate();
+  line.eventTail = messages.promise;
+  const previousAuth = line.auth;
+  let eventFinished = false;
+  const event = socket.eventHandler({ 'creds.update': {
+    registered: true, nextPreKeyId: 42, firstUnuploadedPreKeyId: 42, myAppStateKeyId: 'synthetic-persisted-key',
+  } }).then(() => { eventFinished = true; });
+  const replacement = mockSocket();
+  bridge.makeSocket = () => replacement;
+  bridge.blockConnection(line, socket, 'synthetic_proactive_reconnect');
+  const reconnect = bridge.connect(LINE);
+  try {
+    await previousAuth.store.flush();
+    assert.equal(eventFinished, false, 'credential admission is independent of the blocked message queue');
+    assert.equal(previousAuth.store.data.creds.nextPreKeyId, 42);
+    messages.resolve();
+    await reconnect;
+    assert.equal(line.auth.store, previousAuth.store);
+    assert.equal(line.auth.state.creds.registered, true);
+    assert.equal(line.auth.state.creds.nextPreKeyId, 42);
+    assert.equal(line.auth.state.creds.firstUnuploadedPreKeyId, 42);
+    assert.equal(line.auth.state.creds.myAppStateKeyId, 'synthetic-persisted-key');
+    assert.equal((await readJournal(line.auth.store.filename, () => ({}))).data.creds.nextPreKeyId, 42);
+    await bridge.connectionUpdate(line, replacement, { connection: 'open' });
+  } finally { messages.resolve(); }
+  await event;
+  await socket.eventHandler({ 'creds.update': { registered: false, nextPreKeyId: 1 } });
+  assert.equal(line.auth.state.creds.registered, true, 'events emitted after replacement are fenced before admission');
+  assert.equal(line.auth.store.data.creds.nextPreKeyId, 42);
+});
+
+test('credential persistence failures halt the owning session before a blocked message queue drains', async t => {
+  const reported = gate();
+  const { bridge, line, socket } = await fixture(t, 'ack', { onError: error => reported.resolve(error) });
+  const messages = gate();
+  line.eventTail = messages.promise;
+  const auth = line.auth, append = auth.store.append;
+  auth.store.append = async () => { throw Object.assign(new Error('Synthetic credential disk failure'), { code: 'EIO' }); };
+  const event = socket.eventHandler({ 'creds.update': { registered: true } });
+  try {
+    const error = await reported.promise;
+    assert.equal(error.code, 'EIO');
+    assert.equal(auth.store.failed, true);
+    assert.equal(auth.store.data.creds.registered, false);
+    assert.equal(line.status, 'error');
+    assert.equal(line.socket, null);
+    assert.equal(line.reconnectTimer, null);
+    let created = 0;
+    bridge.makeSocket = () => { created++; return mockSocket(); };
+    await assert.rejects(bridge.connect(LINE), /STORAGE_RESTART_REQUIRED/);
+    assert.equal(created, 0);
+  } finally {
+    messages.resolve();
+    await event;
+    // Only restore this synthetic failed store so fixture teardown can flush.
+    auth.store.append = append;
+    auth.store.failed = false;
+  }
+});
+
+test('incoming messages and delivery evidence accepted before credential failure survive retirement and a failed reconnect', async t => {
+  const reported = gate();
+  const { bridge, line, socket } = await fixture(t, 'ack', { onError: error => reported.resolve(error) });
+  await line.store.update(data => { data.messages.ORIGINAL.mirrored_outgoing = true; });
+  const blocked = gate();
+  line.eventTail = blocked.promise;
+  const incoming = socket.eventHandler({ 'messages.upsert': { messages: [original('BEFORE_CREDS_FAILURE', false)] } });
+  const delivery = socket.eventHandler({ 'messages.update': [{ key: original().key,
+    update: { status: proto.WebMessageInfo.Status.DELIVERY_ACK } }] });
+  const auth = line.auth, append = auth.store.append;
+  auth.store.append = async () => { throw Object.assign(new Error('Synthetic credential disk failure'), { code: 'EIO' }); };
+  const failingBatch = socket.eventHandler({ 'creds.update': { registered: true },
+    'messages.upsert': { messages: [original('SAME_BATCH_CREDS_FAILURE', false)] },
+    'messages.update': [{ key: original().key, update: { status: proto.WebMessageInfo.Status.READ } }],
+  });
+  try {
+    await reported.promise;
+    assert.equal(line.socket, null);
+    assert.equal(line.status, 'error');
+    await assert.rejects(bridge.connect(LINE), /STORAGE_RESTART_REQUIRED/);
+    await socket.eventHandler({ 'messages.upsert': { messages: [original('AFTER_RETIREMENT', false)] } });
+    blocked.resolve();
+    await Promise.all([incoming, delivery, failingBatch]);
+    const saved = (await readJournal(line.store.filename, () => ({}))).data;
+    assert.equal(saved.messages.BEFORE_CREDS_FAILURE.text, 'Original body');
+    assert.equal(saved.messages.SAME_BATCH_CREDS_FAILURE.text, 'Original body');
+    assert.equal(saved.messages.AFTER_RETIREMENT, undefined);
+    assert.equal(saved.messages.ORIGINAL.receipt, 'read');
+    const events = (await readJournal(bridge.outbox.filename, () => ({}))).data.entries.map(item => item.event);
+    assert.equal(events.filter(event => event.type === 'message').length, 2);
+    assert.deepEqual(events.filter(event => event.type === 'message_status').map(event => event.status), ['delivered', 'read']);
+    assert.equal(socket.calls.length, 0);
+  } finally {
+    blocked.resolve(); await Promise.all([incoming, delivery, failingBatch]);
+    await auth.drain().catch(() => {});
+    auth.store.append = append; auth.store.failed = false;
+  }
+});
+
+test('accepted incoming messages survive proactive socket replacement and shutdown', async t => {
+  const { bridge, line, socket } = await fixture(t);
+  const blocked = gate();
+  line.eventTail = blocked.promise;
+  const incoming = socket.eventHandler({ 'messages.upsert': { messages: [original('BEFORE_RECONNECT', false)] } });
+  const replacement = mockSocket();
+  bridge.makeSocket = () => replacement;
+  bridge.blockConnection(line, socket, 'synthetic_proactive_reconnect');
+  const reconnect = bridge.connect(LINE);
+  blocked.resolve();
+  await reconnect;
+  await incoming;
+  assert.equal(line.store.data.messages.BEFORE_RECONNECT.text, 'Original body');
+  const blockedShutdown = gate();
+  line.eventTail = blockedShutdown.promise;
+  const accepted = replacement.eventHandler({ 'messages.upsert': { messages: [original('BEFORE_SHUTDOWN', false)] } });
+  const closing = bridge.close();
+  blockedShutdown.resolve();
+  await Promise.all([accepted, closing]);
+  assert.equal((await readJournal(line.store.filename, () => ({}))).data.messages.BEFORE_SHUTDOWN.text, 'Original body');
+});
+
+test('socket renewal waits for real provider-buffered keys and stale callbacks cannot mutate the replacement', async t => {
+  let providerKeys;
+  const { bridge, line, socket } = await fixture(t, 'ack', { makeSocket: options => {
+    const socket = mockSocket();
+    providerKeys = addTransactionCapability(options.auth.keys, pino({ level: 'silent' }), { maxCommitRetries: 2, delayBetweenTriesMs: 1 });
+    socket.authState = { creds: options.auth.creds, keys: providerKeys };
+    return socket;
+  } });
+  // The fixture's returned mock is unused when makeSocket is overridden.
+  const current = line.socket, oldAuth = line.auth, keys = providerKeys;
+  const buffered = gate(), release = gate();
+  const transaction = keys.transaction(async () => {
+    await keys.set({ session: { retained: Buffer.from([3, 4]) } });
+    buffered.resolve(); await release.promise;
+  }, 'peer');
+  await buffered.promise;
+  bridge.blockConnection(line, current, 'synthetic_reconnect');
+  let renewed = false;
+  const reconnect = bridge.connect(LINE).then(() => { renewed = true; });
+  try {
+    await assert.rejects(keys.set({ session: { tooLate: Buffer.from([0]) } }), { code: 'AUTH_SESSION_RETIRED' });
+    assert.equal(renewed, false);
+  } finally { release.resolve(); }
+  await Promise.all([transaction, reconnect]);
+  assert.notEqual(line.auth, oldAuth);
+  assert.deepEqual(line.auth.store.data.keys.session.retained, Buffer.from([3, 4]));
+  assert.equal(line.auth.store.data.keys.session.tooLate, undefined);
+  assert.equal(socket.calls.length, 0);
+});
+
+test('a rejected real provider key commit immediately stops its owning socket and retains accepted incoming events', async t => {
+  const reported = gate();
+  const { bridge, line } = await fixture(t, 'ack', { onError: error => reported.resolve(error), makeSocket: options => {
+    const socket = mockSocket();
+    socket.authState = { creds: options.auth.creds, keys: addTransactionCapability(options.auth.keys,
+      pino({ level: 'silent' }), { maxCommitRetries: 3, delayBetweenTriesMs: 1 }) };
+    return socket;
+  } });
+  const socket = line.socket, auth = line.auth, blocked = gate();
+  line.eventTail = blocked.promise;
+  const incoming = socket.eventHandler({ 'messages.upsert': { messages: [original('BEFORE_KEY_FAILURE', false)] } });
+  auth.store.maxPending = 0;
+  const rejected = assert.rejects(socket.authState.keys.transaction(async () => {
+    await socket.authState.keys.set({ session: { rejected: Buffer.from([2]) } });
+  }, 'peer'), error => error.bridgePersistenceFailure);
+  try {
+    await reported.promise;
+    assert.equal(line.socket, null);
+    assert.equal(line.status, 'error');
+    assert.equal(auth.store.failed, true);
+    blocked.resolve();
+    await Promise.all([incoming, rejected]);
+    assert.equal(line.store.data.messages.BEFORE_KEY_FAILURE.text, 'Original body');
+    await assert.rejects(bridge.connect(LINE), /STORAGE_RESTART_REQUIRED/);
+    assert.equal(socket.calls.length, 0);
+  } finally {
+    blocked.resolve(); await Promise.all([incoming, rejected]);
+    await auth.drain().catch(() => {});
+    await assert.rejects(bridge.close(), /BRIDGE_SHUTDOWN_FAILED/);
+    auth.store.maxPending = 1000; auth.store.failed = false;
+  }
+});
+
+test('shutdown overlaps active checkpoint cancellation, provider transaction drain, and callback completion', async t => {
+  const { bridge, line } = await fixture(t, 'ack', { makeSocket: options => {
+    const socket = mockSocket();
+    socket.authState = { creds: options.auth.creds, keys: addTransactionCapability(options.auth.keys,
+      pino({ level: 'silent' }), { maxCommitRetries: 2, delayBetweenTriesMs: 1 }) };
+    return socket;
+  } });
+  const checkpointReady = gate(), checkpointRelease = gate();
+  line.store.compactionHook = async stage => {
+    if (stage === 'snapshot_ready') { checkpointReady.resolve(); await checkpointRelease.promise; }
+  };
+  const compacting = line.store.compact();
+  await checkpointReady.promise;
+  const keys = line.socket.authState.keys, buffered = gate(), providerRelease = gate();
+  const transaction = keys.transaction(async () => {
+    await keys.set({ session: { shutdown: Buffer.from([5]) } });
+    buffered.resolve(); await providerRelease.promise;
+    line.auth.state.creds.nextPreKeyId = 47;
+  }, 'peer');
+  await buffered.promise;
+  const callbackStarted = gate(), callbackRelease = gate();
+  bridge.fetch = async () => { callbackStarted.resolve(); await callbackRelease.promise; return { ok: true }; };
+  await bridge.receive(line, original('SHUTDOWN_CALLBACK', false));
+  const callbacks = bridge.deliverCallbacks();
+  await callbackStarted.promise;
+  const monitorEntered = gate(), monitorRelease = gate(), monitorClose = bridge.storageMonitor.close.bind(bridge.storageMonitor);
+  bridge.storageMonitor.close = async () => { monitorEntered.resolve(); await monitorRelease.promise; await monitorClose(); };
+  const started = Date.now(), closing = bridge.close();
+  assert.equal(bridge.close(), closing, 'concurrent close calls share the same drain');
+  try {
+    await monitorEntered.promise;
+    await assert.rejects(keys.transaction(async () => {}, 'late'), { code: 'AUTH_SESSION_RETIRED' });
+    assert.equal(await compacting, false, 'checkpoint cancels even while monitor and callback shutdown are blocked');
+    providerRelease.resolve();
+    await transaction;
+    assert.deepEqual(line.auth.store.data.keys.session.shutdown, Buffer.from([5]));
+    assert.equal(line.auth.store.data.creds.nextPreKeyId, 47);
+    await assert.rejects(readFile(line.auth.store.filename + '.auth-intent'), { code: 'ENOENT' });
+  } finally {
+    providerRelease.resolve(); callbackRelease.resolve(); monitorRelease.resolve(); checkpointRelease.resolve();
+    await Promise.all([transaction, callbacks, closing]);
+  }
+  const duration = Date.now() - started;
+  assert.ok(duration < 35_000, `shutdown exceeded systemd's stop budget: ${duration}ms`);
+  assert.equal(line.store.closed, true);
+  assert.equal(line.auth.store.closed, true);
+  assert.equal((await readJournal(line.store.filename, () => ({}))).data.messages.SHUTDOWN_CALLBACK.text, 'Original body');
+  await bridge.close();
+  t.diagnostic(JSON.stringify({ combined_shutdown_ms: duration, stop_budget_ms: 35_000 }));
+});
+
+test('an accepted LID message remains durable when retirement prevents provider phone normalization', async t => {
+  const { bridge, line, socket } = await fixture(t);
+  socket.signalRepository = { lidMapping: { getPNForLID: async () => {
+    throw Object.assign(new Error('AUTH_SESSION_RETIRED'), { code: 'AUTH_SESSION_RETIRED' });
+  } } };
+  const blocked = gate();
+  line.eventTail = blocked.promise;
+  const message = original('LID_DURING_SHUTDOWN', false);
+  message.key.remoteJid = '123456789@lid';
+  const accepted = socket.eventHandler({ 'messages.upsert': { messages: [message] } });
+  const closing = bridge.close();
+  blocked.resolve(); await Promise.all([accepted, closing]);
+  const saved = (await readJournal(line.store.filename, () => ({}))).data.messages.LID_DURING_SHUTDOWN;
+  assert.equal(saved.text, 'Original body');
+  assert.equal(saved.pending_normalization, true);
+  assert.equal(saved.notified, false);
+  assert.equal(saved.message.key.remoteJid, '123456789@lid');
+});
+
+test('retired provider pipelines preserve late credential events and acknowledged messages before reconnect or shutdown completes', async t => {
+  for (const mode of ['reconnect', 'shutdown']) {
+    const { bridge, line } = await fixture(t, 'ack', { makeSocket: options => {
+      const socket = mockSocket();
+      socket.authState = { creds: options.auth.creds, keys: addTransactionCapability(options.auth.keys,
+        pino({ level: 'silent' }), { maxCommitRetries: 2, delayBetweenTriesMs: 1 }) };
+      socket.messageMutex = makeMutex();
+      return socket;
+    } });
+    const socket = line.socket, oldAuth = line.auth, keyDone = gate(), providerRelease = gate(), eventsRelease = gate();
+    let delivered;
+    const processing = socket.messageMutex.mutex(async () => {
+      await socket.authState.keys.transaction(async () => {
+        await socket.authState.keys.set({ session: { saved: Buffer.from([5]) } });
+      }, 'peer');
+      keyDone.resolve(); await providerRelease.promise;
+      // Actual process-message emits this credential update after awaiting its
+      // key transaction, and EventEmitter does not await ev.process consumers.
+      socket.authState.creds.myAppStateKeyId = 'after-transaction';
+      delivered = socket.eventHandler({ 'creds.update': { myAppStateKeyId: 'after-transaction' },
+        'messages.upsert': { messages: [original('PIPELINE_' + mode, false)] } });
+    });
+    await keyDone.promise;
+    line.eventTail = eventsRelease.promise;
+    if (mode === 'reconnect') bridge.blockConnection(line, socket, 'synthetic_pipeline_reconnect');
+    let finished = false;
+    const transition = (mode === 'reconnect' ? bridge.connect(LINE) : bridge.close()).then(() => { finished = true; });
+    try {
+      assert.equal(socket.unsubscribeCount ?? 0, 0, 'accepted provider work retains its event subscription');
+      providerRelease.resolve(); await processing;
+      assert.equal(finished, false, 'the final accepted event queue must also drain');
+      eventsRelease.resolve(); await Promise.all([delivered, transition]);
+      assert.equal(oldAuth.store.data.creds.myAppStateKeyId, 'after-transaction');
+      if (mode === 'reconnect') assert.equal(line.auth.state.creds.myAppStateKeyId, 'after-transaction');
+      assert.equal((await readJournal(line.store.filename, () => ({}))).data.messages['PIPELINE_' + mode].text, 'Original body');
+      assert.equal(socket.unsubscribeCount, 1);
+      assert.equal(socket.calls.length, 0);
+    } finally { providerRelease.resolve(); eventsRelease.resolve(); await Promise.all([processing, transition]); }
+  }
+});
+
+function bufferedNativeSocket(options) {
+  const socket = mockSocket();
+  socket.ev = makeEventBuffer(pino({ level: 'silent' }));
+  socket.authState = { creds: options.auth.creds, keys: addTransactionCapability(options.auth.keys,
+    pino({ level: 'silent' }), { maxCommitRetries: 2, delayBetweenTriesMs: 1 }) };
+  socket.messageMutex = makeMutex();
+  socket.endCount = 0;
+  socket.end = () => { socket.endCount++; socket.ev.destroy(); };
+  return socket;
+}
+
+test('retirement flushes the real Baileys 100 ms buffer gap before replacing or destroying its subscription', async t => {
+  for (const mode of ['reconnect', 'shutdown']) {
+    const { bridge, line } = await fixture(t, 'ack', { makeSocket: bufferedNativeSocket });
+    const socket = line.socket;
+    await line.store.update(data => { data.messages.ORIGINAL.mirrored_outgoing = true; });
+    await socket.ev.createBufferedFunction(async () => {
+      socket.ev.emit('messages.upsert', { messages: [original('BUFFER_GAP_' + mode, false)], type: 'notify' });
+      socket.ev.emit('messages.update', [{ key: original().key, update: { status: proto.WebMessageInfo.Status.READ } }]);
+    })();
+    assert.equal(socket.ev.isBuffering(), true, 'real provider retains messages after the callback returns');
+    assert.equal(line.auth.hasProviderWork(), false, 'cover the gap after all provider callbacks have finished');
+    if (mode === 'reconnect') bridge.blockConnection(line, socket, 'synthetic_buffer_gap');
+    await (mode === 'reconnect' ? bridge.connect(LINE) : bridge.close());
+    const saved = (await readJournal(line.store.filename, () => ({}))).data;
+    assert.equal(saved.messages['BUFFER_GAP_' + mode].text, 'Original body');
+    assert.equal(saved.messages.ORIGINAL.receipt, 'read');
+    assert.equal(socket.endCount, 1);
+    assert.equal(socket.ev.isBuffering(), false);
+    assert.equal(socket.calls.length, 0);
+  }
+});
+
+test('real buffered provider pipelines finish accepted work before controlled end or native emitter destruction', async t => {
+  for (const mode of ['reconnect', 'shutdown', 'native_destroy']) {
+    const { bridge, line } = await fixture(t, 'ack', { makeSocket: bufferedNativeSocket });
+    const socket = line.socket, auth = line.auth, keyDone = gate(), providerRelease = gate();
+    const eventRelease = gate();
+    const processing = socket.messageMutex.mutex(socket.ev.createBufferedFunction(async () => {
+      await socket.authState.keys.transaction(async () => {
+        await socket.authState.keys.set({ session: { accepted: Buffer.from([6]) } });
+      }, 'peer');
+      keyDone.resolve(); await providerRelease.promise;
+      assert.equal(socket.endCount, 0, 'controlled end cannot interrupt receipt/ack/upsert work');
+      socket.authState.creds.myAppStateKeyId = 'buffered-after-key-commit';
+      socket.ev.emit('creds.update', { myAppStateKeyId: 'buffered-after-key-commit' });
+      socket.ev.emit('messages.upsert', { messages: [original('ACTIVE_BUFFER_' + mode, false)], type: 'notify' });
+    }));
+    await keyDone.promise;
+    line.eventTail = eventRelease.promise;
+    if (mode === 'reconnect') bridge.blockConnection(line, socket, 'synthetic_active_buffer');
+    if (mode === 'native_destroy') {
+      socket.ev.emit('connection.update', { connection: 'close' });
+      socket.ev.destroy(); // The installed socket's internal end() calls this directly.
+    }
+    let finished = false;
+    const transition = (mode === 'reconnect' ? bridge.connect(LINE) : bridge.close()).then(() => { finished = true; });
+    try {
+      assert.equal(socket.endCount, 0);
+      providerRelease.resolve(); await processing;
+      assert.equal(finished, false, 'event persistence drains after provider buffers have flushed');
+      eventRelease.resolve(); await transition;
+      assert.equal(auth.store.data.creds.myAppStateKeyId, 'buffered-after-key-commit');
+      const saved = (await readJournal(line.store.filename, () => ({}))).data;
+      assert.equal(saved.messages['ACTIVE_BUFFER_' + mode].text, 'Original body');
+      assert.equal(socket.endCount, 1);
+      assert.equal(socket.ev.isBuffering(), false);
+      assert.equal(socket.calls.length, 0);
+    } finally { providerRelease.resolve(); eventRelease.resolve(); await Promise.allSettled([processing, transition]); }
+  }
+});
+
+test('credential failure flushes incoming messages and receipts retained by the installed Baileys buffer', async t => {
+  const reported = gate();
+  const { bridge, line } = await fixture(t, 'ack', { makeSocket: bufferedNativeSocket, onError: error => reported.resolve(error) });
+  const socket = line.socket, auth = line.auth, append = auth.store.append;
+  await line.store.update(data => { data.messages.ORIGINAL.mirrored_outgoing = true; });
+  socket.ev.buffer();
+  socket.ev.emit('messages.upsert', { messages: [original('BUFFERED_BEFORE_FAILURE', false)], type: 'notify' });
+  socket.ev.emit('messages.update', [{ key: original().key, update: { status: proto.WebMessageInfo.Status.READ } }]);
+  auth.store.append = async () => { throw Object.assign(new Error('Synthetic credential disk failure'), { code: 'EIO' }); };
+  socket.ev.emit('creds.update', { registered: true });
+  try {
+    await reported.promise;
+    await line.eventTail;
+    assert.equal(line.socket, null);
+    const saved = (await readJournal(line.store.filename, () => ({}))).data;
+    assert.equal(saved.messages.BUFFERED_BEFORE_FAILURE.text, 'Original body');
+    assert.equal(saved.messages.ORIGINAL.receipt, 'read');
+    await assert.rejects(bridge.connect(LINE), /STORAGE_RESTART_REQUIRED/);
+    assert.equal(socket.endCount, 1);
+    assert.equal(socket.calls.length, 0);
+  } finally {
+    await auth.drain().catch(() => {});
+    auth.store.append = append; auth.store.failed = false;
+  }
 });
