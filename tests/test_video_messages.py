@@ -80,7 +80,7 @@ def test_video_mime_types_size_limit_and_storage(tmp_path: Path, monkeypatch) ->
     assert media_extension("video/3gpp") == ".3gp"
     # Browser voice recordings may arrive as video/webm; they must stay audio.
     assert media_kind_for_mime("video/webm", allow_browser_audio=True) == "audio"
-    assert max_media_bytes("video") == 16 * 1024 * 1024
+    assert max_media_bytes("video") == 64 * 1024 * 1024
 
     monkeypatch.setattr(config.settings, "support_media_directory", str(tmp_path / "media"))
     store = SupportMediaStore()
@@ -213,12 +213,22 @@ def test_unsupported_or_empty_videos_are_rejected_before_sending(monkeypatch, co
     assert "send" not in sent
 
 
-def test_oversized_video_is_rejected(monkeypatch, outbound_unit) -> None:
-    monkeypatch.setattr(config.settings, "support_video_max_bytes", 3)
+def test_staff_can_send_a_video_at_the_64_mb_limit(monkeypatch, outbound_unit) -> None:
     sent = _stub_agent_send(monkeypatch)
-    with pytest.raises(SupportValidationError, match="3 MB|0 MB|WhatsApp limit"):
+    content = bytes(64 * 1024 * 1024)
+    result = asyncio.run(support_service_module.support_service.send_agent_media(
+        77, agent=AGENT, media_type="video", content=content, content_type="video/mp4",
+        filename="large.mp4", caption=None, client_message_id="client-video-limit",
+    ))
+    assert result["send_status"] == "SENT"
+    assert sent["upload"]["content"] == content
+
+
+def test_oversized_video_is_rejected(monkeypatch, outbound_unit) -> None:
+    sent = _stub_agent_send(monkeypatch)
+    with pytest.raises(SupportValidationError, match="64 MB limit"):
         asyncio.run(support_service_module.support_service.send_agent_media(
-            77, agent=AGENT, media_type="video", content=b"1234", content_type="video/mp4",
+            77, agent=AGENT, media_type="video", content=bytes(64 * 1024 * 1024 + 1), content_type="video/mp4",
             filename="clip.mp4", caption=None, client_message_id="client-video-4",
         ))
     assert "send" not in sent
@@ -266,15 +276,17 @@ const showError = message => calls.push(['error', message]);
 const setPendingMedia = (kind, file) => calls.push(['pending', kind, file.name]);
 const setAppStatus = message => calls.push(['status', message]);
 const formatBytes = bytes => Math.round(bytes / 1024 / 1024) + ' MB';
-""" + picker.replace("'__VIDEO_MAX_BYTES__'", "'16777216'") + r"""
-input.files = [{name: 'clip.mp4', type: 'video/mp4', size: 5 * 1024 * 1024}];
+""" + picker.replace("'__VIDEO_MAX_BYTES__'", "'67108864'") + r"""
+for (const size of [5, 40, 64]) {
+  input.files = [{name: 'clip.mp4', type: 'video/mp4', size: size * 1024 * 1024}];
+  imageSelected();
+  assert.deepEqual(calls[0], ['pending', 'video', 'clip.mp4']);
+  assert.match(calls[1][1], /Review the preview/);
+  calls.length = 0;
+}
+input.files = [{name: 'big.mp4', type: 'video/mp4', size: 64 * 1024 * 1024 + 1}];
 imageSelected();
-assert.deepEqual(calls[0], ['pending', 'video', 'clip.mp4']);
-assert.match(calls[1][1], /Review the preview/);
-calls.length = 0;
-input.files = [{name: 'big.mp4', type: 'video/mp4', size: 40 * 1024 * 1024}];
-imageSelected();
-assert.deepEqual(calls[0], ['error', 'This file exceeds the 16 MB limit.']);
+assert.deepEqual(calls[0], ['error', 'This file exceeds the 64 MB limit.']);
 assert.deepEqual(calls[1], ['status', '0 of 1 attachments added. Review the file errors.']);
 assert.equal(input.value, '');
 calls.length = 0;

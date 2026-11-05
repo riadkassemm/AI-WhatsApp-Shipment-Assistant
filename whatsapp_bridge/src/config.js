@@ -72,7 +72,7 @@ export function readConfig(env = process.env) {
   return {
     secret, lines, fallbackLineId, host, port: Number(endpoint.port || (endpoint.protocol === 'https:' ? 443 : 80)), callbackUrl: callbackUrl.href,
     dataDir: path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..', env.WHATSAPP_LINKED_DEVICE_DATA_DIRECTORY ?? 'whatsapp_bridge/data'),
-    maxMediaBytes: 25 * 1024 * 1024, ackTimeoutMs: 20_000,
+    maxMediaBytes: 64 * 1024 * 1024, ackTimeoutMs: 20_000,
   };
 }
 

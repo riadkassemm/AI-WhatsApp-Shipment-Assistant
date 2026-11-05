@@ -1103,7 +1103,7 @@ export class Bridge {
     if (encoded.length > Math.ceil(this.config.maxMediaBytes / 3) * 4) throw new BridgeError(413, 'MEDIA_TOO_LARGE', 'Media exceeds the upload limit.');
     const bytes = Buffer.from(encoded, 'base64');
     if (bytes.toString('base64') !== encoded) throw new BridgeError(400, 'INVALID_MEDIA', 'Provide valid base64 media content.');
-    if (!bytes.length || bytes.length > this.config.maxMediaBytes) throw new BridgeError(413, 'MEDIA_TOO_LARGE', 'Media must be nonempty and no larger than 25 MiB.');
+    if (!bytes.length || bytes.length > this.config.maxMediaBytes) throw new BridgeError(413, 'MEDIA_TOO_LARGE', `Media must be nonempty and no larger than ${this.config.maxMediaBytes / (1024 * 1024)} MiB.`);
     const rawMime = String(payload.mime_type ?? '').trim().toLowerCase();
     const baseMime = rawMime.split(';')[0].trim();
     const mime = baseMime === 'audio/ogg' && /codecs\s*=\s*opus/.test(rawMime) ? 'audio/ogg; codecs=opus' : baseMime;
@@ -1154,7 +1154,7 @@ export class Bridge {
         size += chunk.length;
         if (size > this.config.maxMediaBytes) {
           stream.destroy();
-          throw new BridgeError(413, 'MEDIA_TOO_LARGE', 'Incoming media exceeds the 25 MiB bridge limit.');
+          throw new BridgeError(413, 'MEDIA_TOO_LARGE', `Incoming media exceeds the ${this.config.maxMediaBytes / (1024 * 1024)} MiB bridge limit.`);
         }
         chunks.push(chunk);
       }
