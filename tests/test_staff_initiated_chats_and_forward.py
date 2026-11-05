@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from app.support_auth import SupportAgent
-from app.support_service import SupportForbiddenError, SupportService, SupportValidationError
+from app.support_service import SupportConflictError, SupportForbiddenError, SupportService, SupportValidationError
 
 
 @pytest.fixture(autouse=True)
@@ -16,6 +16,14 @@ def visible_message_fixture(monkeypatch):
     monkeypatch.setattr(
         "app.support_service.support_repository.message_hidden_for_user",
         AsyncMock(return_value=False),
+    )
+    monkeypatch.setattr(
+        "app.support_service.whatsapp_registry_service.is_number_enabled",
+        AsyncMock(return_value=True),
+    )
+    monkeypatch.setattr(
+        "app.support_service.support_repository.find_contact_forward",
+        AsyncMock(return_value=None),
     )
 
 
@@ -122,12 +130,14 @@ async def test_forward_allows_accessible_resolved_history_as_source(monkeypatch)
         "current_assignee_id": None,
         "active_key": None,
         "status": "RESOLVED",
+        "business_phone_number_id": "90005",
     }
     destination = {
         "id": 2,
         "current_assignee_id": "7",
         "active_key": "active:2",
         "status": "ASSIGNED",
+        "business_phone_number_id": "90005",
     }
     monkeypatch.setattr(
         "app.support_service.support_repository.get_ticket",
@@ -165,6 +175,110 @@ async def test_forward_allows_accessible_resolved_history_as_source(monkeypatch)
     assert send.await_args.kwargs["is_forwarded"] is True
     assert send.await_args.kwargs["forwarded_from_ticket_id"] == 1
     assert send.await_args.kwargs["forwarded_from_message_id"] == 11
+
+
+@pytest.fixture
+def cross_office_forward(monkeypatch):
+    service = SupportService()
+    agent = SupportAgent(id="7", name="Riad", role="agent")
+    source = {
+        "id": 1, "current_assignee_id": "7", "active_key": "90005:96170111111",
+        "status": "ASSIGNED", "business_phone_number_id": "90005", "whatsapp_phone": "96170111111",
+    }
+    destination = {
+        "id": 2, "current_assignee_id": "7", "active_key": "90006:96170222222",
+        "status": "ASSIGNED", "business_phone_number_id": "90006", "whatsapp_phone": "96170222222",
+        "customer_name": "Recipient",
+    }
+    message = {"id": 11, "ticket_id": 1, "message_type": "text", "body": "Forward me"}
+    monkeypatch.setattr("app.support_service.support_repository.get_ticket",
+        AsyncMock(side_effect=lambda ticket_id: source if ticket_id == 1 else destination))
+    monkeypatch.setattr("app.support_service.support_repository.get_message", AsyncMock(return_value=message))
+    prior = AsyncMock(return_value=None)
+    monkeypatch.setattr("app.support_service.support_repository.get_message_by_client_id", prior)
+    previous_forward = AsyncMock(return_value=None)
+    monkeypatch.setattr("app.support_service.support_repository.find_contact_forward", previous_forward)
+    forwarded = {"id": 91, "ticket_id": 3, "send_status": "SENT"}
+    resolve_contact = AsyncMock(return_value={"message": forwarded})
+    monkeypatch.setattr(service, "forward_message_to_contact", resolve_contact)
+    return SimpleNamespace(service=service, agent=agent, source=source, destination=destination,
+        message=message, prior=prior, previous_forward=previous_forward,
+        resolve_contact=resolve_contact, forwarded=forwarded)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["text", "location", "image", "video", "audio", "document", "sticker"])
+async def test_cross_office_conversation_choice_resolves_recipient_from_source_line(cross_office_forward, kind):
+    state = cross_office_forward
+    state.message["message_type"] = kind
+    result = await state.service.forward_message(
+        source_ticket_id=1, source_message_id=11, destination_ticket_id=2,
+        agent=state.agent, client_message_id="same-browser-attempt",
+    )
+    assert result == state.forwarded
+    state.resolve_contact.assert_awaited_once_with(
+        source_ticket_id=1, source_message_id=11, phone_number="96170222222",
+        customer_name="Recipient", agent=state.agent, client_message_id="same-browser-attempt",
+    )
+    state.prior.assert_awaited_once_with(
+        "forward:1:11:same-browser-attempt", ticket_id=2, sender_type="AGENT", sender_id="7",
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["SENT", "UNCERTAIN"])
+async def test_same_office_conversation_retry_preserves_contact_attempt(cross_office_forward, status):
+    state = cross_office_forward
+    state.destination["business_phone_number_id"] = "90005"
+    state.previous_forward.return_value = {
+        "id": 91, "ticket_id": 2, "send_status": status,
+        "client_message_id": "contact-forward:1:11:same-browser-attempt",
+    }
+    await state.service.forward_message(
+        source_ticket_id=1, source_message_id=11, destination_ticket_id=2,
+        agent=state.agent, client_message_id="same-browser-attempt",
+    )
+    state.resolve_contact.assert_awaited_once()
+    state.prior.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["PENDING", "DISPATCHING", "SENT", "DELIVERED", "READ", "UNCERTAIN", "FAILED"])
+async def test_cross_office_forward_never_reissues_existing_wrong_office_attempt(cross_office_forward, status):
+    state = cross_office_forward
+    state.prior.return_value = {"id": 90, "send_status": status}
+    with pytest.raises(SupportConflictError, match="already exists under another WhatsApp line"):
+        await state.service.forward_message(
+            source_ticket_id=1, source_message_id=11, destination_ticket_id=2,
+            agent=state.agent, client_message_id="same-browser-attempt",
+        )
+    state.resolve_contact.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("boundary", ["missing_line", "disabled_line", "foreign_destination", "inactive_destination"])
+async def test_cross_office_forward_preserves_source_line_and_destination_permissions(cross_office_forward, monkeypatch, boundary):
+    state = cross_office_forward
+    if boundary == "missing_line":
+        state.source["business_phone_number_id"] = None
+        error = SupportValidationError
+    elif boundary == "disabled_line":
+        monkeypatch.setattr("app.support_service.whatsapp_registry_service.is_number_enabled",
+            AsyncMock(return_value=False))
+        error = SupportConflictError
+    else:
+        if boundary == "foreign_destination":
+            state.destination["current_assignee_id"] = "8"
+        else:
+            state.destination["active_key"] = None
+        error = SupportForbiddenError
+    with pytest.raises(error):
+        await state.service.forward_message(
+            source_ticket_id=1, source_message_id=11, destination_ticket_id=2,
+            agent=state.agent, client_message_id="protected-attempt",
+        )
+    state.resolve_contact.assert_not_awaited()
+    state.prior.assert_not_awaited()
 
 
 def test_support_ui_keeps_forward_enabled_for_history_and_marks_forwarded_messages():

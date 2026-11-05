@@ -105,7 +105,7 @@ def repository_with_channel(monkeypatch):
     repository = SupportRepository()
     repository._pool = ChannelPool(connection)
 
-    async def no_existing(*_args):
+    async def no_existing(*_args, **_kwargs):
         return None
 
     monkeypatch.setattr(repository, "find_active_ticket_by_phone", no_existing)

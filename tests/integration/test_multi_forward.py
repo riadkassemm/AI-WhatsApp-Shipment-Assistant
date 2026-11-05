@@ -14,6 +14,7 @@ async def test_multiple_forward_items_deduplicate_dispatch_and_preserve_access(i
     monkeypatch.setattr(service.settings, 'support_media_directory', str(tmp_path))
     store=SupportMediaStore(); monkeypatch.setattr(service, 'support_media_store', store)
     monkeypatch.setattr(service, 'publish_support_event', AsyncMock())
+    monkeypatch.setattr(service.whatsapp_registry_service, 'is_number_enabled', AsyncMock(return_value=True))
     await sql("UPDATE support_tickets SET current_assignee_id='7' WHERE id=43")
     calls=[]
     async def send(**kwargs):

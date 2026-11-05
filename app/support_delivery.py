@@ -39,6 +39,14 @@ async def _deliver_claimed(repository, transport, media_store, ticket, message, 
             client_message_id=message['transport_client_id'],
             context_message_id=message.get('reply_to_whatsapp_message_id') or None,
         )
+        if message.get('is_forwarded'):
+            # Older queued attempts may belong to a different office. Never
+            # upload or dispatch them there, or turn them into a new send here.
+            source_id = int(message.get('forwarded_from_ticket_id') or 0)
+            source = await repository.get_ticket(source_id) if source_id > 0 else None
+            source_line = str((source or {}).get('business_phone_number_id') or '').strip()
+            if not source_line or source_line != common['phone_number_id']:
+                raise ValueError('The forwarding source office does not match this delivery.')
         if kind == 'text':
             send = transport.send_text
             payload = dict(body=body)

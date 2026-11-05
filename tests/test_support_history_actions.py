@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -79,6 +80,7 @@ def history_actions(monkeypatch: pytest.MonkeyPatch, tmp_path):
     monkeypatch.setattr(service_module.support_repository, "get_message", get_message)
     monkeypatch.setattr(service_module.support_repository, "message_hidden_for_user", hidden)
     monkeypatch.setattr(service_module.support_repository, "get_message_by_client_id", no_message)
+    monkeypatch.setattr(service_module.support_repository, "find_contact_forward", no_message)
     monkeypatch.setattr(service_module.support_repository, "add_ticket_message", add_message)
     monkeypatch.setattr(service_module.support_repository, "add_event", no_message)
     monkeypatch.setattr(service_module.support_repository, "get_reaction_by_client_id", get_reaction)
@@ -86,6 +88,7 @@ def history_actions(monkeypatch: pytest.MonkeyPatch, tmp_path):
     monkeypatch.setattr(service_module.whatsapp_client, "send_reaction", send_reaction)
     monkeypatch.setattr(service_module, "publish_support_event", publish)
     monkeypatch.setattr(service_module, "get_transport", lambda _line: "linked_device")
+    monkeypatch.setattr(service_module.whatsapp_registry_service, "is_number_enabled", AsyncMock(return_value=True))
     monkeypatch.setattr(service_module.support_media_store, "_root", tmp_path)
     monkeypatch.setattr(state.service, "_deliver_outbound", deliver)
     return state
