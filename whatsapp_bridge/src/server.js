@@ -30,7 +30,9 @@ export function createServer(bridge, config) {
     response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
     response.end(JSON.stringify(payload));
   };
-  const server = http.createServer(async (request, response) => {
+  const activeRequests = new Set();
+  let requestFailed = false, requestFailure;
+  const handleRequest = async (request, response) => {
     response.setHeader('Cache-Control', 'no-store');
     response.setHeader('X-Content-Type-Options', 'nosniff');
     try {
@@ -40,6 +42,10 @@ export function createServer(bridge, config) {
       try { parts = pathname.split('/').filter(Boolean).map(decodeURIComponent); }
       catch { throw new BridgeError(400, 'INVALID_PATH', 'The bridge endpoint contains invalid URL encoding.'); }
       if (request.method === 'GET' && pathname === '/v1/status') return send(response, 200, bridge.status());
+      if (request.method === 'GET' && pathname === '/v1/storage') {
+        if (!bridge.storageMonitor) throw new BridgeError(503, 'STORAGE_MONITOR_UNAVAILABLE', 'Storage monitoring is not initialized.');
+        return send(response, 200, bridge.storageMonitor.status());
+      }
       if (request.method === 'POST' && parts.length === 2 && parts[0] === 'v1' && parts[1] === 'lines') {
         return send(response, 200, await bridge.addLine(await readJson(request, 1024 * 1024)));
       }
@@ -53,6 +59,11 @@ export function createServer(bridge, config) {
         return response.end(media.content);
       }
       if (request.method !== 'POST') throw new BridgeError(405, 'METHOD_NOT_ALLOWED', 'This endpoint requires POST.');
+      if (parts.length === 4 && parts[3] === 'media') {
+        // Reject critical pressure before buffering/decoding the HTTP body.
+        await bridge.storageMonitor?.sample();
+        bridge.storageMonitor?.assertCanSubmit(id);
+      }
       const limit = parts[3] === 'media' ? Math.ceil(config.maxMediaBytes * 4 / 3) + 4096 : 64 * 1024;
       const payload = await readJson(request, limit);
       if (parts.length === 5 && parts[3] === 'messages' && parts[4] === 'read') return send(response, 200, await bridge.markRead(id, payload));
@@ -81,7 +92,27 @@ export function createServer(bridge, config) {
       send(response, status, { delivery_uncertain: deliveryUncertain,
         error: { code: isKnown ? error.code : 'BRIDGE_ERROR', message: isKnown ? error.message : 'The bridge could not complete this operation.' } });
     }
+  };
+  const server = http.createServer((request, response) => {
+    // Closing a client socket does not cancel its already admitted media or
+    // persistence work. Keep ownership until the full handler settles, even
+    // when Node's server.close callback has already reported no connections.
+    const task = handleRequest(request, response);
+    activeRequests.add(task);
+    task.then(() => activeRequests.delete(task), error => {
+      activeRequests.delete(task);
+      if (!requestFailed) {requestFailed = true; requestFailure = error;}
+      try { response.destroy(); } catch (_) { /* Preserve the handler failure. */ }
+      try { console.error(JSON.stringify({component: 'whatsapp_bridge', event: 'request_handler_failed'})); }
+      catch (_) { /* Shutdown still observes the saved failure. */ }
+    });
   });
+  server.drainRequests = async () => {
+    // The caller first closes connection admission. The loop also covers
+    // handlers delivered while the final existing connections were closing.
+    while (activeRequests.size) await Promise.allSettled([...activeRequests]);
+    if (requestFailed) throw new Error('HTTP_REQUEST_DRAIN_FAILED', {cause: requestFailure});
+  };
   server.requestTimeout = 60_000;
   server.headersTimeout = 10_000;
   server.keepAliveTimeout = 5000;

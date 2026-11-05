@@ -1,12 +1,14 @@
-import { mkdir, readFile, unlink, rm } from 'node:fs/promises';
+import { mkdir, readFile, unlink, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import makeWASocket, { Browsers, DisconnectReason, downloadMediaMessage, normalizeMessageContent, proto, generateMessageIDV2 } from '@whiskeysockets/baileys';
+import makeWASocket, { Browsers, DisconnectReason, downloadMediaMessage, normalizeMessageContent, proto, generateMessageIDV2, initAuthCreds, DEFAULT_CONNECTION_CONFIG } from '@whiskeysockets/baileys';
 import pino from 'pino';
 import QRCode from 'qrcode';
 import { BridgeError, phoneDigits, wrapId, unwrapId, validateLineManifest, UUID_PATTERN, MANIFEST_MAX_BYTES } from './config.js';
 import { FileStore, createAuth } from './storage.js';
-import { JournalStore } from './journal-store.js';
+import { JournalStore, encode } from './journal-store.js';
+import { StorageMonitor } from './storage-monitor.js';
+import { MediaFiles } from './media-files.js';
 import { AckTracker } from './ack.js';
 import { inboundEvent, outgoingEvent, outgoingConfirmationEvent, messageTombstoneEvent, messageStatusEvent, mutationEvent, textBody, millis, eventId, disconnectReason, MEDIA_TYPES, RECEIPT_STATUSES, RECEIPT_RANK } from './events.js';
 import { preserveNativeMutationMetadata } from './native-events.js';
@@ -80,21 +82,46 @@ export class Bridge {
     this.lines = new Map();
     this.registrationTail = Promise.resolve();
     this.phoneReservations = new Map();
+    this.mediaFiles = new MediaFiles();
     this.stopping = false;
+    this.initializationController = new AbortController();
+    // Own a store before load() yields: a failed or cancelled replay must not
+    // leave an untracked maintenance owner behind the directory lock.
+    this.ownedStores = new Set();
+    this.ownedFiles = new Set();
     this.log = dependencies.log ?? (entry => console.info(JSON.stringify(entry)));
+    this.storageMonitor = new StorageMonitor(config.dataDir, {config: config.storage?.monitoring,
+      log: this.log, filesystem: dependencies.storageFilesystem});
     this.callbackTasks = new Map();
     this.onError = dependencies.onError ?? (() => console.error('Bridge operation failed; check the connection status.'));
   }
 
-  async initialize({ autoConnect = true } = {}) {
-    this.outbox = await new JournalStore(path.join(this.config.dataDir, 'outbox.json'), () => ({ entries: [], dead_letters: [] })).load();
-    this.manifest = await new FileStore(path.join(this.config.dataDir, 'lines.json'), () => ({ version: 1, lines: {}, requests: {} })).load();
+  assertRunning() {
+    if (this.stopping) throw new BridgeError(503, 'STOPPING', 'The bridge is shutting down.');
+  }
+  initialize(options = {}) {
+    this.initializePromise ??= this.initializeOnce(options);
+    return this.initializePromise;
+  }
+  async loadFile(filename, initial) {
+    this.assertRunning();
+    const store = new FileStore(filename, initial);
+    this.ownedFiles.add(store);
+    await store.load();
+    this.assertRunning();
+    return store;
+  }
+  async initializeOnce({ autoConnect = true } = {}) {
+    this.assertRunning();
+    this.outbox = await this.loadStore(path.join(this.config.dataDir, 'outbox.json'), () => ({ entries: [], dead_letters: [] }), 'outbox');
+    this.manifest = await this.loadFile(path.join(this.config.dataDir, 'lines.json'), () => ({ version: 1, lines: {}, requests: {} }));
     // Phones of removed lines and when they went offline, so linking one again recovers the gap.
-    this.retiredPhones = await new FileStore(path.join(this.config.dataDir, 'retired-phones.json'), () => ({ version: 1, phones: {} })).load();
+    this.retiredPhones = await this.loadFile(path.join(this.config.dataDir, 'retired-phones.json'), () => ({ version: 1, phones: {} }));
     const manifest = validateLineManifest(this.manifest.data);
     // Confirmed removal tombstones also form a durable cleanup work queue.
     // Repeating the precise numeric directory/outbox purge is safe after a crash.
     for (const id of manifest.removed_line_ids) {
+      this.assertRunning();
       try { await this.purgeRemovedLine(id); }
       catch (error) { this.onError(error); }
     }
@@ -106,11 +133,31 @@ export class Bridge {
       if (definitions.has(id) && definitions.get(id).expected_phone !== expected) throw new Error('The linked-device manifest conflicts with a configured line.');
       definitions.set(id, { line_id: id, expected_phone: expected });
     }
+    const prepared = [];
+    const initializationFailed = (line, error) => {
+      this.assertRunning();
+      this.onError(error);
+      line.session?.dispose();
+      line.ack?.close();
+      line.socket?.end(new Error('Failed to initialize this linked-device line'));
+      line.socket = null;
+      if (!error.bridgePersistenceFailure && line.store?.data?.enabled && transientConnectionError(error)) {
+        line.status = 'disconnected';
+        this.scheduleReconnect(line);
+      } else {
+        line.status = 'error';
+        line.error = 'Could not safely load or connect this WhatsApp line. Check its session storage and configuration.';
+      }
+    };
+    // Finish replay for every line before any provider can acknowledge new
+    // traffic. Shutdown during a slow later replay then has no live sockets.
     for (const definition of definitions.values()) {
+      this.assertRunning();
       const line = this.lineContext(definition);
       this.lines.set(line.line_id, line);
       try {
         await this.prepareLine(line);
+        this.assertRunning();
         // No send call from the previous process can still be running. Preserve
         // its native ID and wait for a real provider echo to resolve uncertainty.
         if (Object.values(line.store.data.messages).some(record => record.pending_send)) {
@@ -121,23 +168,57 @@ export class Bridge {
             }
           });
         }
-        if (autoConnect && line.store.data.enabled) await this.connect(line.line_id);
+        this.assertRunning();
+        prepared.push(line);
       } catch (error) {
-        this.onError(error);
-        line.session?.dispose();
-        line.ack?.close();
-        line.socket?.end(new Error('Failed to initialize this linked-device line'));
-        line.socket = null;
-        if (!error.bridgePersistenceFailure && line.store?.data?.enabled && transientConnectionError(error)) {
-          line.status = 'disconnected';
-          this.scheduleReconnect(line);
-        } else {
-          line.status = 'error';
-          line.error = 'Could not safely load or connect this WhatsApp line. Check its session storage and configuration.';
-        }
+        initializationFailed(line, error);
       }
     }
+    for (const line of prepared) {
+      this.assertRunning();
+      if (autoConnect && line.store.data.enabled) {
+        try { await this.connect(line.line_id); }
+        catch (error) { initializationFailed(line, error); }
+      }
+    }
+    this.assertRunning();
+    await this.storageMonitor.start();
+    this.assertRunning();
     return this;
+  }
+  async loadStore(filename, initial, kind, line = null) {
+    this.assertRunning();
+    // A failed load can retain a large partially decoded state before its line
+    // field is assigned. Repeated retries must neither create a second journal
+    // owner nor accumulate copies of that state. Successful cleanup releases
+    // ownership; unresolved failures require a controlled recovery/restart.
+    if ([...this.ownedStores].some(store => store.filename === filename)) {
+      throw Object.assign(new Error('STORAGE_RESTART_REQUIRED'), {code: 'STORAGE_RESTART_REQUIRED', bridgePersistenceFailure: true});
+    }
+    const store = new JournalStore(filename, initial, {maintenance: this.config.storage?.maintenance,
+      diagnostics: event => {
+        if (event.event === 'storage_commit' && event.persist_ms < 100 && event.queue_wait_ms < 100) return;
+        this.log({component: 'whatsapp_bridge', kind, ...(line ? {line_id: line.line_id} : {}), ...event});
+      }});
+    this.ownedStores.add(store);
+    // A failed load must remain visible to the monitor even without a socket.
+    this.storageMonitor.register(store, {lineId: line?.line_id ?? null, kind});
+    await store.load({signal: this.initializationController.signal});
+    this.assertRunning();
+    return store;
+  }
+  async loadAuth(line) {
+    const store = await this.loadStore(path.join(line.directory, 'auth.json'), () => ({creds: initAuthCreds(), keys: {}}), 'auth', line);
+    const auth = await createAuth(line.directory, {store});
+    if (this.stopping) { auth.retire(); await auth.drain(); this.assertRunning(); }
+    return auth;
+  }
+  async closeStore(store) {
+    if (!store) return;
+    await store.close();
+    // Registrations/removals can repeat without restarting the process. Keep
+    // failed cleanup owners, but release successfully closed historical data.
+    this.ownedStores.delete(store);
   }
   lineContext(definition) {
     return { ...definition, directory: path.join(this.config.dataDir, definition.line_id),
@@ -148,8 +229,16 @@ export class Bridge {
   }
   async prepareLine(line) {
     try {
+      this.assertRunning();
       await mkdir(path.join(line.directory, 'media'), { recursive: true, mode: 0o700 });
-      line.store = await new JournalStore(path.join(line.directory, 'state.json'), initialLine, { diagnostics: event => { if (event.persist_ms >= 100 || event.queue_wait_ms >= 100) this.trace(line, 'storage_slow', event); } }).load();
+      this.assertRunning();
+      // Optional media cleanup must not prevent intact credentials or incoming
+      // evidence from loading. The writer retains failed cleanup obligations
+      // and refuses further media allocation until they can be synchronized.
+      await this.mediaFiles.prepare(path.join(line.directory, 'media')).catch(this.onError);
+      this.assertRunning();
+      line.store ??= await this.loadStore(path.join(line.directory, 'state.json'), initialLine, 'state', line);
+      this.assertRunning();
       // Rebuild only missing index entries at startup, also after a rollback
       // export was used by an older bridge. Never infer a legacy payload hash.
       const requests = new Map();
@@ -165,15 +254,17 @@ export class Bridge {
         return !old || old.native_id !== value.native_id || old.fingerprint !== value.fingerprint;
       });
       for (let offset = 0; offset < entries.length; offset += 256) {
+        this.assertRunning();
         await line.store.update(data => {
           for (const [key, value] of entries.slice(offset, offset + 256)) data.send_requests[key] = value;
         });
       }
       // Retained disconnected/error sessions must remain identifiable as paired
       // after restart so the manager can explicitly unlink their credentials.
-      line.auth = await createAuth(line.directory);
+      line.auth ??= await this.loadAuth(line);
+      this.assertRunning();
       line.display_phone_number = line.store.data.bound_phone || line.expected_phone;
-    } catch (error) { error.bridgePersistenceFailure = true; throw error; }
+    } catch (error) { if (!this.stopping) error.bridgePersistenceFailure = true; throw error; }
   }
   async addLine(payload) {
     if (!payload || typeof payload.request_id !== 'string' || !UUID_PATTERN.test(payload.request_id)) throw new BridgeError(400, 'INVALID_REQUEST_ID', 'A UUID registration request ID is required.');
@@ -197,19 +288,29 @@ export class Bridge {
       const id = String(numericId);
       const line = this.lineContext({ line_id: id, expected_phone: phone });
       // Prepare private state first. Failed storage writes never advertise a line.
-      await this.prepareLine(line);
-      await this.manifest.update(data => {
-        data.version = 1;
-        data.requests ??= {};
-        // Keep an existing legacy fallback paired line routable when its first
-        // additional line makes Python switch from fallback to manifest routing.
-        const fallback = !manifest.removed_line_ids.includes(this.config.fallbackLineId) && this.lines.get(this.config.fallbackLineId);
-        if (fallback) data.lines[fallback.line_id] = fallback.expected_phone;
-        data.lines[id] = phone;
-        data.requests[requestId] = { line_id: id, expected_phone: phone };
-        if (Buffer.byteLength(JSON.stringify(data), 'utf8') > MANIFEST_MAX_BYTES) throw new BridgeError(413, 'MANIFEST_TOO_LARGE', 'The linked-device line manifest exceeds its size limit.');
-        validateLineManifest(data);
-      });
+      try {
+        await this.prepareLine(line);
+        this.assertRunning();
+        await this.manifest.update(data => {
+          data.version = 1;
+          data.requests ??= {};
+          // Keep an existing legacy fallback paired line routable when its first
+          // additional line makes Python switch from fallback to manifest routing.
+          const fallback = !manifest.removed_line_ids.includes(this.config.fallbackLineId) && this.lines.get(this.config.fallbackLineId);
+          if (fallback) data.lines[fallback.line_id] = fallback.expected_phone;
+          data.lines[id] = phone;
+          data.requests[requestId] = { line_id: id, expected_phone: phone };
+          if (Buffer.byteLength(JSON.stringify(data), 'utf8') > MANIFEST_MAX_BYTES) throw new BridgeError(413, 'MANIFEST_TOO_LARGE', 'The linked-device line manifest exceeds its size limit.');
+          validateLineManifest(data);
+        });
+      } catch (error) {
+        // A retry can reuse this ID only after its unpublished owners and
+        // workers finish. Retain every prepared file, including credentials.
+        line.auth?.retire();
+        await Promise.allSettled([this.closeStore(line.auth?.store), this.closeStore(line.store)]);
+        this.storageMonitor.unregister(id);
+        throw error;
+      }
       this.lines.set(id, line);
       return { ...this.lineStatus(line), created: true };
     });
@@ -247,13 +348,14 @@ export class Bridge {
         // callbacks while this particular number is being unlinked.
         await line.sendTail;
         await line.readTail;
+        await line.mediaTail;
         if (line.connectPromise) await line.connectPromise;
         if (this.lineStatus(line).is_paired && !line.removalRemoteConfirmed) await this.confirmDeviceUnlink(line);
         this.stopRemovedSocket(line);
         await line.eventTail;
         await line.ackTail;
         await Promise.allSettled(line.confirmationTasks.values());
-        await line.auth?.store.flush();
+        await line.auth?.drain();
         await line.store.flush();
         await this.retirePhone(line);
         // Only a remote-confirmed removal (or an unpaired line) enters the
@@ -271,6 +373,9 @@ export class Bridge {
           }
           validateLineManifest(data);
         });
+        await this.closeStore(line.auth?.store);
+        await this.closeStore(line.store);
+        this.storageMonitor.unregister(id);
         this.lines.delete(id);
         await this.purgeRemovedLine(id);
         line.restoreNativeEvents?.();
@@ -297,6 +402,7 @@ export class Bridge {
   }
   stopRemovedSocket(line) {
     const socket = line.socket;
+    line.auth?.retire();
     line.session?.dispose();
     line.socket = null;
     line.ack?.close();
@@ -372,9 +478,10 @@ export class Bridge {
     const data = line.store?.data;
     return Boolean(data?.recover_since) && !(data.recover_until && Date.now() > data.recover_until);
   }
-  status() { return { lines: [...this.lines.values()].map(line => this.lineStatus(line)) }; }
+  status() { return { lines: [...this.lines.values()].map(line => this.lineStatus(line)), storage: this.storageMonitor.status() }; }
 
   async connect(id) {
+    this.assertRunning();
     const line = this.getLine(id);
     if (line.removing) throw new BridgeError(503, 'LINE_REMOVING', 'This WhatsApp number is being removed.');
     if (line.socket && !line.session?.closed && ['connected', 'connecting', 'qr'].includes(line.status)) return this.lineStatus(line);
@@ -386,6 +493,7 @@ export class Bridge {
   async openSocket(line) {
     if (this.stopping) throw new BridgeError(503, 'STOPPING', 'The bridge is shutting down.');
     const generation = ++line.generation;
+    line.auth?.retire();
     line.session?.dispose();
     line.ack?.close();
     line.socket?.end(new Error('Replacing linked-device session'));
@@ -394,21 +502,59 @@ export class Bridge {
     line.reconnectTimer = null;
     try {
       if (!line.store?.data) await this.prepareLine(line);
+      this.assertRunning();
       await line.store.update(data => { data.enabled = true; });
-      line.auth = await createAuth(line.directory);
+      this.assertRunning();
+      line.auth = line.auth ? await line.auth.renew() : await this.loadAuth(line);
+      if (this.stopping || generation !== line.generation) {
+        line.auth.retire(); await line.auth.drain(); return this.lineStatus(line);
+      }
+      // Retired provider pipelines can emit their already accepted messages
+      // while auth drains. Persist that final event tail before a new socket.
+      await line.eventTail;
+      this.assertRunning();
       await this.adoptRetiredPhone(line);
     } catch (error) {
       // Session persistence failures must never enter network retry loops.
-      error.bridgePersistenceFailure = true;
+      if (!this.stopping && error.code !== 'AUTH_SESSION_RETIRED') error.bridgePersistenceFailure = true;
       throw error;
     }
-    if (this.stopping || generation !== line.generation) return this.lineStatus(line);
+    const auth = line.auth;
+    if (this.stopping || generation !== line.generation) { auth.retire(); return this.lineStatus(line); }
+    // Standalone provider credential events can follow a server-side change
+    // outside any Signal transaction. Keep a durable active-session fence until
+    // retirement drains all accepted work; an unclean restart needs review.
+    await auth.armSession();
+    if (this.stopping || generation !== line.generation) { auth.retire(); await auth.drain(); return this.lineStatus(line); }
     line.status = 'connecting';
     this.trace(line, 'connection_transition', { state: 'connecting' });
     delete line.error;
     delete line.qr;
     delete line.qr_data_url;
-    const socket = this.makeSocket({ auth: line.auth.state, logger: silentLogger, browser: Browsers.ubuntu('Support Dashboard'),
+    let socket;
+    try { socket = this.makeSocket({ auth: auth.state, logger: silentLogger, browser: Browsers.ubuntu('Support Dashboard'),
+      bridgeTask: work => (...args) => {
+        // The checksum-verified pinned provider exposes complete asynchronous
+        // callback boundaries, including jobs it starts without awaiting them.
+        let task;
+        try { task = auth.trackProviderTask(() => work(...args)); }
+        catch (error) { task = Promise.reject(error); }
+        task.catch(error => { if (error.code !== 'AUTH_SESSION_RETIRED') this.onError(error); });
+        return task;
+      },
+      bridgeDetachedTask: work => (...args) => {
+        let task;
+        try { task = auth.trackProviderDetachedTask(() => work(...args)); }
+        catch (error) { task = Promise.reject(error); }
+        task.catch(error => { if (error.code !== 'AUTH_SESSION_RETIRED') this.onError(error); });
+        return task;
+      },
+      makeSignalRepository: (state, ...args) => {
+        // Install ownership before Signal operations or socket event handlers
+        // can start using the provider's buffered transaction wrapper.
+        auth.trackProviderKeys(state.keys);
+        return DEFAULT_CONNECTION_CONFIG.makeSignalRepository(state, ...args);
+      },
       printQRInTerminal: false, emitOwnEvents: false, enableRecentMessageCache: false,
       // Only the recent history of a line recovering from an outage, never a full sync.
       syncFullHistory: false, shouldSyncHistoryMessage: notification => this.recovering(line) && RECOVERY_SYNC_TYPES.includes(notification?.syncType),
@@ -416,6 +562,10 @@ export class Bridge {
       shouldIgnoreJid: jid => /@(g\.us|broadcast|newsletter)$/.test(jid),
       getMessage: async key => line.store.data.messages[key.id]?.message?.message,
     });
+      if (socket.authState?.keys) auth.trackProviderKeys(socket.authState.keys);
+      auth.trackProviderPipelines(socket);
+      auth.beforeRetire = socket.bridgePrepareRetirement?.bind(socket);
+    } catch (error) { auth.retire(); throw error; }
     line.socket = socket;
     const session = { generation, ready: false, closed: false };
     line.session = session;
@@ -425,15 +575,66 @@ export class Bridge {
       this.scheduleReconnect(line);
     };
     socket.ws.on('close', onClose);
+    let flushingBuffer = false, finishingRetirement = false, requestedEnd, endRequested = false, nativeEndStarted = false;
+    let destroyRequested = false, nativeDestroyed = false;
+    const nativeEnd = socket.end.bind(socket);
+    const nativeDestroy = socket.ev.destroy?.bind(socket.ev);
+    const flushAcceptedBuffer = () => {
+      if (flushingBuffer || session.subscriptionReleased || typeof socket.ev.flush !== 'function') return;
+      flushingBuffer = true;
+      try { auth.acceptBufferedEvents(() => socket.ev.flush()); }
+      finally { flushingBuffer = false; }
+    };
+    const releaseSubscription = () => {
+      if (session.subscriptionReleased) return;
+      flushAcceptedBuffer();
+      session.subscriptionReleased = true;
+      session.restoreNativeEvents?.(); session.unsubscribe?.();
+    };
+    const finishRetirement = (force = false) => {
+      if (finishingRetirement) return;
+      finishingRetirement = true;
+      try {
+        flushAcceptedBuffer();
+        if (auth.hasProviderWork() && !force) return;
+        // Controlled retirement must keep the transport available until
+        // accepted receive callbacks finish their receipt/ack/upsert sequence.
+        if (endRequested && !nativeEndStarted) {
+          nativeEndStarted = true;
+          Promise.resolve(nativeEnd(requestedEnd)).catch(this.onError);
+        }
+        releaseSubscription();
+        if (destroyRequested && !nativeDestroyed) { nativeDestroyed = true; nativeDestroy?.(); }
+      } finally { finishingRetirement = false; }
+    };
     session.dispose = () => {
       if (session.disposed) return;
       session.disposed = true;
       session.closed = true; session.ready = false;
+      auth.retire();
       socket.ws.off('close', onClose);
-      session.ack?.close();
-      session.restoreNativeEvents?.();
-      session.unsubscribe?.();
+      if (session.keepLateAcks) session.ack?.interrupt();
+      else session.ack?.close();
+      finishRetirement();
     };
+    socket.end = reason => {
+      // A timed-out outgoing send can still receive authoritative late ACKs.
+      // Keep that evidence listener until explicit replacement/shutdown closes
+      // it; accepting evidence never re-enables submissions on this socket.
+      if (!session.disposed && !this.stopping) session.keepLateAcks = true;
+      if (!endRequested) { endRequested = true; requestedEnd = reason; }
+      session.dispose();
+      finishRetirement();
+    };
+    if (nativeDestroy) socket.ev.destroy = () => {
+      // Baileys' internal end() calls destroy() directly. Retain its buffer
+      // and listeners while already admitted native callbacks are still live.
+      destroyRequested = true;
+      session.dispose();
+      finishRetirement();
+    };
+    auth.onDrained = () => finishRetirement(true);
+    auth.onProviderIdle = finishRetirement;
     // Real sockets expose the same emitter used by their native receive path.
     // Mock sockets may supply only ev.process; keep that seam for transport tests.
     if (typeof socket.ev.emit === 'function') line.restoreNativeEvents = session.restoreNativeEvents = preserveNativeMutationMetadata(socket);
@@ -451,17 +652,50 @@ export class Bridge {
         }).catch(this.onError);
       },
     });
+    const eventFailed = error => {
+      if (line.socket !== socket || line.generation !== generation) { this.onError(error); return; }
+      this.blockConnection(line, socket, 'persistence_failed');
+      line.status = 'error';
+      line.error = 'Could not safely save or synchronize the WhatsApp session. Reconnect after checking bridge storage.';
+      clearTimeout(line.reconnectTimer);
+      line.reconnectTimer = null;
+      session.dispose();
+      line.ack?.close();
+      socket.end(new Error('Linked-device event persistence failed'));
+      if (line.socket === socket) line.socket = null;
+      this.onError(error);
+    };
+    auth.onFailure = eventFailed;
     session.unsubscribe = socket.ev.process(events => {
+      // Identity is checked at admission, never after another event has had a
+      // chance to retire the socket. WhatsApp may already have acknowledged an
+      // incoming message; accepted payloads must survive failure/replacement.
+      const acceptedPipeline = auth.inProviderContext();
+      if (!acceptedPipeline && (line.socket !== socket || line.generation !== generation || session.disposed)) return Promise.resolve();
       // Fence immediately, before persistence or another queued event can yield.
       if (events['connection.update']?.connection === 'close') this.blockConnection(line, socket, 'connection_closed');
+      let credentialsSaved;
+      if (events['creds.update']) {
+        // Baileys may already have rotated a server-side pre-key. Admit this
+        // write now, before slow message/history processing can be overtaken by
+        // reconnect. The next auth facade drains this same durable store queue.
+        try {
+          Object.assign(auth.state.creds, events['creds.update']);
+          credentialsSaved = Promise.resolve(auth.saveCreds());
+        } catch (error) { credentialsSaved = Promise.reject(error); }
+        // Observe immediately, but do not reject this batch before preserving
+        // its incoming messages and delivery evidence below.
+        credentialsSaved = credentialsSaved.catch(error => {
+          if (!error.bridgePersistenceFailure) eventFailed(error);
+        });
+      }
       line.eventTail = line.eventTail.then(async () => {
-        if (line.socket !== socket) return;
-        if (events['creds.update']) {
-          Object.assign(line.auth.state.creds, events['creds.update']);
-          await line.auth.saveCreds();
+        if (credentialsSaved) await credentialsSaved;
+        let connectionError;
+        if (events['connection.update']) {
+          try { await this.connectionUpdate(line, socket, events['connection.update']); }
+          catch (error) { connectionError = error; }
         }
-        if (line.socket !== socket || line.generation !== generation) return;
-        if (events['connection.update']) await this.connectionUpdate(line, socket, events['connection.update']);
         if (line.removing) return;
         const upsert = events['messages.upsert'];
         if (upsert) for (const message of upsert.messages ?? []) {
@@ -480,19 +714,8 @@ export class Bridge {
         for (const update of events['messages.update'] ?? []) await this.receiveUpdate(line, update);
         const history = events['messaging-history.set'];
         if (history && this.recovering(line)) await this.recoverHistory(line, history.messages ?? []);
-      }).catch(error => {
-        if (line.socket !== socket || line.generation !== generation) { this.onError(error); return; }
-        this.blockConnection(line, socket, 'persistence_failed');
-        line.status = 'error';
-        line.error = 'Could not safely save or synchronize the WhatsApp session. Reconnect after checking bridge storage.';
-        clearTimeout(line.reconnectTimer);
-        line.reconnectTimer = null;
-        session.dispose();
-        line.ack?.close();
-        socket.end(new Error('Linked-device event persistence failed'));
-        if (line.socket === socket) line.socket = null;
-        this.onError(error);
-      });
+        if (connectionError) throw connectionError;
+      }).catch(eventFailed);
       return line.eventTail;
     });
     return this.lineStatus(line);
@@ -604,7 +827,7 @@ export class Bridge {
           delete data.recover_until;
         });
         if (line.session !== session) return;
-        await auth.reset();
+        line.auth = await auth.reset();
       } else {
         line.status = 'disconnected';
         this.scheduleReconnect(line, reason === DisconnectReason.restartRequired);
@@ -638,31 +861,40 @@ export class Bridge {
   }
 
   async disconnect(id) {
-    const line = this.getLine(id);
-    if (line.removing) throw new BridgeError(503, 'LINE_REMOVING', 'This WhatsApp number is being removed.');
-    if (!line.store?.data) throw new BridgeError(503, 'LINE_STORAGE_UNAVAILABLE', 'Check this line session storage before disconnecting.');
-    clearTimeout(line.reconnectTimer);
-    line.reconnectTimer = null;
-    line.generation++;
-    line.session?.dispose();
-    await line.store.update(data => { data.enabled = false; });
-    const socket = line.socket;
-    line.socket = null;
-    line.ack?.close();
-    if (socket) {
-      try { await socket.logout(); }
-      catch { socket.end(new Error('Explicit linked-device disconnect')); }
-    }
-    await line.eventTail;
-    line.auth ??= await createAuth(line.directory);
-    await line.auth.reset();
-    await line.store.update(data => { data.bound_phone = ''; });
-    line.display_phone_number = line.expected_phone;
-    line.status = 'logged_out';
-    delete line.error;
-    delete line.qr;
-    delete line.qr_data_url;
-    return this.lineStatus(line);
+    this.assertRunning();
+    // Unlinking can outlive its HTTP connection. Share registration/removal
+    // ownership so shutdown retains its stores until an admitted unlink ends.
+    const task = this.registrationTail.then(async () => {
+      this.assertRunning();
+      const line = this.getLine(id);
+      if (line.removing) throw new BridgeError(503, 'LINE_REMOVING', 'This WhatsApp number is being removed.');
+      if (!line.store?.data) throw new BridgeError(503, 'LINE_STORAGE_UNAVAILABLE', 'Check this line session storage before disconnecting.');
+      clearTimeout(line.reconnectTimer);
+      line.reconnectTimer = null;
+      line.generation++;
+      line.auth?.retire();
+      line.session?.dispose();
+      await line.store.update(data => { data.enabled = false; });
+      const socket = line.socket;
+      line.socket = null;
+      line.ack?.close();
+      if (socket) {
+        try { await socket.logout(); }
+        catch { socket.end(new Error('Explicit linked-device disconnect')); }
+      }
+      await line.eventTail;
+      line.auth ??= await this.loadAuth(line);
+      line.auth = await line.auth.reset();
+      await line.store.update(data => { data.bound_phone = ''; });
+      line.display_phone_number = line.expected_phone;
+      line.status = 'logged_out';
+      delete line.error;
+      delete line.qr;
+      delete line.qr_data_url;
+      return this.lineStatus(line);
+    });
+    this.registrationTail = task.catch(() => {});
+    return task;
   }
 
   // Baileys filters out negative contacts. An empty/absent response therefore
@@ -726,8 +958,14 @@ export class Bridge {
       if (jid?.endsWith('@s.whatsapp.net')) return phoneDigits(jid.split('@')[0].split(':')[0]);
     }
     if (key.remoteJid?.endsWith('@lid')) {
-      const phoneJid = await line.socket?.signalRepository?.lidMapping?.getPNForLID(key.remoteJid);
-      if (phoneJid?.endsWith('@s.whatsapp.net')) return phoneDigits(phoneJid.split('@')[0].split(':')[0]);
+      try {
+        const phoneJid = await line.socket?.signalRepository?.lidMapping?.getPNForLID(key.remoteJid);
+        if (phoneJid?.endsWith('@s.whatsapp.net')) return phoneDigits(phoneJid.split('@')[0].split(':')[0]);
+      } catch (error) {
+        // Retirement or failed auth storage must not discard an accepted LID
+        // message. receive() retains its native payload for later normalization.
+        this.onError(error);
+      }
     }
     return null;
   }
@@ -842,7 +1080,7 @@ export class Bridge {
   }
   async purgeDeletedContent(line, wrapped) {
     const nativeId = unwrapId(line.line_id, wrapped);
-    await line.store.update(data => {
+    await this.mediaStorage(line, () => line.store.update(data => {
       const record = data.messages[nativeId];
       const mediaIds = Object.entries(data.media)
         .filter(([id, media]) => id === record?.media_id || media.message?.key?.id === nativeId).map(([id]) => id);
@@ -867,7 +1105,7 @@ export class Bridge {
         delete operation.event;
         operation.event_enqueued = true;
       }
-    });
+    }));
     const targetsMessage = event => event.message_id === wrapped ||
       event.payload?.entry?.some(entry => entry.changes?.some(change => change.value?.messages?.some(message => message.id === wrapped)));
     const deletedRecord = line.store.data.messages[nativeId];
@@ -949,12 +1187,19 @@ export class Bridge {
       if (data.messages[nativeId]?.deleted) Object.assign(data.messages[nativeId], { callbacks_scrubbed: true, tombstone_version: 2, pending_original_tombstone: false });
     });
   }
+  mediaStorage(line, action) {
+    const task = (line.mediaTail ?? Promise.resolve()).then(action);
+    line.mediaTail = task.catch(() => {});
+    return task;
+  }
   async removePendingMedia(line) {
-    for (const mediaId of line.store.data.pending_media_deletions ?? []) {
-      try { await unlink(this.mediaPath(line, mediaId)); }
-      catch (error) { if (error.code !== 'ENOENT') throw error; }
-      await line.store.update(data => { data.pending_media_deletions = data.pending_media_deletions.filter(id => id !== mediaId); });
-    }
+    return this.mediaStorage(line, async () => {
+      for (const mediaId of line.store.data.pending_media_deletions ?? []) {
+        try { await unlink(this.mediaPath(line, mediaId)); }
+        catch (error) { if (error.code !== 'ENOENT') throw error; }
+        await line.store.update(data => { data.pending_media_deletions = data.pending_media_deletions.filter(id => id !== mediaId); });
+      }
+    });
   }
   async retirePhone(line) {
     const phone = knownPhone(line.store.data.bound_phone || line.display_phone_number);
@@ -994,13 +1239,43 @@ export class Bridge {
     if (!key?.id || !key.remoteJid || /@(g\.us|broadcast|newsletter)$/.test(key.remoteJid)) return;
     wrapId(line.line_id, key.id);
     const existing = line.store.data.messages[key.id];
-    const phone = existing?.phone ?? await this.counterpart(line, key);
+    const existingRouteMatches = existing && Boolean(existing.message?.key?.fromMe) === Boolean(key.fromMe) &&
+      [existing.message?.key?.remoteJid, existing.message?.key?.remoteJidAlt].includes(key.remoteJid);
+    let phone = existingRouteMatches ? existing.phone : undefined;
+    if (!phone) {
+      try { phone = await this.counterpart(line, key); }
+      catch (error) {
+        // A queued LID payload can outlive its auth owner. Preserve it for
+        // verified normalization instead of losing it when key lookup fails.
+        if (!key.remoteJid.endsWith('@lid')) throw error;
+        this.onError(error);
+      }
+    }
     const mutation = mutationEvent(line, message, phone);
     if (mutation) {
       const ownOperation = Object.values(line.store.data.operations).find(operation => operation.provider_id === key.id);
       // A relayed operation is confirmed only by its ACK, never by a local echo.
       if (ownOperation) return;
-      if (phone) await this.applyEvent(line, mutation);
+      const target = line.store.data.messages[unwrapId(line.line_id, mutation.message_id)];
+      // A target ID alone is not a conversation binding. The exact saved LID
+      // and sender side must agree before reusing its already verified phone.
+      if (!phone && target?.phone && Boolean(target.message?.key?.fromMe) === Boolean(key.fromMe) &&
+          [target.message?.key?.remoteJid, target.message?.key?.remoteJidAlt].includes(key.remoteJid)) phone = target.phone;
+      const pendingId = crypto.createHash('sha256').update(encode(message)).digest('hex');
+      if (!phone) {
+        if (!line.store.data.pending_mutations?.[pendingId]) await line.store.update(data => {
+          data.pending_mutations ??= {};
+          data.pending_mutations[pendingId] = {message};
+        });
+        return;
+      }
+      await this.applyEvent(line, {...mutation, sender_phone: phone});
+      // Only release retained input after the durable event/tombstone work
+      // finishes (or its verified routing/side is rejected by applyEvent).
+      if (line.store.data.pending_mutations?.[pendingId]) await line.store.update(data => {
+        delete data.pending_mutations[pendingId];
+        if (!Object.keys(data.pending_mutations).length) delete data.pending_mutations;
+      });
       return;
     }
     if (existing?.deleted) {
@@ -1067,6 +1342,18 @@ export class Bridge {
   }
   async receiveUpdate(line, { key, update }) {
     if (!key?.id || !update) return;
+    if (update.status === proto.WebMessageInfo.Status.ERROR) {
+      // Negative provider evidence can arrive after a send is already marked
+      // uncertain, or while an account-restriction query delays the native
+      // callback. Retain it independently of positive receipt/UI transitions;
+      // this evidence never authorizes a retry or a new provider message ID.
+      const evidence = { key, status: update.status, parameters: update.messageStubParameters ?? [] };
+      const id = crypto.createHash('sha256').update(encode(evidence)).digest('hex');
+      await line.store.update(data => {
+        data.provider_rejections ??= {};
+        data.provider_rejections[id] ??= { ...evidence, observed_at: Date.now() };
+      });
+    }
     if (update.messageStubParameters?.[1] && line.store.data.messages[key.id]?.pending_placeholder) {
       await line.store.update(data => { data.messages[key.id].placeholder_request_id = update.messageStubParameters[1]; });
     }
@@ -1096,23 +1383,53 @@ export class Bridge {
     const line = this.getLine(id);
     if (line.removing) throw new BridgeError(503, 'LINE_REMOVING', 'This WhatsApp number is being removed.');
     if (!line.store?.data) throw new BridgeError(503, 'LINE_STORAGE_UNAVAILABLE', 'Check this line session storage before uploading media.');
+    // Outgoing uploads are optional new work, unlike incoming messages and
+    // delivery evidence. Probe before decoding the potentially large body.
+    await this.storageMonitor.sample();
+    this.storageMonitor.assertCanSubmit(id);
     const encoded = payload?.content_base64;
     if (typeof encoded !== 'string' || encoded.length % 4 !== 0) throw new BridgeError(400, 'INVALID_MEDIA', 'Provide valid base64 media content.');
     // Bound allocation first. Repeated regex groups overflow V8's stack on
     // normal multi-megabyte attachments; Buffer's decoder alone is permissive.
     if (encoded.length > Math.ceil(this.config.maxMediaBytes / 3) * 4) throw new BridgeError(413, 'MEDIA_TOO_LARGE', 'Media exceeds the upload limit.');
-    const bytes = Buffer.from(encoded, 'base64');
-    if (bytes.toString('base64') !== encoded) throw new BridgeError(400, 'INVALID_MEDIA', 'Provide valid base64 media content.');
-    if (!bytes.length || bytes.length > this.config.maxMediaBytes) throw new BridgeError(413, 'MEDIA_TOO_LARGE', 'Media must be nonempty and no larger than 25 MiB.');
-    const rawMime = String(payload.mime_type ?? '').trim().toLowerCase();
-    const baseMime = rawMime.split(';')[0].trim();
-    const mime = baseMime === 'audio/ogg' && /codecs\s*=\s*opus/.test(rawMime) ? 'audio/ogg; codecs=opus' : baseMime;
-    if (!/^[a-z0-9][a-z0-9.+-]*\/[a-z0-9][a-z0-9.+-]*$/.test(baseMime)) throw new BridgeError(400, 'INVALID_MEDIA', 'Provide a valid media MIME type.');
-    const mediaId = `ldmedia:${id}:${crypto.randomUUID()}`;
-    const filename = this.mediaPath(line, mediaId);
-    await this.writeBytes(filename, bytes);
-    await line.store.update(data => { data.media[mediaId] = { content_hash: crypto.createHash('sha256').update(bytes).digest('hex'), mime_type: mime, filename: path.basename(String(payload.filename ?? 'attachment')).slice(0, 255), downloaded: true }; });
-    return { id: mediaId };
+    const releaseCapacity = this.storageMonitor.reserveOptionalWrite(id, encoded.length / 4 * 3);
+    try {
+      const bytes = Buffer.from(encoded, 'base64');
+      if (bytes.toString('base64') !== encoded) throw new BridgeError(400, 'INVALID_MEDIA', 'Provide valid base64 media content.');
+      if (!bytes.length || bytes.length > this.config.maxMediaBytes) throw new BridgeError(413, 'MEDIA_TOO_LARGE', 'Media must be nonempty and no larger than 25 MiB.');
+      const rawMime = String(payload.mime_type ?? '').trim().toLowerCase();
+      const baseMime = rawMime.split(';')[0].trim();
+      const mime = baseMime === 'audio/ogg' && /codecs\s*=\s*opus/.test(rawMime) ? 'audio/ogg; codecs=opus' : baseMime;
+      if (!/^[a-z0-9][a-z0-9.+-]*\/[a-z0-9][a-z0-9.+-]*$/.test(baseMime)) throw new BridgeError(400, 'INVALID_MEDIA', 'Provide a valid media MIME type.');
+      const displayFilename = path.basename(String(payload.filename ?? 'attachment')).slice(0, 255);
+      const contentHash = crypto.createHash('sha256').update(bytes).digest('hex');
+      // A send can be rejected after its upload completed. Identical retries must
+      // reuse those bytes instead of creating another otherwise orphaned file.
+      const digest = crypto.createHash('sha256').update(JSON.stringify(['outgoing-media-v1', contentHash, mime, displayFilename])).digest('hex');
+      const stableId = `${digest.slice(0, 8)}-${digest.slice(8, 12)}-${digest.slice(12, 16)}-${digest.slice(16, 20)}-${digest.slice(20, 32)}`;
+      const mediaId = `ldmedia:${id}:${stableId}`;
+      return await this.mediaStorage(line, async () => {
+        if (line.removing || this.stopping) throw new BridgeError(503, 'STOPPING', 'Media storage is shutting down.');
+        const filename = this.mediaPath(line, mediaId);
+        const existing = line.store.data.media[mediaId];
+        if (existing) {
+          if (existing.content_hash !== contentHash || existing.mime_type !== mime || existing.filename !== displayFilename) {
+            throw new BridgeError(409, 'MEDIA_ID_CONFLICT', 'The attachment storage identity conflicts with existing media.');
+          }
+          if (existing.downloaded && !(line.store.data.pending_media_deletions ?? []).includes(mediaId)) {
+            const saved = await stat(filename).catch(error => { if (error.code !== 'ENOENT') throw error; return null; });
+            if (saved?.isFile() && saved.size === bytes.length) return { id: mediaId };
+          }
+        }
+        this.storageMonitor.assertCanSubmit(id);
+        await this.writeBytes(filename, bytes);
+        await line.store.update(data => {
+          data.media[mediaId] = { content_hash: contentHash, mime_type: mime, filename: displayFilename, downloaded: true };
+          if (data.pending_media_deletions) data.pending_media_deletions = data.pending_media_deletions.filter(value => value !== mediaId);
+        });
+        return { id: mediaId };
+      });
+    } finally { releaseCapacity(); }
   }
   mediaPath(line, id) {
     const match = /^ldmedia:(\d{5,32}):([0-9a-f-]{36})$/.exec(id);
@@ -1120,11 +1437,7 @@ export class Bridge {
     return path.join(line.directory, 'media', `${match[2]}.bin`);
   }
   async writeBytes(filename, bytes) {
-    const { open, rename } = await import('node:fs/promises');
-    const temporary = `${filename}.${crypto.randomUUID()}.tmp`;
-    const handle = await open(temporary, 'wx', 0o600);
-    try { await handle.writeFile(bytes); await handle.sync(); } finally { await handle.close(); }
-    await rename(temporary, filename);
+    return this.mediaFiles.write(filename, bytes);
   }
   async downloadMedia(id, mediaId) {
     const line = this.getLine(id);
@@ -1139,6 +1452,7 @@ export class Bridge {
       try {
         stream = await download({});
       } catch (error) {
+        this.assertRunning();
         // Some messages (seen with stickers) carry a URL on a host that does not
         // resolve, such as a.whatsapp.net. Baileys keeps that host when it builds
         // the URL from directPath, so the download can never succeed. Retry once
@@ -1159,8 +1473,15 @@ export class Bridge {
         chunks.push(chunk);
       }
       const bytes = Buffer.concat(chunks);
-      await this.writeBytes(filename, bytes);
-      await line.store.update(data => { data.media[mediaId].downloaded = true; });
+      // Network downloads are optional work and may finish after shutdown.
+      // Only publication enters the media queue: already admitted publication
+      // drains with close(), while late downloads allocate no storage.
+      await this.mediaStorage(line, async () => {
+        this.assertRunning();
+        if (!line.store.data.media[mediaId]) throw new BridgeError(404, 'UNKNOWN_MEDIA', 'Media was removed while its download was in progress.');
+        await this.writeBytes(filename, bytes);
+        await line.store.update(data => { data.media[mediaId].downloaded = true; });
+      });
     }
     return { content: await readFile(filename), mime_type: media.mime_type };
   }
@@ -1271,6 +1592,7 @@ export class Bridge {
       const options = {};
       if (payload.context?.message_id) options.quoted = this.target(line, payload.context.message_id, phone, false).message;
       this.connected(line, socket);
+      this.storageMonitor.assertCanSubmit(id);
       const nativeId = generateMessageIDV2(socket.user?.id);
       const waiter = line.ack.expect(nativeId, { deferred: true });
       let submitted = false;
@@ -1278,13 +1600,20 @@ export class Bridge {
         // Reserve the native ID durably before the socket can emit a fromMe
         // upsert. A fast echo or crash must not mirror this dashboard send as
         // a second, unattributed WhatsApp-app message in the ticket.
-        await line.store.update(data => {
+        await this.mediaStorage(line, () => line.store.update(data => {
+          const mediaId = MEDIA_TYPES.includes(payload.type) ? payload[payload.type].id : undefined;
+          // Publication of this durable reference must serialize with deletion
+          // of another message sharing the same deduplicated attachment.
+          if (mediaId && (!data.media[mediaId] || data.pending_media_deletions?.includes(mediaId))) {
+            throw new BridgeError(404, 'UNKNOWN_MEDIA', 'The attachment was removed before this send was reserved.');
+          }
           if (clientMessageId) data.send_requests[crypto.createHash('sha256').update(clientMessageId).digest('hex')] = {native_id: nativeId, fingerprint};
           data.messages[nativeId] = {
           request_fingerprint: fingerprint, message: { key: { id: nativeId, remoteJid: jid, fromMe: true } },
           phone, timestamp: Date.now(), notified: true, pending_send: true,
+          ...(mediaId ? { media_id: mediaId } : {}),
           ...(clientMessageId ? { client_message_id: clientMessageId } : {}),
-        }; });
+        }; }));
         this.connected(line, socket);
         const sendStarted = Date.now();
         this.trace(line, 'send_attempt', { native_id: nativeId, content_type: payload.type });
@@ -1386,6 +1715,7 @@ export class Bridge {
       if (!operation && (age < -60_000 || age > window)) throw new BridgeError(409, 'TIME_WINDOW_EXPIRED', kind === 'edit' ? 'WhatsApp messages can be edited within 15 minutes of sending.' : 'The deletion window has expired for this WhatsApp message.');
       if (kind === 'edit' && target.text === null) throw new BridgeError(409, 'UNSUPPORTED_EDIT', 'Only text messages can be edited.');
       const socket = this.connected(line);
+      this.storageMonitor.assertCanSubmit(id);
       if (!operation) {
         const timestamp = Math.max(Date.now(), (target.last_mutation_timestamp ?? 0) + 1);
         const protocolMessage = { key: target.message.key,
@@ -1448,6 +1778,7 @@ export class Bridge {
     // A history pass may outlast the timer interval on a busy line. Do not
     // multiply disk writes or replay the same work with overlapping passes.
     if (this.recoveryTask) return this.recoveryTask;
+    if (this.stopping) return;
     this.recoveryTask = this.recoverPendingOnce().finally(() => { this.recoveryTask = null; });
     return this.recoveryTask;
   }
@@ -1496,6 +1827,9 @@ export class Bridge {
           if (record.client_message_id && !record.confirmation_enqueued && (record.ack_confirmed || record.echo_seen)) {
             await this.enqueueOwnConfirmation(line, nativeId);
           }
+        }
+        if (line.status === 'connected') for (const pending of Object.values(line.store.data.pending_mutations ?? {})) {
+          await this.receive(line, pending.message);
         }
         if (line.status === 'connected') for (const record of Object.values(line.store.data.messages)) {
           // Retry unsupported content retained by older builds as well as LID
@@ -1577,28 +1911,85 @@ export class Bridge {
       data.entries = data.entries.filter(item => item.event.event_id !== entry.event.event_id);
     });
   }
-  async close() {
+  close() {
+    // Set admission fences synchronously, including while initialize() is
+    // suspended in a store replay or socket/auth preparation.
     this.stopping = true;
+    this.initializationController.abort();
+    this.closePromise ??= this.closeOnce().finally(() => { this.closed = true; });
+    return this.closePromise;
+  }
+  async closeOnce() {
+    this.stopping = true;
+    const failures = [];
+    const settled = async tasks => {
+      for (const result of await Promise.allSettled(tasks)) if (result.status === 'rejected') failures.push(result.reason);
+    };
     clearInterval(this.workerTimer);
     clearInterval(this.pendingTimer);
-    await Promise.allSettled(this.callbackTasks.values());
-    await this.registrationTail;
-    for (const line of this.lines.values()) {
+    const authDrains = new Map(), maintenance = new Map(), stoppedLines = new Set();
+    const begin = operation => {
+      try {
+        const task = Promise.resolve(operation());
+        task.catch(() => {});
+        return task;
+      } catch (error) { failures.push(error); return Promise.resolve(); }
+    };
+    const stopStore = store => {
+      if (store && !maintenance.has(store)) maintenance.set(store, begin(() => store.stopMaintenance()));
+    };
+    const stopLine = line => {
       clearTimeout(line.reconnectTimer);
-      line.generation++;
-      line.session?.dispose();
-      line.ack?.close();
-      line.socket?.end(new Error('Bridge shutdown'));
-      await line.connectPromise?.catch(() => {});
-      await line.sendTail;
-      await line.readTail;
-      await line.eventTail;
-      await line.ackTail;
-      await Promise.allSettled(line.confirmationTasks.values());
-      await line.auth?.store.flush();
-      await line.store?.flush();
-    }
-    await this.outbox.flush();
-    await this.manifest?.flush();
+      line.reconnectTimer = null;
+      if (!stoppedLines.has(line)) { stoppedLines.add(line); line.generation++; }
+      if (line.auth && !authDrains.has(line.auth)) {
+        begin(() => line.auth.retire());
+        begin(() => line.session?.dispose());
+        begin(() => line.ack?.close());
+        begin(() => line.socket?.end(new Error('Bridge shutdown')));
+        authDrains.set(line.auth, begin(() => line.auth.drain()));
+      }
+      stopStore(line.auth?.store); stopStore(line.store);
+    };
+    // Start socket retirement, all auth drains, checkpoint cancellation and
+    // monitoring shutdown before awaiting any phase. Their deadlines overlap
+    // within systemd's 35-second budget; essential journal writes remain open.
+    for (const line of this.lines.values()) stopLine(line);
+    for (const store of this.ownedStores) stopStore(store);
+    stopStore(this.outbox);
+    await settled([this.storageMonitor.close(), ...maintenance.values(),
+      // initialize() may still be assigning a newly loaded facade to its line.
+      // Its owner must settle before the final drain/close and lock release.
+      this.initializePromise?.catch(() => {}), this.registrationTail,
+      this.recoveryTask, ...this.callbackTasks.values()]);
+    // A registration admitted before stopping can have finished during the
+    // drain. Its new stores have no socket but still need orderly closure.
+    for (const line of this.lines.values()) stopLine(line);
+    for (const store of this.ownedStores) stopStore(store);
+    await settled([...maintenance.values()]);
+    await Promise.all([...this.lines.values()].map(async line => {
+      try {
+        await line.connectPromise?.catch(() => {});
+        // A renewal admitted before shutdown may have produced a new facade.
+        stopLine(line);
+        await line.sendTail;
+        await line.readTail;
+        await line.mediaTail;
+        // Auth failure must not skip already accepted message/delivery work.
+        await settled([...authDrains.values()]);
+        await line.eventTail;
+        await line.ackTail;
+        await Promise.allSettled(line.confirmationTasks.values());
+      } catch (error) { failures.push(error); }
+    }));
+    await settled([...authDrains.values()]);
+    // Include failed/partially loaded stores, even when line.store or line.auth
+    // could never be assigned. Only settled cleanup permits lock release.
+    const stores = new Set([...this.ownedStores, this.outbox,
+      ...[...this.lines.values()].flatMap(line => [line.auth?.store, line.store])]);
+    await settled([...stores].filter(Boolean).map(store => begin(() => this.closeStore(store))));
+    const files = new Set([...this.ownedFiles, this.manifest, this.retiredPhones]);
+    await settled([...files].filter(Boolean).map(store => begin(() => store.flush())));
+    if (failures.length) throw new AggregateError(failures, 'BRIDGE_SHUTDOWN_FAILED');
   }
 }

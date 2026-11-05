@@ -51,6 +51,9 @@ async def _deliver_claimed(repository, transport, media_store, ticket, message, 
             if asset is None:
                 raise ValueError('The stored attachment is unavailable. Restore it before retrying.')
             phase = "upload"
+            check_storage = getattr(transport, "check_media_storage", None)
+            if check_storage is not None:
+                await check_storage(phone_number_id=common['phone_number_id'])
             media_id = await transport.upload_media(content=asset.path.read_bytes(), mime_type=asset.mime_type,
                                                     filename=asset.filename, phone_number_id=common['phone_number_id'])
             defaults = {'image': {'Image'}, 'video': {'Video'}, 'document': {asset.filename, 'Document'}}

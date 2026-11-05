@@ -523,6 +523,12 @@ class RoutedWhatsAppClient:
         client, line = self._route(phone_number_id, message_id)
         return await client.delete_message(to, message_id, phone_number_id=line, operation_id=operation_id)
 
+    async def check_media_storage(self, *, phone_number_id: str | None = None) -> None:
+        client, line = self._route(phone_number_id)
+        check = getattr(client, "check_media_storage", None)
+        if check is not None:
+            await check(phone_number_id=line)
+
     async def upload_media(self, *, content: bytes, mime_type: str, filename: str, phone_number_id: str | None = None) -> str:
         try:
             client, line = self._route(phone_number_id)

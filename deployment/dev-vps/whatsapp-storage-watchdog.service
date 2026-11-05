@@ -1,0 +1,31 @@
+[Unit]
+Description=Independent WhatsApp bridge and storage health probe
+After=network.target
+# Deliberately no Requires/PartOf bridge dependency: report failed startup too.
+
+[Service]
+Type=oneshot
+User=whatsapp-support
+Group=whatsapp-support
+WorkingDirectory=/opt/whatsapp-support/current
+EnvironmentFile=/etc/whatsapp-support/app.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+# Install the probe independently so rolling back the release cannot remove it.
+ExecStart=/usr/bin/python3 /usr/local/libexec/whatsapp-support/check_bridge_storage.py
+TimeoutStartSec=10
+TimeoutStopSec=3
+RuntimeDirectory=whatsapp-storage-watchdog
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+UMask=0077
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=whatsapp-storage-watchdog
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/var/lib/whatsapp-support
+ReadWritePaths=/run/whatsapp-storage-watchdog
+CapabilityBoundingSet=
+RestrictSUIDSGID=true

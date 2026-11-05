@@ -5,6 +5,7 @@ import base64
 import json
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -19,6 +20,66 @@ from app.whatsapp_client import (
 
 MESSAGE = "ld:10001:ABC123"
 MEDIA = "ldmedia:10001:ce82b74b-1763-494a-9b79-3f99b994c354"
+
+
+def test_delivery_pressure_preflight_prevents_attachment_reads_uploads_and_dispatch(bridge):
+    from app.support_delivery import deliver
+
+    requests = bridge(lambda request: httpx.Response(200, json={"lines": [], "storage": {
+        "level": "critical", "issues": [{"code": "DISK_SPACE_LOW", "level": "critical", "line_id": None}],
+    }}))
+    finished = []
+
+    class Repository:
+        async def claim_delivery(self, *_args, **_kwargs):
+            return "claim"
+
+        async def begin_delivery(self, *_args):
+            pytest.fail("storage pressure must be rejected before dispatch admission")
+
+        async def finish_delivery(self, *_args, **kwargs):
+            finished.append(kwargs)
+
+        async def get_message(self, message_id):
+            return {"id": message_id}
+
+    def forbidden_read():
+        pytest.fail("storage pressure must be rejected before allocating attachment bytes")
+
+    asset = SimpleNamespace(path=SimpleNamespace(read_bytes=forbidden_read), mime_type="application/pdf", filename="test.pdf")
+    media_store = SimpleNamespace(get=lambda *_args: asset)
+    ticket = {"id": 1, "whatsapp_phone": "96170123456", "business_phone_number_id": "10001"}
+    message = {"id": 2, "message_type": "document", "body": "Document", "transport_client_id": "stable-send-key"}
+
+    async def run():
+        for _ in range(3):
+            await deliver(Repository(), RoutedWhatsAppClient(), media_store, ticket, message, retry=True)
+
+    asyncio.run(run())
+    assert len(requests) == 3
+    assert all(request.method == "GET" and request.url.path == "/v1/status" for request in requests)
+    assert all(result["status"] == "FAILED" for result in finished)
+
+
+@pytest.mark.parametrize("storage", [None, {"level": "warning", "issues": []}, {
+    "level": "critical", "issues": [{"code": "JOURNAL_LIMIT", "level": "critical", "line_id": "10002"}],
+}])
+def test_media_preflight_preserves_rollback_and_other_line_availability(bridge, storage):
+    payload = {"lines": []}
+    if storage is not None:
+        payload["storage"] = storage
+    requests = bridge(lambda _: httpx.Response(200, json=payload))
+    asyncio.run(RoutedWhatsAppClient().check_media_storage(phone_number_id="10001"))
+    assert len(requests) == 1
+
+
+@pytest.mark.parametrize("storage", [{"level": [], "issues": []}, {"level": "ok", "issues": None}, []])
+def test_media_preflight_fails_closed_on_malformed_storage_health(bridge, storage):
+    bridge(lambda _: httpx.Response(200, json={"storage": storage}))
+    with pytest.raises(WhatsAppSendError) as caught:
+        asyncio.run(LinkedDeviceWhatsAppClient().check_media_storage(phone_number_id="10001"))
+    assert caught.value.bridge_code == "STORAGE_PRESSURE"
+    assert not caught.value.delivery_uncertain
 
 
 @pytest.fixture
