@@ -904,7 +904,14 @@ class SupportRepository(DashboardRepositoryMixin, DeliveryRepositoryMixin, ReadS
         self,
         phone_number: str,
         business_phone_number_id: str | None = None,
+        *,
+        include_legacy: bool = True,
     ) -> dict[str, Any] | None:
+        """Find a line's active thread, optionally allowing unbound inbound history.
+
+        Outbound forwarding requires an exact office match and opts out of the
+        legacy fallback; incoming-message adoption retains its existing default.
+        """
         if self._pool is None:
             await self.connect()
         assert self._pool is not None
@@ -923,7 +930,7 @@ class SupportRepository(DashboardRepositoryMixin, DeliveryRepositoryMixin, ReadS
                           AND (
                                 t.business_phone_number_id = %s
                                 OR (
-                                    t.business_phone_number_id IS NULL
+                                    %s AND t.business_phone_number_id IS NULL
                                     AND t.active_key = %s
                                 )
                               )
@@ -934,6 +941,7 @@ class SupportRepository(DashboardRepositoryMixin, DeliveryRepositoryMixin, ReadS
                             phone_number,
                             *ACTIVE_TICKET_STATUSES,
                             business_phone_number_id,
+                            include_legacy,
                             phone_number,
                         ),
                     )
@@ -1473,12 +1481,15 @@ class SupportRepository(DashboardRepositoryMixin, DeliveryRepositoryMixin, ReadS
         customer_name: str | None,
         agent_id: str,
         agent_name: str,
+        include_legacy: bool = True,
     ) -> dict[str, Any]:
         """Create one active staff-origin conversation already assigned to its starter."""
         if self._pool is None:
             await self.connect()
         assert self._pool is not None
-        existing = await self.find_active_ticket_by_phone(phone_number, business_phone_number_id)
+        existing = await self.find_active_ticket_by_phone(
+            phone_number, business_phone_number_id, include_legacy=include_legacy,
+        )
         if existing:
             raise SupportConflictError("This customer already has an active conversation on that WhatsApp line.")
         active_key = _ticket_active_key(phone_number, business_phone_number_id)
@@ -1519,7 +1530,9 @@ class SupportRepository(DashboardRepositoryMixin, DeliveryRepositoryMixin, ReadS
                 await conn.commit()
             except aiomysql.IntegrityError as exc:
                 await conn.rollback()
-                existing = await self.find_active_ticket_by_phone(phone_number, business_phone_number_id)
+                existing = await self.find_active_ticket_by_phone(
+                    phone_number, business_phone_number_id, include_legacy=include_legacy,
+                )
                 if existing:
                     raise SupportConflictError("This customer already has an active conversation on that WhatsApp line.") from exc
                 raise
@@ -1642,6 +1655,16 @@ class SupportRepository(DashboardRepositoryMixin, DeliveryRepositoryMixin, ReadS
                 verify_send_fingerprint(existing, request_fingerprint)
                 return existing, False
 
+        alternate_forward_id = None
+        if (client_message_id and sender_type == "AGENT" and direction == "OUTBOUND"
+                and sender_id and is_forwarded and int(forwarded_from_ticket_id or 0) > 0
+                and int(forwarded_from_message_id or 0) > 0):
+            provenance = f"{forwarded_from_ticket_id}:{forwarded_from_message_id}:"
+            for prefix, alternate in (("forward:", "contact-forward:"), ("contact-forward:", "forward:")):
+                if client_message_id.startswith(prefix + provenance) and len(client_message_id) > len(prefix + provenance):
+                    alternate_forward_id = alternate + client_message_id[len(prefix):]
+                    break
+
         async with self._pool.acquire() as conn:
             await conn.begin()
             try:
@@ -1698,6 +1721,22 @@ class SupportRepository(DashboardRepositoryMixin, DeliveryRepositoryMixin, ReadS
                             WHERE ticket_id=%s AND sender_type=%s AND sender_scope=%s AND client_message_id=%s""",
                             (ticket_id, sender_type, str(sender_id or ""), client_message_id))
                         existing = await cur.fetchone()
+                        if not existing and alternate_forward_id is not None:
+                            # Both selectors represent the same forwarding
+                            # attempt. Serialize their namespace aliases under
+                            # the ticket lock, including simultaneous requests.
+                            # Ordinary replies cannot supply trusted provenance
+                            # merely by choosing a forwarding-looking client ID.
+                            await cur.execute("""SELECT * FROM support_ticket_messages
+                                WHERE ticket_id=%s AND sender_type='AGENT' AND sender_scope=%s
+                                  AND BINARY client_message_id=%s AND direction='OUTBOUND'
+                                  AND is_forwarded=1 AND forwarded_from_ticket_id=%s
+                                  AND forwarded_from_message_id=%s LIMIT 1""",
+                                (ticket_id, str(sender_id), alternate_forward_id,
+                                 forwarded_from_ticket_id, forwarded_from_message_id))
+                            existing = await cur.fetchone()
+                            if existing and not request_fingerprint:
+                                raise SupportConflictError("The original forwarding attempt cannot be verified.")
                         if existing:
                             verify_send_fingerprint(existing, request_fingerprint)
                             await conn.commit()
@@ -2185,13 +2224,14 @@ class SupportRepository(DashboardRepositoryMixin, DeliveryRepositoryMixin, ReadS
 
     async def find_contact_forward(
         self, *, source_ticket_id: int, source_message_id: int, sender_id: str,
-        client_message_id: str, phone: str, line_id: str,
+        client_message_id: str, phone: str,
     ) -> dict[str, Any] | None:
         """Find a prior attempt even if its destination has since closed.
 
         Start with the indexed source provenance; normal client ID uniqueness
-        remains scoped to destination and sender. Never turn an uncertain old
-        attempt into a new send just because another ticket is now active.
+        remains scoped to destination and sender. Include other offices only
+        when finding prior attempts: the service rejects a mismatched office
+        instead of duplicating an old send after a routing correction.
         """
         if self._pool is None:
             await self.connect()
@@ -2204,10 +2244,10 @@ class SupportRepository(DashboardRepositoryMixin, DeliveryRepositoryMixin, ReadS
                     WHERE m.forwarded_from_ticket_id=%s AND m.forwarded_from_message_id=%s
                       AND m.sender_type='AGENT' AND m.sender_id=%s AND m.is_forwarded=1
                       AND m.client_message_id IN (%s,%s) AND m.direction='OUTBOUND'
-                      AND t.whatsapp_phone=%s AND t.business_phone_number_id=%s
+                      AND t.whatsapp_phone=%s
                     ORDER BY m.id LIMIT 1
                 """, (source_ticket_id, source_message_id, sender_id, client_message_id,
-                      client_message_id.replace("contact-forward:", "forward:", 1), phone, line_id))
+                      client_message_id.replace("contact-forward:", "forward:", 1), phone))
                 return await cur.fetchone()
 
     async def get_message_by_client_id(

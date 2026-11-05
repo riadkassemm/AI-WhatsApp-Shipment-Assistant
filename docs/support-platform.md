@@ -933,6 +933,13 @@ remain visible for diagnosis rather than being hidden.
   choose **Forward selected**. Up to 20 selected messages are forwarded in their
   conversation order to one contact or active conversation. Existing source
   visibility and destination-assignee permissions are checked for every item.
+- Each forward uses its source conversation's enabled WhatsApp office number.
+  Selecting a conversation under another office selects only its recipient; the
+  system reuses that recipient's conversation under the source office, reopens
+  its staff chat, or creates one. An unbound legacy conversation is not reused.
+  Retrying a request preserves its original delivery attempt across both
+  selectors. Older attempts under the wrong office are blocked, including queued
+  sends; inspect their delivery status before starting another forward.
 - The attachment picker, drag-and-drop, and clipboard paste accept multiple
   supported files. Each has its own preview, Remove action, and image Edit
   action where applicable. Select up to 20 files totaling 100 MB; existing

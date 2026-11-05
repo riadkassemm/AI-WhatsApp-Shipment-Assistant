@@ -31,6 +31,7 @@ async def setup_history(infrastructure, monkeypatch, tmp_path):
     monkeypatch.setattr(service, 'support_media_store', SupportMediaStore())
     monkeypatch.setattr(service, 'publish_support_event', AsyncMock())
     monkeypatch.setattr(service, 'get_transport', lambda *_: 'linked_device')
+    monkeypatch.setattr(service.whatsapp_registry_service, 'is_number_enabled', AsyncMock(return_value=True))
     calls = []
 
     async def send(**kwargs):

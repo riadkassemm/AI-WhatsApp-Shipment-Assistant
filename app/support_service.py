@@ -2050,8 +2050,9 @@ class SupportService:
         if not source or int(source.get("ticket_id") or 0) != int(source_ticket_id) or source.get("deleted_for_everyone_at") or await support_repository.message_hidden_for_user(source_message_id, agent.id):
             raise SupportNotFoundError("Message not found.")
 
+        client_message_id = client_message_id or str(uuid.uuid4())
         prefix = "contact-forward" if _contact_destination is not None else "forward"
-        client_id = f"{prefix}:{source_ticket_id}:{source_message_id}:{client_message_id or uuid.uuid4()}"
+        client_id = f"{prefix}:{source_ticket_id}:{source_message_id}:{client_message_id}"
         contact_options = {}
         if _contact_destination is not None:
             if _contact_retry_id is not None:
@@ -2076,6 +2077,52 @@ class SupportService:
             raise SupportForbiddenError("You can only forward to an active conversation assigned to you.")
         if int(source_ticket_id) == int(destination_ticket_id):
             raise SupportValidationError("Choose a different destination conversation.")
+
+        line_id = str(source_ticket.get("business_phone_number_id") or "").strip()
+        if not line_id:
+            raise SupportValidationError("The source conversation does not have a WhatsApp business line.")
+        if not await whatsapp_registry_service.is_number_enabled(line_id):
+            raise SupportConflictError("The source WhatsApp business line is disabled.")
+        if _contact_destination is None:
+            # A retry may switch between the contact and conversation picker,
+            # or select a newer conversation for the same recipient.
+            prior = await support_repository.find_contact_forward(
+                source_ticket_id=source_ticket_id, source_message_id=source_message_id,
+                sender_id=agent.id,
+                client_message_id=f"contact-forward:{source_ticket_id}:{source_message_id}:{client_message_id}",
+                phone=normalize_phone(str(destination.get("whatsapp_phone") or "")),
+            )
+            if prior:
+                prior_destination = (destination if int(prior["ticket_id"]) == destination_ticket_id
+                                     else await support_repository.get_ticket(int(prior["ticket_id"])))
+                if str((prior_destination or {}).get("business_phone_number_id") or "") != line_id:
+                    raise SupportConflictError(
+                        "This forwarding attempt already exists under another WhatsApp line. "
+                        "Check its delivery status before starting a new forward."
+                    )
+            cross_office = str(destination.get("business_phone_number_id") or "") != line_id
+            if cross_office:
+                # Preserve even a malformed pre-upgrade attempt on the selected
+                # ticket instead of turning it into another outgoing message.
+                existing = await support_repository.get_message_by_client_id(
+                    client_id, ticket_id=destination_ticket_id, sender_type="AGENT", sender_id=agent.id,
+                )
+                if existing:
+                    raise SupportConflictError(
+                        "This forwarding attempt already exists under another WhatsApp line. "
+                        "Check its delivery status before starting a new forward."
+                    )
+            if cross_office or (prior and (int(prior["ticket_id"]) != destination_ticket_id
+                                           or str(prior.get("client_message_id")) != client_id)):
+                # The existing contact path validates and returns the original
+                # attempt, including closed threads and uncertain deliveries.
+                result = await self.forward_message_to_contact(
+                    source_ticket_id=source_ticket_id, source_message_id=source_message_id,
+                    phone_number=str(destination.get("whatsapp_phone") or ""),
+                    customer_name=destination.get("customer_name"),
+                    agent=agent, client_message_id=client_message_id,
+                )
+                return result["message"]
 
         kind = str(source.get("message_type") or "text").lower()
         if kind == "location":
@@ -2208,10 +2255,15 @@ class SupportService:
         client_id = f"contact-forward:{source_ticket_id}:{source_message_id}:{client_message_id}"
         prior = await support_repository.find_contact_forward(
             source_ticket_id=source_ticket_id, source_message_id=source_message_id,
-            sender_id=agent.id, client_message_id=client_id, phone=phone, line_id=line_id,
+            sender_id=agent.id, client_message_id=client_id, phone=phone,
         )
         destination = (await support_repository.get_ticket(int(prior["ticket_id"])) if prior
-                       else await support_repository.find_active_ticket_by_phone(phone, line_id))
+                       else await support_repository.find_active_ticket_by_phone(phone, line_id, include_legacy=False))
+        if prior and str((destination or {}).get("business_phone_number_id") or "") != line_id:
+            raise SupportConflictError(
+                "This forwarding attempt already exists under another WhatsApp line. "
+                "Check its delivery status before starting a new forward."
+            )
         reopened = False
         if not destination:
             identity = await customer_directory.resolve(phone)
@@ -2225,7 +2277,7 @@ class SupportService:
                         agent_name=agent.name,
                     )
                 except SupportConflictError:
-                    destination = await support_repository.find_active_ticket_by_phone(phone, line_id)
+                    destination = await support_repository.find_active_ticket_by_phone(phone, line_id, include_legacy=False)
                     if not destination:
                         raise
                 if reopened and name and name != destination.get("customer_name"):
@@ -2249,11 +2301,12 @@ class SupportService:
                         customer_name=name,
                         agent_id=agent.id,
                         agent_name=agent.name,
+                        include_legacy=False,
                     )
                 except SupportConflictError:
                     # Another staff member/inbound message can win creation
                     # after our lookup. Reuse that conversation without claiming it.
-                    destination = await support_repository.find_active_ticket_by_phone(phone, line_id)
+                    destination = await support_repository.find_active_ticket_by_phone(phone, line_id, include_legacy=False)
                     if not destination:
                         raise
 

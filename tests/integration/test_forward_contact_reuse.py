@@ -220,14 +220,14 @@ async def test_contact_forward_reuses_winner_of_conversation_creation_race(
     find_active = repo.find_active_ticket_by_phone
     lookups = 0
 
-    async def missed_initial_lookup(phone_number, business_phone_number_id=None):
+    async def missed_initial_lookup(phone_number, business_phone_number_id=None, **kwargs):
         nonlocal lookups
         lookups += 1
         # The next repository create/reopen sees a conversation that appeared
         # after the service lookup. No timing or concurrent customer sends.
         if lookups == 1:
             return None
-        return await find_active(phone_number, business_phone_number_id)
+        return await find_active(phone_number, business_phone_number_id, **kwargs)
 
     monkeypatch.setattr(repo, 'find_active_ticket_by_phone', missed_initial_lookup)
     result = await forward(original)
