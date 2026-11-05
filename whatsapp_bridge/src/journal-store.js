@@ -1,6 +1,7 @@
 // Incremental durable transactions. Legacy JSON is an immutable import source;
 // snapshots/exports run only in the offline storage tool, never on this loop.
-import { readFile, open, stat, truncate } from 'node:fs/promises';
+import { createReadStream } from 'node:fs';
+import { readFile, open, stat } from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { performance } from 'node:perf_hooks';
@@ -90,28 +91,51 @@ export async function readJournal(filename, initial, { repairTail = false } = {}
   }
   const snapshotSeq = seq;
   let previousSeq = null;
-  let journal;
-  try { journal = await readFile(filename + '.journal'); }
-  catch (error) { if (error.code !== 'ENOENT') throw error; return {data, seq}; }
-  const boundary = journal.lastIndexOf(10) + 1;
-  if (boundary !== journal.length && repairTail) {
-    await truncate(filename + '.journal', boundary);
-    const fd = await open(filename + '.journal', 'r+');
-    try { await fd.sync(); } finally { await fd.close(); }
-  }
-  for (const line of journal.subarray(0, boundary).toString('utf8').split('\n')) {
-    if (!line) continue;
+  const replay = line => {
+    if (!line) return;
     const envelope = decode(line);
     if (typeof envelope.record !== 'string' || hash(envelope.record) !== envelope.checksum) throw new Error('JOURNAL_CHECKSUM_FAILED');
     const record = decode(envelope.record);
     if (record.version !== 1 || !Number.isSafeInteger(record.seq) || record.seq < 1 || !Array.isArray(record.ops)) throw new Error('INVALID_JOURNAL_RECORD');
     if (previousSeq !== null && record.seq !== previousSeq + 1) throw new Error('JOURNAL_SEQUENCE_GAP');
     previousSeq = record.seq;
-    if (record.seq <= snapshotSeq) continue; // Snapshot committed before old journal rotation.
+    if (record.seq <= snapshotSeq) return; // Snapshot committed before old journal rotation.
     if (record.seq !== seq + 1) throw new Error('JOURNAL_SEQUENCE_GAP');
     applyOperations(data, record.ops); seq = record.seq;
+  };
+  // Journals can grow beyond V8's maximum string size between offline
+  // compactions. Retain at most one record, never the complete file.
+  const journal = createReadStream(filename + '.journal', {highWaterMark: 64 * 1024});
+  let bytesRead = 0, boundary = 0, pendingBytes = 0;
+  let pieces = [];
+  try {
+    for await (const chunk of journal) {
+      let start = 0, newline;
+      while ((newline = chunk.indexOf(10, start)) !== -1) {
+        const piece = chunk.subarray(start, newline);
+        const line = pieces.length
+          ? Buffer.concat([...pieces, piece], pendingBytes + piece.length)
+          : piece;
+        replay(line.toString('utf8'));
+        pieces = []; pendingBytes = 0;
+        boundary = bytesRead + newline + 1;
+        start = newline + 1;
+      }
+      if (start < chunk.length) {
+        const piece = chunk.subarray(start);
+        pieces.push(piece); pendingBytes += piece.length;
+      }
+      bytesRead += chunk.length;
+    }
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+    return {data, seq};
+  } finally { journal.destroy(); }
+  if (boundary !== bytesRead && repairTail) {
+    const fd = await open(filename + '.journal', 'r+');
+    try { await fd.truncate(boundary); await fd.sync(); } finally { await fd.close(); }
   }
-  return {data, seq, incompleteTailBytes: journal.length - boundary};
+  return {data, seq, incompleteTailBytes: bytesRead - boundary};
 }
 
 export class JournalStore {
