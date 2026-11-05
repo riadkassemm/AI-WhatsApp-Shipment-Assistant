@@ -86,7 +86,7 @@ Real edits and revocations arriving from the customer or the paired account's ot
 
 Callback delivery is durable and uses a 5-second timeout and exponential backoff capped at 60 seconds. A delayed callback does not prevent unrelated callbacks from being delivered. Transient failures retry for seven days. Permanent HTTP 4xx failures other than 429, and events exceeding the retry period, remain in the durable outbox dead-letter list (base JSON plus journal) for investigation. The status API reports `pending_callbacks` and `failed_callbacks` per line.
 
-The bridge accepts media up to 25 MiB. It stores customer content privately and streams incoming downloads with a size limit. Confirmed deletion removes the original message payload, unreferenced attachment files and references, prior edit payloads, and superseded callbacks from the bridge. It retains native keys, operation IDs, fingerprints, and results needed for deduplication. File deletion is durable and resumes after a crash. The dashboard separately removes its database content and attachment cache.
+The bridge accepts media up to 64 MiB so videos can use the dashboard's 64 MB limit. The application still enforces its separate image, audio, sticker, and document limits. It stores customer content privately and streams incoming downloads with a size limit. Confirmed deletion removes the original message payload, unreferenced attachment files and references, prior edit payloads, and superseded callbacks from the bridge. It retains native keys, operation IDs, fingerprints, and results needed for deduplication. File deletion is durable and resumes after a crash. The dashboard separately removes its database content and attachment cache.
 
 ## API
 

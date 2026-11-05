@@ -84,6 +84,7 @@ test('configuration rejects weak secrets, nonnumeric lines, and public binds', (
   const config = readConfig(valid);
   assert.equal(config.host, '127.0.0.1');
   assert.equal(config.port, 3001);
+  assert.equal(config.maxMediaBytes, 64 * 1024 * 1024);
   assert.equal(config.lines[0].expected_phone, '');
   assert.throws(() => readConfig({ ...valid, WHATSAPP_LINKED_DEVICE_SECRET: 'short' }), /at least 32/);
   assert.throws(() => readConfig({ ...valid, WHATSAPP_LINKED_DEVICE_BIND_HOST: '0.0.0.0' }), /loopback/);
@@ -1761,6 +1762,32 @@ test('multi-megabyte PDF uploads dispatch exact bytes once and enforce canonical
     await assert.rejects(bridge.uploadMedia(LINE, { content_base64: content.toString('base64'), mime_type: 'application/pdf' }), error => error.code === 'MEDIA_TOO_LARGE');
   }
   assert.equal(socket.calls.length, 2);
+});
+
+test('64 MiB video uploads pass the HTTP envelope and dispatch once; larger videos are rejected', async t => {
+  const { bridge, config, socket } = await fixture(t);
+  config.maxMediaBytes = readConfig({ WHATSAPP_LINKED_DEVICE_SECRET: SECRET }).maxMediaBytes;
+  const server = createServer(bridge, config);
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => { server.close(resolve); server.closeAllConnections(); }));
+  const base = `http://127.0.0.1:${server.address().port}/v1/lines/${LINE}`;
+  const headers = { Authorization: `Bearer ${SECRET}`, 'Content-Type': 'application/json' };
+  const content = Buffer.alloc(64 * 1024 * 1024, 37);
+  const uploaded = await fetch(`${base}/media`, { method: 'POST', headers,
+    body: JSON.stringify({ content_base64: content.toString('base64'), mime_type: 'video/mp4', filename: 'large.mp4' }) });
+  assert.equal(uploaded.status, 200);
+  const media = await uploaded.json();
+  const payload = { to: PHONE, type: 'video', video: { id: media.id }, client_message_id: 'video-limit' };
+  const sent = await bridge.send(LINE, payload);
+  assert.deepEqual(await bridge.send(LINE, payload), sent);
+  assert.equal(socket.calls.length, 1);
+  assert.deepEqual(socket.calls[0].content.video, content);
+  assert.deepEqual((await bridge.downloadMedia(LINE, media.id)).content, content);
+  const rejected = await fetch(`${base}/media`, { method: 'POST', headers,
+    body: JSON.stringify({ content_base64: Buffer.alloc(content.length + 1).toString('base64'), mime_type: 'video/mp4' }) });
+  assert.equal(rejected.status, 413);
+  assert.equal((await rejected.json()).error.code, 'MEDIA_TOO_LARGE');
+  assert.equal(socket.calls.length, 1);
 });
 
 test('old orphan phone revokes reconcile durably without resetting sessions; transient failures retry', async t => {
