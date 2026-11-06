@@ -3729,7 +3729,7 @@ class SupportService:
                 raise SupportValidationError("The video is empty.")
             if len(content) > max_media_bytes("video"):
                 raise SupportValidationError(
-                    f"The video is larger than the {max_media_bytes('video') // (1024 * 1024)} MB WhatsApp limit."
+                    f"The video is larger than the {max_media_bytes('video') // (1024 * 1024)} MB limit."
                 )
             prepared = content
             prepared_mime = normalized_mime
