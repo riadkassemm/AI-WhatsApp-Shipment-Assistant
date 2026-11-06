@@ -1,5 +1,14 @@
 # Development VPS and production deployment
 
+> Workflow confirmed on 2026-11-07: DEV is `root@158.220.113.93`; PROD is
+> `root@194.5.152.173`. Local review → dedicated committed branch → pushed PR →
+> explicit DEV deployment approval → isolated DEV verification → separate PROD
+> approval. Never deploy temporary/uncommitted code or reuse production sessions
+> in DEV. The layouts and rollout records below are historical: re-inspect paths,
+> ports, and retained state before any approved DEV deployment; do not overwrite
+> existing databases or sessions. See [repository workflow](../AGENTS.md) and the
+> [Phase 1 verification plan](customer-support-phase1-verification.txt).
+
 ## Recommended layout
 
 Run the development VPS with supervised API, linked-device bridge, database

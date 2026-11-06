@@ -18,7 +18,8 @@ ExecStart=/opt/whatsapp-support/current/venv/bin/python -m uvicorn app.main:app 
 Restart=always
 RestartSec=5
 TimeoutStartSec=100
-TimeoutStopSec=35
+# Allow the 10s ASGI drain and the 180s durable inbound-worker drain.
+TimeoutStopSec=210
 UMask=0077
 StateDirectory=whatsapp-support
 StateDirectoryMode=0700

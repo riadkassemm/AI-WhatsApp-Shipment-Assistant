@@ -1,0 +1,240 @@
+CUSTOMER SUPPORT PHASE 1 — REVIEW BRANCH; NOT DEPLOYED
+
+Authoritative workflow and scope
+This change is prepared in the local development Git repository on dedicated
+branch feat/customer-support-phase1-reliability, based on origin/main da80ce5.
+The temporary investigation tree was compared with Git, not used as a deployment
+source. The PR has two reviewable parts: deployed recovery prerequisites missing
+from main, followed by Phase 1. Main's 192 MiB video regression and forwarding
+fixes are retained. Database-transfer scripts, Shipping Rates, cutover manifests,
+host credentials/configurations, customer data, and temporary helpers are excluded.
+Runtime alert definitions live under deployment/monitoring, not migration files.
+
+DEV: root@158.220.113.93. PROD: root@194.5.152.173.
+Local review -> commit -> push -> PR review -> explicit DEV deployment approval ->
+isolated DEV verification -> separate explicit PROD approval. Never deploy a
+working directory or temporary tree; deploy only the approved committed revision.
+No DEV/PROD connection or deployment, build, application execution, automated test,
+or browser check was performed while preparing this PR. Source/Git review and
+whitespace checks are complete. Every runtime/browser result below is NOT RUN.
+The head commit skips automatic full-suite CI; no workflow configuration is changed.
+This is not a passing CI or production-readiness claim.
+
+Required deployed safeguards carried into Git
+- Redis reserves pending input into a persistent in-flight list before processing;
+  only confirmed completion removes it. Pending claims do not expire. Abandoned
+  in-flight work blocks takeover; it is not blindly replayed.
+- HTTP cancellation cannot discard the detached inbound worker. Shutdown drains
+  workers and retains unresolved reservations for review. The DEV API unit source
+  allows 210 seconds for the 10-second ASGI plus 180-second worker drain; review
+  the actual approved target unit before installation. No server unit was changed.
+- Bridge liveness is available during replay, while readiness and mutations remain
+  gated. Late buffered provider events admitted before retirement are preserved.
+- Known pre-request transport failures are distinguished from uncertain writes;
+  large media admission is bounded without changing file-size limits.
+
+The cause of the recurring 9–10 minute heartbeat silence remains UNCONFIRMED.
+The patch measures the existing provider heartbeat, decoded-frame age, heartbeat
+RTT/errors/timeouts, timer delay and Node event-loop lag. It neither increases the
+heartbeat timeout nor sends extra heartbeats. Correlation after a separately
+approved deployment is required to distinguish provider/network silence from
+local stalls. Do not describe this as a proven fix for provider disconnections.
+
+Implemented behavior
+1. Per-identity exponential backoff uses equal jitter, a 60-second base cap and
+   250 ms spacing between nearby retry slots. A long backoff on one identity does
+   not hold another identity behind it. Existing generation/ownership guards,
+   auth retirement/draining, stable-connection reset and persistence fences stay.
+   408/transport failures recover; 401 retains the existing genuine-logout flow.
+   Repeated 515 restart-required responses also back off exponentially.
+   403/auth rejection, 440/session conflict and 411/500/protocol/session errors
+   stop automatic retry and require administrator review without clearing keys.
+   Terminal reasons fence raw-close retries before queued persistence finishes.
+2. Text bubbles still appear immediately. States distinguish local Queued,
+   Submitting, server-saved Sending, and Confirmation pending. Ambiguous errors
+   cause GET lookups by the original client ID, never automatic POST resubmission.
+   The new endpoint restricts lookup to the authenticated sender and ticket,
+   verifies current conversation access, and respects per-user message deletion.
+   Explicit Retry original request first checks that same key, then requires a
+   staff confirmation. It never allocates a replacement key. Existing server-side
+   UNCERTAIN handling and deliberate new-copy confirmation remain unchanged.
+3. One active browser text request per WhatsApp identity; at most three identities
+   concurrently, 64 queued/active jobs globally and 16 per conversation. Local
+   unconfirmed drafts also have 64/16 caps. Same-identity FIFO is preserved, while
+   different identities can progress. Unknown persistence holds later text for that
+   identity without consuming a global concurrency slot, until the original ID is
+   found. Only an explicit retry of that original ID can pass the hold. Attachments
+   and quick-reply batches retain their drafts and explain the hold. A rejected
+   repeat cannot turn an earlier ambiguous outcome into Not sent. A full queue
+   leaves the composer draft intact.
+   Attachments and selected quick replies wait for their own identity's text
+   barrier. Queue limits do not change upload limits or forwarding permissions.
+   Request deadlines produce uncertainty, never a claim of non-delivery. Page exit
+   warns about unsaved work; page-cache navigation pauses/resumes queued work.
+   Logout/session changes fence unsent jobs and prevent dispatch as another user.
+   This is NOT a durable browser/server outbox: forcing a tab/device closed can
+   still lose work that never reached the server, after the exit warning.
+4. HTTP/SSE/history merging preserves newer edit versions and monotonically
+   advances delivery evidence. Global deletion is terminal and clears old media
+   URLs/body/reactions. Per-user deletion tombstones survive stale responses for
+   the current staff session. These tombstones clear on logout.
+5. Callback enqueue wakes the existing per-line worker only after the durable
+   outbox commit. Coalesced wakeups and one task per line prevent overlap; an
+   enqueue racing the worker's final empty check schedules another pass. The
+   existing 1-second timer, due-time/backoff, history exceptions, deduplication,
+   failure retention, shutdown draining and journal checkpoints remain in place.
+6. Staff feedback distinguishes Connected, Reconnecting, Temporarily unavailable,
+   Storage recovery required and Relink required. Ordinary reconnects do not sound
+   an alarm until the existing prolonged-outage threshold. Visible tabs poll only
+   connection health on a 5-second cadence (plus request time), using a shared
+   5-second server cache; the rest of the dashboard keeps its existing cadence.
+   Paired devices with transient/storage errors no longer show a misleading Pair
+   action. Genuine logout/QR flows remain available to authorized staff.
+7. Runtime metrics add hashed identity labels, disconnect reasons/frequency,
+   recovery timings, heartbeat timing, event-loop lag, callback backlog/age,
+   dead letters and uncertain sends. A bounded, indexed, read-only local SQL query
+   reports database PENDING/DISPATCHING/UNCERTAIN counts. Missing observers,
+   malformed data and stopped collectors cannot be reported as healthy.
+   Alerts include repeated short disconnects despite current connectivity,
+   heartbeat/loop delays, callback backlog, new uncertainty and missing telemetry.
+   Existing disk/inode/storage/checkpoint/collector alerts remain unchanged.
+
+Isolated DEV verification — commands for later execution, NOT executed here
+Use a fresh, private DEV release with mocked WhatsApp transport and disposable
+services only. No production environment file, session directory or credentials.
+Use the existing DEV setup procedure to prepare its dependencies. The pinned
+Baileys patch now includes additional checksum-verified diagnostic hooks; a clean
+npm ci in the isolated DEV release is required. Do not copy or patch a deployed
+node_modules tree. An older already-patched dependency is intentionally rejected
+by the new verification gate; never disable that gate to make startup succeed.
+
+From the DEV release root, after dependency preparation:
+  git diff --check
+  node whatsapp_bridge/scripts/patch-baileys-lifecycle.js --verify
+  node --test whatsapp_bridge/test/phase1-diagnostics.test.js
+  node --test whatsapp_bridge/test/provider-lifecycle-patch.test.js
+  node --test --test-name-pattern='repeated disconnects|terminal disconnect classification' whatsapp_bridge/test/bridge.test.js
+  node --test tests/support_phase1_delivery.test.cjs
+  venv/bin/python -m pytest -q tests/test_runtime_metrics.py tests/test_attended_support_monitor.py
+  venv/bin/python -m pytest -q tests/test_line_outage_resilience.py -k 'health or banner or staff_connection_states'
+  venv/bin/python -m pytest -q tests/test_message_receipts_and_resend.py -k 'ambiguous_text or client_id_confirmation or failed_messages_offer'
+  venv/bin/python -m pytest -q tests/test_support_ui_interactions.py -k 'text_send_clears_composer'
+  venv/bin/python scripts/check_support_assets.py
+  promtool check rules deployment/monitoring/storage-alerts.yml
+  promtool test rules deployment/monitoring/storage-alerts-phase1-test.yml
+
+Also verify the prerequisite safeguards in isolated DEV, as separate processes:
+  venv/bin/python -m pytest -q tests/test_inbound_shutdown.py tests/test_inbound_process_shutdown.py
+  venv/bin/python -m pytest -q tests/integration/test_inbound_queue_durability.py
+  venv/bin/python -m pytest -q tests/test_linked_device_client.py
+  venv/bin/python -m pytest -q tests/test_storage_metrics.py
+  node --test whatsapp_bridge/test/startup-health.test.js whatsapp_bridge/test/startup-lifecycle.test.js whatsapp_bridge/test/server-lifecycle.test.js
+  node --test --test-name-pattern='retired native buffers retain admitted messages' whatsapp_bridge/test/bridge.test.js
+  promtool test rules deployment/monitoring/storage-alerts-test.yml
+The Redis regression creates its own disposable Unix socket and data directory.
+Do not point test configuration at retained DEV data. Existing production state is
+never a fixture. For application/browser checks, use synthetic staff/tickets and
+mock providers; fresh private test credentials must stay outside Git and reports.
+
+These are targeted checks, not a full suite. Also run the existing mocked browser
+checks for delete, historical actions and selected quick replies if browser
+infrastructure is available on DEV. Never point their fake APIs at production.
+
+Manual verification (DEV only; synthetic staff/tickets and mocked identities)
+A. Queue and immediate feedback
+   Delay mock identity A's response. Send two texts to A and a text to B. All
+   bubbles appear immediately; B progresses, A preserves FIFO. Observe at most
+   three active identities and one request per identity. Fill 16 unsaved messages
+   in one conversation; the next draft must stay in the composer. Repeat Send/
+   Retry clicks on one client ID: at most one browser job and one durable send.
+   Drop A's response before persistence is known: later A texts must wait, B must
+   progress, and an attachment batch must retain its draft with an explanation.
+   Resolve the original key using GET/SSE: A resumes in order. Reject an explicit
+   retry while the original remains ambiguous: it must stay Confirmation pending.
+   Attempt reload/logout: receive a warning; cancelling leaves the dashboard
+   functional. Back/forward restoration resumes queued work. Change staff
+   sessions while a job is waiting: it must never dispatch as the new staff user.
+B. Ambiguity and acknowledgment correctness
+   Have the mock API save a request, then drop its HTTP response. Expect
+   Confirmation pending, no Not sent and no successful tick. Observe read-only
+   GET /api/support/tickets/<ticket>/messages/by-client/<original-client-id>.
+   Return the original saved row: it replaces the local bubble once. No extra
+   POST is issued automatically. Before provider evidence, persisted PENDING or
+   DISPATCHING retains a clock. Confirmed evidence alone permits a tick.
+   Also drop the request before it reaches the mock server: lookup returns null,
+   and does not claim non-delivery. Explicit Retry original request uses the same
+   client ID. A different staff account or inaccessible ticket cannot retrieve it.
+C. Out-of-order responses and deletion
+   Deliver READ over SSE, then older SENT over HTTP; read status stays. Deliver an
+   older content version with a newer receipt: keep the edited body and newer
+   receipt. Delete for everyone, then return an old media snapshot: body, media
+   URL and reactions stay absent. Delete for me, then inject a pre-delete response:
+   the message stays hidden, including in previous-ticket history. Check text
+   selection, audio playback and scroll behavior on desktop and mobile widths.
+D. Connection recovery and diagnostics
+   In mocks, emit 408 for eight identities simultaneously. Verify jittered and
+   staggered attempts, one owner per identity and bounded backoff. Hold one auth
+   drain: do not create a second owner. Emit 403/440/411/500 while event persistence
+   is delayed: retries stop immediately and credentials remain retained. Emit
+   genuine 401: the existing relink-required behavior remains distinct. Inject a
+   persistence error: sending/reconnection stay fenced; no automatic session reset.
+   Feed known heartbeat RTT/frame-age/timer-delay samples and event-loop stalls;
+   verify isolated identity metrics, finite values and no payload/key leakage.
+E. Callback durability
+   Hold the outbox commit: no callback before fsync completion. Release it:
+   callbacks start without waiting for the polling tick. Enqueue during an active
+   callback and during its final empty check: no lost wakeup or overlapping line
+   workers. Keep the original retry delay after HTTP failure; duplicates remain
+   idempotent. Repeat shutdown with active callbacks and checkpoint activity:
+   drains and ownership fences must retain all pending work.
+F. Monitoring and attended operation
+   Simulate three short disconnects within 30 minutes, ending connected: the
+   repeated-disconnect warning must still fire. Stop a collector or omit a field:
+   health must fail, not silently publish zero. Simulate heartbeat observer loss,
+   new database uncertainty, callback age and event-loop stalls. Inspect samples
+   for credentials/message content; only fixed labels, hashes, counts and timings
+   are permitted. Review existing historical callback/uncertainty backlogs rather
+   than deleting them or interpreting them as new failures.
+   External notifications are not configured. During a later approved deployment,
+   an operator must keep attended_support_monitor.py visible: healthy must be true
+   and every nonempty attention list must be reviewed. Warning alerts are displayed
+   even when current connectivity is healthy. This is not an external paging system.
+
+Deployment readiness
+NO-GO for production pending isolated targeted checks, browser acceptance and
+review of the pinned provider patch. No production activation commands are
+included or authorized. Deploy the API endpoint, complete versioned UI asset set,
+bridge diagnostic hook, collector and alert definitions together in a separately
+approved release. Collectors may be installed outside the release; inspect their
+ExecStart paths and environment before updating them. Do not copy only bridge.js.
+The storage collector now requires an explicit --receipt pointing at the existing
+verified local restore receipt. Retain the existing migration_storage_scan_timestamp_seconds
+metric name for alert compatibility. No backup mechanism or receipt is created.
+Keep Prometheus and collectors private, retain the existing activation marker, and
+review the eight-identity alert expectation for a synthetic DEV fixture. Metrics
+must fail closed when dependencies or diagnostic fields are absent.
+Do not revert to the old server, clone live sessions, clear authentication state,
+resend uncertain deliveries or weaken storage/recovery gates during verification.
+
+Remaining limits
+The 9–10 minute disconnection cause still needs the new observations. Provider
+revocation/outages cannot be prevented by this patch. The single Node process,
+shared callback journal and shared disk remain common failure domains. Automatic
+recovery of abandoned Redis in-flight work and a durable outbound outbox are
+separate future work; existing fail-closed preservation is unchanged. Off-server
+backups and external alert delivery are not added by this phase. No measured
+production speedup or connection-uptime improvement is claimed before deployment.
+
+Review correction retained
+A missing bridge/monitor status must not be presented as confirmed storage failure.
+Composer/banner classification now distinguishes BRIDGE_UNAVAILABLE and
+MONITOR_UNAVAILABLE; a focused regression covers that distinction.
+
+Review/deployment gate
+Source and scope review: complete. Git whitespace check: passed.
+Connection/backoff, terminal recovery fences, send ambiguity/reconciliation,
+SSE/HTTP merging, queue FIFO/navigation, durable callbacks, monitoring/alerts and
+browser acceptance: NOT RUN, awaiting explicit DEV deployment approval.
+NO-GO for production until focused DEV checks and browser acceptance pass and the
+user separately approves production. No measured performance improvement or
+end-to-end functionality guarantee can be inferred from source review alone.

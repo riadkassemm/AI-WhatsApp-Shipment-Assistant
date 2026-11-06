@@ -57,3 +57,27 @@ test('unexpected escaping handler failures remain visible to every shutdown drai
   assert.equal(destroyed, true);
   await assert.rejects(server.drainRequests(), /HTTP_REQUEST_DRAIN_FAILED/);
 });
+
+test('concurrent media admission rejects before buffering and releases the slot after completion', async t => {
+  const entered = gate(), release = gate();
+  let uploads = 0;
+  const server = createServer({getLine() {}, async uploadMedia() {
+    uploads++; entered.resolve(); await release.promise; return {id: 'synthetic-upload'};
+  }}, {secret, maxMediaBytes: 192 * 1024 * 1024});
+  server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  t.after(async () => {release.resolve(); server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); await server.drainRequests();});
+  const endpoint = `http://127.0.0.1:${server.address().port}/v1/lines/90001/media`;
+  const headers = {authorization: `Bearer ${secret}`, 'content-type': 'application/json'};
+  const first = fetch(endpoint, {method: 'POST', headers, body: '{}'});
+  await entered.promise;
+  const rejected = await fetch(endpoint.replace('90001', '90002'), {method: 'POST', headers, body: '{}'});
+  assert.equal(rejected.status, 503);
+  const result = await rejected.json();
+  assert.equal(result.error.code, 'MEDIA_UPLOAD_BUSY');
+  assert.equal(result.delivery_uncertain, false);
+  assert.equal(uploads, 1, 'another office cannot allocate a second whole-media request');
+  release.resolve();
+  assert.equal((await first).status, 200);
+  assert.equal((await fetch(endpoint, {method: 'POST', headers, body: '{}'})).status, 200);
+  assert.equal(uploads, 2);
+});

@@ -6,9 +6,11 @@ Cloud client's payload/response shapes so ticket routing and the bot can use it.
 from __future__ import annotations
 
 import base64
+import errno
 import hashlib
 import ipaddress
 import json
+import logging
 import re
 import uuid
 from typing import TYPE_CHECKING, Any
@@ -20,6 +22,24 @@ from app.config import Settings, configured_linked_device_lines, linked_device_r
 
 if TYPE_CHECKING:
     from app.whatsapp_client import DownloadedWhatsAppMedia, WhatsAppSendError
+
+
+logger = logging.getLogger('shipment-bot')
+
+
+def _transport_errno(error: BaseException) -> str | None:
+    """Preserve an operating-system error code without logging private messages."""
+    seen: set[int] = set()
+    current: BaseException | None = error
+    for _ in range(6):
+        if current is None or id(current) in seen:
+            break
+        seen.add(id(current))
+        number = getattr(current, 'errno', None)
+        if isinstance(number, int) and number in errno.errorcode:
+            return errno.errorcode[number]
+        current = current.__cause__ or current.__context__
+    return None
 
 
 def _send_error(message: str, *, uncertain: bool = False, retryable: bool = False, http_status: int | None = None) -> WhatsAppSendError:
@@ -146,12 +166,22 @@ class LinkedDeviceWhatsAppClient:
                         raise error
                     return content, response.headers
             except httpx.RequestError as exc:
-                raise _send_error(
+                # These typed failures occur before this HTTP request is sent.
+                # Read/write/protocol failures may follow provider submission;
+                # neither timeout wording nor HTTP 5xx proves retry safety.
+                before_request = isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout))
+                uncertain = mutating and not before_request
+                logger.warning('Linked-device request failed: error_type=%s errno=%s method=%s retry_safe=%s',
+                               type(exc).__name__, _transport_errno(exc), method, not uncertain)
+                error = _send_error(
                     "The linked-device bridge connection failed; the operation outcome is uncertain."
-                    if mutating else "The linked-device bridge connection failed.",
-                    uncertain=mutating,
+                    if uncertain else "The linked-device bridge connection failed.",
+                    uncertain=uncertain,
                     retryable=True,
-                ) from exc
+                )
+                error.bridge_code = 'BRIDGE_UNAVAILABLE' if before_request else 'BRIDGE_TRANSPORT_UNKNOWN'
+                error.transport_error = type(exc).__name__
+                raise error from exc
 
     async def _json_request(self, method: str, path: str, *, payload: dict | None = None, mutating: bool = False, timeout_seconds: float | None = None) -> dict:
         if method == "POST" and payload is None:
@@ -287,7 +317,9 @@ class LinkedDeviceWhatsAppClient:
             return media_id
         except WhatsAppSendError as exc:
             # Uploads only store an asset; retrying never sends a customer message.
-            raise WhatsAppMediaError(str(exc), retryable=bool(getattr(exc, "retryable", False))) from exc
+            error = WhatsAppMediaError(str(exc), retryable=bool(getattr(exc, "retryable", False)))
+            error.bridge_code = getattr(exc, 'bridge_code', None)
+            raise error from exc
 
     async def download_media(self, media_id: str, *, phone_number_id: str | None = None) -> DownloadedWhatsAppMedia:
         from app.whatsapp_client import DownloadedWhatsAppMedia, WhatsAppMediaError, WhatsAppSendError
@@ -327,7 +359,7 @@ class LinkedDeviceWhatsAppClient:
         return data
 
     async def get_status(self) -> dict:
-        data = await self._json_request("GET", "/v1/status")
+        data = await self._json_request("GET", "/v1/status", timeout_seconds=5.0)
         _, configured = self._configuration()
         lines = data.get("lines")
         if not isinstance(lines, list) or any(not isinstance(line, dict) for line in lines):

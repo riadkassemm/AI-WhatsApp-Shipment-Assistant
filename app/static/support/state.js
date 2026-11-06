@@ -168,7 +168,10 @@ const state = {
   lastInboundByTicket: {},
   localMessages: new Map(),
   realtimeMessages: new Map(),
-  textSendChain: Promise.resolve()
+  hiddenSupportMessages: new Set(),
+  sendSessionEpoch: 0,
+  confirmationCursor: 0,
+  confirmationFlight: null
 };
 
 const SUPPORT_SELECTION_STORAGE_PREFIX = 'shipment-support-workspace-v1:';

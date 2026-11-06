@@ -46,10 +46,13 @@ Use short imperative subjects, matching history: “Fix …”, “Add …”, o
 
 Workflow:
 
-- Developer PC: source editing and Git only. The build, test, and run commands above are executed on the DEV VPS, not on the PC.
-- DEV VPS: builds, tests, runtime services, and deployment, with disposable or mocked services for tests.
-- Committing, pushing, opening PRs, and deploying to the DEV VPS require authorization for the specific task; finishing a change is not that authorization.
-- Never merge PRs automatically or deploy to production.
+- Developer PC: source editing, review, and Git only. Build, test, and run commands execute on DEV, not on the PC.
+- DEV is `root@158.220.113.93`; PROD is `root@194.5.152.173`.
+- Implement and review locally, commit to a dedicated feature branch, push it, and open a PR. Committing, pushing, and opening a PR require task-specific authorization.
+- Deploy reviewed, committed code to DEV only after explicit DEV deployment approval. Use isolated/mock WhatsApp connections and disposable test services; preserve existing DEV databases, sessions, and persistent files.
+- After successful DEV verification, production deployment requires separate explicit approval. Never automatically merge a PR.
+- Never deploy from temporary investigation directories or deploy uncommitted code. Never reuse production WhatsApp credentials/sessions in DEV or create duplicate owners of a linked identity.
+- Keep PROD unchanged during local development and DEV verification. Preserve storage, checkpointing, deduplication, and message-recovery safeguards.
 - Read-only tasks stay read-only unless explicitly expanded.
 
 ## Security & Configuration

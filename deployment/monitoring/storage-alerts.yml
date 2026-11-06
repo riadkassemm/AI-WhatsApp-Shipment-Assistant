@@ -1,0 +1,125 @@
+groups:
+  - name: selected-applications-storage
+    rules:
+      - alert: DiskSpaceWarning
+        expr: node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"} < 0.20 or node_filesystem_avail_bytes{mountpoint="/"} < 21474836480
+        for: 5m
+        labels: {severity: warning}
+      - alert: DiskSpaceCritical
+        expr: node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"} < 0.10 or node_filesystem_avail_bytes{mountpoint="/"} < 10737418240
+        for: 2m
+        labels: {severity: critical}
+      - alert: InodeExhaustion
+        expr: node_filesystem_files_free{mountpoint="/"} / node_filesystem_files{mountpoint="/"} < 0.10
+        for: 5m
+        labels: {severity: critical}
+      - alert: RapidApplicationGrowth
+        expr: deriv(application_storage_bytes[6h]) * 86400 > 5368709120
+        for: 30m
+        labels: {severity: warning}
+      - alert: ApplicationStorageBudget
+        expr: application_storage_bytes > 53687091200
+        for: 30m
+        labels: {severity: warning}
+      - alert: BridgeJournalGrowth
+        expr: bridge_largest_journal_bytes > 134217728 or bridge_largest_snapshot_bytes > 100663296
+        for: 10m
+        labels: {severity: warning}
+      - alert: BridgeCheckpointFailure
+        expr: (bridge_storage_checkpoint_failed == 1 or absent(bridge_storage_checkpoint_failed)) and on() (support_monitoring_expected == 1)
+        for: 5m
+        labels: {severity: critical}
+      - alert: BridgeStorageUnavailable
+        expr: (bridge_storage_health_level == 2 or time() - bridge_watchdog_timestamp_seconds > 180 or absent(bridge_watchdog_timestamp_seconds) or absent(bridge_storage_health_level)) and on() (support_monitoring_expected == 1)
+        for: 2m
+        labels: {severity: critical}
+      - alert: LocalBackupRestoreOverdue
+        expr: (time() - local_backup_last_restore_verified_timestamp_seconds > 172800 or absent(local_backup_last_restore_verified_timestamp_seconds)) and on() (support_monitoring_expected == 1)
+        for: 30m
+        labels: {severity: critical}
+      - alert: StorageCollectorFailed
+        expr: (application_storage_scan_ok == 0 or absent(application_storage_scan_ok{application="bridge"}) or absent(application_storage_scan_ok{application="media"}) or absent(application_storage_scan_ok{application="database"}) or absent(application_storage_scan_ok{application="releases"}) or time() - migration_storage_scan_timestamp_seconds > 180 or absent(migration_storage_scan_timestamp_seconds)) and on() (support_monitoring_expected == 1)
+        for: 10m
+        labels: {severity: critical}
+      - alert: MonitoringTargetDown
+        expr: up == 0
+        for: 5m
+        labels: {severity: critical}
+      - alert: MonitoringActivationStateMissing
+        expr: absent(support_monitoring_expected)
+        for: 2m
+        labels: {severity: critical}
+      - alert: RuntimeCollectorFailed
+        expr: (absent(support_runtime_check_timestamp_seconds) or time() - support_runtime_check_timestamp_seconds > 120) and on() (support_monitoring_expected == 1)
+        for: 2m
+        labels: {severity: critical}
+      - alert: SupportAPIUnavailable
+        expr: (support_api_up == 0 or absent(support_api_up) or support_redis_up == 0 or absent(support_redis_up)) and on() (support_monitoring_expected == 1)
+        for: 2m
+        labels: {severity: critical}
+      - alert: BridgeDisconnected
+        expr: (support_bridge_ready == 0 or absent(support_bridge_ready) or support_bridge_connected_lines < support_bridge_lines or support_bridge_lines != 8 or absent(support_bridge_connected_lines) or support_bridge_paired_lines != 8 or absent(support_bridge_paired_lines) or support_bridge_qr_codes != 0 or absent(support_bridge_qr_codes)) and on() (support_monitoring_expected == 1)
+        for: 2m
+        labels: {severity: critical}
+      - alert: InboundWorkUnresolved
+        expr: (support_inbound_pending > 0 or support_inbound_inflight > 0 or support_inbound_invalid > 0) and on() (support_monitoring_expected == 1)
+        for: 5m
+        labels: {severity: critical}
+      - alert: DiskTelemetryMissing
+        expr: absent(node_filesystem_avail_bytes{mountpoint="/"}) or absent(node_filesystem_files_free{mountpoint="/"})
+        for: 2m
+        labels: {severity: critical}
+      - alert: BridgeDiagnosticsMissing
+        expr: (support_bridge_diagnostics_up == 0 or absent(support_bridge_diagnostics_up) or absent(support_bridge_event_loop_sample_timestamp_seconds) or time() - support_bridge_event_loop_sample_timestamp_seconds > 60 or count by (job, instance) (support_bridge_identity_diagnostics_up) != on (job, instance) support_bridge_lines) and on() (support_monitoring_expected == 1)
+        for: 2m
+        labels: {severity: critical}
+        annotations:
+          summary: "Bridge diagnostics are missing or stale"
+          description: "Inspect collector health and the pinned provider diagnostic patch. Missing data is not evidence of healthy connections."
+      - alert: SupportDeliveryTelemetryMissing
+        expr: (support_delivery_database_check_up == 0 or absent(support_delivery_database_check_up) or absent(support_database_uncertain_deliveries)) and on() (support_monitoring_expected == 1)
+        for: 2m
+        labels: {severity: critical}
+        annotations:
+          summary: "Delivery-state monitoring cannot read the Support database"
+      - alert: BridgeRepeatedDisconnects
+        expr: increase(support_bridge_disconnects_total[30m]) >= 3
+        for: 0m
+        labels: {severity: warning}
+        annotations:
+          summary: "WhatsApp identity {{ $labels.identity }} repeatedly disconnects"
+          description: "Correlate heartbeat RTT/frame silence, timer delay, event-loop lag and disconnect reasons. Do not relink or lengthen timeouts without evidence."
+      - alert: BridgeHeartbeatDelayed
+        expr: ((time() - support_bridge_heartbeat_sample_timestamp_seconds > 90) or (support_bridge_heartbeat_timer_delay_seconds > 5)) and on (job, instance, identity) (support_bridge_identity_connected == 1)
+        for: 1m
+        labels: {severity: warning}
+        annotations:
+          summary: "Heartbeat observation is delayed for {{ $labels.identity }}"
+          description: "Compare provider heartbeat diagnostics with event-loop and host/network telemetry; no customer payload logging is required."
+      - alert: BridgeEventLoopStalls
+        expr: increase(support_bridge_event_loop_lag_spikes_total[10m]) > 0
+        for: 0m
+        labels: {severity: warning}
+        annotations:
+          summary: "The shared bridge event loop stalled for more than one second"
+          description: "Inspect bounded recovery work, storage timings and CPU pressure. Preserve journal fsync and ownership fences."
+      - alert: BridgeCallbackBacklog
+        expr: support_bridge_callback_oldest_age_seconds > 300 and support_bridge_callback_pending > 0
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "Callbacks for {{ $labels.identity }} need review"
+          description: "Check API availability and retained callback outcomes. Historical exceptions require review; do not delete callbacks to clear this alert."
+      - alert: BridgeCallbackDeadLetters
+        expr: support_bridge_callback_dead_letters > 0
+        for: 1m
+        labels: {severity: warning}
+        annotations:
+          summary: "Preserved callback failures require administrator review"
+      - alert: SupportDeliveryUncertaintyIncreased
+        expr: delta(support_database_uncertain_deliveries[10m]) > 0
+        for: 0m
+        labels: {severity: warning}
+        annotations:
+          summary: "Additional outgoing messages have uncertain delivery"
+          description: "Check saved provider evidence and recipient receipts. Never blindly resend; an unchanged historical backlog is reported separately as a gauge."

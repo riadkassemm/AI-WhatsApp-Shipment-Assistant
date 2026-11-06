@@ -1,6 +1,7 @@
 import http from 'node:http';
 import crypto from 'node:crypto';
 import { BridgeError } from './config.js';
+import { safeStorageCode } from './journal-maintenance.js';
 
 function authorize(request, secret) {
   const expected = Buffer.from(`Bearer ${secret}`);
@@ -31,13 +32,25 @@ export function createServer(bridge, config) {
     response.end(JSON.stringify(payload));
   };
   const activeRequests = new Set();
+  let activeMediaUploads = 0;
   let requestFailed = false, requestFailure;
   const handleRequest = async (request, response) => {
+    let ownsMediaSlot = false;
     response.setHeader('Cache-Control', 'no-store');
     response.setHeader('X-Content-Type-Options', 'nosniff');
     try {
       if (!authorize(request, config.secret)) throw new BridgeError(401, 'UNAUTHORIZED', 'Bridge authentication is required.');
       const pathname = new URL(request.url, 'http://localhost').pathname;
+      if (request.method === 'GET' && ['/v1/health/live', '/v1/health/ready'].includes(pathname)) {
+        const health = bridge.runtimeHealth();
+        return send(response, (pathname.endsWith('/live') ? health.live : health.ready) ? 200 : 503, health);
+      }
+      if (bridge.stopping || bridge.initialized === false) {
+        const error = new BridgeError(503, bridge.stopping ? 'STOPPING' : 'BRIDGE_INITIALIZING',
+          bridge.stopping ? 'The bridge is shutting down.' : 'The bridge is loading saved sessions. Replies will wait until it is ready.');
+        error.delivery_uncertain = false;
+        throw error;
+      }
       let parts;
       try { parts = pathname.split('/').filter(Boolean).map(decodeURIComponent); }
       catch { throw new BridgeError(400, 'INVALID_PATH', 'The bridge endpoint contains invalid URL encoding.'); }
@@ -60,6 +73,12 @@ export function createServer(bridge, config) {
       }
       if (request.method !== 'POST') throw new BridgeError(405, 'METHOD_NOT_ALLOWED', 'This endpoint requires POST.');
       if (parts.length === 4 && parts[3] === 'media') {
+        // Reserve before reading the 256 MiB base64 body. Bound whole-request
+        // allocations across offices; rejected uploads have no provider effect.
+        if (activeMediaUploads >= (config.maxConcurrentMediaUploads ?? 1)) {
+          throw new BridgeError(503, 'MEDIA_UPLOAD_BUSY', 'An attachment upload is in progress. This reply will wait and retry.');
+        }
+        activeMediaUploads++; ownsMediaSlot = true;
         // Reject critical pressure before buffering/decoding the HTTP body.
         await bridge.storageMonitor?.sample();
         bridge.storageMonitor?.assertCanSubmit(id);
@@ -85,12 +104,15 @@ export function createServer(bridge, config) {
         console.warn(JSON.stringify({ component: 'whatsapp_bridge', event: 'request_failed',
           route: `${request.method} ${String(request.url ?? '').split('?')[0].replace(/\/(messages|media)\/[^/]+/, '/$1/:id')}`,
           http_status: status, error_code: isKnown ? error.code : 'BRIDGE_ERROR',
+          cause_code: safeStorageCode(error), persistence_failure: error?.bridgePersistenceFailure === true,
           provider_status: Number.isInteger(providerStatus) ? providerStatus : null }));
       }
       const uncertainCodes = ['CONFIRMATION_UNKNOWN', 'DISCONNECTED', 'SEND_FAILED', 'INVALID_PROVIDER_RESPONSE'];
       const deliveryUncertain = error.delivery_uncertain ?? (!isKnown || uncertainCodes.includes(error.code));
       send(response, status, { delivery_uncertain: deliveryUncertain,
         error: { code: isKnown ? error.code : 'BRIDGE_ERROR', message: isKnown ? error.message : 'The bridge could not complete this operation.' } });
+    } finally {
+      if (ownsMediaSlot) activeMediaUploads--;
     }
   };
   const server = http.createServer((request, response) => {

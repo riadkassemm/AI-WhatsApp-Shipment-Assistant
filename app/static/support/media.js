@@ -479,6 +479,7 @@ function installComposerFileInput() {
 async function sendMediaMessage() {
   if (!state.pendingMedia || !state.ticketId || state.busy || !state.composerEnabled) return;
   const ticketId = state.ticketId;
+  const sendEpoch = state.sendSessionEpoch, sendGroup = supportSendGroup(ticketId);
   const items = [...state.pendingMediaItems];
   const caption = $('message').value.trim();
   const firstCaption = items.find(item => ['image', 'document', 'video'].includes(item.kind));
@@ -489,7 +490,9 @@ async function sendMediaMessage() {
   let completed = 0;
   let failure = '';
   try {
+    await supportSendQueue.waitForGroup(sendGroup);
     for (const draft of items) {
+      if (!state.authenticated || state.sendSessionEpoch !== sendEpoch) throw new Error('Staff session changed. Review this attachment before submitting it again.');
       // Keep an immutable request and key after ambiguous HTTP failures. A
       // repeat checks the existing delivery instead of creating another send.
       draft.submission ||= {caption: draft.caption || (draft === firstCaption ? caption : ''), replyId: state.replyTarget?.id || null};
@@ -564,10 +567,12 @@ async function sendMessage() {
     sender_type: 'AGENT', sender_id: state.agent?.id,
     sender_name: state.agent?.name || 'Support agent', direction: 'OUTBOUND',
     message_type: 'text', body, send_status: 'PENDING',
+    business_phone_number_id: state.currentTicketData?.ticket?.business_phone_number_id,
+    reply_to_message_id: reply?.id || null,
     created_at: new Date().toISOString(),
     reply_to: reply ? {id: reply.id, sender_name: reply.actor, body: reply.preview} : null
   };
-  state.localMessages.set(clientMessageId, {ticketId, message: optimistic});
+  if (!queueTextMessage(optimistic, ticketId)) return;
   upsertTimelineMessage(optimistic, ticketId);
   $('message').value = '';
   clearReplyTarget();
@@ -576,9 +581,7 @@ async function sendMessage() {
   updateComposerControls();
   showError('');
   focusMessageComposer();
-  optimistic.reply_to_message_id = reply?.id || null;
-  const send = () => deliverTextMessage(optimistic, ticketId);
-  state.textSendChain = state.textSendChain.then(send, send);
+
 }
 
 // A request that got no answer (network drop, gateway error page) may or may not

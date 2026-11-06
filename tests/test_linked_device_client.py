@@ -22,6 +22,91 @@ MESSAGE = "ld:10001:ABC123"
 MEDIA = "ldmedia:10001:ce82b74b-1763-494a-9b79-3f99b994c354"
 
 
+@pytest.mark.parametrize("first_result", ["success", "failure", "cancelled"])
+def test_attachment_upload_slot_precedes_allocation_and_releases_on_every_outcome(monkeypatch, first_result):
+    from app import support_delivery
+
+    async def run():
+        monkeypatch.setattr(support_delivery, "_media_upload_slot", asyncio.Semaphore(1))
+        entered, release, second_claimed = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        reads, sends, interrupted, finished = [], [], [], {}
+        active = maximum_active = 0
+
+        class Repository:
+            async def claim_delivery(self, message_id, **_kwargs):
+                if message_id == 2:
+                    second_claimed.set()
+                return str(message_id)
+
+            async def begin_delivery(self, *_args):
+                return True
+
+            async def interrupt_delivery(self, message_id, _token):
+                interrupted.append(message_id)
+
+            async def finish_delivery(self, message_id, _token, **kwargs):
+                finished[message_id] = kwargs
+
+            async def get_message(self, message_id):
+                return {"id": message_id}
+
+        def asset(_ticket_id, message_id):
+            def read():
+                reads.append(message_id)
+                return str(message_id).encode()
+            return SimpleNamespace(path=SimpleNamespace(read_bytes=read), mime_type="video/mp4", filename="synthetic.mp4")
+
+        async def upload_media(*, content, **_kwargs):
+            nonlocal active, maximum_active
+            active += 1
+            maximum_active = max(maximum_active, active)
+            try:
+                if content == b"1":
+                    entered.set()
+                    await release.wait()
+                    if first_result == "failure":
+                        raise WhatsAppMediaError("Synthetic upload failure", retryable=True)
+                return content.decode()
+            finally:
+                active -= 1
+
+        async def send_media(*, media_id, client_message_id, **_kwargs):
+            sends.append((media_id, client_message_id))
+            return {"messages": [{"id": "provider-" + media_id}]}
+
+        repository = Repository()
+        transport = SimpleNamespace(upload_media=upload_media, send_media=send_media)
+        ticket = {"id": 42, "whatsapp_phone": "96170123456", "business_phone_number_id": "10001"}
+        def deliver(message_id):
+            message = {"id": message_id, "message_type": "video", "body": "Video",
+                       "transport_client_id": "stable-" + str(message_id)}
+            return support_delivery.deliver(repository, transport, SimpleNamespace(get=asset), ticket, message)
+
+        first = asyncio.create_task(deliver(1))
+        await entered.wait()
+        second = asyncio.create_task(deliver(2))
+        await second_claimed.wait()
+        assert reads == [1], "another claimed reply must wait before allocating attachment bytes"
+        assert sends == [], "uploading cannot bypass the existing dispatch claim"
+        if first_result == "cancelled":
+            first.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await first
+        else:
+            release.set()
+            await first
+        await second
+        assert reads == [1, 2] and maximum_active == 1 and active == 0
+        assert finished[2]["status"] == "SENT"
+        assert sends == ([("1", "stable-1"), ("2", "stable-2")] if first_result == "success" else [("2", "stable-2")])
+        if first_result == "failure":
+            assert finished[1]["status"] == "FAILED"
+        if first_result == "cancelled":
+            assert interrupted == [1] and 1 not in finished
+
+    asyncio.run(run())
+
+
 def test_delivery_pressure_preflight_prevents_attachment_reads_uploads_and_dispatch(bridge):
     from app.support_delivery import deliver
 
@@ -189,6 +274,44 @@ def test_network_timeout_leaves_mutation_uncertain(bridge):
     with pytest.raises(WhatsAppSendError) as caught:
         asyncio.run(LinkedDeviceWhatsAppClient().edit_message("96171111111", MESSAGE, "New", operation_id="stable-op"))
     assert caught.value.delivery_uncertain
+
+
+@pytest.mark.parametrize('failure,uncertain', [
+    (httpx.ConnectError, False), (httpx.ConnectTimeout, False), (httpx.PoolTimeout, False),
+    (httpx.ReadTimeout, True), (httpx.WriteTimeout, True), (httpx.WriteError, True),
+    (httpx.RemoteProtocolError, True),
+])
+def test_only_typed_pre_request_failure_is_safe_to_hold(bridge, failure, uncertain, caplog):
+    import errno
+
+    def fail(request):
+        try:
+            raise OSError(errno.ECONNREFUSED, 'private-secret-path')
+        except OSError as cause:
+            raise failure('private-secret-provider-message', request=request) from cause
+
+    requests = bridge(fail)
+    with pytest.raises(WhatsAppSendError) as caught:
+        asyncio.run(LinkedDeviceWhatsAppClient().send_text(
+            '96171111111', 'Synthetic', phone_number_id='10001', client_message_id='stable-send-key'))
+    assert len(requests) == 1, 'the HTTP adapter must not automatically replay an uncertain mutation'
+    assert caught.value.delivery_uncertain is uncertain
+    assert caught.value.bridge_code == ('BRIDGE_TRANSPORT_UNKNOWN' if uncertain else 'BRIDGE_UNAVAILABLE')
+    assert 'ECONNREFUSED' in caplog.text
+    assert 'private-secret' not in caplog.text
+    assert 'stable-send-key' not in caplog.text
+
+
+def test_media_upload_retains_safe_connection_failure_code(bridge):
+    def fail(request):
+        raise httpx.ConnectError('synthetic connection refusal', request=request)
+
+    bridge(fail)
+    with pytest.raises(WhatsAppMediaError) as caught:
+        asyncio.run(LinkedDeviceWhatsAppClient().upload_media(
+            content=b'synthetic-media', mime_type='application/pdf', filename='test.pdf', phone_number_id='10001'))
+    assert caught.value.bridge_code == 'BRIDGE_UNAVAILABLE'
+    assert caught.value.retryable is True
 
 
 @pytest.mark.parametrize("payload", [

@@ -56,7 +56,7 @@ const dashboardRefresh = new DashboardRefreshCoordinator({
       tasks.push(openTicket(state.ticketId, {silent: true, refreshHistory: scopes.has('history')}));
     }
     if (routine && !state.aiSettingsBusy) tasks.push(loadAiSettings().catch(error => renderAiSettingsUnavailable(error.message)));
-    if (routine) tasks.push(loadLineHealth());
+    if (routine) { tasks.push(loadLineHealth()); tasks.push(reconcilePendingTextMessages()); }
     await Promise.allSettled(tasks);
   }
 });
@@ -64,11 +64,12 @@ function requestDashboardRefresh(...scopes) {
   if (scopes.includes('counts')) invalidateQueueCounts();
   dashboardRefresh.request(...scopes);
 }
-function startDashboardRefresh() { dashboardRefresh.start(); }
-function stopDashboardRefresh() { dashboardRefresh.stop(); resetDashboardRequests(); }
+function startDashboardRefresh() { dashboardRefresh.start(); startLineHealthPolling(); }
+function stopDashboardRefresh() { stopLineHealthPolling(); dashboardRefresh.stop(); resetDashboardRequests(); }
 function dashboardVisibilityChanged() {
   if (!document.hidden) clearAttentionIndicator();
   dashboardRefresh.visibilityChanged();
+  if (document.hidden) stopLineHealthPolling(); else startLineHealthPolling();
 }
 document.addEventListener('visibilitychange', dashboardVisibilityChanged);
 window.addEventListener('pagehide', stopDashboardRefresh);

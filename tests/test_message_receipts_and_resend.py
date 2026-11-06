@@ -423,7 +423,7 @@ def test_failed_messages_offer_resend_only_to_their_sender():
     assert "Resend" not in _render_status(message, agent_id="8")["buttons"]
     assert "Resend" not in _render_status(message, can_reply=False)["buttons"]
     pending = _render_status({**message, "send_status": "PENDING"})
-    assert pending["states"] == [{"className": "send-state pending", "label": "Sending", "text": ""}]
+    assert pending["states"] == [{"className": "send-state pending", "label": "Saved · waiting for WhatsApp confirmation", "text": "Sending"}]
     assert "Send status unknown" not in _HTML
 
 
@@ -438,54 +438,45 @@ def test_closed_reply_window_is_visible_and_has_no_resend_button():
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is unavailable")
-def test_text_sends_retry_network_failures_with_the_same_client_id():
-    start = _HTML.index("const TEXT_SEND_RETRY_DELAYS_MS")
+def test_ambiguous_text_outcomes_are_checked_without_automatic_resubmission():
+    start = _HTML.index("const TEXT_SEND_DEADLINE_MS")
     end = _HTML.index("function showMessagePreferencesError(")
     script = r"""
 const assert = require('node:assert/strict');
-const state = {ticketId: 42, localMessages: new Map(), pageLeaving: false};
-const upserts = [];
+const state = {ticketId: 42, authenticated: true, sendSessionEpoch: 0, localMessages: new Map(), pageLeaving: false};
+const upserts = [], calls = [];
 const upsertTimelineMessage = message => upserts.push({...message});
-const loadQueue = () => Promise.resolve();
-const showError = () => {};
-const notices = [];
-const notify = (message, tone) => notices.push([message, tone]);
-const opened = [];
-const openTicket = (id, options) => { opened.push(id); return Promise.resolve(); };
-global.setTimeout = fn => fn();
-let script = [];
-const calls = [];
+const showError = () => {}, notify = () => {}, requestDashboardRefresh = () => {};
+const observePersistedSupportMessage = message => state.localMessages.delete(message.client_message_id);
+const supportSendGroup = ticketId => 'ticket:' + ticketId;
+const supportSendQueue = {hold: () => {}};
+let response;
 const api = async (path, options) => {
-  calls.push(JSON.parse(options.body).client_message_id);
-  const next = script.shift();
-  if (next instanceof Error) throw next;
-  return next;
+  calls.push({path, method: options.method || 'GET'});
+  if (!options.method) return {message: null};
+  if (response instanceof Error) throw response;
+  return response;
 };
-const httpError = (status, detail) => Object.assign(new Error(detail || 'Request failed (' + status + ')'), {status, detail});
 """ + _HTML[start:end] + r"""
 (async () => {
-  // Two network drops, then the server answers: one message, same client ID throughout.
-  script = [new TypeError('Failed to fetch'), httpError(502), {message: {id: 7, client_message_id: 'c1', send_status: 'SENT'}}];
-  await deliverTextMessage({client_message_id: 'c1', body: 'hi'}, 42);
-  assert.deepEqual(calls, ['c1', 'c1', 'c1']);
-  assert.equal(state.localMessages.has('c1'), false);
-  assert.equal(upserts.at(-1).id, 7);
-
-  // The server said WhatsApp failed: no automatic retry; the stored row is reloaded.
-  calls.length = 0; upserts.length = 0;
-  script = [httpError(502, 'WhatsApp could not send the message.')];
-  await deliverTextMessage({client_message_id: 'c2', body: 'hi'}, 42);
-  assert.deepEqual(calls, ['c2']);
-  assert.equal(upserts.at(-1).send_status, 'FAILED');
-  assert.deepEqual(opened, [42]);
-
-  // Still unreachable after the retries: marked Not sent with a clear reason.
-  calls.length = 0;
-  script = [new TypeError('x'), new TypeError('x'), new TypeError('x')];
-  await deliverTextMessage({client_message_id: 'c3', body: 'hi'}, 42);
-  assert.equal(calls.length, 3);
-  assert.match(upserts.at(-1).error_message, /could not reach the server/);
-  assert.equal(notices.at(-1)[1], 'error');
+  for (const error of [new TypeError('network lost'), Object.assign(new Error('gateway'), {status: 502, detail: 'private'})]) {
+    calls.length = 0;
+    response = error;
+    const message = {client_message_id: 'same-original-key', body: 'hello'};
+    state.localMessages.set(message.client_message_id, {ticketId: 42, message});
+    await deliverTextMessage(message, 42); await Promise.resolve();
+    assert.equal(message.send_status, 'CONFIRMATION_PENDING');
+    assert.equal(calls.filter(call => call.method === 'POST').length, 1);
+    assert.ok(calls.some(call => call.method === 'GET' && call.path.endsWith('/by-client/same-original-key')));
+  }
+  response = Object.assign(new Error('rejected repeat'), {status: 403});
+  const uncertainOriginal = state.localMessages.get('same-original-key').message;
+  await deliverTextMessage(uncertainOriginal, 42);
+  assert.equal(uncertainOriginal.send_status, 'CONFIRMATION_PENDING', 'a rejected repeat does not disprove the original outcome');
+  response = {message: {id: 7, client_message_id: 'same-original-key', send_status: 'SENT'}};
+  await deliverTextMessage({client_message_id: 'same-original-key', body: 'hello'}, 42);
+  assert.equal(state.localMessages.size, 0);
+  assert.equal(upserts.at(-1).send_status, 'SENT');
 })().catch(error => {console.error(error); process.exitCode = 1});
 """
     result = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=15)
@@ -500,3 +491,38 @@ def test_voice_microphone_blue_only_after_confirmed_playback(status):
     assert len(result['playback']) == 1
     assert ('confirmed-played' in result['playback'][0]['className']) is (status == 'played')
     assert result['playback'][0]['label'] == ('Played by recipient' if status == 'played' else 'Playback not confirmed')
+
+
+def test_client_id_confirmation_lookup_is_read_only_and_scoped_to_the_viewing_sender(monkeypatch):
+    calls = []
+    row = {"id": 9, "ticket_id": 42, "client_message_id": "original", "sender_id": "7", "send_status": "PENDING"}
+    allowed = True
+    hidden = False
+
+    async def ticket(ticket_id):
+        return {"id": ticket_id}
+
+    async def can_view(_ticket, _agent):
+        return allowed
+
+    async def lookup(client_id, **scope):
+        calls.append((client_id, scope))
+        return row
+
+    async def is_hidden(_message_id, _agent_id):
+        return hidden
+
+    monkeypatch.setattr(service_module, "support_repository", SimpleNamespace(
+        get_ticket=ticket, get_message_by_client_id=lookup, message_hidden_for_user=is_hidden))
+    monkeypatch.setattr(service_module, "_can_view_ticket", can_view)
+    monkeypatch.setattr(service_module, "_serialize_support_messages", lambda _ticket, rows: rows)
+    agent = SimpleNamespace(id="7")
+    assert asyncio.run(support_service.lookup_agent_message(42, "original", agent=agent)) == row
+    assert calls == [("original", {"ticket_id": 42, "sender_type": "AGENT", "sender_id": "7"})]
+    hidden = True
+    assert asyncio.run(support_service.lookup_agent_message(42, "original", agent=agent)) is None
+    allowed = False
+    before = len(calls)
+    with pytest.raises(service_module.SupportNotFoundError):
+        asyncio.run(support_service.lookup_agent_message(42, "original", agent=agent))
+    assert len(calls) == before, "a forbidden ticket must not reach the scoped lookup"
