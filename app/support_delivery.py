@@ -7,6 +7,12 @@ import logging
 from app.whatsapp_client import WhatsAppSendError
 
 
+# A 192 MiB attachment also needs its base64/JSON representation while uploading.
+# Bound that allocation across concurrently claimed replies in this API process.
+# Deployment must budget separately for every API worker and incoming uploads.
+_media_upload_slot = asyncio.Semaphore(1)
+
+
 async def deliver(repository, transport, media_store, ticket, message, *, retry=False):
     message_id = int(message['id'])
     token = await repository.claim_delivery(message_id, retry=retry, expected_token=message.get("delivery_token"))
@@ -59,11 +65,12 @@ async def _deliver_claimed(repository, transport, media_store, ticket, message, 
             if asset is None:
                 raise ValueError('The stored attachment is unavailable. Restore it before retrying.')
             phase = "upload"
-            check_storage = getattr(transport, "check_media_storage", None)
-            if check_storage is not None:
-                await check_storage(phone_number_id=common['phone_number_id'])
-            media_id = await transport.upload_media(content=asset.path.read_bytes(), mime_type=asset.mime_type,
-                                                    filename=asset.filename, phone_number_id=common['phone_number_id'])
+            async with _media_upload_slot:
+                check_storage = getattr(transport, "check_media_storage", None)
+                if check_storage is not None:
+                    await check_storage(phone_number_id=common['phone_number_id'])
+                media_id = await transport.upload_media(content=asset.path.read_bytes(), mime_type=asset.mime_type,
+                                                        filename=asset.filename, phone_number_id=common['phone_number_id'])
             defaults = {'image': {'Image'}, 'video': {'Video'}, 'document': {asset.filename, 'Document'}}
             send = transport.send_media
             payload = dict(media_type=kind, media_id=media_id,
@@ -86,8 +93,10 @@ async def _deliver_claimed(repository, transport, media_store, ticket, message, 
             'Support delivery failed: ticket_id=%s message_id=%s phase=%s error_type=%s retry_safe=%s',
             ticket['id'], message_id, phase, type(exc).__name__, safe,
         )
-        # The line was offline and nothing was sent: hold it for automatic resend.
-        held = safe and getattr(exc, 'bridge_code', None) == 'NOT_CONNECTED'
+        # Only known rejections before provider submission can be retried automatically.
+        held = safe and getattr(exc, 'bridge_code', None) in {
+            'NOT_CONNECTED', 'BRIDGE_UNAVAILABLE', 'BRIDGE_INITIALIZING', 'STORAGE_PRESSURE', 'STOPPING', 'MEDIA_UPLOAD_BUSY',
+        }
         # Never store raw transport exceptions (which may contain credentials).
         await repository.finish_delivery(message_id, token, status='FAILED' if safe else 'UNCERTAIN',
                                          error='Not sent; retry is available.' if safe else 'Delivery is uncertain; do not resend.',

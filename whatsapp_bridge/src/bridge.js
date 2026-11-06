@@ -7,6 +7,7 @@ import QRCode from 'qrcode';
 import { BridgeError, phoneDigits, wrapId, unwrapId, validateLineManifest, UUID_PATTERN, MANIFEST_MAX_BYTES } from './config.js';
 import { FileStore, createAuth } from './storage.js';
 import { JournalStore, encode } from './journal-store.js';
+import { safeStorageCode } from './journal-maintenance.js';
 import { StorageMonitor } from './storage-monitor.js';
 import { MediaFiles } from './media-files.js';
 import { AckTracker } from './ack.js';
@@ -84,6 +85,9 @@ export class Bridge {
     this.phoneReservations = new Map();
     this.mediaFiles = new MediaFiles();
     this.stopping = false;
+    this.initialized = false;
+    this.startupPhase = 'created';
+    this.startedAt = Date.now();
     this.initializationController = new AbortController();
     // Own a store before load() yields: a failed or cancelled replay must not
     // leave an untracked maintenance owner behind the directory lock.
@@ -93,7 +97,9 @@ export class Bridge {
     this.storageMonitor = new StorageMonitor(config.dataDir, {config: config.storage?.monitoring,
       log: this.log, filesystem: dependencies.storageFilesystem});
     this.callbackTasks = new Map();
-    this.onError = dependencies.onError ?? (() => console.error('Bridge operation failed; check the connection status.'));
+    this.onError = dependencies.onError ?? (error => this.log({component: 'whatsapp_bridge',
+      event: 'operation_failed', code: safeStorageCode(error),
+      persistence_failure: error?.bridgePersistenceFailure === true}));
   }
 
   assertRunning() {
@@ -113,6 +119,7 @@ export class Bridge {
   }
   async initializeOnce({ autoConnect = true } = {}) {
     this.assertRunning();
+    this.startupPhase = 'storage_replay';
     this.outbox = await this.loadStore(path.join(this.config.dataDir, 'outbox.json'), () => ({ entries: [], dead_letters: [] }), 'outbox');
     this.manifest = await this.loadFile(path.join(this.config.dataDir, 'lines.json'), () => ({ version: 1, lines: {}, requests: {} }));
     // Phones of removed lines and when they went offline, so linking one again recovers the gap.
@@ -174,6 +181,7 @@ export class Bridge {
         initializationFailed(line, error);
       }
     }
+    this.startupPhase = 'connecting';
     for (const line of prepared) {
       this.assertRunning();
       if (autoConnect && line.store.data.enabled) {
@@ -184,6 +192,8 @@ export class Bridge {
     this.assertRunning();
     await this.storageMonitor.start();
     this.assertRunning();
+    this.initialized = true;
+    this.startupPhase = 'ready';
     return this;
   }
   async loadStore(filename, initial, kind, line = null) {
@@ -478,7 +488,25 @@ export class Bridge {
     const data = line.store?.data;
     return Boolean(data?.recover_since) && !(data.recover_until && Date.now() > data.recover_until);
   }
-  status() { return { lines: [...this.lines.values()].map(line => this.lineStatus(line)), storage: this.storageMonitor.status() }; }
+  runtimeHealth() {
+    const storage = this.storageMonitor.status();
+    const recoveryRequired = storage.stores.filter(store => store.failed)
+      .map(store => ({line_id: store.line_id, kind: store.kind, code: 'STORAGE_RECOVERY_REQUIRED'}));
+    const criticalIssues = storage.issues.filter(issue => issue.level === 'critical');
+    const capacityOnly = criticalIssues.length > 0 && criticalIssues.every(issue =>
+      ['DISK_SPACE_LOW', 'INODES_LOW'].includes(issue.code));
+    const phase = this.stopping ? 'stopping' : !this.initialized ? this.startupPhase :
+      storage.level === 'critical' ? 'storage_degraded' : 'ready';
+    return {live: !this.stopping, ready: phase === 'ready', phase,
+      startup_elapsed_ms: this.initialized ? null : Date.now() - this.startedAt,
+      recovery_required: recoveryRequired,
+      recovery_mode: recoveryRequired.length ? 'review_required' :
+        capacityOnly ? 'automatic_after_capacity_recovers' : criticalIssues.length ? 'operator_attention' : 'none',
+      connected_lines: [...this.lines.values()].filter(line => line.status === 'connected').length,
+      configured_lines: this.lines.size};
+  }
+  status() { return { lines: [...this.lines.values()].map(line => this.lineStatus(line)),
+    storage: this.storageMonitor.status(), runtime: this.runtimeHealth() }; }
 
   async connect(id) {
     this.assertRunning();
@@ -637,7 +665,18 @@ export class Bridge {
     auth.onProviderIdle = finishRetirement;
     // Real sockets expose the same emitter used by their native receive path.
     // Mock sockets may supply only ev.process; keep that seam for transport tests.
-    if (typeof socket.ev.emit === 'function') line.restoreNativeEvents = session.restoreNativeEvents = preserveNativeMutationMetadata(socket);
+    if (typeof socket.ev.emit === 'function') {
+      line.restoreNativeEvents = session.restoreNativeEvents = preserveNativeMutationMetadata(socket);
+      const nativeEmit = socket.ev.emit;
+      // The provider's delayed flush can outlive the task context that queued
+      // its messages. Fence new emissions at admission, so every later native
+      // flush still contains only events accepted before/during the drain.
+      session.bufferAdmissionFenced = true;
+      socket.ev.emit = function (...args) {
+        if (session.disposed && !auth.inProviderContext()) return false;
+        return nativeEmit.apply(this, args);
+      };
+    }
     line.ack?.close();
     line.ack = session.ack = new AckTracker(socket, this.config.ackTimeoutMs, {
       onTimeout: id => this.trace(line, 'ack_timeout', { generation, native_id: id }),
@@ -671,7 +710,9 @@ export class Bridge {
       // chance to retire the socket. WhatsApp may already have acknowledged an
       // incoming message; accepted payloads must survive failure/replacement.
       const acceptedPipeline = auth.inProviderContext();
-      if (!acceptedPipeline && (line.socket !== socket || line.generation !== generation || session.disposed)) return Promise.resolve();
+      const acceptedBuffer = session.disposed && session.bufferAdmissionFenced && !session.subscriptionReleased;
+      if (!acceptedPipeline && !acceptedBuffer &&
+          (line.socket !== socket || line.generation !== generation || session.disposed)) return Promise.resolve();
       // Fence immediately, before persistence or another queued event can yield.
       if (events['connection.update']?.connection === 'close') this.blockConnection(line, socket, 'connection_closed');
       let credentialsSaved;

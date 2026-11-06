@@ -90,8 +90,8 @@ export function createRuntime({prepare, process: processOwner = process, logger 
       if (stopping) return;
       bridge = createBridge(config);
       if (stopping) return;
-      await bridge.initialize();
-      if (stopping) return;
+      // Bind health before replay. The HTTP layer rejects operational routes
+      // until initialize() finishes; a live process is not a ready sender.
       server = createServer(bridge, config);
       // Keep ownership on errors after listen has completed too. An unhandled
       // EventEmitter error would otherwise bypass the same durable drain as a
@@ -119,6 +119,8 @@ export function createRuntime({prepare, process: processOwner = process, logger 
         try { server.listen(config.port, config.host); }
         catch (error) { onError(error); }
       });
+      if (stopping) return;
+      await bridge.initialize();
       if (stopping) return;
       bridge.startWorkers();
       logger.info(`WhatsApp linked-device bridge listening on ${config.host}:${config.port}`);

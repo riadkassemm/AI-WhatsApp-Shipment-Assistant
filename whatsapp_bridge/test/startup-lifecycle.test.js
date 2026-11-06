@@ -53,10 +53,10 @@ async function assertReleased(directory) {
   const release = await acquireDataDirectory(directory);
   await release();
 }
-function assertStoppedBeforeServing(done) {
+function assertStoppedBeforeServing(done, healthListener = true) {
   assert.equal(done.counts.workers, 0);
-  assert.equal(done.counts.servers, 0);
-  assert.equal(done.counts.listeners, 0);
+  assert.equal(done.counts.servers, Number(healthListener));
+  assert.equal(done.counts.listeners, Number(healthListener));
 }
 
 for (const signal of ['SIGTERM', 'SIGINT']) {
@@ -70,7 +70,7 @@ for (const signal of ['SIGTERM', 'SIGINT']) {
     assert.deepEqual(await child.exit, { code: 0, signal: null });
     assert.equal(done.counts.acquired, 0);
     assert.equal(done.counts.bridges, 0);
-    assertStoppedBeforeServing(done);
+    assertStoppedBeforeServing(done, false);
   });
   for (const scenario of ['lock_before', 'lock_after']) {
     test(`${signal} during ${scenario} retains late lock ownership and never initializes`, { timeout: 20_000 }, async t => {
@@ -87,7 +87,7 @@ for (const signal of ['SIGTERM', 'SIGINT']) {
       assert.equal(done.counts.acquired, 1);
       assert.equal(done.counts.released, 1);
       assert.equal(done.counts.bridges, 0);
-      assertStoppedBeforeServing(done);
+      assertStoppedBeforeServing(done, false);
       await assertReleased(child.directory);
     });
   }
@@ -153,7 +153,7 @@ test('SIGTERM while listen is pending closes the listener without starting backg
   assert.equal(done.counts.workers, 0);
   assert.equal(done.counts.servers, 1);
   assert.equal(done.counts.listeners, 1);
-  assert.equal(done.counts.ended, 2);
+  assert.equal(done.counts.ended, 0, 'provider sockets do not start before the health listener binds');
   assert.equal(done.counts.released, 1);
   assert.deepEqual(done.fences, [false, false]);
 });

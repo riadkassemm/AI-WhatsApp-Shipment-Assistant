@@ -329,10 +329,13 @@ def _conversation_processing_key(phone_number: str) -> str:
 
 
 def _pending_inbound_queue_key(phone_number: str) -> str:
-    # Queue payloads can temporarily contain the raw customer text (including an
-    # authentication message), so the phone number itself is never exposed in the
-    # Redis key and the queue is kept only for the inbound-processing TTL.
+    # Payloads can include authentication text. Keep Redis private and remove
+    # each payload on acknowledgement, never by a timer that can lose work.
     return f"conversation:pending-inbound:{_sender_digest(phone_number)}"
+
+
+def _inflight_inbound_queue_key(phone_number: str) -> str:
+    return f"conversation:inflight-inbound:{_sender_digest(phone_number)}"
 
 
 def _outbound_reply_key(idempotency_key: str) -> str:
@@ -442,8 +445,15 @@ class BaseConversationStore:
     async def pop_incoming_work(
         self,
         phone_number: str,
+        *, claim_token: str | None = None,
     ) -> dict[str, Any] | None:
-        """Atomically pop the oldest queued inbound item for one sender."""
+        """Reserve the oldest item, retaining it until explicitly acknowledged."""
+        raise NotImplementedError
+
+    async def acknowledge_incoming_work(self, phone_number: str, item: dict[str, Any]) -> None:
+        raise NotImplementedError
+
+    async def inflight_incoming_work_count(self, phone_number: str) -> int:
         raise NotImplementedError
 
     async def pending_incoming_work_count(
@@ -636,6 +646,7 @@ class InMemoryConversationStore(
         self._conversation_claims: dict[str, tuple[str, str, float]] = {}
         self._outbound_replies: dict[str, tuple[str, str, float]] = {}
         self._pending_inbound_work: dict[str, list[dict[str, Any]]] = {}
+        self._inflight_inbound_work: dict[str, list[dict[str, Any]]] = {}
         self._revoked_inbound: dict[str, float] = {}
 
         # Short-lived password-first auth values. These never enter Conversation
@@ -827,7 +838,7 @@ class InMemoryConversationStore(
             store.pop(key, None)
 
     async def claim_conversation_processing(self, phone_number: str) -> str | None:
-        return self._claim_memory_guard(
+        claimed = self._claim_memory_guard(
             self._conversation_claims,
             phone_number,
             max(
@@ -836,6 +847,10 @@ class InMemoryConversationStore(
                 int(float(settings.openai_turn_timeout_seconds)) + 30,
             ),
         )
+        if claimed and self._inflight_inbound_work.get(phone_number):
+            self._conversation_claims.pop(phone_number, None)
+            raise RuntimeError("INBOUND_RECOVERY_REQUIRED")
+        return claimed
 
     async def refresh_conversation_processing(
         self,
@@ -873,6 +888,12 @@ class InMemoryConversationStore(
     ) -> None:
         queue = self._pending_inbound_work.setdefault(phone_number, [])
         payload = dict(item)
+        receipt = payload.pop("_queue_receipt", None)
+        if receipt is not None:
+            await self.acknowledge_incoming_work(phone_number, item)
+        message_id, token = payload.get("message_id"), payload.get("claim_token")
+        if message_id and token and self._inbound_messages.get(message_id, ())[:2] == ("processing", token):
+            self._inbound_messages[message_id] = ("processing", token, float("inf"))
         if front:
             queue.insert(0, payload)
         else:
@@ -881,6 +902,7 @@ class InMemoryConversationStore(
     async def pop_incoming_work(
         self,
         phone_number: str,
+        *, claim_token: str | None = None,
     ) -> dict[str, Any] | None:
         queue = self._pending_inbound_work.get(phone_number)
         if not queue:
@@ -888,7 +910,20 @@ class InMemoryConversationStore(
         item = queue.pop(0)
         if not queue:
             self._pending_inbound_work.pop(phone_number, None)
-        return dict(item)
+        reserved = {**item, "_queue_receipt": secrets.token_hex(16)}
+        self._inflight_inbound_work.setdefault(phone_number, []).append(reserved)
+        return dict(reserved)
+
+    async def acknowledge_incoming_work(self, phone_number: str, item: dict[str, Any]) -> None:
+        queue = self._inflight_inbound_work.get(phone_number, [])
+        for index, reserved in enumerate(queue):
+            if reserved.get("_queue_receipt") == item.get("_queue_receipt"):
+                queue.pop(index)
+                return
+        raise RuntimeError("INBOUND_RECEIPT_MISSING")
+
+    async def inflight_incoming_work_count(self, phone_number: str) -> int:
+        return len(self._inflight_inbound_work.get(phone_number, []))
 
     async def pending_incoming_work_count(
         self,
@@ -1109,16 +1144,20 @@ class RedisConversationStore(
 
     async def claim_conversation_processing(self, phone_number: str) -> str | None:
         token = secrets.token_urlsafe(24)
-        claimed = await self._client.set(
-            _conversation_processing_key(phone_number),
+        claimed = await self._client.eval(
+            """if redis.call('EXISTS', KEYS[1]) == 1 then return 0 end
+            if redis.call('LLEN', KEYS[2]) > 0 then return -1 end
+            redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[2]); return 1""",
+            2, _conversation_processing_key(phone_number), _inflight_inbound_queue_key(phone_number),
             f"processing:{token}",
-            nx=True,
-            ex=max(
+            max(
                 30,
                 int(settings.conversation_processing_lock_ttl_seconds),
                 int(float(settings.openai_turn_timeout_seconds)) + 30,
             ),
         )
+        if claimed == -1:
+            raise RuntimeError("INBOUND_RECOVERY_REQUIRED")
         return token if claimed else None
 
     async def refresh_conversation_processing(
@@ -1160,20 +1199,41 @@ class RedisConversationStore(
         front: bool = False,
     ) -> None:
         key = _pending_inbound_queue_key(phone_number)
-        payload = json.dumps(item, ensure_ascii=False, separators=(",", ":"))
-        pipeline = self._client.pipeline(transaction=True)
-        if front:
-            pipeline.lpush(key, payload)
-        else:
-            pipeline.rpush(key, payload)
-        pipeline.expire(key, INBOUND_PROCESSING_TTL_SECONDS)
-        await pipeline.execute()
+        clean = dict(item)
+        receipt = clean.pop("_queue_receipt", "")
+        payload = json.dumps(clean, ensure_ascii=False, separators=(",", ":"))
+        # Pending/in-flight work and its claim must never expire before completion.
+        # Retrying a known retryable response moves its receipt atomically.
+        result = await self._client.eval(
+            """if ARGV[2] ~= '' and redis.call('LPOS', KEYS[2], ARGV[2]) == false then return 0 end
+            redis.call(ARGV[3], KEYS[1], ARGV[1]); redis.call('PERSIST', KEYS[1])
+            if ARGV[2] ~= '' then redis.call('LREM', KEYS[2], 1, ARGV[2]) end
+            if ARGV[4] ~= '' and redis.call('GET', KEYS[3]) == ARGV[4] then redis.call('PERSIST', KEYS[3]) end
+            return 1""",
+            3, key, _inflight_inbound_queue_key(phone_number),
+            _inbound_message_key(str(clean.get("message_id") or "")),
+            payload, receipt, "LPUSH" if front else "RPUSH",
+            f"processing:{clean['claim_token']}" if clean.get("claim_token") else "",
+        )
+        if not result:
+            raise RuntimeError("INBOUND_RECEIPT_MISSING")
 
     async def pop_incoming_work(
         self,
         phone_number: str,
+        *, claim_token: str | None = None,
     ) -> dict[str, Any] | None:
-        raw = await self._client.lpop(_pending_inbound_queue_key(phone_number))
+        if claim_token is None:
+            raise RuntimeError("INBOUND_OWNER_REQUIRED")
+        raw = await self._client.eval(
+            """if redis.call('GET', KEYS[3]) ~= ARGV[1] then return redis.error_reply('INBOUND_OWNER_LOST') end
+            local value = redis.call('LINDEX', KEYS[1], 0)
+            if not value then return false end
+            redis.call('RPUSH', KEYS[2], value); redis.call('PERSIST', KEYS[2])
+            redis.call('LPOP', KEYS[1]); return value""",
+            3, _pending_inbound_queue_key(phone_number), _inflight_inbound_queue_key(phone_number),
+            _conversation_processing_key(phone_number), f"processing:{claim_token}",
+        )
         if raw is None:
             return None
         if isinstance(raw, (bytes, bytearray)):
@@ -1181,12 +1241,27 @@ class RedisConversationStore(
         try:
             item = json.loads(str(raw))
         except (TypeError, ValueError):
-            logger.error(
-                "Discarding malformed pending inbound queue item: customer_ref=%s",
-                safe_log_identifier(phone_number, "wa"),
-            )
-            return None
-        return item if isinstance(item, dict) else None
+            raise RuntimeError("INBOUND_PAYLOAD_INVALID") from None
+        if not isinstance(item, dict):
+            raise RuntimeError("INBOUND_PAYLOAD_INVALID")
+        return {**item, "_queue_receipt": str(raw)}
+
+    async def acknowledge_incoming_work(self, phone_number: str, item: dict[str, Any]) -> None:
+        receipt = item.get("_queue_receipt")
+        if not receipt:
+            raise RuntimeError("INBOUND_RECEIPT_MISSING")
+        result = await self._client.eval(
+            """if ARGV[2] == '1' and redis.call('GET', KEYS[2]) ~= 'completed' then return -1 end
+            return redis.call('LREM', KEYS[1], 1, ARGV[1])""",
+            2, _inflight_inbound_queue_key(phone_number),
+            _inbound_message_key(str(item.get("message_id") or "")), receipt,
+            "1" if item.get("message_id") and item.get("claim_token") else "0",
+        )
+        if result != 1:
+            raise RuntimeError("INBOUND_COMPLETION_UNCONFIRMED")
+
+    async def inflight_incoming_work_count(self, phone_number: str) -> int:
+        return int(await self._client.llen(_inflight_inbound_queue_key(phone_number)))
 
     async def pending_incoming_work_count(
         self,

@@ -75,6 +75,23 @@ logging.basicConfig(level=settings.log_level)
 logger = logging.getLogger("shipment-bot")
 
 _idle_ticket_sweeper: asyncio.Task | None = None
+_inbound_tasks: set[asyncio.Task] = set()
+_inbound_stopping = False
+
+
+async def _finish_inbound_tasks(timeout: float = 180) -> None:
+    """Wait for detached request workers; never treat cancellation as completion."""
+    if not _inbound_tasks:
+        return
+    done, pending = await asyncio.wait(tuple(_inbound_tasks), timeout=timeout)
+    if pending:
+        logger.critical("Inbound shutdown incomplete; Redis reservations retained for review")
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+        raise RuntimeError("INBOUND_SHUTDOWN_INCOMPLETE")
+    if any(task.cancelled() or task.exception() is not None for task in done):
+        raise RuntimeError("INBOUND_SHUTDOWN_REQUIRES_REVIEW")
 
 
 async def _sweep_idle_tickets_forever() -> None:
@@ -109,19 +126,27 @@ async def _stop_idle_ticket_sweeper() -> None:
 
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
+    global _inbound_stopping
+    _inbound_stopping = False
     from app.support_delivery_reconciliation import reconcile_deliveries_forever
     reconciliation = asyncio.create_task(reconcile_deliveries_forever(support_service)) if settings.support_ui_enabled else None
     await _start_idle_ticket_sweeper()
     try:
         yield
     finally:
-        if reconciliation is not None:
-            reconciliation.cancel()
-            try:
-                await reconciliation
-            except asyncio.CancelledError:
-                pass
-        await _stop_idle_ticket_sweeper()
+        _inbound_stopping = True
+        # Uvicorn may already have cancelled request handlers. Their shielded
+        # workers still own durable reservations and must finish before exit.
+        try:
+            await _finish_inbound_tasks()
+        finally:
+            await _stop_idle_ticket_sweeper()
+            if reconciliation is not None:
+                reconciliation.cancel()
+                try:
+                    await reconciliation
+                except asyncio.CancelledError:
+                    pass
 
 
 app = FastAPI(title="AI Shipment Assistant - WhatsApp Backend", lifespan=_lifespan)
@@ -364,11 +389,11 @@ def _response_is_retryable(response: Response) -> bool:
     return response.status_code == 429 or response.status_code >= 500
 
 
-async def _complete_queued_inbound_items(items: list[dict]) -> None:
+async def _complete_queued_inbound_items(phone_number: str, items: list[dict]) -> None:
     for item in items:
         incoming = _incoming_from_queued_item(item)
         if incoming is None:
-            continue
+            raise RuntimeError("INBOUND_PAYLOAD_INVALID")
         try:
             await _mark_inbound_completed(incoming)
         except Exception:
@@ -378,6 +403,7 @@ async def _complete_queued_inbound_items(items: list[dict]) -> None:
                 "Could not persist queued inbound completion watermark: message_id=%s",
                 incoming.message_id,
             )
+            raise
         claim_token = item.get("claim_token")
         if incoming.message_id and claim_token:
             try:
@@ -390,6 +416,8 @@ async def _complete_queued_inbound_items(items: list[dict]) -> None:
                     "Could not finalize queued inbound idempotency: message_id=%s",
                     incoming.message_id,
                 )
+                raise
+        await conversation_store.acknowledge_incoming_work(phone_number, item)
 
 
 async def _requeue_inbound_items_front(phone_number: str, items: list[dict]) -> None:
@@ -403,7 +431,7 @@ async def _requeue_inbound_items_front(phone_number: str, items: list[dict]) -> 
         )
 
 
-async def _collect_inbound_burst(phone_number: str) -> list[dict]:
+async def _collect_inbound_burst(phone_number: str, claim_token: str | None = None) -> list[dict]:
     debounce = max(0.0, float(settings.whatsapp_message_burst_debounce_seconds))
     if debounce:
         # Human-owned conversations do not benefit from the AI turn debounce.
@@ -445,7 +473,7 @@ async def _collect_inbound_burst(phone_number: str) -> list[dict]:
     limit = max(1, int(settings.whatsapp_message_burst_max_messages))
     items: list[dict] = []
     while len(items) < limit:
-        item = await conversation_store.pop_incoming_work(phone_number)
+        item = await conversation_store.pop_incoming_work(phone_number, claim_token=claim_token)
         if item is None:
             break
         items.append(item)
@@ -468,7 +496,7 @@ async def _process_inbound_burst(phone_number: str, items: list[dict]) -> Respon
         await _requeue_inbound_items_front(phone_number, items)
         return _json_response(503, {"status": "revocation_state_unavailable"})
     if revoked:
-        await _complete_queued_inbound_items(revoked)
+        await _complete_queued_inbound_items(phone_number, revoked)
         revoked_ids = {id(item) for item in revoked}
         items = [item for item in items if id(item) not in revoked_ids]
         if not items:
@@ -523,19 +551,19 @@ async def _process_inbound_burst(phone_number: str, items: list[dict]) -> Respon
         if _response_is_retryable(response):
             await _requeue_inbound_items_front(phone_number, items)
             return response
-        await _complete_queued_inbound_items(items)
+        await _complete_queued_inbound_items(phone_number, items)
         return response
 
     for index, item in enumerate(items):
         incoming = _incoming_from_queued_item(item)
         if incoming is None:
-            await _complete_queued_inbound_items([item])
+            await _complete_queued_inbound_items(phone_number, [item])
             continue
         response = await _process_incoming_message(incoming)
         if _response_is_retryable(response):
             await _requeue_inbound_items_front(phone_number, items[index:])
             return response
-        await _complete_queued_inbound_items([item])
+        await _complete_queued_inbound_items(phone_number, [item])
 
     return _json_response(200, {"status": "queue_drained"})
 
@@ -557,7 +585,7 @@ async def _drain_inbound_queue(
         if await conversation_store.pending_incoming_work_count(phone_number) <= 0:
             return last_response
 
-        items = await _collect_inbound_burst(phone_number)
+        items = await _collect_inbound_burst(phone_number, claim_token)
         if not items:
             return last_response
         last_response = await _process_inbound_burst(phone_number, items)
@@ -569,6 +597,24 @@ async def _drive_inbound_queue(
     phone_number: str,
     initial_claim_token: str | None = None,
 ) -> Response | None:
+    if _inbound_stopping:
+        return _json_response(503, {"status": "inbound_shutting_down"})
+    task = asyncio.create_task(_drive_owned_inbound_queue(phone_number, initial_claim_token))
+    _inbound_tasks.add(task)
+
+    def finished(worker):
+        _inbound_tasks.discard(worker)
+        if worker.cancelled() or worker.exception() is not None:
+            # Do not log exception text: Redis diagnostics can contain payloads.
+            logger.error("Inbound worker interrupted; inspect retained Redis reservations")
+
+    task.add_done_callback(finished)
+    return await asyncio.shield(task)
+
+
+async def _drive_owned_inbound_queue(
+    phone_number: str, initial_claim_token: str | None = None,
+) -> Response | None:
     """Own the sender lock when available and close the enqueue/release race safely."""
     claim_token = initial_claim_token
     while True:
@@ -577,9 +623,29 @@ async def _drive_inbound_queue(
             if claim_token is None:
                 return None
 
+        if await conversation_store.inflight_incoming_work_count(phone_number):
+            await conversation_store.release_conversation_processing(phone_number, claim_token)
+            raise RuntimeError("INBOUND_RECOVERY_REQUIRED")
+        owner = asyncio.current_task()
+
+        async def keep_lease():
+            try:
+                while True:
+                    await asyncio.sleep(10)
+                    if not await conversation_store.refresh_conversation_processing(phone_number, claim_token):
+                        raise RuntimeError("INBOUND_OWNER_LOST")
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.error("Inbound processing lease unavailable; reservation retained")
+                owner.cancel()
+
+        heartbeat = asyncio.create_task(keep_lease())
         try:
             response = await _drain_inbound_queue(phone_number, claim_token)
         finally:
+            heartbeat.cancel()
+            await asyncio.gather(heartbeat, return_exceptions=True)
             await conversation_store.release_conversation_processing(
                 phone_number,
                 claim_token,

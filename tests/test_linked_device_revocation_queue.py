@@ -24,10 +24,14 @@ def test_revoked_inbound_message_is_removed_before_queue_processing(monkeypatch)
         )
         claim = await store.claim_incoming_message(incoming.message_id)
         await store.mark_inbound_revoked(incoming.message_id)
+        route = "90001:96171111111"
+        await store.enqueue_incoming_work(route, main._queued_inbound_item(incoming, claim))
+        reserved = await store.pop_incoming_work(route)
         response = await main._process_inbound_burst(
-            "90001:96171111111", [main._queued_inbound_item(incoming, claim)],
+            route, [reserved],
         )
         assert response.status_code == 200
+        assert await store.inflight_incoming_work_count(route) == 0
         assert await store.is_inbound_revoked(incoming.message_id)
         assert await store.claim_incoming_message(incoming.message_id) is None
 

@@ -2775,6 +2775,39 @@ function bufferedNativeSocket(options) {
   return socket;
 }
 
+test('retired native buffers retain admitted messages after task context expires and reject later emissions', async t => {
+  const { bridge, line } = await fixture(t, 'ack', { makeSocket: bufferedNativeSocket });
+  const socket = line.socket, auth = line.auth;
+  const held = gate(), releaseHeld = gate(), emitterStarted = gate(), releaseEmitter = gate();
+  const background = auth.trackProviderTask(async () => {held.resolve(); await releaseHeld.promise;});
+  const emitter = auth.trackProviderTask(async () => {
+    emitterStarted.resolve(); await releaseEmitter.promise;
+    socket.ev.buffer();
+    socket.ev.emit('messages.upsert', {messages: [original('ACCEPTED_BEFORE_RETIREMENT', false)], type: 'notify'});
+  });
+  await Promise.all([held.promise, emitterStarted.promise]);
+  const closing = bridge.close();
+  try {
+    releaseEmitter.resolve(); await emitter;
+    assert.equal(auth.inProviderContext(), false, 'simulate the native timer outside the completed emitter task');
+    assert.equal(auth.hasProviderWork(), true, 'another accepted task keeps retirement in progress');
+    socket.ev.flush();
+    await line.eventTail;
+    assert.equal(line.store.data.messages.ACCEPTED_BEFORE_RETIREMENT?.text, 'Original body');
+    assert.equal(socket.ev.emit('messages.upsert', {
+      messages: [original('UNADMITTED_AFTER_RETIREMENT', false)], type: 'notify',
+    }), false, 'retirement must reject new events before they can enter the retained buffer');
+    socket.ev.flush(); await line.eventTail;
+    assert.equal(line.store.data.messages.UNADMITTED_AFTER_RETIREMENT, undefined);
+  } finally {
+    releaseEmitter.resolve(); releaseHeld.resolve();
+    await Promise.allSettled([emitter, background, closing]);
+  }
+  const restored = (await readJournal(line.store.filename, () => ({}))).data;
+  assert.equal(restored.messages.ACCEPTED_BEFORE_RETIREMENT.text, 'Original body');
+  assert.equal(restored.messages.UNADMITTED_AFTER_RETIREMENT, undefined);
+});
+
 test('retirement flushes the real Baileys 100 ms buffer gap before replacing or destroying its subscription', async t => {
   for (const mode of ['reconnect', 'shutdown']) {
     const { bridge, line } = await fixture(t, 'ack', { makeSocket: bufferedNativeSocket });

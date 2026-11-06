@@ -123,7 +123,7 @@ def watchdog_storage(registry: list[dict[str, Any]], now: float) -> dict[str, An
 async def line_health() -> dict[str, Any]:
     async with _lock:
         now = time.time()
-        if _cache["payload"] is not None and now - _cache["at"] < _CACHE_SECONDS:
+        if _cache["payload"] is not None and 0 <= time.monotonic() - _cache["at"] < _CACHE_SECONDS:
             return _cache["payload"]
         from app.whatsapp_registry import whatsapp_registry_repository
 
@@ -143,9 +143,13 @@ async def line_health() -> dict[str, Any]:
             except Exception:
                 bridge_lines = None
                 storage = await asyncio.to_thread(watchdog_storage, registry, now)
+        completed_at = time.time()
         payload = {"available": not registry or bridge_lines is not None,
-                   "lines": summarize(registry, bridge_lines, now), "storage": storage, "checked_at": _iso(now)}
-        _cache.update(at=now, payload=payload)
+                   "lines": summarize(registry, bridge_lines, completed_at), "storage": storage, "checked_at": _iso(completed_at)}
+        # Cache from completion: a slow failed probe must not let every queued
+        # staff poll launch another full timeout immediately. Use monotonic time
+        # so clock corrections cannot prolong or repeatedly invalidate health.
+        _cache.update(at=time.monotonic(), payload=payload)
         return payload
 
 
