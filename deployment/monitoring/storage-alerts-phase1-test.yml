@@ -1,0 +1,30 @@
+rule_files:
+  - storage-alerts.yml
+evaluation_interval: 1m
+tests:
+  - interval: 1m
+    input_series:
+      - series: 'support_bridge_disconnects_total{identity="test_identity"}'
+        values: '0+1x10'
+      - series: 'support_bridge_identity_connected{identity="test_identity"}'
+        values: '1+0x10'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: BridgeRepeatedDisconnects
+        exp_alerts:
+          - exp_labels: {identity: test_identity, severity: warning}
+            exp_annotations:
+              summary: "WhatsApp identity test_identity repeatedly disconnects"
+              description: "Correlate heartbeat RTT/frame silence, timer delay, event-loop lag and disconnect reasons. Do not relink or lengthen timeouts without evidence."
+  - interval: 1m
+    input_series:
+      - series: support_monitoring_expected
+        values: '1+0x10'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: BridgeDiagnosticsMissing
+        exp_alerts:
+          - exp_labels: {severity: critical}
+            exp_annotations:
+              summary: "Bridge diagnostics are missing or stale"
+              description: "Inspect collector health and the pinned provider diagnostic patch. Missing data is not evidence of healthy connections."

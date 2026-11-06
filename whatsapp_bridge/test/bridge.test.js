@@ -2074,7 +2074,7 @@ test('blocked line recovery stays isolated and repeated worker starts do not dup
 });
 
 test('repeated disconnects back off per generation and a queued logout cancels recovery', async t => {
-  const {bridge,line,socket}=await fixture(t);
+  const {bridge,line,socket}=await fixture(t, 'ack', {random: () => 0});
   t.mock.timers.enable({apis:['setTimeout']});
   const second=mockSocket(),third=mockSocket();let opened=0;
   bridge.makeSocket=()=>++opened === 1 ? second : third;
@@ -2892,5 +2892,26 @@ test('credential failure flushes incoming messages and receipts retained by the 
   } finally {
     await auth.drain().catch(() => {});
     auth.store.append = append; auth.store.failed = false;
+  }
+});
+
+
+test('terminal disconnect classification cancels raw-close recovery before queued persistence drains', async t => {
+  for (const code of [403, 440, 500]) {
+    const {bridge, line, socket} = await fixture(t, 'ack', {random: () => 0});
+    const auth = line.auth;
+    let release;
+    line.eventTail = new Promise(resolve => { release = resolve; });
+    socket.ws.isOpen = false;
+    socket.ws.emit('close');
+    assert.ok(line.reconnectTimer);
+    const closed = socket.eventHandler({'connection.update': {connection: 'close', lastDisconnect: {error: {output: {statusCode: code}}}}});
+    assert.equal(line.reconnectTimer, null, 'classification fences the timer before awaiting the old event tail');
+    assert.equal(line.retryBlocked, true);
+    release(); await closed;
+    assert.equal(line.status, 'error');
+    assert.equal(line.auth, auth, 'saved credentials were not reset');
+    assert.equal(line.store.data.enabled, true, 'quarantine does not unlink the device');
+    await bridge.close();
   }
 });

@@ -1,0 +1,100 @@
+rule_files:
+  - storage-alerts.yml
+evaluation_interval: 1m
+tests:
+  - interval: 1m
+    input_series:
+      - series: 'node_filesystem_avail_bytes{mountpoint="/"}'
+        values: '5000000000+0x10'
+      - series: 'node_filesystem_size_bytes{mountpoint="/"}'
+        values: '500000000000+0x10'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: DiskSpaceCritical
+        exp_alerts:
+          - exp_labels: {mountpoint: '/', severity: critical}
+      - eval_time: 6m
+        alertname: DiskSpaceWarning
+        exp_alerts:
+          - exp_labels: {mountpoint: '/', severity: warning}
+  - interval: 1m
+    input_series:
+      - series: support_monitoring_expected
+        values: "1+0x10"
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: RuntimeCollectorFailed
+        exp_alerts:
+          - exp_labels: {severity: critical}
+      - eval_time: 6m
+        alertname: SupportAPIUnavailable
+        exp_alerts:
+          - exp_labels: {severity: critical}
+      - eval_time: 6m
+        alertname: BridgeDisconnected
+        exp_alerts:
+          - exp_labels: {severity: critical}
+      - eval_time: 6m
+        alertname: BridgeStorageUnavailable
+        exp_alerts:
+          - exp_labels: {severity: critical}
+      - eval_time: 6m
+        alertname: BridgeCheckpointFailure
+        exp_alerts:
+          - exp_labels: {severity: critical}
+  - interval: 1m
+    input_series:
+      - series: support_monitoring_expected
+        values: "1+0x10"
+      - series: support_runtime_check_timestamp_seconds
+        values: "0+0x10"
+      - series: bridge_watchdog_timestamp_seconds
+        values: "0+0x10"
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: RuntimeCollectorFailed
+        exp_alerts:
+          - exp_labels: {severity: critical}
+      - eval_time: 6m
+        alertname: SupportAPIUnavailable
+        exp_alerts:
+          - exp_labels: {severity: critical}
+      - eval_time: 6m
+        alertname: BridgeDisconnected
+        exp_alerts:
+          - exp_labels: {severity: critical}
+      - eval_time: 6m
+        alertname: BridgeStorageUnavailable
+        exp_alerts:
+          - exp_labels: {severity: critical}
+      - eval_time: 6m
+        alertname: BridgeCheckpointFailure
+        exp_alerts:
+          - exp_labels: {severity: critical}
+  - interval: 1m
+    input_series:
+      - series: support_monitoring_expected
+        values: '0+0x10'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: RuntimeCollectorFailed
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: SupportAPIUnavailable
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: BridgeStorageUnavailable
+        exp_alerts: []
+  - interval: 1m
+    input_series:
+      - series: support_monitoring_expected
+        values: '1+0x20'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: StorageCollectorFailed
+        exp_alerts:
+          - exp_labels: {severity: critical}
+          - exp_labels: {severity: critical, application: bridge}
+          - exp_labels: {severity: critical, application: media}
+          - exp_labels: {severity: critical, application: database}
+          - exp_labels: {severity: critical, application: releases}

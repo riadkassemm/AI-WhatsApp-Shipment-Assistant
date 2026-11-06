@@ -1301,6 +1301,15 @@ async def transfer_ticket(
         raise _translate_error(exc) from exc
 
 
+@router.get("/tickets/{ticket_id}/messages/by-client/{client_message_id}")
+async def lookup_ticket_message(ticket_id: int, client_message_id: str,
+                                agent: SupportAgent = Depends(get_current_agent)) -> dict:
+    try:
+        return {"message": await support_service.lookup_agent_message(ticket_id, client_message_id, agent=agent)}
+    except Exception as exc:
+        raise _translate_error(exc) from exc
+
+
 @router.post("/tickets/{ticket_id}/messages")
 async def send_ticket_message(
     ticket_id: int,

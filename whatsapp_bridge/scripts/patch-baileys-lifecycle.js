@@ -26,6 +26,27 @@ export const patchManifest = Object.freeze({
     sha256: 'ff8b19ff02491fa080ee371f066d49c94acb903207dd0d9fdb5548e5a594fb4a',
     edits: [
       hook('makeSocket'),
+      // Passive, bounded diagnostics only: no extra pings, deadline changes,
+      // payload logging or dependency on a successful observer callback.
+      edit('    const bridgeDetachedTask = config.bridgeDetachedTask ?? bridgeTask;',
+        `    const bridgeDetachedTask = config.bridgeDetachedTask ?? bridgeTask;
+    const bridgeDiagnostic = sample => { try { config.bridgeConnectionDiagnostics?.(sample); } catch {} };`),
+      edit('            lastDateRecv = new Date();\n            let anyTriggered = false;',
+        "            lastDateRecv = new Date();\n            bridgeDiagnostic({event: 'decoded_frame'});\n            let anyTriggered = false;"),
+      edit('    const startKeepAliveRequest = () => (keepAliveReq = setInterval(() => {',
+        `    const startKeepAliveRequest = () => {
+        let bridgeLastTick = performance.now();
+        return (keepAliveReq = setInterval(() => {
+        const bridgeTick = performance.now();
+        const bridgeTimerDelay = Math.max(0, bridgeTick - bridgeLastTick - keepAliveIntervalMs);
+        bridgeLastTick = bridgeTick;`),
+      edit('        const diff = Date.now() - lastDateRecv.getTime();',
+        "        const diff = Date.now() - lastDateRecv.getTime();\n        bridgeDiagnostic({event: 'heartbeat_tick', frame_age_ms: diff, timer_delay_ms: bridgeTimerDelay});"),
+      edit('        if (diff > keepAliveIntervalMs + 5000) {',
+        "        if (diff > keepAliveIntervalMs + 5000) {\n            bridgeDiagnostic({event: 'heartbeat_timeout'});"),
+      edit("                content: [{ tag: 'ping', attrs: {} }]\n            }).catch(err => {",
+        "                content: [{ tag: 'ping', attrs: {} }]\n            }).then(() => {\n                bridgeDiagnostic({event: 'heartbeat_result', rtt_ms: performance.now() - bridgeTick});\n            }).catch(err => {\n                bridgeDiagnostic({event: 'heartbeat_error'});"),
+      edit('    }, keepAliveIntervalMs));', '    }, keepAliveIntervalMs));\n    };'),
       ...named('    const rotateSignedPreKey = async () => {', '    };\n    const executeUSyncQuery = async (usyncQuery) => {'),
       ...named('    const requestPairingCode = async (phoneNumber, customPairingCode) => {', '    };\n    async function generatePairingKey() {'),
       // Track the actual upload/retry operation, even if its timeout race wins.
@@ -43,7 +64,7 @@ export const patchManifest = Object.freeze({
       // callback without delaying native query-response/TAG event handlers.
       edit("    ws.on('CB:ib,,edge_routing', (node) => {", "    ws.on('CB:ib,,edge_routing', bridgeTask((node) => {"),
       edit('    });\n    let didStartBuffer = false;', '    }));\n    let didStartBuffer = false;'),
-      edit("        type: 'md',\n        ws,", "        type: 'md',\n        bridgeTaskVersion: 1,\n        ws,"),
+      edit("        type: 'md',\n        ws,", "        type: 'md',\n        bridgeTaskVersion: 1,\n        bridgeConnectionDiagnosticsVersion: 1,\n        ws,"),
     ],
   },
   'lib/Socket/chats.js': {

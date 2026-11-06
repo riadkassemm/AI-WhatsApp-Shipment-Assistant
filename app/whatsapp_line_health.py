@@ -24,7 +24,7 @@ router = APIRouter(tags=["whatsapp-line-health"])
 
 # Reconnects normally finish within seconds; alert only when one does not.
 ALERT_AFTER_SECONDS = 120
-_CACHE_SECONDS = 10
+_CACHE_SECONDS = 5
 _STATES = {"connected": "connected", "logged_out": "logged_out", "error": "offline",
            "connecting": "reconnecting", "disconnected": "reconnecting", "qr": "reconnecting"}
 _cache: dict[str, Any] = {"at": 0.0, "payload": None}
@@ -44,7 +44,8 @@ def _iso(epoch_seconds: float | None) -> str | None:
     return datetime.fromtimestamp(epoch_seconds, tz=timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def summarize(registry: list[dict[str, Any]], bridge_lines: list[dict[str, Any]] | None, now: float) -> list[dict[str, Any]]:
+def summarize(registry: list[dict[str, Any]], bridge_lines: list[dict[str, Any]] | None, now: float,
+              storage: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     """Merge enabled lines with bridge status. ``bridge_lines=None`` means the bridge is unreachable."""
     by_id = {str(line.get("line_id")): line for line in bridge_lines or [] if isinstance(line, dict)}
     lines = []
@@ -60,10 +61,28 @@ def summarize(registry: list[dict[str, Any]], bridge_lines: list[dict[str, Any]]
             reported = ((bridge.get("logged_out_at") if state == "logged_out" else None) or bridge.get("disconnected_since")) if bridge else None
             since = reported / 1000 if isinstance(reported, (int, float)) and reported > 0 else _first_seen_down.setdefault(line_id, now)
         reason = bridge.get("logout_reason") if bridge and state == "logged_out" else None
+        category = (bridge or {}).get("recovery_category")
+        storage_blocked = category == "storage_failure" or any(
+            issue.get("level") == "critical" and issue.get("code") not in {"BRIDGE_UNAVAILABLE", "MONITOR_UNAVAILABLE"}
+            and (not issue.get("line_id") or str(issue["line_id"]) == line_id)
+            for issue in (storage or {}).get("issues", [])
+        )
+        if storage_blocked:
+            connection_state, recovery_action = "storage_recovery_required", "administrator"
+        elif state == "logged_out" or (bridge or {}).get("status") == "qr":
+            connection_state, recovery_action = "relink_required", "relink"
+        elif state == "connected":
+            connection_state, recovery_action = "connected", "none"
+        elif state == "reconnecting" and category not in {"authentication_failure", "session_conflict", "protocol_failure"}:
+            connection_state, recovery_action = "reconnecting", "automatic"
+        else:
+            connection_state, recovery_action = "temporarily_unavailable", "administrator"
         lines.append({
             "line_id": line_id, "name": row.get("name") or line_id, "status": state, "since": _iso(since),
             "logout_reason": reason if isinstance(reason, str) else None,
-            "alert": state == "logged_out" or (state != "connected" and since is not None and now - since >= ALERT_AFTER_SECONDS),
+            "connection_state": connection_state, "recovery_action": recovery_action,
+            "alert": connection_state in {"relink_required", "storage_recovery_required"} or
+                     (state != "connected" and since is not None and now - since >= ALERT_AFTER_SECONDS),
         })
     return lines
 
@@ -145,7 +164,7 @@ async def line_health() -> dict[str, Any]:
                 storage = await asyncio.to_thread(watchdog_storage, registry, now)
         completed_at = time.time()
         payload = {"available": not registry or bridge_lines is not None,
-                   "lines": summarize(registry, bridge_lines, completed_at), "storage": storage, "checked_at": _iso(completed_at)}
+                   "lines": summarize(registry, bridge_lines, completed_at, storage), "storage": storage, "checked_at": _iso(completed_at)}
         # Cache from completion: a slow failed probe must not let every queued
         # staff poll launch another full timeout immediately. Use monotonic time
         # so clock corrections cannot prolong or repeatedly invalidate health.

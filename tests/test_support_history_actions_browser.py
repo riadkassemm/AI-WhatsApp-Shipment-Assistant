@@ -132,7 +132,7 @@ CHECKS = r'''<script>
 
   // The outgoing reply belongs to the current ticket and quotes the old message.
   $('sendBtn').click();
-  await state.textSendChain;
+  await supportSendQueue.waitForGroup(supportSendGroup(state.ticketId));
   check(row(1003)?.textContent.includes(draft),'Reply to historical message was not rendered');
   check(textarea.value===''&&state.replyTarget===null,'Successful reply did not clear the draft');
   check(String(state.ticketId)==='42'&&state.historySelectionEpoch===selectionEpoch,'Reply changed the selected conversation');

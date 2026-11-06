@@ -191,7 +191,7 @@ def test_storage_banner_warns_before_outage_without_suggesting_pairing():
     helpers = source[source.index("const LINE_HEALTH_INTERVAL_MS"):source.index("function linkedDeviceAdditionStorageKey(")]
     script = r"""
 const assert = require('node:assert/strict');
-function element() {return {textContent: '', classList: {hidden: true, toggle(_, value) {this.hidden = value}}}}
+function element() {return {dataset: {}, textContent: '', classList: {hidden: true, toggle(_, value) {this.hidden = value}}}}
 const elements = {lineAlertBanner: element(), lineAlertText: element(), lineAlertActionBtn: element(), composerHelp: element()};
 const $ = id => elements[id], text = (node, value) => {node.textContent = value};
 const canLinkWhatsApp = () => true, sounds = [], notifyNewCustomerActivity = value => sounds.push(value);
@@ -208,15 +208,15 @@ assert.equal(sounds.length, 1, 'one notification for the same storage issue');
 payload.storage = {level:'critical', issues:[{line_id:null, level:'critical', code:'DISK_SPACE_LOW'}]};
 renderLineHealth(payload);
 assert.equal(sounds.length, 2, 'escalation alerts immediately');
-assert.match(elements.composerHelp.textContent, /New replies are paused.*Saved sessions and delivery records are retained/);
+assert.match(elements.composerHelp.textContent, /New sends are paused.*Saved sessions and delivery records are retained/);
 payload.storage = {level:'ok', issues:[]};
 renderLineHealth(payload);
 assert.equal(elements.lineAlertBanner.classList.hidden, true);
-assert.equal(elements.composerHelp.textContent, 'Messages are sent from the WhatsApp number for this conversation.');
+assert.equal(elements.composerHelp.textContent, 'Connected. Messages are sent from the WhatsApp number for this conversation.');
 payload.storage = {level:'critical', issues:[{line_id:'90021', name:'Tyre Office', level:'critical', code:'JOURNAL_LIMIT'}]};
 renderLineHealth(payload);
 assert.equal(sounds.length, 3, 'a recurrence notifies again');
-assert.equal(elements.composerHelp.textContent, 'Messages are sent from the WhatsApp number for this conversation.');
+assert.equal(elements.composerHelp.textContent, 'Connected. Messages are sent from the WhatsApp number for this conversation.');
 """
     result = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=10)
     assert result.returncode == 0, result.stderr
@@ -273,7 +273,7 @@ def test_banner_and_composer_explain_an_outage():
     helpers = source[source.index("const LINE_HEALTH_INTERVAL_MS"):source.index("function linkedDeviceAdditionStorageKey(")]
     script = r"""
 const assert = require('node:assert/strict');
-function element() {return {textContent: '', classList: {hidden: true, toggle(_, value) {this.hidden = value}}}}
+function element() {return {dataset: {}, textContent: '', classList: {hidden: true, toggle(_, value) {this.hidden = value}}}}
 const elements = {lineAlertBanner: element(), lineAlertText: element(), lineAlertActionBtn: element(), composerHelp: element()};
 const $ = id => elements[id];
 const text = (node, value) => {node.textContent = value};
@@ -287,18 +287,25 @@ const state = {authenticated: true, lineHealthAt: 0, lineAlertsSeen: new Set(),
 const down = {lines: [{line_id: '90020', name: 'Saida Office', status: 'logged_out', since: '2026-10-31T08:10:27Z', alert: true}]};
 renderLineHealth(down);
 assert.equal(elements.lineAlertBanner.classList.hidden, false);
-assert.match(elements.lineAlertText.textContent, /^Saida Office was logged out by WhatsApp since .+\. It keeps trying to reconnect\. Replies wait and are sent automatically/);
+assert.match(elements.lineAlertText.textContent, /^Saida Office needs relinking since .+\. Ask an authorized staff member to relink the same phone/);
 assert.equal(elements.lineAlertActionBtn.classList.hidden, true, 'no re-pair button without link rights');
 assert.deepEqual(sounds, [], 'nobody who cannot fix it is paged');
-assert.match(elements.composerHelp.textContent, /^Saida Office is offline since .+ sent automatically when it reconnects/);
+assert.match(elements.composerHelp.textContent, /^Saida Office: Relink required\. Ask an authorized staff member/);
 staff = true; state.lineAlertsSeen.clear();  // every staff role can re-pair
 renderLineHealth(down); renderLineHealth(down);
-assert.match(elements.lineAlertText.textContent, /Re-pair it with the same phone; every conversation and its history stays\. Replies wait/);
+assert.match(elements.lineAlertText.textContent, /relink the same phone; conversation history stays/);
 assert.equal(elements.lineAlertActionBtn.classList.hidden, false);
 assert.equal(sounds.length, 1, 'one sound per outage');
 renderLineHealth({lines: [{line_id: '90020', name: 'Saida Office', status: 'connected', since: null, alert: false}]});
 assert.equal(elements.lineAlertBanner.classList.hidden, true);
-assert.equal(elements.composerHelp.textContent, 'Messages are sent from the WhatsApp number for this conversation.');
+assert.equal(elements.composerHelp.textContent, 'Connected. Messages are sent from the WhatsApp number for this conversation.');
+renderLineHealth({available: false,
+  lines: [{line_id: '90020', name: 'Saida Office', status: 'offline', connection_state: 'temporarily_unavailable', alert: false}],
+  storage: {level: 'critical', issues: [{code: 'BRIDGE_UNAVAILABLE', level: 'critical'}, {code: 'MONITOR_UNAVAILABLE', level: 'critical'}]}});
+assert.match(elements.composerHelp.textContent, /Temporarily unavailable/);
+assert.doesNotMatch(elements.composerHelp.textContent, /Storage recovery required/);
+assert.match(elements.lineAlertText.textContent, /connection status is unavailable/);
+assert.equal(elements.lineAlertActionBtn.classList.hidden, true, 'missing telemetry is not a reason to relink');
 """
     result = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=10)
     assert result.returncode == 0, result.stderr
@@ -339,3 +346,20 @@ try {
                "--user-data-dir=" + str(tmp_path / "profile"), "--virtual-time-budget=500", "--dump-dom", page.as_uri()]
     result = subprocess.run(command, capture_output=True, text=True, timeout=45)
     assert 'data-result="passed"' in result.stdout, result.stdout[-700:]
+
+
+def test_staff_connection_states_distinguish_recovery_from_relinking(monkeypatch):
+    monkeypatch.setattr(health, "_first_seen_down", {})
+    now = 1_800_000_000.0
+    cases = [
+        ({"status": "connected"}, "connected", "none"),
+        ({"status": "disconnected", "recovery_category": "temporary_transport"}, "reconnecting", "automatic"),
+        ({"status": "error", "recovery_category": "session_conflict"}, "temporarily_unavailable", "administrator"),
+        ({"status": "error", "recovery_category": "storage_failure"}, "storage_recovery_required", "administrator"),
+        ({"status": "logged_out"}, "relink_required", "relink"),
+    ]
+    for bridge, expected, action in cases:
+        [line] = health.summarize(REGISTRY[:1], [{"line_id": "90020", **bridge}], now)
+        assert line["connection_state"] == expected and line["recovery_action"] == action
+        if expected == "reconnecting":
+            assert not line["alert"], "brief recoverable gaps should not sound an alarm"

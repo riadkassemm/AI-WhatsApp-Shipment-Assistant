@@ -110,7 +110,7 @@ CHECKS = r'''<script>
   textarea.focus();
   check(document.activeElement===textarea,'Composer could not receive focus');
   $('sendBtn').click();
-  await state.textSendChain;
+  await supportSendQueue.waitForGroup(supportSendGroup(state.ticketId));
   check(row(1003)?.textContent.includes(draft),'Next message was not delivered and rendered');
   check(textarea.value===''&&state.replyTarget===null,'Successful send did not clear the draft');
   check(String(state.ticketId)==='42'&&state.currentConversationOrigin===origin,'Send changed conversation');

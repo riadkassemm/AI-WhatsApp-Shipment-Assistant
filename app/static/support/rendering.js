@@ -64,6 +64,12 @@ function clearTicketWorkspace() {
 }
 
 function showLogin() {
+  const unsavedSends = hasUnpersistedSupportMessages();
+  state.sendSessionEpoch++;
+  supportSendQueue.cancelWaiting();
+  state.localMessages.clear();
+  state.realtimeMessages.clear();
+  state.hiddenSupportMessages?.clear();
   state.sessionCheckController?.abort();
   stopDashboardRefresh();
   state.dashboardReadBoundaries.clear();
@@ -132,7 +138,7 @@ function showLogin() {
   $('passwordToggleBtn').setAttribute('aria-pressed', 'false');
   $('passwordToggleBtn').setAttribute('aria-label', 'Show password');
   $('passwordToggleBtn').setAttribute('data-tooltip', 'Show password');
-  showLoginError('');
+  showLoginError(unsavedSends ? 'Some messages had no saved confirmation when the session ended. Sign in and check the conversation before sending them again.' : '');
   window.setTimeout(() => $('email').focus(), 20);
 }
 
@@ -278,6 +284,9 @@ function waitForSessionRetry(delay, signal) {
 
 async function logout() {
   if (state.busy) return;
+  if (hasUnpersistedSupportMessages() && !(await confirmDialog({title: 'Messages are still pending',
+    message: 'Some messages have not been confirmed as saved. Logging out discards unsent local work; an in-flight request may still complete. Stay to check their status.',
+    confirmLabel: 'Log out anyway', cancelLabel: 'Stay', tone: 'warning'}))) return;
   state.busy = true;
   const button = $('logoutBtn');
   button.disabled = true;
@@ -2056,6 +2065,21 @@ function addMessage(container, m, extraClass = '', {allowReply = true} = {}) {
       resend.onclick = () => resendMessage(m, resend);
       meta.append(resend);
     }
+  } else if (m.send_status === 'CONFIRMATION_PENDING') {
+    const pending = document.createElement('span');
+    pending.className = 'send-state pending';
+    pending.append(createIcon('clock', 'icon icon-sm'), document.createTextNode('Confirmation pending'));
+    pending.title = 'The server may have accepted this message. Nothing has been resent.';
+    meta.append(pending);
+    if (!extraClass && !m.id && String(m.sender_id) === String(state.agent?.id)) {
+      const check = document.createElement('button');
+      check.type = 'button'; check.className = 'btn send-retry-btn'; check.textContent = 'Check status';
+      check.onclick = () => checkPendingTextMessage(m, m.ticket_id || state.ticketId);
+      const retry = document.createElement('button');
+      retry.type = 'button'; retry.className = 'btn send-retry-btn'; retry.textContent = 'Retry original request';
+      retry.onclick = () => retryOriginalTextRequest(m, m.ticket_id || state.ticketId);
+      meta.append(check, retry);
+    }
   } else if (m.send_status === 'UNCERTAIN') {
     const uncertain = document.createElement('span');
     uncertain.className = 'send-state failed';
@@ -2081,9 +2105,11 @@ function addMessage(container, m, extraClass = '', {allowReply = true} = {}) {
   } else if (m.send_status === 'PENDING' || m.send_status === 'DISPATCHING') {
     const pending = document.createElement('span');
     pending.className = 'send-state pending';
-    pending.title = 'Sending';
-    pending.setAttribute('aria-label', 'Sending');
-    pending.append(createIcon('clock', 'icon icon-sm'));
+    const label = m.local_submission === 'QUEUED' ? 'Queued on this device · not saved yet'
+      : m.id ? 'Saved · waiting for WhatsApp confirmation' : 'Submitting · not confirmed as saved';
+    pending.title = label;
+    pending.setAttribute('aria-label', label);
+    pending.append(createIcon('clock', 'icon icon-sm'), document.createTextNode(m.local_submission === 'QUEUED' ? 'Queued' : m.id ? 'Sending' : 'Submitting'));
     meta.append(pending);
   } else if (outbound && m.send_status) {
     // WhatsApp-style ticks: one grey when sent, two grey when delivered, two blue when read.
@@ -2152,12 +2178,9 @@ async function resendMessage(m, button) {
   if (button) { button.disabled = true; button.textContent = 'Sending…'; }
   const ticketId = m.ticket_id || state.ticketId;
   if (!m.id) {
-    // Never reached the server: send it again with the same client ID, so a
-    // request that did arrive is not sent twice.
-    m.send_status = 'PENDING';
-    m.error_message = null;
-    upsertTimelineMessage(m, ticketId);
-    await deliverTextMessage(m, ticketId);
+    // Explicit retry only; retain the original scoped idempotency key.
+    if (queueTextMessage(m, ticketId)) upsertTimelineMessage(m, ticketId);
+    else if (button) { button.disabled = false; button.textContent = 'Resend'; }
     return;
   }
   try {
@@ -2247,7 +2270,7 @@ function timelineSignature(data) {
 function mergeTimelineMessages(loaded, incoming) {
   const byId = new Map();
   for (const message of [...(loaded || []), ...(incoming || [])]) {
-    if (message?.id) byId.set(String(message.id), message);
+    if (message?.id && !supportMessageHidden(message)) byId.set(String(message.id), mergeSupportMessage(byId.get(String(message.id)), message));
   }
   return [...byId.values()].sort((left, right) => Number(left.id) - Number(right.id));
 }
@@ -2271,8 +2294,15 @@ function mergePreviousHistoryThreads(loaded, fresh) {
 }
 
 function changeCachedMessage(ticketId, messageId, updated = null, hidden = false) {
+  const realtimeKey = String(ticketId) + ':' + messageId;
+  if (hidden) {
+    (state.hiddenSupportMessages ??= new Set()).add(String(messageId));
+    state.realtimeMessages.delete(realtimeKey);
+  } else if (updated && !supportMessageHidden(updated)) {
+    state.realtimeMessages.set(realtimeKey, mergeSupportMessage(state.realtimeMessages.get(realtimeKey), updated));
+  }
   const change = messages => (messages || []).filter(message => !hidden || Number(message.id) !== Number(messageId))
-    .map(message => updated && Number(message.id) === Number(messageId) ? updated : message);
+    .map(message => updated && Number(message.id) === Number(messageId) ? mergeSupportMessage(message, updated) : message);
   if (String(ticketId) === String(state.ticketId)) {
     state.cachedCurrentMessages = change(state.cachedCurrentMessages);
     if (state.currentTicketData) state.currentTicketData.messages = change(state.currentTicketData.messages);
@@ -2283,7 +2313,7 @@ function changeCachedMessage(ticketId, messageId, updated = null, hidden = false
   const selected = state.selectedMessages?.get(String(messageId));
   if (selected && messageTicketId(selected) === Number(ticketId)) {
     if (hidden || updated?.deleted_for_everyone_at) state.selectedMessages.delete(String(messageId));
-    else if (updated) state.selectedMessages.set(String(messageId), {...updated, ticket_id: Number(ticketId)});
+    else if (updated) state.selectedMessages.set(String(messageId), {...mergeSupportMessage(selected, updated), ticket_id: Number(ticketId)});
     updateMessageSelection();
   }
   if ((hidden || updated?.deleted_for_everyone_at) && state.replyTarget?.id === Number(messageId)) clearReplyTarget();
@@ -2308,22 +2338,22 @@ async function refreshHistoricalMessage(ticketId, messageId) {
 }
 
 function upsertTimelineMessage(message, ticketId) {
-  if (!message || !state.currentTicketData || String(state.ticketId) !== String(ticketId)) return;
+  if (!message || supportMessageHidden(message) || !state.currentTicketData || String(state.ticketId) !== String(ticketId)) return;
   if (state.currentTicketData.ticket?.id && String(state.currentTicketData.ticket.id) !== String(ticketId)) return;
   const messages = state.currentTicketData.messages || (state.currentTicketData.messages = []);
   const clientId = String(message.client_message_id || '');
   const index = messages.findIndex(item =>
     (message.id && String(item.id) === String(message.id)) ||
-    (clientId && String(item.client_message_id || '') === clientId));
-  if (index >= 0) messages[index] = message;
+    (clientId && sameClientMessageScope(item, message)));
+  if (index >= 0) message = messages[index] = mergeSupportMessage(messages[index], message);
   else messages.push(message);
   if (message.id) {
     const cacheIndex = state.cachedCurrentMessages.findIndex(item => String(item.id) === String(message.id));
-    if (cacheIndex >= 0) state.cachedCurrentMessages[cacheIndex] = message;
+    if (cacheIndex >= 0) state.cachedCurrentMessages[cacheIndex] = mergeSupportMessage(state.cachedCurrentMessages[cacheIndex], message);
     else state.cachedCurrentMessages.push(message);
   }
-  if (clientId && message.id) state.localMessages.delete(clientId);
-  if (message.id) state.realtimeMessages.set(String(ticketId) + ':' + message.id, message);
+  observePersistedSupportMessage(message, ticketId);
+  if (message.id) state.realtimeMessages.set(String(ticketId) + ':' + message.id, mergeSupportMessage(state.realtimeMessages.get(String(ticketId) + ':' + message.id), message));
   state.timelineSignature = timelineSignature(state.currentTicketData);
   renderConversation(state.currentTicketData);
   if (message.direction === 'INBOUND' && message.id) {
@@ -2334,17 +2364,28 @@ function upsertTimelineMessage(message, ticketId) {
 
 function mergeLiveMessages(data, ticketId) {
   if (!Array.isArray(data.messages)) data.messages = [];
+  data.messages = data.messages.filter(message => !supportMessageHidden(message));
+  for (const thread of data.previous_ticket_history || []) {
+    thread.messages = (thread.messages || []).filter(message => !supportMessageHidden(message)).map(message =>
+      mergeSupportMessage(state.realtimeMessages.get(String(thread.ticket?.id) + ':' + message.id), message));
+  }
   const seen = new Set((data.messages || []).map(message => String(message.id)));
   for (const [key, message] of state.realtimeMessages) {
-    if (!key.startsWith(String(ticketId) + ':')) continue;
-    if (seen.has(String(message.id))) { state.realtimeMessages.delete(key); continue; }
+    if (!key.startsWith(String(ticketId) + ':') || supportMessageHidden(message)) continue;
+    if (seen.has(String(message.id))) {
+      const index = data.messages.findIndex(item => String(item.id) === String(message.id));
+      data.messages[index] = mergeSupportMessage(message, data.messages[index]);
+      state.realtimeMessages.delete(key);
+      continue;
+    }
     data.messages.push(message);
     seen.add(String(message.id));
   }
-  const confirmed = new Set(data.messages.map(message => String(message.client_message_id || '')));
+  const merged = new Map(data.messages.map(message => [String(message.id), message]));
+  state.cachedCurrentMessages = state.cachedCurrentMessages.map(message => merged.get(String(message.id)) || message);
+  for (const message of data.messages) observePersistedSupportMessage(message, ticketId);
   for (const [clientId, item] of state.localMessages) {
     if (String(item.ticketId) !== String(ticketId)) continue;
-    if (confirmed.has(clientId)) { state.localMessages.delete(clientId); continue; }
     data.messages.push(item.message);
   }
 }

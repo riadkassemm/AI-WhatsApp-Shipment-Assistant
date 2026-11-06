@@ -19,6 +19,8 @@ const calls=[],downloads=[],timeline=[],notices=[],copies=[];
 const animationFrames=[];
 window.requestAnimationFrame=callback=>{animationFrames.push(callback);return animationFrames.length};
 let sendBehavior=null,downloadBehavior=null,renderFailure=false,nextMessageId=100,queueRefreshes=0;
+const supportSendGroup=ticketId=>'ticket:'+ticketId;
+const supportSendQueue={waitForGroup:group=>{if(group!=='ticket:42')throw Error('wrong conversation barrier');return state.textSendChain;}};
 const text=(element,value)=>{element.textContent=value};
 const notify=value=>notices.push(value);
 const staffRoleLabel=role=>role;

@@ -3385,6 +3385,20 @@ class SupportService:
                 raise SupportConflictError("The contact conversation is no longer active.")
         return ticket
 
+    async def lookup_agent_message(self, ticket_id: int, client_message_id: str, *, agent: SupportAgent):
+        """Read the caller's original request only; never create or retry a send."""
+        if not client_message_id or len(client_message_id) > 191:
+            raise SupportValidationError("A valid client_message_id is required.")
+        ticket = await support_repository.get_ticket(ticket_id)
+        if not ticket or not await _can_view_ticket(ticket, agent):
+            raise SupportNotFoundError("Conversation not found.")
+        message = await support_repository.get_message_by_client_id(
+            client_message_id, ticket_id=ticket_id, sender_type="AGENT", sender_id=agent.id,
+        )
+        if not message or await support_repository.message_hidden_for_user(int(message["id"]), agent.id):
+            return None
+        return _serialize_support_messages(ticket_id, [message])[0]
+
     async def send_agent_message(
         self,
         ticket_id: int,

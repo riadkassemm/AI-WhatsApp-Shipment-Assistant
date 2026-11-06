@@ -13,6 +13,11 @@ import pytest
 from app.support_ui import _ASSETS, _HTML, support_image_editor_script
 from app.config import settings
 
+
+def _with_delivery_model(script: str) -> str:
+    # Fragment harnesses need the same shared model loaded by the real asset list.
+    return script if "class ScopedSupportSendQueue" in script else _ASSETS["delivery-state.js"] + "\n" + script
+
 # Connection-health hooks used by queue/conversation loading: the shipped error
 # classifier and no-op recorders (tests/dashboard_connection.test.cjs covers them).
 CONNECTION_HOOKS = _HTML[_HTML.index("function transientReadError("):_HTML.index("function backgroundRetryDelay(")] + """
@@ -50,7 +55,7 @@ const document = {
   assert.deepEqual(notifications, [['Message copied.'], ['Message copied.']]);
 })().catch(error => {console.error(error); process.exitCode = 1});
 """
-    result = subprocess.run(["node", "-e", script], text=True, capture_output=True, timeout=10)
+    result = subprocess.run(["node", "-e", _with_delivery_model(script)], text=True, capture_output=True, timeout=10)
     assert result.returncode == 0, result.stderr
     assert "copy.onclick = () => copyMessageText(bodyText);" in _HTML
     assert ".message-body {" in _HTML and "user-select: text !important;" in _HTML
@@ -101,7 +106,7 @@ assert.equal(state.pendingConversationRender, null);
 selection = {isCollapsed: false, anchorNode: outside, focusNode: outside, toString() {return 'draft'}};
 assert.equal(selectedConversationText(), '', 'the composer keeps its native copy behavior');
 """
-    result = subprocess.run(["node", "-e", script], text=True, capture_output=True, timeout=10)
+    result = subprocess.run(["node", "-e", _with_delivery_model(script)], text=True, capture_output=True, timeout=10)
     assert result.returncode == 0, result.stderr
     assert "if (!forceScroll && (state.conversationSelectionPointer !== null || selectedConversationText())) {" in _HTML
     assert "$('conversation').addEventListener('pointerdown', beginConversationSelection);" in _HTML
@@ -164,7 +169,7 @@ emit({type: 'outbound_message', authorized: false, ticket_id: 42,
 assert.equal(queueRefreshes, 2, 'unauthorized events do not touch the queue');
 assert.deepEqual(upserts, [[1002, 42]]);
 """
-    result = subprocess.run(["node", "-e", script], text=True, capture_output=True, timeout=10)
+    result = subprocess.run(["node", "-e", _with_delivery_model(script)], text=True, capture_output=True, timeout=10)
     assert result.returncode == 0, result.stderr
 
 
@@ -221,7 +226,7 @@ const agentRows = elements.linkedDeviceLines.children;
 assert.equal(agentRows[2].children[2].textContent, 'Re-pair (keeps all history)');
 assert.equal(agentRows.some(row => row.children.some(child => child.textContent === 'Remove and unlink')), false);
 """
-    subprocess.run(["node", "-e", script], check=True, timeout=10)
+    subprocess.run(["node", "-e", _with_delivery_model(script)], check=True, timeout=10)
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is unavailable")
@@ -284,7 +289,7 @@ const api = async (path, options) => {
   assert.equal(feedback[0].kind, 'whatsappSuccess');
 })().catch(error => {console.error(error); process.exitCode = 1});
 """
-    subprocess.run(["node", "-e", script], check=True, timeout=10)
+    subprocess.run(["node", "-e", _with_delivery_model(script)], check=True, timeout=10)
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is unavailable")
@@ -357,7 +362,7 @@ const api = async (path, options) => {
   assert.equal(polls, 3);
 })().catch(error => {console.error(error); process.exitCode = 1});
 """
-    subprocess.run(["node", "-e", script], check=True, timeout=10)
+    subprocess.run(["node", "-e", _with_delivery_model(script)], check=True, timeout=10)
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is unavailable")
@@ -487,7 +492,7 @@ assert.equal(editor.mode, 'draw');
 assert.equal(editor.cropRect, null);
 })().catch(error => {console.error(error); process.exitCode = 1});
 """
-    result = subprocess.run(["node", "-e", script], text=True, capture_output=True, timeout=15)
+    result = subprocess.run(["node", "-e", _with_delivery_model(script)], text=True, capture_output=True, timeout=15)
     assert result.returncode == 0, result.stderr
 
 
@@ -523,7 +528,7 @@ const plain = createSupportNumberLabel({phone_number_id: '90002', display_phone_
 assert.equal(plain.textContent, '96176063972');
 assert.equal(plain.children.length, 0);
 """
-    result = subprocess.run(["node", "-e", script], text=True, capture_output=True, timeout=10)
+    result = subprocess.run(["node", "-e", _with_delivery_model(script)], text=True, capture_output=True, timeout=10)
     assert result.returncode == 0, result.stderr
     assert ".support-number-label.has-alias:is(:hover, :focus) .support-number-raw," in _HTML
     assert ".support-number-label.has-alias:is(:hover, :focus) .support-number-alias," in _HTML
@@ -589,7 +594,7 @@ const api = async (path, options) => {
   assert.deepEqual(feedback.map(item => item[0]), ['whatsappSuccess', 'whatsappSuccess']);
 })().catch(error => {console.error(error); process.exitCode = 1});
 """
-    result = subprocess.run(["node", "-e", script], text=True, capture_output=True, timeout=10)
+    result = subprocess.run(["node", "-e", _with_delivery_model(script)], text=True, capture_output=True, timeout=10)
     assert result.returncode == 0, result.stderr
 
 
@@ -613,7 +618,7 @@ const state = {
   editTarget: null, pendingMedia: null, busy: false, ticketId: 42,
   composerEnabled: true, replyTarget: null, agent: {id: '7', name: 'Agent'},
   localMessages: new Map(), realtimeMessages: new Map(), lastInboundByTicket: {},
-  textSendChain: Promise.resolve(), currentTicketData: {messages: []}
+  authenticated: true, sendSessionEpoch: 0, cachedCurrentMessages: [], currentTicketData: {messages: []}
 };
 const $ = id => id === 'message' ? input : {};
 let sequence = 0;
@@ -623,7 +628,7 @@ let finishFirst;
 const api = (path, options) => {
   calls.push({path, payload: JSON.parse(options.body)});
   if (calls.length === 1) return new Promise(resolve => {finishFirst = resolve});
-  return Promise.resolve({message: {id: 102, client_message_id: '2', body: 'second reply'}});
+  return Promise.resolve({message: {id: 102, client_message_id: '2', sender_type: 'AGENT', sender_id: '7', send_status: 'SENT', body: 'second reply'}});
 };
 const timelineSignature = () => '';
 const renderConversation = () => {};
@@ -634,8 +639,9 @@ const updateComposerControls = () => {};
 const showError = () => {};
 const focusMessageComposer = () => {};
 const loadQueue = () => Promise.resolve();
+const requestDashboardRefresh = () => {};
 const notify = () => {};
-""" + timeline + send + r"""
+""" + _ASSETS["delivery-state.js"] + timeline + send + r"""
 (async () => {
   sendMessage();
   assert.equal(input.value, '');
@@ -648,8 +654,8 @@ const notify = () => {};
   const earlyDetail = {messages: []};
   mergeLiveMessages(earlyDetail, 42);
   assert.equal(earlyDetail.messages.length, 2);
-  finishFirst({message: {id: 101, client_message_id: '1', body: 'first reply'}});
-  await state.textSendChain;
+  finishFirst({message: {id: 101, client_message_id: '1', sender_type: 'AGENT', sender_id: '7', send_status: 'SENT', body: 'first reply'}});
+  await supportSendQueue.waitForGroup(supportSendGroup(42));
   assert.equal(calls.length, 2);
   assert.deepEqual(calls.map(call => call.payload.body), ['first reply', 'second reply']);
   assert.deepEqual(state.currentTicketData.messages.map(message => message.id), [101, 102]);
@@ -658,7 +664,7 @@ const notify = () => {};
   assert.equal(confirmedDetail.messages.length, 2);
 })().catch(error => {console.error(error); process.exitCode = 1});
 """
-    result = subprocess.run(["node", "-e", script], text=True, capture_output=True, timeout=15)
+    result = subprocess.run(["node", "-e", _with_delivery_model(script)], text=True, capture_output=True, timeout=15)
     assert result.returncode == 0, result.stderr
 
 
@@ -921,7 +927,7 @@ const api = async (path, options) => {
   assert.equal(calls.length, before);
 })().catch(error => {console.error(error); process.exitCode = 1});
 """
-    result = subprocess.run(["node", "-e", script], text=True, capture_output=True, timeout=15)
+    result = subprocess.run(["node", "-e", _with_delivery_model(script)], text=True, capture_output=True, timeout=15)
     assert result.returncode == 0, result.stderr
 
 
@@ -946,7 +952,7 @@ const afterEligibility = timelineSignature(data);
 data.previous_ticket_history[0].messages[0].can_delete_for_everyone = false;
 assert.notEqual(timelineSignature(data), afterEligibility);
 """
-    result = subprocess.run(["node", "-e", script], text=True, capture_output=True, timeout=15)
+    result = subprocess.run(["node", "-e", _with_delivery_model(script)], text=True, capture_output=True, timeout=15)
     assert result.returncode == 0, result.stderr
 
 
@@ -1015,7 +1021,7 @@ const openTicket = async (id, options) => {opened.push({id, options})};
   assert.equal(sessionStorage.getItem('shipment-support-theme'), 'dark');
 })().catch(error => {console.error(error); process.exitCode = 1});
 """
-    result = subprocess.run(["node", "-e", script], text=True, capture_output=True, timeout=15)
+    result = subprocess.run(["node", "-e", _with_delivery_model(script)], text=True, capture_output=True, timeout=15)
     assert result.returncode == 0, result.stderr
 
 
@@ -1155,7 +1161,7 @@ const api = async path => {
   assert.equal(readSupportSelection().ticketId, 88);
 })().catch(error => {console.error(error); process.exitCode = 1});
 """
-    result = subprocess.run(["node", "-e", script], text=True, capture_output=True, timeout=15)
+    result = subprocess.run(["node", "-e", _with_delivery_model(script)], text=True, capture_output=True, timeout=15)
     assert result.returncode == 0, result.stderr
 
 
@@ -1267,7 +1273,7 @@ const api = path => {
   assert.deepEqual(errors, []);
 })().catch(error => {console.error(error); process.exitCode = 1});
 """
-    result = subprocess.run(["node", "-e", script], text=True, capture_output=True, timeout=15)
+    result = subprocess.run(["node", "-e", _with_delivery_model(script)], text=True, capture_output=True, timeout=15)
     assert result.returncode == 0, result.stderr
 
 
@@ -1381,7 +1387,7 @@ const api = path => {
   assert.deepEqual(state.previousTicketHistory.map(item => item.ticket.id), [7]);
 })().catch(error => {console.error(error); process.exitCode = 1});
 """
-    result = subprocess.run(["node", "-e", script], text=True, capture_output=True, timeout=15)
+    result = subprocess.run(["node", "-e", _with_delivery_model(script)], text=True, capture_output=True, timeout=15)
     assert result.returncode == 0, result.stderr
 
 
@@ -1455,7 +1461,7 @@ state.previousTicketHistory = [];
 updateSharedHistoryShortcut();
 assert.equal(historyButton.classList.contains('hidden'), true);
 """
-    result = subprocess.run(["node", "-e", script], text=True, capture_output=True, timeout=10)
+    result = subprocess.run(["node", "-e", _with_delivery_model(script)], text=True, capture_output=True, timeout=10)
     assert result.returncode == 0, result.stderr
 
 
@@ -1547,7 +1553,7 @@ renderConversation(data, {preserveScrollAnchor: '[data-message-id="400"]'});
 assert.equal(conversation.querySelector('[data-message-id="400"]').getBoundingClientRect().top, messageTop,
   'loading older current messages must keep the first visible message stationary');
 """
-    result = subprocess.run(["node", "-e", script], text=True, capture_output=True, timeout=15)
+    result = subprocess.run(["node", "-e", _with_delivery_model(script)], text=True, capture_output=True, timeout=15)
     assert result.returncode == 0, result.stderr
 
 
@@ -1605,7 +1611,7 @@ const fetch = async () => {
   assert.equal(loginCalls, 1, 'an active 401 still signs the user out');
 })().catch(error => {console.error(error); process.exitCode = 1});
 """
-    result = subprocess.run(["node", "-e", script], text=True, capture_output=True, timeout=15)
+    result = subprocess.run(["node", "-e", _with_delivery_model(script)], text=True, capture_output=True, timeout=15)
     assert result.returncode == 0, result.stderr
 
 
@@ -1718,7 +1724,7 @@ const api = () => {
   assert.equal(clearedSelections, 1, 'an expired session clears saved ticket selection');
 })().catch(error => {console.error(error); process.exitCode = 1});
 """
-    result = subprocess.run(["node", "-e", script], text=True, capture_output=True, timeout=15)
+    result = subprocess.run(["node", "-e", _with_delivery_model(script)], text=True, capture_output=True, timeout=15)
     assert result.returncode == 0, result.stderr
 
 
@@ -1766,7 +1772,7 @@ const openTicket = async (id, options) => {
   assert.equal(calls.some(call => call[0] === 'view'), false, 'only claiming changes the queue');
 })().catch(error => {console.error(error); process.exitCode = 1});
 """
-    result = subprocess.run(["node", "-e", script], text=True, capture_output=True, timeout=10)
+    result = subprocess.run(["node", "-e", _with_delivery_model(script)], text=True, capture_output=True, timeout=10)
     assert result.returncode == 0, result.stderr
 
 
@@ -1825,7 +1831,7 @@ state.ticketId = '42';
 renderActions(data);
 assert.equal(menu().open, false, 'switching tickets closes the menu');
 """
-    result = subprocess.run(["node", "-e", script], text=True, capture_output=True, timeout=10)
+    result = subprocess.run(["node", "-e", _with_delivery_model(script)], text=True, capture_output=True, timeout=10)
     assert result.returncode == 0, result.stderr
 
 

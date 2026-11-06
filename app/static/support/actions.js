@@ -1,42 +1,119 @@
-const TEXT_SEND_RETRY_DELAYS_MS = [1500, 4000];
+const TEXT_SEND_DEADLINE_MS = 45000;
 
-function transientSendError(error) {
-  return !error.status || ([502, 503, 504].includes(error.status) && !error.detail);
+function ambiguousSendError(error) {
+  return !error.status || error.status >= 500 || [408, 429].includes(error.status);
 }
 
-async function deliverTextMessage(message, ticketId) {
-  const clientMessageId = message.client_message_id;
-  state.localMessages.set(clientMessageId, {ticketId, message});
-  for (let attempt = 0; ; attempt++) {
-    let result;
-    try {
-      result = await api('/api/support/tickets/' + ticketId + '/messages', {
-        method: 'POST',
-        body: JSON.stringify({body: message.body, client_message_id: clientMessageId, reply_to_message_id: message.reply_to_message_id || null})
-      });
-    } catch (error) {
-      if (transientSendError(error) && attempt < TEXT_SEND_RETRY_DELAYS_MS.length && !state.pageLeaving) {
-        await new Promise(resolve => setTimeout(resolve, TEXT_SEND_RETRY_DELAYS_MS[attempt]));
-        continue;
-      }
-      message.send_status = 'FAILED';
-      message.error_message = transientSendError(error)
-        ? 'The dashboard could not reach the server. Check your connection, then resend.'
-        : (error.message || 'Message could not be sent.');
-      if (state.localMessages.has(clientMessageId)) upsertTimelineMessage(message, ticketId);
-      if (String(state.ticketId) === String(ticketId)) showError(message.error_message);
-      notify(message.error_message, 'error');
-      // If the server did store it, the refreshed ticket replaces this local copy.
-      if (!transientSendError(error) && String(state.ticketId) === String(ticketId)) openTicket(ticketId, {silent: true}).catch(() => {});
-      return;
+async function supportSendRequest(path, options, timeout = TEXT_SEND_DEADLINE_MS) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeout);
+  try { return await api(path, {...options, signal: controller.signal}); }
+  finally { clearTimeout(timer); }
+}
+
+function queueTextMessage(message, ticketId) {
+  const epoch = state.sendSessionEpoch, agentId = String(state.agent?.id || '');
+  const current = () => state.authenticated && state.sendSessionEpoch === epoch && String(state.agent?.id || '') === agentId;
+  try {
+    if (!state.localMessages.has(message.client_message_id) && (state.localMessages.size >= 64 ||
+        [...state.localMessages.values()].filter(item => String(item.ticketId) === String(ticketId)).length >= 16)) {
+      throw new Error('Review pending messages before adding more. Your draft has been kept.');
     }
-    state.localMessages.delete(clientMessageId);
-    // The send succeeded. A drawing problem must never mark it as failed;
-    // the next live update or refresh redraws the timeline.
-    try { if (result.message) upsertTimelineMessage(result.message, ticketId); } catch (_) {}
-    loadQueue({silent: true}).catch(() => {});
+    const task = supportSendQueue.enqueue({id: message.client_message_id, conversation: String(ticketId),
+      group: supportSendGroup(ticketId, message.business_phone_number_id)}, async () => {
+      if (!current()) return false;
+      if (state.pageLeaving) {
+        message.send_status = 'FAILED'; message.local_submission = 'REJECTED';
+        message.error_message = 'Not submitted because this page was left. Retry the original request after returning.';
+        return false;
+      }
+      return deliverTextMessage(message, ticketId, current);
+    });
+    message.local_submission = 'QUEUED'; message.send_status = 'PENDING'; message.error_message = null;
+    state.localMessages.set(message.client_message_id, {ticketId, message});
+    task.catch(() => { if (current()) notify('The pending request needs a status check. Nothing was resent.', 'error'); });
+    return true;
+  } catch (error) { showError(error.message); notify(error.message, 'error'); return false; }
+}
+
+async function deliverTextMessage(message, ticketId, current = () => state.authenticated) {
+  const clientMessageId = message.client_message_id;
+  if (!current()) return;
+  message.local_submission = 'SUBMITTING';
+  upsertTimelineMessage(message, ticketId);
+  let result;
+  try {
+    result = await supportSendRequest('/api/support/tickets/' + ticketId + '/messages', {
+      method: 'POST',
+      body: JSON.stringify({body: message.body, client_message_id: clientMessageId, reply_to_message_id: message.reply_to_message_id || null})
+    });
+    if (!result.message?.id) throw new Error('Confirmation is unavailable.');
+  } catch (error) {
+    if (!current() || !state.localMessages.has(clientMessageId)) return; // SSE may already have confirmed persistence.
+    // A rejected repeat cannot disprove an earlier ambiguous request's outcome.
+    const ambiguous = Boolean(message.confirmation_required) || ambiguousSendError(error);
+    if (ambiguous) {
+      message.confirmation_required = true;
+      supportSendQueue.hold(supportSendGroup(ticketId, message.business_phone_number_id), clientMessageId);
+    }
+    message.send_status = ambiguous ? 'CONFIRMATION_PENDING' : 'FAILED';
+    message.local_submission = ambiguous ? 'UNKNOWN' : 'REJECTED';
+    message.error_message = ambiguous
+      ? 'Confirmation pending. The server may have accepted this message. Check its status; do not create another copy.'
+      : (error.message || 'The server rejected this request.');
+    upsertTimelineMessage(message, ticketId);
+    if (String(state.ticketId) === String(ticketId)) showError(message.error_message);
+    if (ambiguous) checkPendingTextMessage(message, ticketId, {quiet: true}).catch(() => {});
+    else notify(message.error_message, 'error');
     return;
   }
+  if (!current()) return;
+  observePersistedSupportMessage(result.message, ticketId);
+  try { upsertTimelineMessage(result.message, ticketId); } catch (_) {}
+  requestDashboardRefresh('queue');
+}
+
+async function checkPendingTextMessage(message, ticketId, {quiet = false} = {}) {
+  const epoch = state.sendSessionEpoch;
+  try {
+    const result = await supportSendRequest('/api/support/tickets/' + ticketId + '/messages/by-client/' +
+      encodeURIComponent(message.client_message_id), {}, 10000);
+    if (!state.authenticated || epoch !== state.sendSessionEpoch) return undefined;
+    if (result.message?.id) {
+      observePersistedSupportMessage(result.message, ticketId);
+      upsertTimelineMessage(result.message, ticketId);
+      return result.message;
+    }
+    if (!quiet) notify('No saved confirmation is available yet. Nothing was resent.');
+    return null; // Absence is not evidence that an in-flight request cannot commit.
+  } catch (_) {
+    if (!quiet && epoch === state.sendSessionEpoch) notify('Status is unavailable. Nothing was resent.', 'error');
+    return undefined;
+  }
+}
+
+async function retryOriginalTextRequest(message, ticketId) {
+  const epoch = state.sendSessionEpoch;
+  const found = await checkPendingTextMessage(message, ticketId, {quiet: true});
+  if (found !== null || !state.authenticated || epoch !== state.sendSessionEpoch) return;
+  if (!(await confirmDialog({title: 'Retry the original request?',
+    message: 'No saved request was found. Retry with the same request ID? If the original was accepted, the server returns it without sending a duplicate.',
+    confirmLabel: 'Retry original request', tone: 'warning'}))) return;
+  if (epoch !== state.sendSessionEpoch || !state.localMessages.has(message.client_message_id)) return;
+  if (queueTextMessage(message, ticketId)) upsertTimelineMessage(message, ticketId);
+}
+
+function reconcilePendingTextMessages() {
+  if (state.confirmationFlight) return state.confirmationFlight;
+  const pending = [...state.localMessages.values()].filter(item => item.message.send_status === 'CONFIRMATION_PENDING');
+  if (!pending.length) return Promise.resolve();
+  const offset = state.confirmationCursor % pending.length;
+  const batch = [...pending.slice(offset), ...pending.slice(0, offset)].slice(0, 3);
+  state.confirmationCursor = offset + batch.length;
+  const task = Promise.allSettled(batch.map(item => checkPendingTextMessage(item.message, item.ticketId, {quiet: true})))
+    .finally(() => { if (state.confirmationFlight === task) state.confirmationFlight = null; });
+  state.confirmationFlight = task;
+  return task;
 }
 
 function showMessagePreferencesError(message) {
@@ -188,7 +265,7 @@ async function sendSelectedQuickReplies() {
   let succeeded = false;
   try {
     // Finish already queued composer text before sending this ordered batch.
-    await state.textSendChain;
+    await supportSendQueue.waitForGroup(supportSendGroup(batch.ticketId));
     while (state.quickReplySelection.size) {
       requireQuickReplyDestination(batch);
       const [id, item] = state.quickReplySelection.entries().next().value;
@@ -1175,7 +1252,9 @@ function renderLinkedDeviceStatus(payload) {
     const status = document.createElement('div');
     status.className = 'muted';
     const labels = {connected: 'Connected', connecting: 'Connecting…', qr: 'Scan this code with the phone you want to connect', logged_out: 'Not paired', disconnected: 'Disconnected', error: 'Connection failed'};
-    status.textContent = labels[line.status] || 'Not paired';
+    status.textContent = line.recovery_category === 'storage_failure' ? 'Storage recovery required'
+      : ['authentication_failure', 'session_conflict', 'protocol_failure'].includes(line.recovery_category) ? 'Temporarily unavailable · administrator review required'
+      : line.status === 'disconnected' && line.is_paired ? 'Reconnecting…' : labels[line.status] || 'Not paired';
     if (line.status === 'logged_out' && line.logged_out_at) {
       status.textContent = 'Logged out by WhatsApp at ' + new Date(line.logged_out_at).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'})
         + '. Re-pair it with the same phone: every conversation and its history stays.';
@@ -1193,7 +1272,7 @@ function renderLinkedDeviceStatus(payload) {
       row.append(qr);
     }
     const connected = line.status === 'connected';
-    if (!connected) {
+    if (!connected && line.recovery_category !== 'storage_failure' && (['qr', 'logged_out'].includes(line.status) || !line.is_paired)) {
       const pair = document.createElement('button');
       const repair = line.status === 'logged_out' && Boolean(line.logged_out_at);
       pair.type = 'button'; pair.className = repair ? 'btn small primary' : 'btn small';
@@ -1230,7 +1309,20 @@ async function loadLinkedDeviceStatus() {
   }
 }
 
-const LINE_HEALTH_INTERVAL_MS = 30000;
+const LINE_HEALTH_INTERVAL_MS = 5000;
+let lineHealthTimer = null;
+let lineHealthGeneration = 0;
+function stopLineHealthPolling() { lineHealthGeneration++; clearTimeout(lineHealthTimer); lineHealthTimer = null; }
+function startLineHealthPolling() {
+  stopLineHealthPolling();
+  const generation = lineHealthGeneration;
+  const poll = async () => {
+    if (generation !== lineHealthGeneration || !state.authenticated || document.hidden || state.pageLeaving) return;
+    try { await loadLineHealth(); }
+    finally { if (generation === lineHealthGeneration) lineHealthTimer = setTimeout(poll, LINE_HEALTH_INTERVAL_MS); }
+  };
+  poll();
+}
 
 async function loadLineHealth({force = false} = {}) {
   if (!state.authenticated || (!force && Date.now() - state.lineHealthAt < LINE_HEALTH_INTERVAL_MS)) return;
@@ -1252,8 +1344,13 @@ function renderLineHealth(payload) {
   const alerts = (payload?.lines || []).filter(line => line.alert);
   const storage = payload?.storage;
   const storageAlert = ['warning', 'critical'].includes(storage?.level);
+  const unavailableOnly = storageAlert && storage.issues?.length && storage.issues.every(issue =>
+    ['BRIDGE_UNAVAILABLE', 'MONITOR_UNAVAILABLE'].includes(issue.code));
   $('lineAlertBanner').classList.toggle('hidden', !alerts.length && !storageAlert);
-  if (storageAlert) {
+  if (unavailableOnly) {
+    text($('lineAlertText'), 'WhatsApp connection status is unavailable. Contact your administrator to check the bridge and monitoring. Saved sessions are retained; this does not establish a storage failure or require relinking.');
+    $('lineAlertActionBtn').classList.toggle('hidden', true);
+  } else if (storageAlert) {
     const affected = [...new Set((storage.issues || []).map(issue => issue.name).filter(Boolean))];
     const scope = affected.length && !(storage.issues || []).some(issue => !issue.line_id) ? ' for ' + affected.join(', ') : '';
     const pause = storage.level === 'critical' ? ' New sends on affected lines are paused.' : '';
@@ -1264,10 +1361,11 @@ function renderLineHealth(payload) {
   } else if (alerts.length) {
     const first = alerts[0];
     const more = alerts.length > 1 ? ' and ' + (alerts.length - 1) + ' more' : '';
-    const problem = first.status === 'logged_out' ? ' was logged out by WhatsApp' : ' is offline';
-    const next = (first.status === 'logged_out' && canLinkWhatsApp()
-      ? ' Re-pair it with the same phone; every conversation and its history stays.'
-      : ' It keeps trying to reconnect.') + ' Replies wait and are sent automatically when it reconnects.';
+    const relink = first.connection_state === 'relink_required' || first.status === 'logged_out';
+    const problem = relink ? ' needs relinking' : first.connection_state === 'storage_recovery_required' ? ' needs storage recovery' : ' is temporarily unavailable';
+    const next = relink ? ' Ask an authorized staff member to relink the same phone; conversation history stays.'
+      : first.recovery_action === 'automatic' ? ' Automatic reconnection is in progress. Check saved message statuses before retrying.'
+      : ' Contact your administrator. Saved sessions and messages are retained; relinking is not the default recovery action.';
     text($('lineAlertText'), first.name + more + problem + lineOfflineSince(first) + '.' + next);
     $('lineAlertActionBtn').classList.toggle('hidden', !canLinkWhatsApp());
   }
@@ -1289,14 +1387,23 @@ function renderLineHealth(payload) {
 function renderComposerLineNotice(ticket) {
   const line = (state.lineHealth?.lines || []).find(item => String(item.line_id) === String(ticket.business_phone_number_id || ''));
   const storageBlocked = (state.lineHealth?.storage?.issues || []).some(issue => issue.level === 'critical' &&
+    !['BRIDGE_UNAVAILABLE', 'MONITOR_UNAVAILABLE'].includes(issue.code) &&
     (!issue.line_id || String(issue.line_id) === String(ticket.business_phone_number_id || '')));
-  if (storageBlocked) {
-    text($('composerHelp'), 'New replies are paused while WhatsApp storage needs attention. Contact your server administrator. Saved sessions and delivery records are retained.');
-  } else if (line && line.status !== 'connected') {
-    text($('composerHelp'), line.name + ' is offline' + lineOfflineSince(line) + '. Replies wait and are sent automatically when it reconnects (up to 30 minutes).');
-  } else if (String($('composerHelp').textContent || '').includes(' is offline') ||
-      String($('composerHelp').textContent || '').includes('WhatsApp storage needs attention')) {
-    text($('composerHelp'), 'Messages are sent from the WhatsApp number for this conversation.');
+  const element = $('composerHelp');
+  const status = storageBlocked ? 'storage_recovery_required' : line?.connection_state ||
+    (line?.status === 'logged_out' ? 'relink_required' : line?.status === 'reconnecting' ? 'reconnecting' : line?.status === 'offline' ? 'temporarily_unavailable' : 'connected');
+  const messages = {
+    reconnecting: 'Reconnecting automatically. Saved replies are retained; check each message’s status before retrying.',
+    temporarily_unavailable: 'Temporarily unavailable. Contact your administrator; saved messages and sessions are retained.',
+    storage_recovery_required: 'Storage recovery required. New sends are paused; contact your administrator. Saved sessions and delivery records are retained.',
+    relink_required: 'Relink required. Ask an authorized staff member to reconnect the same phone; conversation history stays.'
+  };
+  if (messages[status]) {
+    element.dataset.connectionNotice = '1';
+    text(element, (line?.name ? line.name + ': ' : '') + messages[status]);
+  } else if (element.dataset.connectionNotice) {
+    delete element.dataset.connectionNotice;
+    text(element, 'Connected. Messages are sent from the WhatsApp number for this conversation.');
   }
 }
 
@@ -2743,13 +2850,11 @@ window.addEventListener('message', event => {
   }
 });
 window.addEventListener('resize', syncContextLayout);
-window.addEventListener('beforeunload', () => {
-  markPageLeaving();
-  stopMediaTracks();
-});
-window.addEventListener('pagehide', markPageLeaving);
+window.addEventListener('beforeunload', warnUnpersistedSupportMessages);
+window.addEventListener('pagehide', () => { supportSendQueue.pause(); markPageLeaving(); stopMediaTracks(); });
 window.addEventListener('pageshow', event => {
   state.pageLeaving = false;
+  supportSendQueue.resume();
   if (event.persisted && !state.authenticated && $('loginPage').classList.contains('hidden')) {
     // A page restored from the browser's back/forward cache may have cancelled
     // its session check on pagehide. Let that check finish before starting one.
