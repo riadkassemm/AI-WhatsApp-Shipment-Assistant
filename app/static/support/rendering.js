@@ -2109,7 +2109,7 @@ function addMessage(container, m, extraClass = '', {allowReply = true} = {}) {
       : m.id ? 'Saved · waiting for WhatsApp confirmation' : 'Submitting · not confirmed as saved';
     pending.title = label;
     pending.setAttribute('aria-label', label);
-    pending.append(createIcon('clock', 'icon icon-sm'), document.createTextNode(m.local_submission === 'QUEUED' ? 'Queued' : m.id ? 'Sending' : 'Submitting'));
+    pending.append(createIcon('clock', 'icon icon-sm'), document.createTextNode(m.local_submission === 'QUEUED' ? 'Queued' : m.id ? 'Sending' : ''));
     meta.append(pending);
   } else if (outbound && m.send_status) {
     // WhatsApp-style ticks: one grey when sent, two grey when delivered, two blue when read.
