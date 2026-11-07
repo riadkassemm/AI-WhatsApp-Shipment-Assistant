@@ -1252,13 +1252,16 @@ function renderLinkedDeviceStatus(payload) {
     const status = document.createElement('div');
     status.className = 'muted';
     const labels = {connected: 'Connected', connecting: 'Connecting…', qr: 'Scan this code with the phone you want to connect', logged_out: 'Not paired', disconnected: 'Disconnected', error: 'Connection failed'};
-    status.textContent = line.recovery_category === 'storage_failure' ? 'Storage recovery required'
+    const recovery = line.recovery_category === 'storage_failure'
+      ? whatsAppRecoveryNotice({issues: line.storage_issues || []}) : null;
+    status.textContent = recovery ? recovery.title
       : ['authentication_failure', 'session_conflict', 'protocol_failure'].includes(line.recovery_category) ? 'Temporarily unavailable · administrator review required'
       : line.status === 'disconnected' && line.is_paired ? 'Reconnecting…' : labels[line.status] || 'Not paired';
     if (line.status === 'logged_out' && line.logged_out_at) {
       status.textContent = 'Logged out by WhatsApp at ' + new Date(line.logged_out_at).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'})
         + '. Re-pair it with the same phone: every conversation and its history stays.';
-    } else if (line.error) status.textContent += ' · ' + line.error;
+    } else if (recovery) status.textContent += ' · ' + recovery.detail + ' Saved sessions are retained.';
+    else if (line.error) status.textContent += ' · ' + line.error;
     if (line.recovering_history) status.textContent += ' · Recovering messages sent while offline';
     if (line.pending_callbacks) status.textContent += ' · ' + line.pending_callbacks + ' updates pending';
     if (line.waiting_history_reactions) status.title = line.waiting_history_reactions + ' reactions are waiting for older messages to sync. This does not block new messages.';
@@ -1339,11 +1342,33 @@ function lineOfflineSince(line) {
   return since && !Number.isNaN(since.getTime()) ? ' since ' + since.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'}) : '';
 }
 
+function whatsAppRecoveryNotice(storage) {
+  const kinds = new Set((storage?.issues || []).map(issue => {
+    if (['DISK_SPACE_LOW', 'INODES_LOW'].includes(issue.code)) return 'capacity';
+    if (issue.code === 'STORE_UNAVAILABLE') return issue.kind === 'auth' ? 'session' : 'persistence';
+    if (['COMPACTION_FAILED', 'JOURNAL_LIMIT', 'SNAPSHOT_LIMIT'].includes(issue.code)) return 'maintenance';
+    if (['BRIDGE_UNAVAILABLE', 'MONITOR_UNAVAILABLE', 'STORAGE_HEALTH_UNAVAILABLE', 'WATCHDOG_CONFIG_INVALID', 'WATCHDOG_REPORT_FAILED'].includes(issue.code)) return 'monitor';
+    return 'review';
+  }));
+  if (!kinds.size) kinds.add('review');
+  const notices = {
+    capacity: {title: 'WhatsApp storage capacity is low', detail: 'Contact your server administrator to check available disk space and file capacity.'},
+    session: {title: 'WhatsApp session recovery required', detail: 'Session safety checks could not complete. Contact your server administrator to review session recovery.'},
+    persistence: {title: 'WhatsApp saved-state recovery required', detail: 'Contact your server administrator to review saved message and delivery state before reconnecting.'},
+    maintenance: {title: 'WhatsApp automatic maintenance needs attention', detail: 'Contact your server administrator to check journal checkpointing and configured storage limits.'},
+    monitor: {title: 'WhatsApp connection status is unavailable', detail: 'Contact your server administrator to check the bridge and monitoring. The cause has not been confirmed.'},
+    review: {title: 'WhatsApp recovery needs review', detail: 'Contact your server administrator to inspect the recovery evidence before reconnecting.'}
+  };
+  return {title: kinds.size === 1 ? notices[[...kinds][0]].title : 'WhatsApp needs administrator attention',
+    detail: [...kinds].map(kind => notices[kind].detail).join(' ')};
+}
+
 function renderLineHealth(payload) {
   state.lineHealth = payload;
   const alerts = (payload?.lines || []).filter(line => line.alert);
   const storage = payload?.storage;
   const storageAlert = ['warning', 'critical'].includes(storage?.level);
+  const recovery = whatsAppRecoveryNotice(storage);
   const unavailableOnly = storageAlert && storage.issues?.length && storage.issues.every(issue =>
     ['BRIDGE_UNAVAILABLE', 'MONITOR_UNAVAILABLE'].includes(issue.code));
   $('lineAlertBanner').classList.toggle('hidden', !alerts.length && !storageAlert);
@@ -1354,15 +1379,15 @@ function renderLineHealth(payload) {
     const affected = [...new Set((storage.issues || []).map(issue => issue.name).filter(Boolean))];
     const scope = affected.length && !(storage.issues || []).some(issue => !issue.line_id) ? ' for ' + affected.join(', ') : '';
     const pause = storage.level === 'critical' ? ' New sends on affected lines are paused.' : '';
-    text($('lineAlertText'), 'WhatsApp storage needs attention' + scope + '.' + pause +
-      ' Contact your server administrator to check disk space and automatic session maintenance. Saved sessions are retained.' +
-      (alerts.length ? ' ' + alerts.length + ' WhatsApp line' + (alerts.length > 1 ? 's are' : ' is') + ' also offline.' : ''));
+    const offlineCount = alerts.filter(line => line.status !== 'connected').length;
+    text($('lineAlertText'), recovery.title + scope + '.' + pause + ' ' + recovery.detail + ' Saved sessions are retained.' +
+      (offlineCount ? ' ' + offlineCount + ' WhatsApp line' + (offlineCount > 1 ? 's are' : ' is') + ' also offline.' : ''));
     $('lineAlertActionBtn').classList.toggle('hidden', true);
   } else if (alerts.length) {
     const first = alerts[0];
     const more = alerts.length > 1 ? ' and ' + (alerts.length - 1) + ' more' : '';
     const relink = first.connection_state === 'relink_required' || first.status === 'logged_out';
-    const problem = relink ? ' needs relinking' : first.connection_state === 'storage_recovery_required' ? ' needs storage recovery' : ' is temporarily unavailable';
+    const problem = relink ? ' needs relinking' : first.connection_state === 'storage_recovery_required' ? ' needs a recovery review' : ' is temporarily unavailable';
     const next = relink ? ' Ask an authorized staff member to relink the same phone; conversation history stays.'
       : first.recovery_action === 'automatic' ? ' Automatic reconnection is in progress. Check saved message statuses before retrying.'
       : ' Contact your administrator. Saved sessions and messages are retained; relinking is not the default recovery action.';
@@ -1372,13 +1397,14 @@ function renderLineHealth(payload) {
   // Sound once per outage, for the people who can fix it (every staff role).
   const fresh = alerts.filter(line => !state.lineAlertsSeen.has(line.line_id + ':' + line.since));
   for (const line of alerts) state.lineAlertsSeen.add(line.line_id + ':' + line.since);
-  if (fresh.length && canLinkWhatsApp()) notifyNewCustomerActivity(fresh[0].name + ' needs attention: its WhatsApp line is offline.');
+  if (fresh.length && canLinkWhatsApp()) notifyNewCustomerActivity(fresh[0].name + ' needs attention: ' +
+    (fresh[0].status === 'connected' ? 'sending is paused.' : 'its WhatsApp line is offline.'));
   const storageKey = storageAlert ? 'storage:' + storage.level + ':' + (storage.issues || [])
-    .map(issue => [issue.line_id || 'shared', issue.code, issue.level].join(':')).sort().join(',') : null;
+    .map(issue => [issue.line_id || 'shared', issue.code, issue.kind || '', issue.level].join(':')).sort().join(',') : null;
   for (const key of state.lineAlertsSeen) if (key.startsWith('storage:') && key !== storageKey) state.lineAlertsSeen.delete(key);
   if (storageKey && !state.lineAlertsSeen.has(storageKey)) {
     state.lineAlertsSeen.add(storageKey);
-    if (canLinkWhatsApp()) notifyNewCustomerActivity('WhatsApp storage needs attention. Contact your server administrator; saved sessions are retained.');
+    if (canLinkWhatsApp()) notifyNewCustomerActivity(recovery.title + '. ' + recovery.detail + ' Saved sessions are retained.');
   }
   const ticket = state.currentTicketData?.ticket;
   if (ticket && state.currentTicketData?.permissions?.can_reply) renderComposerLineNotice(ticket);
@@ -1386,16 +1412,16 @@ function renderLineHealth(payload) {
 
 function renderComposerLineNotice(ticket) {
   const line = (state.lineHealth?.lines || []).find(item => String(item.line_id) === String(ticket.business_phone_number_id || ''));
-  const storageBlocked = (state.lineHealth?.storage?.issues || []).some(issue => issue.level === 'critical' &&
+  const blockingIssues = (state.lineHealth?.storage?.issues || []).filter(issue => issue.level === 'critical' &&
     !['BRIDGE_UNAVAILABLE', 'MONITOR_UNAVAILABLE'].includes(issue.code) &&
     (!issue.line_id || String(issue.line_id) === String(ticket.business_phone_number_id || '')));
   const element = $('composerHelp');
-  const status = storageBlocked ? 'storage_recovery_required' : line?.connection_state ||
+  const status = blockingIssues.length ? 'storage_recovery_required' : line?.connection_state ||
     (line?.status === 'logged_out' ? 'relink_required' : line?.status === 'reconnecting' ? 'reconnecting' : line?.status === 'offline' ? 'temporarily_unavailable' : 'connected');
   const messages = {
     reconnecting: 'Reconnecting automatically. Saved replies are retained; check each message’s status before retrying.',
     temporarily_unavailable: 'Temporarily unavailable. Contact your administrator; saved messages and sessions are retained.',
-    storage_recovery_required: 'Storage recovery required. New sends are paused; contact your administrator. Saved sessions and delivery records are retained.',
+    storage_recovery_required: whatsAppRecoveryNotice({issues: blockingIssues}).title + '. New sends are paused; contact your administrator. Saved sessions and delivery records are retained.',
     relink_required: 'Relink required. Ask an authorized staff member to reconnect the same phone; conversation history stays.'
   };
   if (messages[status]) {
