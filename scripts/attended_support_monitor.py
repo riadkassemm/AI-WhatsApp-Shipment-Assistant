@@ -15,7 +15,10 @@ CHECKS = {
     'bridge_ready': 'support_bridge_ready == 1',
     'bridge_diagnostics_present': 'support_bridge_diagnostics_up == 1',
     'delivery_monitoring_present': 'support_delivery_database_check_up == 1',
-    'event_loop_observer_fresh': 'time() - support_bridge_event_loop_sample_timestamp_seconds < 60',
+    # Instant console checks must cover the 10s observer + 30s collector +
+    # 30s scrape, plus timer/probe jitter. A live sample can legitimately be
+    # 60–75s old here. Sustained-staleness Prometheus alerts remain unchanged.
+    'event_loop_observer_fresh': 'time() - support_bridge_event_loop_sample_timestamp_seconds < 90',
     'expected_identity_count_valid': 'support_bridge_expected_lines > 0',
     'expected_identity_count_present': 'support_bridge_eligible_lines == on(job, instance) support_bridge_expected_lines',
     'all_expected_lines_connected': 'support_bridge_connected_lines == on(job, instance) support_bridge_expected_lines',

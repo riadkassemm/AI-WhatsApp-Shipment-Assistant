@@ -42,3 +42,18 @@ def test_retained_identity_requires_visible_operator_attention():
     report = collect(read)
     assert report['healthy']
     assert report['attention'] == ['BridgeIdentityFenced']
+
+
+def test_observer_freshness_accounts_for_pipeline_but_rejects_stopped_or_missing_observer():
+    import re
+    for age, expected in [(72, True), (91, False), (None, False)]:
+        def read(expression):
+            if 'ALERTS{' in expression:
+                return []
+            if 'support_bridge_event_loop_sample_timestamp_seconds' in expression:
+                limit = int(re.search(r'< (\d+)$', expression)[1])
+                return [{'value': [0, '1']}] if age is not None and age < limit else []
+            return [{'value': [0, '1']}]
+        result = collect(read)
+        assert result['healthy'] is expected
+        assert ('event_loop_observer_fresh' in result['failed_checks']) is (not expected)
