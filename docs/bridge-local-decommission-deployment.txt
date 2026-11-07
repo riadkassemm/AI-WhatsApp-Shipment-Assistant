@@ -96,7 +96,15 @@ subsequently proven by finalize. If PID/cgroup remains alive, stop here. No kill
 new owner, file movement, fence deletion or activation is permitted.
   "$task_previous/venv/bin/python" -B "$task_previous/scripts/check_inbound_drain.py" --socket /run/redis/redis-server.sock --stable-seconds 10
   systemctl stop --no-block shipment-bot.service
-Require API inactive, MainPID=0, ExecMainStatus=0, Result=success; poll, never kill.
+Require API inactive, MainPID=0, empty cgroup and Result=success; poll, never kill.
+For Uvicorn 0.52.4, capture_signals deliberately re-raises SIGTERM AFTER _serve
+finishes: ExecMainCode=2/ExecMainStatus=15 is the documented graceful result.
+Accept that exact result only with Application shutdown complete and Finished
+server process logs, empty inbound work/leases, and no unfinished outbound or
+message-change operations. If graceful HTTP timeout cancels tasks, require
+matching completed dashboard SSE access logs for every canceled task; unidentified
+requests remain blockers. Do not generalize this exception to other signals,
+errors, healthy bridge shutdown or incomplete application shutdown.
   "$task_previous/venv/bin/python" -B "$task_previous/scripts/check_inbound_drain.py" --socket /run/redis/redis-server.sock --stable-seconds 10
 Both queue/lease checks must pass without expiry manufacturing an empty queue.
 Redis remains running at the existing path; do not restore or change TTLs.
