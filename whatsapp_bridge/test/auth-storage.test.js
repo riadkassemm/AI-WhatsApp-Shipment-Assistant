@@ -281,6 +281,41 @@ test('concurrent rejected provider transactions retain distinct recovery evidenc
   assert.deepEqual(new Set(keysSaved), new Set(['peer0', 'peer1']));
 });
 
+test('a burst of auth failures coalesces durable snapshots without dropping or aliasing evidence', async t => {
+  const { auth } = await fixture(t);
+  const entered = gate(), release = gate();
+  const open = fs.open;
+  let writes = 0;
+  t.mock.method(fs, 'open', async (filename, ...args) => {
+    if (String(filename).includes('.auth-failure.') && args[0] === 'wx') {
+      writes++;
+      if (writes === 1) { entered.resolve(); await release.promise; }
+    }
+    return open(filename, ...args);
+  });
+  // Simulate a previously failed journal. Retain the active-session fence and
+  // all subsequent rejected credential values; no recovery is authorized.
+  await auth.armSession();
+  auth.store.failed = true;
+  await assert.rejects(auth.saveCreds(), /STORAGE_RESTART_REQUIRED/);
+  await entered.promise;
+  try {
+    for (let index = 0; index < 300; index++) {
+      auth.state.creds.myAppStateKeyId = `mock-rejected-${index}`;
+      await assert.rejects(auth.saveCreds(), /STORAGE_RESTART_REQUIRED/);
+    }
+    assert.equal(writes, 1);
+  } finally { release.resolve(); }
+  await assert.rejects(auth.drain(), /STORAGE_RESTART_REQUIRED/);
+  const evidence = JSON.parse(await readFile(auth.store.filename + '.auth-failure', 'utf8'), BufferJSON.reviver);
+  assert.equal(evidence.failures.length, 301);
+  assert.equal(writes, 2, 'one initial write plus one snapshot of the entire admitted burst');
+  for (let index = 0; index < 300; index++) {
+    assert.equal(evidence.failures[index + 1].creds.myAppStateKeyId, `mock-rejected-${index}`);
+  }
+  assert.equal((await stat(auth.store.filename + '.auth-failure')).mode & 0o777, 0o600);
+});
+
 test('failure to persist the auth recovery fence remains fail closed and emits a distinct actionable error', async t => {
   const { auth } = await fixture(t);
   const errors = [];

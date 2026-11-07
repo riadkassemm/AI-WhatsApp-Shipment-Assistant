@@ -82,7 +82,7 @@ function authFacade(store, owner) {
   const context = new AsyncLocalStorage();
   const pending = new Set(), tokens = new Set(), attached = new WeakSet();
   const failureEvidence = [];
-  let failureTail = Promise.resolve(), reportedFailure = false;
+  let failureTail = Promise.resolve(), reportedFailure = false, failureWriting = false;
   let directSetTail = Promise.resolve(), activeArm, activeDisarm, activeArmed = false;
   let outsideProviderTransaction, inProviderTransaction;
   const changeIntent = change => {
@@ -142,14 +142,29 @@ function authFacade(store, owner) {
     // A known rejected mutation must not disappear on process restart. Retain
     // its private evidence and require explicit recovery before another socket
     // uses these credentials. Never automatically clear this fence.
-    failureEvidence.push(evidence);
-    const saved = cloneAuth({ version: 1, failures: failureEvidence });
-    failureTail = failureTail.then(() => atomicWrite(store.filename + '.auth-failure', saved)).catch(fenceError => {
-      error.authFencePersistenceFailed = true;
-      fenceError.bridgePersistenceFailure = true;
-      fenceError.code = 'AUTH_FAILURE_FENCE_UNWRITABLE';
-      auth.onFailure?.(fenceError);
-    });
+    // Snapshot only the new evidence at admission. Cloning the entire growing
+    // history on every rejection made an auth-failure burst quadratic and could
+    // starve heartbeat timers for every identity in this process. Coalesce
+    // writes while retaining every entry; drain still waits for the last one.
+    failureEvidence.push(cloneAuth(evidence));
+    if (!failureWriting) {
+      failureWriting = true;
+      failureTail = failureTail.then(async () => {
+        try {
+          let written = 0;
+          while (written < failureEvidence.length) {
+            const failures = failureEvidence.slice();
+            await atomicWrite(store.filename + '.auth-failure', { version: 1, failures });
+            written = failures.length;
+          }
+        } catch (fenceError) {
+          error.authFencePersistenceFailed = true;
+          fenceError.bridgePersistenceFailure = true;
+          fenceError.code = 'AUTH_FAILURE_FENCE_UNWRITABLE';
+          auth.onFailure?.(fenceError);
+        } finally { failureWriting = false; }
+      });
+    }
     if (!reportedFailure) { reportedFailure = true; auth.onFailure?.(error); }
   };
   const runProvider = (method, operation, args, independent = false, detached = false) => {
