@@ -76,3 +76,36 @@ test('an already closing failed transport has one bounded grace and close reject
   assert.equal(rejected.raw.readyState, 1, 'no forced termination of a healthy socket');
   assert.equal(rejected.raw.listenerCount('close'), 0);
 });
+
+test('passive underlying socket errors survive ws cleanup without consuming data or affecting other observers', () => {
+  const {raw, ws, closed} = fixture(), events = [], provider = [];
+  raw._socket = Object.assign(new EventEmitter(), raw._socket, {authorized: true});
+  const tcp = raw._socket;
+  tcp.on('error', () => provider.push('error'));
+  tcp.on('end', () => provider.push('end'));
+  tcp.on('close', () => { provider.push('close'); closed(); });
+  observeTransport(ws, sample => events.push(sample));
+  assert.equal(tcp.listenerCount('data'), 0, 'diagnostics never change flowing mode');
+  tcp.emit('error', {code: 'ECONNRESET', message: 'private-body', secret: 'private-key'});
+  tcp.emit('end'); tcp.emit('close', true);
+  assert.deepEqual(events.map(x => x.event), ['transport_open', 'socket_error', 'socket_end', 'socket_closed', 'transport_closed']);
+  assert.equal(events[1].error_code, 'ECONNRESET'); assert.equal(events[3].had_error, true);
+  assert.equal(events[0].transport.tls_authorized, true);
+  assert.deepEqual(provider, ['error', 'end', 'close']);
+  assert.equal(tcp.listenerCount('error'), 1); assert.equal(tcp.listenerCount('end'), 1);
+  assert.equal(tcp.listenerCount('close'), 1, 'only diagnostic listeners were removed');
+  assert.doesNotMatch(JSON.stringify(events), /private/);
+});
+
+test('socket diagnostics attach after handshake, isolate unknown errors and cannot throw into transport', () => {
+  const f = fixture(); f.raw.readyState = 0;
+  const events = [];
+  const cleanup = observeTransport(f.ws, x => events.push(x));
+  f.raw._socket = Object.assign(new EventEmitter(), f.raw._socket);
+  f.raw.readyState = 1; f.raw.emit('open');
+  f.raw._socket.emit('error', {code: 'private-value'});
+  assert.equal(events.at(-1).error_code, 'OTHER');
+  cleanup(); assert.equal(f.raw._socket.listenerCount('error'), 0);
+  const stop = observeTransport(f.ws, () => { throw new Error('diagnostic sink'); });
+  assert.doesNotThrow(() => f.raw._socket.emit('error', {code: 'EPIPE'})); stop();
+});

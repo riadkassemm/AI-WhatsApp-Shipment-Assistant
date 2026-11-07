@@ -95,7 +95,11 @@ test('recovery spans first failure through new-generation readiness using monoto
   const d = newConnectionDiagnostics();
   beginInterruption(d, 10000, 100);
   beginInterruption(d, 30000, 20100);
+  Object.assign(d, {socket_error_code: 'ECONNRESET', socket_end_at: 30100,
+    socket_closed_at: 30110, socket_close_had_error: true});
   resetConnectionDiagnostics(d, 2);
+  assert.equal(d.socket_error_code, null); assert.equal(d.socket_end_at, null);
+  assert.equal(d.socket_closed_at, null); assert.equal(d.socket_close_had_error, null);
   assert.equal(d.recovery_started_at, 10000);
   assert.equal(d.heartbeat_success_at, null);
   assert.equal(finishInterruption(d, 25100), 25);

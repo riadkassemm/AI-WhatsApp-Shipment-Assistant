@@ -96,6 +96,71 @@ test('configuration rejects weak secrets, nonnumeric lines, and public binds', (
   assert.throws(() => validateLineManifest({ version: 1, lines: { '../unsafe': '' } }), /Invalid/);
 });
 
+test('IPv4 policy covers eight identities and reconnect without duplicate ownership or uncertain replay', {timeout: 15000}, async t => {
+  const dataDir = await mkdtemp(path.join(os.tmpdir(), 'bridge-ipv4-ownership-'));
+  const ids = Array.from({length: 8}, (_, i) => String(91000 + i));
+  const sockets = [], optionsSeen = [], release = [];
+  let firstEnd;
+  const firstEnding = new Promise(resolve => { firstEnd = resolve; });
+  let holdFirst = false;
+  const config = {secret: SECRET, wsIpFamily: 4, lines: ids.map(line_id => ({line_id, expected_phone: ''})),
+    dataDir, callbackUrl: 'http://127.0.0.1/callback', maxMediaBytes: 1024, ackTimeoutMs: 100};
+  const bridge = new Bridge(config, {storageFilesystem: healthyStorage, log: () => {}, onError: () => {},
+    fetch: () => { throw new Error('No callback dispatch expected'); },
+    makeSocket: options => {
+      const index = sockets.length, socket = mockSocket();
+      options.auth.creds.me ??= {id: `${96170110000 + index}:1@s.whatsapp.net`};
+      socket.user = options.auth.creds.me;
+      socket.bridgeTransportClosed = new Promise(resolve => { release[index] = resolve; });
+      socket.end = () => {
+        socket.ws.isOpen = false;
+        if (index === 0) firstEnd();
+        if (index !== 0 || !holdFirst) release[index]();
+      };
+      socket.bridgeConnectionDiagnosticsVersion = 2;
+      sockets.push(socket); optionsSeen.push(options); return socket;
+    }});
+  t.after(async () => {
+    for (const done of release) done();
+    await bridge.close(); await rm(dataDir, {recursive: true, force: true});
+  });
+  await bridge.initialize({autoConnect: false});
+  for (const id of ids) {
+    await Promise.all([bridge.connect(id), bridge.connect(id)]);
+    const line = bridge.getLine(id);
+    await line.auth.saveCreds();
+    await bridge.connectionUpdate(line, line.socket, {connection: 'open'});
+  }
+  assert.equal(sockets.length, 8); assert.equal(bridge.status().lines.filter(x => x.status === 'connected').length, 8);
+  for (const options of optionsSeen) {
+    assert.equal(options.agent, bridge.wsAgent); assert.equal(options.agent.options.family, 4);
+    assert.equal(options.fetchAgent, undefined, 'media transport is not changed');
+  }
+  const line = bridge.getLine(ids[0]);
+  await line.store.update(data => { data.messages.HELD_UNCERTAIN = {
+    message: original('HELD_UNCERTAIN'), phone: PHONE, timestamp: Date.now(), delivery_uncertain: true,
+  }; });
+  const saved = structuredClone(line.store.data.messages.HELD_UNCERTAIN);
+  const outbox = structuredClone(bridge.outbox.data);
+  holdFirst = true;
+  bridge.blockConnection(line, sockets[0], 'test_transport_failure');
+  const renewal = bridge.connect(ids[0]), duplicate = bridge.connect(ids[0]);
+  await firstEnding;
+  assert.equal(sockets.length, 8, 'a close request does not authorize a replacement');
+  assert.ok(ids.slice(1).every(id => bridge.getLine(id).session.ready));
+  release[0](); await Promise.all([renewal, duplicate]);
+  assert.equal(sockets.length, 9);
+  await bridge.connectionUpdate(line, line.socket, {connection: 'open'});
+  assert.equal(optionsSeen[8].agent, bridge.wsAgent);
+  assert.equal(bridge.lineStatus(line).diagnostics.configured_ip_family, 4);
+  optionsSeen[0].bridgeConnectionDiagnostics({event: 'socket_error', error_code: 'EPIPE',
+    transport: {remote_ip: '2001:db8::1', family: 'IPv6'}});
+  assert.equal(line.diagnostics.socket_error_code, null, 'retired generation diagnostics are ignored');
+  assert.deepEqual(line.store.data.messages.HELD_UNCERTAIN, saved);
+  assert.deepEqual(bridge.outbox.data, outbox);
+  assert.ok(sockets.every(socket => socket.calls.length === 0), 'no sends or uncertainty replays');
+});
+
 test('dynamic line registrations allocate IDs atomically, avoid reserved IDs, and replay across restarts without touching connected sockets', async t => {
   const { bridge, line, socket, config, dataDir } = await fixture(t);
   const currentAuth = line.auth;

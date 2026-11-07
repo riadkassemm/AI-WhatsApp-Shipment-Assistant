@@ -15,6 +15,7 @@ import { inboundEvent, outgoingEvent, outgoingConfirmationEvent, messageTombston
 import { preserveNativeMutationMetadata } from './native-events.js';
 import { classifyDisconnect, reconnectDelay, newConnectionDiagnostics, observeHeartbeat, resetConnectionDiagnostics, beginInterruption, finishInterruption, EventLoopDiagnostics } from './connection-diagnostics.js';
 import { transportSnapshot, observeTransport, closeTransport } from './transport-diagnostics.js';
+import { createWebSocketAgent } from './websocket-transport.js';
 
 const silentLogger = pino({ level: 'silent' });
 const DEFAULT_MEDIA_HOST = 'mmg.whatsapp.net';
@@ -80,6 +81,7 @@ export class Bridge {
   constructor(config, dependencies = {}) {
     this.config = config;
     this.makeSocket = dependencies.makeSocket ?? makeWASocket;
+    this.wsAgent = createWebSocketAgent(config.wsIpFamily);
     this.fetch = dependencies.fetch ?? fetch;
     this.downloadMediaMessage = dependencies.downloadMediaMessage ?? downloadMediaMessage;
     this.lines = new Map();
@@ -491,6 +493,7 @@ export class Bridge {
       recovery_category: line.recoveryCategory,
       retry_scheduled: Boolean(line.reconnectTimer),
       diagnostics: { ...line.diagnostics,
+        configured_ip_family: this.config.wsIpFamily ?? 0,
         last_frame_age_ms: line.diagnostics.last_frame_at ? Math.max(0, Date.now() - line.diagnostics.last_frame_at) : null },
       oldest_callback_age_seconds: pending.length ? Math.max(0, Date.now() - oldest) / 1000 : 0,
       pending_callbacks: pending.length,
@@ -590,6 +593,12 @@ export class Bridge {
       if (generation !== line.generation || this.stopping) return;
       if (sample.event === 'transport_error') line.diagnostics.transport_error_code = sample.error_code;
       if (sample.event === 'transport_closed') line.diagnostics.transport_close_code = sample.close_code;
+      if (sample.event === 'socket_error') line.diagnostics.socket_error_code = sample.error_code;
+      if (sample.event === 'socket_end') line.diagnostics.socket_end_at = Date.now();
+      if (sample.event === 'socket_closed') {
+        line.diagnostics.socket_closed_at = Date.now();
+        line.diagnostics.socket_close_had_error = sample.had_error;
+      }
       const heartbeat = observeHeartbeat(line.diagnostics, sample);
       if (heartbeat && sample.event === 'heartbeat_result' && line.session?.ready && !line.session.closed) {
         const seconds = finishInterruption(line.diagnostics);
@@ -613,10 +622,15 @@ export class Bridge {
           timer_delay_ms: line.diagnostics.heartbeat_timer_delay_ms,
           rtt_ms: line.diagnostics.heartbeat_rtt_ms, transport: line.diagnostics.transport,
           close_code: line.diagnostics.transport_close_code, error_code: line.diagnostics.transport_error_code,
+          configured_ip_family: this.config.wsIpFamily ?? 0,
+          socket_error_code: line.diagnostics.socket_error_code,
+          socket_end_at: line.diagnostics.socket_end_at, socket_closed_at: line.diagnostics.socket_closed_at,
+          socket_close_had_error: line.diagnostics.socket_close_had_error,
           event_loop: this.eventLoop.snapshot() });
       }
     };
     try { socket = this.makeSocket({ auth: auth.state, logger: silentLogger, browser: Browsers.ubuntu('Support Dashboard'),
+      ...(this.wsAgent ? {agent: this.wsAgent} : {}),
       bridgeConnectionDiagnostics: reportDiagnostic,
       bridgeCloseTransport: (ws, error) => closeTransport(ws, error, reportDiagnostic),
       bridgeTransportClosing: error => {
@@ -2181,6 +2195,9 @@ export class Bridge {
     await settled([...stores].filter(Boolean).map(store => begin(() => this.closeStore(store))));
     const files = new Set([...this.ownedFiles, this.manifest, this.retiredPhones]);
     await settled([...files].filter(Boolean).map(store => begin(() => store.flush())));
+    // Only after accepted work drains. Upgraded WebSockets are owned and
+    // retired by their existing session lifecycle, not by this HTTP agent.
+    this.wsAgent?.destroy();
     if (failures.length) throw new AggregateError(failures, 'BRIDGE_SHUTDOWN_FAILED');
   }
 }
