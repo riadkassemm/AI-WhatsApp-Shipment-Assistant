@@ -89,10 +89,13 @@ TLS path, then that affected check passed. Tests establish:
 
 Review and later activation (requires separate approval)
 -------------------------------------------------------
-This branch starts at 9a52dae, the merge of PR #81 into
-fix/support-submitting-indicator. Its tree matches deployed 487550d. main does
-not yet contain #81; the PR targets that feature branch to isolate this diff.
-Do not deploy/merge a base that drops the existing recovery safeguards.
+PR #82 started at 9a52dae, the merge of #81 into
+fix/support-submitting-indicator, whose tree matches deployed 487550d. #82 was
+subsequently merged into that feature branch as dd47789. main still lacks both
+changes. The follow-up fix/bridge-ipv4-main replays #81 and #82 on current main
+with an identical application tree. See bridge-ipv4-deployment.txt for the
+verified clean-install results, exact commands, shutdown gates and rollback.
+Do not deploy current main or another base that drops the existing safeguards.
 
 1. Review the committed PR and approve deployment separately. Prepare a clean
    immutable release with the pinned lockfile and lifecycle-patch verification;

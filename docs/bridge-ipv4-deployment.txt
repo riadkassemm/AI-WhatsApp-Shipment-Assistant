@@ -1,0 +1,422 @@
+PR #82 deployment readiness and production procedure
+===================================================
+Prepared 2026-11-07. DO NOT EXECUTE until explicit production approval.
+No production configuration, source, persistent state or service was changed
+during preparation. No DEV access. Do not merge a PR as part of this procedure.
+
+Review result
+-------------
+PR #82 was already merged externally into fix/support-submitting-indicator at
+dd47789. main is still 3d996b1 and lacks deployed PR #81 as well as #82.
+fix/bridge-ipv4-main starts at current main and replays only #81 and #82.
+Its application tree is identical to d1a245c/dd47789; additional changes are
+these deployment instructions. Deploy an explicitly approved commit from this
+review branch, NOT current main. If main advances, repeat the comparison.
+
+Read-only production verification: current release is
+/opt/whatsapp-support/releases/20261107-heartbeat-487550d, revision
+487550d9986fe14e9c00c543084cc091b0e67b1f. All 371 tracked files match that commit;
+the installed lifecycle patch verifies. Eight identities were ready/paired,
+no QR required, storage OK, about 463 GB available. Current environment has no
+IP-family override, disabled TLS verification or NODE_OPTIONS. One pending
+callback and 200 historical uncertain deliveries are a baseline, not a retry
+list. Preserve their durable records; do not require uncertainty to become zero.
+
+Clean install: official Node v24.22.2 linux-x64 checksum verified, matching
+production; npm 11.19.1, npm ci in an empty local dependency tree. Root
+postinstall applied the checksum-verified Baileys 7.0.0-rc14 lifecycle patch;
+--verify and 26 focused tests passed on this fresh installation. These cover
+actual TLS/WebSocket adapter behavior, eight independent IPv4 connections,
+reconnection ownership, default IPv6, TLS/hostname rejection, no fallback,
+patch idempotence/tamper/partial-install gates, heartbeat accounting and durable
+uncertain-delivery blocking. Earlier 35 focused checks include Python metrics.
+No full test suite/build or live WhatsApp experiment. npm warned about upstream
+Baileys engine-check/protobufjs version-advice scripts; neither changes runtime
+source, and our root postinstall did execute. No dependency/lockfile change.
+
+The option is passed only as makeWASocket.agent; Baileys WebSocketClient forwards
+it to ws. Media uses the separate, untouched fetchAgent. No global resolver,
+server networking, TLS bypass, endpoint pinning or hostname/SNI override.
+PR #81 patch, storage/runtime/journal code, app code, Python requirements and
+Node lockfile are unchanged relative to the deployed release except the
+explicit bridge diagnostics/agent and matching collector changes in #82.
+
+Operational gates
+-----------------
+- Use an attended maintenance window. Stage/install dependencies BEFORE closing
+  ingress. Confirm staff/IT will not upgrade/reboot/restart concurrently.
+- Existing systemd allows SIGKILL after 35 seconds. The temporary runtime
+  override below disables that fallback during this deployment. The bridge's
+  existing 30-second diagnostic deadline still causes a failed-stop gate.
+  Never override a failed stop, clear a lock, or proceed with a live owner.
+- Close only Customer Support ingress and its ngrok tunnel. Leave Shipping
+  Rates, databases, Redis, storage monitoring and other services running.
+- API stays available to process final bridge callbacks during bridge shutdown.
+  Pending/in-flight Redis queues and processing leases must be zero before API
+  stop and again afterward. Do not wait for expiration to manufacture a drain.
+- No database migration, Redis restore/TTL rewrite or media relocation. Existing
+  database, Redis, sessions, journals and media remain at their current paths.
+- On a mandatory gate failure, stop. After new bridge activation, preserve new
+  authoritative state and request approval before rollback. Never restore old
+  data snapshots over current state or resend uncertain deliveries.
+- Local same-server snapshots are validation/recovery evidence, not independent
+  backups. The previously accepted lack of off-server backup remains unchanged.
+
+1. LOCAL: package the approved committed source (AFTER approval)
+--------------------------------------------------------------
+Run from the local repository. Compare the printed revision to the approved
+review hash; stop on any mismatch. No temporary investigation tree is deployed.
+
+  set -euo pipefail
+  test "$(git branch --show-current)" = fix/bridge-ipv4-main
+  git diff --quiet
+  git diff --cached --quiet
+  task_revision=$(git rev-parse HEAD)
+  printf 'Approved source must match: %s\n' "$task_revision"
+  task_bundle=$(mktemp -d /tmp/support-ipv4-release.XXXXXX)
+  git archive --format=tar "$task_revision" -o "$task_bundle/source.tar"
+  git archive --format=tar 487550d9986fe14e9c00c543084cc091b0e67b1f -o "$task_bundle/base.tar"
+  printf '%s\n' "$task_revision" > "$task_bundle/REVISION"
+  (cd "$task_bundle" && sha256sum source.tar base.tar REVISION > SHA256SUMS)
+  ssh root@194.5.152.173 'test ! -e /root/support-ipv4-deployment && install -d -m0700 /root/support-ipv4-deployment'
+  scp "$task_bundle/source.tar" "$task_bundle/base.tar" "$task_bundle/REVISION" "$task_bundle/SHA256SUMS" root@194.5.152.173:/root/support-ipv4-deployment/
+
+2. PROD: prepare a fresh inactive release and private rollback record
+-------------------------------------------------------------------
+All following blocks run as root on 194.5.152.173 in the same shell. Do not set
+shell tracing. Keep the record directory private. Never print app.env contents.
+
+  set -euo pipefail
+  umask 077
+  export task_record=/root/support-ipv4-deployment
+  export task_previous=/opt/whatsapp-support/releases/20261107-heartbeat-487550d
+  task_revision=$(cat "$task_record/REVISION")
+  export task_release=/opt/whatsapp-support/releases/20261107-ipv4-${task_revision:0:12}
+  test "$(readlink -f /opt/whatsapp-support/current)" = "$task_previous"
+  test "$(cat "$task_previous/REVISION")" = 487550d9986fe14e9c00c543084cc091b0e67b1f
+  test "$(node --version)" = v24.22.2
+  (cd "$task_record" && sha256sum --check SHA256SUMS)
+  test ! -e "$task_release"
+  df -h / /var/lib/whatsapp-support
+  test "$(df -B1 --output=avail / | tail -1)" -gt 21474836480
+  python3 - <<'PY'
+import hashlib,os,tarfile
+from pathlib import Path
+root=Path(os.environ['task_previous'])
+with tarfile.open(Path(os.environ['task_record'])/'base.tar') as archive:
+    for item in archive:
+        if item.isfile():
+            assert (root/item.name).is_file(), 'DEPLOYED_SOURCE_MISSING'
+            assert (root/item.name).read_bytes()==archive.extractfile(item).read(), 'DEPLOYED_SOURCE_DRIFT:'+item.name
+print('DEPLOYED_BASELINE_MATCHES')
+PY
+  install -d -m0755 "$task_release"
+  tar -xf "$task_record/source.tar" --no-same-owner -C "$task_release"
+  test ! -e "$task_release/.env"
+  "$task_previous/venv/bin/python" -m pip freeze > "$task_record/python-freeze.txt"
+  python3 - "$task_record/python-freeze.txt" <<'PY'
+import re,sys
+assert all(re.fullmatch(r'[A-Za-z0-9_.-]+==[^\s@]+',x) for x in open(sys.argv[1]).read().splitlines()), 'DEPENDENCY_SOURCE_REVIEW_REQUIRED'
+PY
+  install -m0644 "$task_record/python-freeze.txt" "$task_release/.python-runtime-freeze.txt"
+  chown -R nobody:nogroup "$task_release"
+  systemd-run --unit=support-ipv4-dependencies --wait --collect --pipe \
+    -p User=nobody -p Group=nogroup -p NoNewPrivileges=yes \
+    -p ProtectSystem=strict -p ProtectHome=yes -p PrivateTmp=yes \
+    -p "ReadWritePaths=$task_release" \
+    -p 'InaccessiblePaths=/etc/whatsapp-support /var/lib/whatsapp-support /var/lib/mysql /var/lib/redis /run/mysqld /run/redis /srv/migration' \
+    -p MemoryMax=4G -p CPUQuota=200% -p TasksMax=128 \
+    --working-directory="$task_release" /bin/bash -c \
+    'set -eu; python3 -m venv venv; venv/bin/python -m pip install --disable-pip-version-check --no-cache-dir -r .python-runtime-freeze.txt; npm ci --prefix whatsapp_bridge --cache .npm-cache --no-audit --no-fund; node whatsapp_bridge/scripts/patch-baileys-lifecycle.js --verify' \
+    > "$task_record/dependencies.log" 2>&1
+  chown -R root:root "$task_release"
+  install -m0644 "$task_record/REVISION" "$task_release/REVISION"
+  node "$task_release/whatsapp_bridge/scripts/patch-baileys-lifecycle.js" --verify
+  python3 - <<'PY'
+import os,tarfile
+from pathlib import Path
+root=Path(os.environ['task_release'])
+with tarfile.open(Path(os.environ['task_record'])/'source.tar') as archive:
+    for item in archive:
+        if item.isfile(): assert (root/item.name).read_bytes()==archive.extractfile(item).read(), 'STAGED_SOURCE_DRIFT:'+item.name
+print('STAGED_COMMITTED_SOURCE_VERIFIED')
+PY
+  cp -a /etc/whatsapp-support/app.env "$task_record/app.env.before"
+  cp -a /etc/nginx/sites-available/export-customer-service.mik-holding.co "$task_record/nginx.before"
+  for task_file in bridge_tcp_diagnostics.py export_runtime_metrics.py; do
+    cp -a "/usr/local/libexec/whatsapp-support/$task_file" "$task_record/$task_file.before"
+  done
+  python3 - <<'PY'
+import os,re,shutil
+from pathlib import Path
+p=Path(os.environ['task_record'])
+before=(p/'app.env.before').read_text()
+value=re.sub(r'(?m)^[ \t]*(?:export[ \t]+)?WHATSAPP_WS_IP_FAMILY[ \t]*=[^\n]*(?:\n|$)', '', before)
+target=p/'app.env.ipv4'
+shutil.copy2(p/'app.env.before',target)
+target.write_text(value+('' if value.endswith('\n') else '\n')+'WHATSAPP_WS_IP_FAMILY=4\n')
+target.chmod(0o600)
+PY
+
+3. PROD: define guarded stop/ingress/readiness commands
+----------------------------------------------------
+These helper definitions do not themselves stop or start services.
+
+  stop_clean() {
+    systemctl stop --no-block "$1.service"
+    for task_wait in $(seq 1 120); do
+      task_state=$(systemctl show "$1.service" -p ActiveState --value)
+      if test "$task_state" = inactive; then
+        test "$(systemctl show "$1.service" -p MainPID --value)" = 0
+        test "$(systemctl show "$1.service" -p Result --value)" = success
+        if test "$1" != ngrok; then
+          test "$(systemctl show "$1.service" -p ExecMainStatus --value)" = 0
+        fi
+        return
+      fi
+      test "$task_state" != failed || return 1
+      sleep 1
+    done
+    printf 'STOP_UNRESOLVED: %s; do not kill or activate a replacement\n' "$1" >&2
+    return 1
+  }
+  guard_shutdown() {
+    for task_unit in whatsapp-bridge shipment-bot; do
+      install -d -m0755 "/run/systemd/system/$task_unit.service.d"
+      test ! -e "/run/systemd/system/$task_unit.service.d/99-ipv4-deployment.conf"
+      printf '[Service]\nTimeoutStopSec=infinity\nSendSIGKILL=no\n' > "/run/systemd/system/$task_unit.service.d/99-ipv4-deployment.conf"
+    done
+    systemctl daemon-reload
+    for task_unit in whatsapp-bridge shipment-bot; do
+      test "$(systemctl show "$task_unit.service" -p SendSIGKILL --value)" = no
+      test "$(systemctl show "$task_unit.service" -p TimeoutStopUSec --value)" = infinity
+    done
+  }
+  ingress() {
+    python3 - "$1" <<'PY'
+import os,sys,subprocess
+from pathlib import Path
+p=Path('/etc/nginx/sites-available/export-customer-service.mik-holding.co')
+original=(Path(os.environ['task_record'])/'nginx.before').read_bytes()
+assert original.count(b'server {\n')==2, 'VHOST_LAYOUT_REVIEW_REQUIRED'
+closed=original.replace(b'server {\n',b'server {\n    # Approved IPv4 deployment maintenance.\n    add_header Retry-After 120 always;\n    return 503;\n')
+assert sys.argv[1] in ('close','open')
+assert p.read_bytes() in (original,closed), 'VHOST_CHANGED_DURING_DEPLOYMENT'
+old=p.read_bytes(); tmp=p.with_suffix('.ipv4-pending')
+assert not tmp.exists()
+tmp.write_bytes(closed if sys.argv[1]=='close' else original); tmp.chmod(0o644); os.replace(tmp,p)
+if subprocess.run(['nginx','-t'],capture_output=True).returncode:
+    tmp.write_bytes(old); tmp.chmod(0o644); os.replace(tmp,p)
+    raise SystemExit('NGINX_VALIDATION_FAILED')
+PY
+    systemctl reload nginx.service
+    task_expected=503
+    if test "$1" = open; then task_expected=200; fi
+    for task_wait in $(seq 1 15); do
+      if test "$(curl --noproxy '*' --resolve export-customer-service.mik-holding.co:443:127.0.0.1 -sS -o /dev/null -w '%{http_code}' https://export-customer-service.mik-holding.co/support)" = "$task_expected"; then return; fi
+      sleep 1
+    done
+    return 1
+  }
+
+Create a private, read-only health helper; output contains counts, never session
+data or credentials. The baseline mode records identity hashes/counts only.
+
+  cat > "$task_record/ready.py" <<'PY'
+import hashlib,json,os,sys,time,urllib.request
+from pathlib import Path
+from dotenv import load_dotenv
+load_dotenv('/etc/whatsapp-support/app.env')
+release=Path('/opt/whatsapp-support/current').resolve(); sys.path.insert(0,str(release))
+from scripts.export_runtime_metrics import bridge_probe
+record=Path(os.environ['task_record']); mode=sys.argv[1]
+baseline=None if mode=='baseline' else json.loads((record/'health-before.json').read_text())
+stable=0
+for attempt in range(60 if baseline else 1):
+    try: s=bridge_probe()
+    except Exception:
+        if baseline: time.sleep(5); continue
+        raise SystemExit('BRIDGE_PREFLIGHT_UNAVAILABLE')
+    lines=s['lines']; identity=hashlib.sha256(json.dumps(sorted(x['line_id'] for x in lines)).encode()).hexdigest()
+    assert len(lines)==8, 'IDENTITY_COUNT_CHANGED'
+    if baseline: assert identity==baseline['identity_sha256'], 'IDENTITY_SET_CHANGED'
+    assert s['storage']['level']!='critical', 'STORAGE_CRITICAL'
+    assert not any(x.get('qr') or x.get('recovery_category') in {'storage_failure','authentication_failure','session_conflict','protocol_failure','logged_out'} for x in lines), 'RECOVERY_REVIEW_REQUIRED'
+    good=s['ready'] and all(x['status']=='connected' and x.get('is_paired') and x.get('diagnostics',{}).get('supported') and x['diagnostics'].get('version')==2 for x in lines)
+    if mode=='4':
+        good=good and all(x['diagnostics'].get('configured_ip_family')==4 and (x['diagnostics'].get('transport') or {}).get('family')=='IPv4' and (x['diagnostics'].get('transport') or {}).get('tls_authorized') is True for x in lines)
+    if baseline: good=good and all(x['diagnostics'].get('heartbeat_successes',0)>0 for x in lines)
+    stable=stable+1 if good else 0
+    report={'identity_sha256':identity,'ready':bool(good),'connected':sum(x['status']=='connected' for x in lines),'pending_callbacks':sum(x['pending_callbacks'] for x in lines),'uncertain_sends':sum(x['uncertain_sends'] for x in lines),'stable_observations':stable}
+    print(json.dumps(report),flush=True)
+    if good and (mode=='baseline' or stable>=3):
+        with urllib.request.build_opener(urllib.request.ProxyHandler({})).open('http://127.0.0.1:8000/health',timeout=3) as response:
+            assert response.status==200 and json.load(response).get('status')=='ok'
+        (record/('health-before.json' if mode=='baseline' else 'health-after.json')).write_text(json.dumps(report))
+        break
+    if baseline: time.sleep(5)
+else: raise SystemExit('READINESS_GATE_FAILED')
+PY
+
+4. PROD: preflight, maintenance and clean drains
+----------------------------------------------
+  "$task_previous/venv/bin/python" -B "$task_record/ready.py" baseline
+  "$task_previous/venv/bin/python" -B "$task_previous/scripts/attended_support_monitor.py" --once
+  guard_shutdown
+  ingress close
+  systemctl stop support-runtime-metrics.timer support-runtime-metrics.service
+  stop_clean ngrok
+  stop_clean whatsapp-bridge
+  "$task_previous/venv/bin/python" -B "$task_previous/scripts/check_inbound_drain.py" --socket /run/redis/redis-server.sock --stable-seconds 10
+  stop_clean shipment-bot
+  "$task_previous/venv/bin/python" -B "$task_previous/scripts/check_inbound_drain.py" --socket /run/redis/redis-server.sock --stable-seconds 10
+  test "$(systemctl show whatsapp-bridge.service -p MainPID --value)" = 0
+  test "$(systemctl show shipment-bot.service -p MainPID --value)" = 0
+  snapshot_validate() {
+    task_copy=$1
+    test ! -e "$task_copy"
+    cp -a --reflink=auto /var/lib/whatsapp-support/linked-device "$task_copy"
+    python3 - "$task_copy" <<'PY'
+import hashlib,os,sys
+from pathlib import Path
+def manifest(root):
+    result={}
+    for directory,dirs,files in os.walk(root,followlinks=False):
+        for name in dirs+files:
+            p=Path(directory)/name; key=str(p.relative_to(root))
+            if p.is_symlink(): result[key]=('link',os.readlink(p))
+            elif p.is_file():
+                with p.open('rb') as f: result[key]=('file',p.stat().st_size,hashlib.file_digest(f,'sha256').hexdigest())
+    return result
+assert manifest(Path('/var/lib/whatsapp-support/linked-device'))==manifest(Path(sys.argv[1])), 'STATE_COPY_MISMATCH'
+print('STATE_COPY_CHECKSUMS_MATCH')
+PY
+    node "$task_release/whatsapp_bridge/src/storage-tool.js" validate "$task_copy" > "$task_copy.validation.json"
+    python3 - "$task_copy.validation.json" <<'PY'
+import json,sys
+from pathlib import Path
+v=json.loads(Path(sys.argv[1]).read_text())
+assert v['stores']==17 and v['incomplete_tail_bytes']==0, 'JOURNAL_INTEGRITY_FAILED'
+print(v)
+PY
+  }
+  snapshot_validate "$task_record/linked-device-before"
+
+If any drain, clean-stop, ownership or journal check fails: DO NOT activate.
+Redis continues running; no key/TTL changes are made. Pending callbacks remain
+durable for ordered recovery; this change does not replay uncertain sends.
+
+5. PROD: activate the verified source and IPv4 setting
+----------------------------------------------------
+  cmp /etc/whatsapp-support/app.env "$task_record/app.env.before"
+  install -m0640 -o root -g whatsapp-support "$task_record/app.env.ipv4" /etc/whatsapp-support/app.env.ipv4-pending
+  mv /etc/whatsapp-support/app.env.ipv4-pending /etc/whatsapp-support/app.env
+  for task_file in bridge_tcp_diagnostics.py export_runtime_metrics.py; do
+    install -m0755 "$task_release/scripts/$task_file" "/usr/local/libexec/whatsapp-support/$task_file.ipv4-pending"
+    mv "/usr/local/libexec/whatsapp-support/$task_file.ipv4-pending" "/usr/local/libexec/whatsapp-support/$task_file"
+  done
+  test "$(readlink -f /opt/whatsapp-support/current)" = "$task_previous"
+  test ! -e /opt/whatsapp-support/current.ipv4-pending
+  ln -s "$task_release" /opt/whatsapp-support/current.ipv4-pending
+  mv -Tf /opt/whatsapp-support/current.ipv4-pending /opt/whatsapp-support/current
+  systemctl start shipment-bot.service
+  test "$(systemctl show shipment-bot.service -p ActiveState --value)" = active
+  node "$task_release/whatsapp_bridge/scripts/patch-baileys-lifecycle.js" --verify
+  date -u +%FT%TZ > "$task_record/activation-started"
+  systemctl start whatsapp-bridge.service
+  "$task_release/venv/bin/python" -B "$task_record/ready.py" 4
+  systemctl start support-runtime-metrics.timer
+  systemctl start support-runtime-metrics.service application-storage-metrics.service whatsapp-storage-watchdog.service
+
+Wait up to 120 seconds for fresh Prometheus samples (existing collector/scrape
+cadence), running the next command. Abort/escalate if health cannot become true;
+do not ignore a missing collector. Keep ingress closed until it passes.
+
+  "$task_release/venv/bin/python" -B "$task_release/scripts/attended_support_monitor.py" --once
+  "$task_release/venv/bin/python" -B - <<'PY'
+import sys
+sys.path.insert(0,'/opt/whatsapp-support/current')
+from scripts.attended_support_monitor import query
+for expression in ('support_bridge_configured_ip_family == 4',
+                   'support_bridge_transport_family{family="IPv4"} == 1',
+                   'support_bridge_transport_tls_authorized == 1',
+                   'support_bridge_tcp_sample_up == 1'):
+    assert len(query(expression))==8, 'IPV4_TLS_TCP_METRICS_GATE_FAILED'
+print('EIGHT_IPV4_TLS_TCP_METRIC_IDENTITIES_VERIFIED')
+PY
+  ingress open
+  systemctl start ngrok.service
+  systemctl is-active shipment-bot.service whatsapp-bridge.service nginx.service ngrok.service
+  curl --noproxy '*' --fail --silent --show-error -o /dev/null https://export-customer-service.mik-holding.co/support
+  "$task_release/venv/bin/python" -B - <<'PY'
+import json,urllib.request
+with urllib.request.build_opener(urllib.request.ProxyHandler({})).open('http://127.0.0.1:4040/api/tunnels',timeout=5) as r: tunnels=json.load(r)['tunnels']
+assert any(t.get('public_url')=='https://sanction-lake-exalted.ngrok-free.dev' and t.get('config',{}).get('addr') in {'http://localhost:8000','http://127.0.0.1:8000','localhost:8000','127.0.0.1:8000'} for t in tunnels), 'WEBHOOK_TUNNEL_CHANGED'
+print('EXISTING_WEBHOOK_TUNNEL_PRESERVED')
+PY
+
+No DNS, Meta webhook, ngrok URL or networking changes. Staff must verify login,
+conversations/history, attachments, text/image exchange with an internal contact,
+accurate receipts and no duplicates. Confirm callback progress, unchanged
+uncertain evidence, checkpoint/storage health and fresh collector/TCP samples.
+Observe natural reconnects only: replacement must remain IPv4 with one owner.
+Monitor at least 60 minutes, then compare timeout rates per connection-hour over
+24 hours; successful local mocks do not prove the network failure is eliminated.
+
+Keep the console visible in a separate terminal:
+  sudo /opt/whatsapp-support/current/venv/bin/python -B /opt/whatsapp-support/current/scripts/attended_support_monitor.py
+
+After successful acceptance, remove ONLY the temporary stop-policy overrides
+created here. This restores the pre-deployment unit policy without restarting.
+If a stop is unresolved, retain them and escalate; do not restore forced killing.
+
+  rm /run/systemd/system/whatsapp-bridge.service.d/99-ipv4-deployment.conf /run/systemd/system/shipment-bot.service.d/99-ipv4-deployment.conf
+  systemctl daemon-reload
+
+6. Rollback to the current working release (separate approval after activation)
+-----------------------------------------------------------------------------
+Keep the current authoritative database/Redis/media/auth/journals. Do NOT copy
+linked-device-before back. Rollback changes source/config/collector only. It
+cannot undo provider-side effects or guarantee recovery after real logout,
+session conflict or corrupted persistence; those conditions require review.
+
+Use the same shell variables/functions/record from above. If the temporary
+guards were removed, call guard_shutdown first; otherwise verify SendSIGKILL=no
+and TimeoutStopUSec=infinity still hold for both services. Do not overwrite an
+unexpected unit override. Then run:
+
+  ingress close
+  systemctl stop support-runtime-metrics.timer support-runtime-metrics.service
+  stop_clean ngrok
+  stop_clean whatsapp-bridge
+  /opt/whatsapp-support/current/venv/bin/python -B /opt/whatsapp-support/current/scripts/check_inbound_drain.py --socket /run/redis/redis-server.sock --stable-seconds 10
+  stop_clean shipment-bot
+  /opt/whatsapp-support/current/venv/bin/python -B /opt/whatsapp-support/current/scripts/check_inbound_drain.py --socket /run/redis/redis-server.sock --stable-seconds 10
+  snapshot_validate "$task_record/linked-device-rollback"
+  cmp /etc/whatsapp-support/app.env "$task_record/app.env.ipv4"
+  install -m0640 -o root -g whatsapp-support "$task_record/app.env.before" /etc/whatsapp-support/app.env.ipv4-pending
+  mv /etc/whatsapp-support/app.env.ipv4-pending /etc/whatsapp-support/app.env
+  for task_file in bridge_tcp_diagnostics.py export_runtime_metrics.py; do
+    install -m0755 "$task_record/$task_file.before" "/usr/local/libexec/whatsapp-support/$task_file.ipv4-pending"
+    mv "/usr/local/libexec/whatsapp-support/$task_file.ipv4-pending" "/usr/local/libexec/whatsapp-support/$task_file"
+  done
+  test ! -e /opt/whatsapp-support/current.ipv4-pending
+  ln -s "$task_previous" /opt/whatsapp-support/current.ipv4-pending
+  mv -Tf /opt/whatsapp-support/current.ipv4-pending /opt/whatsapp-support/current
+  node "$task_previous/whatsapp_bridge/scripts/patch-baileys-lifecycle.js" --verify
+  systemctl start shipment-bot.service
+  systemctl start whatsapp-bridge.service
+  "$task_previous/venv/bin/python" -B "$task_record/ready.py" 0
+  systemctl start support-runtime-metrics.timer
+  systemctl start support-runtime-metrics.service application-storage-metrics.service whatsapp-storage-watchdog.service
+  "$task_previous/venv/bin/python" -B "$task_previous/scripts/attended_support_monitor.py" --once
+  ingress open
+  systemctl start ngrok.service
+
+Repeat staff acceptance and webhook/monitor checks; remove the temporary guard
+only after success. Do not prune either release or this private record during
+the observation window. Setting-only fallback is also possible after approval:
+retain the new release, set WHATSAPP_WS_IP_FAMILY=0 in the private environment,
+and use the same maintenance/drain/physical-close gates before a graceful start.
+That retains new diagnostics while reverting address selection. Never change
+host-wide IPv6 settings to perform this rollback.
