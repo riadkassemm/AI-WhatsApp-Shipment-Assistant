@@ -78,3 +78,19 @@ def test_tcp_metric_labels_never_include_endpoints_or_untrusted_fields():
     metrics = bridge_metrics(data, {'90000': {'retransmitted_segments': 3, 'private_payload': 99}})
     assert any(key.startswith('support_bridge_tcp_retransmitted_segments') and value == 3 for key, value in metrics.items())
     assert '2001:db8' not in str(metrics) and 'private_payload' not in str(metrics)
+
+
+def test_ip_policy_tls_and_kernel_progress_are_exported_without_endpoint_or_error_labels():
+    data = snapshot()
+    data['lines'][0]['diagnostics'].update(configured_ip_family=4, socket_error_code='private-error',
+        transport={'remote_ip': '192.0.2.1', 'family': 'IPv4', 'tls_authorized': True})
+    metrics = bridge_metrics(data, {'90000': {'bytes_received': 1234, 'bytes_acked': 456,
+        'segments_in': 10, 'unacked_segments': 1, 'sample_started_timestamp_seconds': 100,
+        'sample_timestamp_seconds': 100.2, 'private_payload': 99}})
+    for name, expected in {'configured_ip_family': 4, 'transport_tls_authorized': 1,
+                           'tcp_bytes_received': 1234, 'tcp_bytes_acked': 456,
+                           'tcp_segments_in': 10, 'tcp_unacked_segments': 1,
+                           'tcp_sample_timestamp_seconds': 100.2}.items():
+        assert any(k.startswith('support_bridge_' + name + '{') and v == expected for k, v in metrics.items())
+    assert '192.0.2' not in str(metrics) and 'private' not in str(metrics)
+    assert not any(k.startswith('support_bridge_tcp_send_window_bytes') for k in metrics)
