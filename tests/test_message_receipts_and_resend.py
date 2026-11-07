@@ -414,6 +414,18 @@ def test_outgoing_messages_show_whatsapp_ticks(delivery, class_name, label, icon
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is unavailable")
+def test_local_submission_shows_only_a_clock_until_confirmed():
+    message = {"ticket_id": 42, "direction": "OUTBOUND", "sender_type": "AGENT", "sender_id": "7",
+               "message_type": "text", "body": "Hello", "send_status": "PENDING", "local_submission": "SUBMITTING"}
+    found = _render_status(message)
+    assert found["states"] == [{"className": "send-state pending", "label": "Submitting · not confirmed as saved", "text": ""}]
+    assert "clock" in found["icons"]
+    assert "check" not in found["icons"] and "check-double" not in found["icons"]
+    queued = _render_status({**message, "local_submission": "QUEUED"})
+    assert queued["states"] == [{"className": "send-state pending", "label": "Queued on this device · not saved yet", "text": "Queued"}]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is unavailable")
 def test_failed_messages_offer_resend_only_to_their_sender():
     message = {"id": 5, "ticket_id": 42, "direction": "OUTBOUND", "sender_type": "AGENT", "sender_id": "7",
                "message_type": "text", "body": "Hello", "delivery_retry_safe": True, "transport_client_id": "wire-900", "send_status": "FAILED", "error_message": "HTTP 500"}
