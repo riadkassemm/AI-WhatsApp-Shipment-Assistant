@@ -52,12 +52,25 @@ export async function validateStoppedStores(directory, target, eligible, minimum
   if(JSON.stringify(active)!==JSON.stringify([...eligible].sort()))fail('IDENTITY_INVENTORY_CHANGED');
   const numeric=(await fs.readdir(directory,{withFileTypes:true})).filter(e=>e.isDirectory()&&/^\d+$/.test(e.name)).map(e=>e.name).sort();
   if(JSON.stringify(numeric)!==JSON.stringify([...eligible,target].sort()))fail('UNACCOUNTED_IDENTITY_DIRECTORY');
-  const summaries={};
+  const summaries={}, credentials=new Map();
   for(const name of ['outbox.json',...eligible.flatMap(id=>[`${id}/auth.json`,`${id}/state.json`]),`${target}/state.json`]) {
     if(name.endsWith('/auth.json'))await assertAuthRecoveryClear(path.join(directory,name));
     const journal=await readJournal(path.join(directory,name),()=>{throw new Error('STORE_MISSING');},{repairTail:false});
     if(journal.incompleteTailBytes || journal.seq < (minimumSequences[name]??0))fail('BUSINESS_DURABILITY_UNPROVEN');
-    if(name.endsWith('/auth.json') && (journal.data.creds?.registered!==true || typeof journal.data.creds?.me?.id!=='string'))fail('HEALTHY_SESSION_INCOMPLETE');
+    if(name.endsWith('/auth.json')) credentials.set(name.split('/')[0],journal.data.creds);
+    if(name.endsWith('/state.json') && !name.startsWith(target+'/')) {
+      const creds=credentials.get(name.split('/')[0]);
+      const bytes=value=>value instanceof Uint8Array && value.length>=32;
+      const pair=value=>bytes(value?.public)&&bytes(value?.private);
+      // Baileys QR pairing sets me.id, not registered=true (that flag is for
+      // registration flows). Require complete keys AND the persisted phone
+      // binding; accepting a boolean flag alone would not prove a linked session.
+      if(typeof creds?.registered!=='boolean' || !/^\d+:\d+@s\.whatsapp\.net$/.test(creds?.me?.id??'') ||
+          journal.data.bound_phone!==creds.me.id.split('@')[0].split(':')[0] || journal.data.auth_reset_required ||
+          !pair(creds.noiseKey)||!pair(creds.signedIdentityKey)||!pair(creds.signedPreKey?.keyPair)||
+          !bytes(creds.signedPreKey?.signature)||!Number.isInteger(creds.registrationId)||
+          typeof creds.advSecretKey!=='string'||!creds.advSecretKey)fail('HEALTHY_SESSION_INCOMPLETE');
+    }
     if(name.endsWith('/state.json') && !name.startsWith(target+'/') && Object.values(journal.data.messages??{}).some(m=>m.pending_send && !m.delivery_uncertain))fail('HEALTHY_SEND_UNRESOLVED');
     let health;
     try{health=JSON.parse(await fs.readFile(path.join(directory,name+'.health.json'),'utf8'));}
