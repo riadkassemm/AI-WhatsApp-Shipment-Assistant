@@ -55,6 +55,13 @@ export function createServer(bridge, config) {
       try { parts = pathname.split('/').filter(Boolean).map(decodeURIComponent); }
       catch { throw new BridgeError(400, 'INVALID_PATH', 'The bridge endpoint contains invalid URL encoding.'); }
       if (request.method === 'GET' && pathname === '/v1/status') return send(response, 200, bridge.status());
+      if (request.method === 'POST' && pathname === '/v1/shutdown-preflight') {
+        // Explicit operator action: seals only proven failed owners in memory.
+        // No signals, healthy socket closure, credential writes or fence clearing.
+        try { await bridge.prepareShutdown(); }
+        catch (error) { return send(response, 503, {shutdown_safe: false, code: safeStorageCode(error), runtime: bridge.runtimeHealth()}); }
+        return send(response, 200, {shutdown_safe: true, runtime: bridge.runtimeHealth()});
+      }
       if (request.method === 'GET' && pathname === '/v1/storage') {
         if (!bridge.storageMonitor) throw new BridgeError(503, 'STORAGE_MONITOR_UNAVAILABLE', 'Storage monitoring is not initialized.');
         return send(response, 200, bridge.storageMonitor.status());
@@ -64,6 +71,11 @@ export function createServer(bridge, config) {
       }
       if (parts[0] !== 'v1' || parts[1] !== 'lines' || !/^\d{5,32}$/.test(parts[2] ?? '')) throw new BridgeError(404, 'NOT_FOUND', 'Unknown bridge endpoint.');
       const id = parts[2];
+      if (request.method === 'POST' && parts.length === 4 && parts[3] === 'decommission') {
+        const payload = await readJson(request, 1024);
+        if (payload.confirm_line_id !== id || typeof payload.actor !== 'string' || !payload.actor.trim() || payload.actor.length > 128) throw new BridgeError(400, 'DECOMMISSION_CONFIRMATION_REQUIRED', 'Confirm the selected identity and administrator.');
+        return send(response, 200, await bridge.decommissionLine(id, {actor: payload.actor}));
+      }
       if (request.method === 'DELETE' && parts.length === 3) return send(response, 200, await bridge.removeLine(id));
       bridge.getLine(id);
       if (request.method === 'GET' && parts.length === 4 && parts[3] === 'auth-recovery') {

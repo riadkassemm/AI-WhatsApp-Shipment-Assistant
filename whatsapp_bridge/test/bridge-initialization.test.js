@@ -10,7 +10,7 @@ import {JournalStore} from '../src/journal-store.js';
 
 const gate = () => { let resolve; const promise = new Promise(done => { resolve = done; }); return {promise, resolve}; };
 const healthyStorage = async () => ({bsize: 4096, blocks: 10_000_000, bavail: 5_000_000, files: 1_000_000, ffree: 900_000});
-const socket = () => ({ws: new EventEmitter(), ev: {process: () => () => {}}, end() {}});
+const socket = () => ({ws: new EventEmitter(), bridgeTransportClosed: Promise.resolve(), ev: {process: () => () => {}}, end() {}});
 
 async function setup(t, count = 2, Type = Bridge) {
   const dataDir = await mkdtemp(path.join(os.tmpdir(), 'bridge-initialization-'));

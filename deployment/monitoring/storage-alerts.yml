@@ -30,7 +30,7 @@ groups:
         for: 5m
         labels: {severity: critical}
       - alert: BridgeStorageUnavailable
-        expr: (bridge_storage_health_level == 2 or time() - bridge_watchdog_timestamp_seconds > 180 or absent(bridge_watchdog_timestamp_seconds) or absent(bridge_storage_health_level)) and on() (support_monitoring_expected == 1)
+        expr: ((bridge_storage_health_level == 2 and on(job, instance) support_bridge_eligible_storage_critical == 1) or absent(support_bridge_eligible_storage_critical) or time() - bridge_watchdog_timestamp_seconds > 180 or absent(bridge_watchdog_timestamp_seconds) or absent(bridge_storage_health_level)) and on() (support_monitoring_expected == 1)
         for: 2m
         labels: {severity: critical}
       - alert: LocalBackupRestoreOverdue
@@ -58,9 +58,29 @@ groups:
         for: 2m
         labels: {severity: critical}
       - alert: BridgeDisconnected
-        expr: (support_bridge_ready == 0 or absent(support_bridge_ready) or support_bridge_connected_lines < support_bridge_lines or support_bridge_lines != on(job, instance) support_bridge_expected_lines or absent(support_bridge_lines) or support_bridge_expected_lines < 1 or absent(support_bridge_expected_lines) or absent(support_bridge_connected_lines) or support_bridge_paired_lines != on(job, instance) support_bridge_expected_lines or absent(support_bridge_paired_lines) or support_bridge_qr_codes != 0 or absent(support_bridge_qr_codes)) and on() (support_monitoring_expected == 1)
+        expr: (support_bridge_ready == 0 or absent(support_bridge_ready) or support_bridge_connected_lines < support_bridge_eligible_lines or support_bridge_eligible_lines != on(job, instance) support_bridge_expected_lines or absent(support_bridge_eligible_lines) or support_bridge_expected_lines < 1 or absent(support_bridge_expected_lines) or absent(support_bridge_connected_lines) or support_bridge_eligible_paired_lines != on(job, instance) support_bridge_expected_lines or absent(support_bridge_eligible_paired_lines) or support_bridge_qr_codes != 0 or absent(support_bridge_qr_codes)) and on() (support_monitoring_expected == 1)
         for: 2m
         labels: {severity: critical}
+      - alert: BridgeIdentityFenced
+        expr: (support_bridge_fenced_lines > 0) and on() (support_monitoring_expected == 1)
+        for: 0m
+        labels: {severity: warning}
+        annotations:
+          summary: "WhatsApp identity retained offline for authentication review"
+          description: "Healthy eligible lines may operate. Retention never authorizes recovery, relinking, fence removal or uncertain resends."
+      - alert: BridgeIdentityIsolationUnproven
+        expr: (support_bridge_fenced_unresolved_lines > 0 or absent(support_bridge_fenced_unresolved_lines)) and on() (support_monitoring_expected == 1)
+        for: 0m
+        labels: {severity: critical}
+        annotations:
+          summary: "Fenced identity lacks safe retirement evidence; do not restart"
+      - alert: BridgeIdentityDecommissioned
+        expr: (support_bridge_decommissioned_lines > 0) and on() (support_monitoring_expected == 1)
+        for: 0m
+        labels: {severity: warning}
+        annotations:
+          summary: "WhatsApp session permanently decommissioned; evidence retained"
+          description: "Remote unlink may require action on the selected number's primary phone. Never reuse abandoned credentials or replay uncertain deliveries."
       - alert: InboundWorkUnresolved
         expr: (support_inbound_pending > 0 or support_inbound_inflight > 0 or support_inbound_invalid > 0) and on() (support_monitoring_expected == 1)
         for: 5m

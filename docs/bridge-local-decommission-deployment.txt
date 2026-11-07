@@ -1,0 +1,187 @@
+Permanent local decommission and bridge-only IPv4 activation
+==========================================================
+Supersedes the restart blocker in bridge-fenced-identity-isolation.txt and the
+obsolete identity/release assumptions in bridge-ipv4-deployment.txt. Execute
+only within explicit production authorization. No DEV, forced kill, hot patch,
+credential recovery, uncertain resend, DNS change or server-wide IP change.
+
+Semantics and review
+--------------------
+Normal unlink still confirms WhatsApp revocation. Permanent local decommission
+requires proven cessation, not reusable credentials. A private atomic record in
+lines.json/quarantined_lines makes the selected ID permanently ineligible.
+Authentication and message-state files are fingerprinted and retained in place;
+no purge tombstone, callback deletion, journal flush or repair is used. New QR
+linking allocates a new ID and new authentication. Old uncertain deliveries stay
+visible and protected. Local removal never implies confirmed remote unlink.
+
+The old binary cannot gain this behavior from staging files. The committed
+legacy-decommission-transition.js pins its exact revision and six source hashes.
+It accepts only that binary's natural exit 1, two known aggregate shutdown
+errors, no additional errors, empty old cgroup, dead old PID/start identity, held
+data lock, every healthy auth marker cleared, complete healthy/shared/business
+replay, unchanged identity inventory and nonregressing journal sequences. The
+old code drains all healthy owners and shared work before its aggregate throw.
+The exact old source was rehearsed with six healthy mocked sessions and one
+failed session: healthy markers cleared; failed evidence retained; natural exit
+1. Historical unresolved records are preserved as incomplete/abandoned, never
+claimed to be completed. Any additional failure blocks activation.
+
+Focused verification
+--------------------
+Use the authorized local mock-test exception; never production WhatsApp tests:
+  node --test whatsapp_bridge/test/decommission.test.js whatsapp_bridge/test/legacy-decommission-transition.test.js whatsapp_bridge/test/fenced-auth.test.js whatsapp_bridge/test/websocket-transport.test.js
+  node --test --test-name-pattern='removal|removed and stopped|HTTP PDF upload|callback|uploaded media|media downloads' whatsapp_bridge/test/bridge.test.js
+  venv/bin/python -m pytest -q tests/test_linked_device_api.py tests/test_linked_device_client.py -k 'remov or decommiss or quarantin'
+  venv/bin/python -m pytest -q tests/test_whatsapp_number_registry.py -k 'remov or decommiss'
+  venv/bin/python -m pytest -q tests/test_runtime_metrics.py tests/test_attended_support_monitor.py
+  promtool test rules deployment/monitoring/storage-alerts-retirement-test.yml deployment/monitoring/storage-alerts-fenced-test.yml
+  git diff --check
+Run registry and ticket suites separately: existing module-level database doubles
+contaminate imports. No full suites. Existing nine CI failures were EACH rerun
+at baseline 0f15957 with Node 24 and Chromium: inbound receipt fixture; missing
+connection-poll fixture; missing send-group fixture; history navigation assertion;
+missing send-queue fixture; stale failed-line removal button expectation; session
+navigation assertion; missing message-hidden fixture; missing persisted-message
+observer fixture. The removal expectation is corrected here and its focused UI
+checks pass. Eight independently reproduced baseline failures remain outside this
+change; they are not evidence that a new failure may be ignored.
+
+1. Commit, push, review and stage while the existing application runs
+-------------------------------------------------------------------
+Set TASK_APPROVED_REV to the full reviewed commit; TASK_TARGET to the explicitly
+selected ID after checking its current registry label. Never infer either value.
+  git diff --quiet
+  git diff --cached --quiet
+  task_bundle=$(mktemp -d /tmp/support-decommission-release.XXXXXX)
+  git archive --format=tar "$TASK_APPROVED_REV" -o "$task_bundle/source.tar"
+  git archive --format=tar b5f8e35ceba5daba0ac6a24cc47332fad4cb149e -o "$task_bundle/base.tar"
+  printf '%s\n' "$TASK_APPROVED_REV" > "$task_bundle/REVISION"
+  (cd "$task_bundle" && sha256sum source.tar base.tar REVISION > SHA256SUMS)
+Transfer into a NEW root-only deployment record directory on PROD. Preserve the
+old current symlink and REVISION, app.env, Customer Support nginx vhost, collector
+and Prometheus rule files. Do not put production evidence or credentials in Git.
+Stage a NEW release using section 2 of bridge-ipv4-deployment.txt, substituting
+the actual old b5f8e35 release and new approved revision. Validate every archived
+source byte, install pinned Python dependencies and npm ci in the documented
+systemd sandbox without access to production credentials/data, and run:
+  node "$task_release/whatsapp_bridge/scripts/patch-baileys-lifecycle.js" --verify
+Prepare a PRIVATE app.env candidate changing ONLY WHATSAPP_WS_IP_FAMILY=4.
+Do not install it yet. Preserve old config and release. Verify six healthy paired
+lines, only the selected failed auth store, no unhealthy shared/state store,
+correct target registry identity, sufficient disk and current queue telemetry.
+
+2. Close ingress, prepare transition and allow natural old exit
+--------------------------------------------------------------
+Use a private root shell with set -euo pipefail; umask 077. Define task_previous,
+task_release, task_record and TASK_TARGET from verified values. Keep staff ready.
+Before any stop, install temporary runtime unit overrides for whatsapp-bridge and
+shipment-bot with exactly:
+  [Service]
+  Restart=no
+  TimeoutStopSec=infinity
+  SendSIGKILL=no
+Run systemctl daemon-reload and verify all three properties. Keep the permanent
+bridge no-SIGKILL drop-in from deployment/examples/whatsapp-bridge-fenced-retirement.conf.
+Using the reviewed ingress helper in the IPv4 runbook, close ONLY the Customer
+Support vhost; nginx -t then reload, verify HTTPS /support returns 503. Stop ngrok
+cleanly; leave API, database, Redis, unrelated applications and monitoring up.
+Create a mode700 transition directory outside linked-device, owned by the data
+owner; its record must not exist. The committed wrapper reads private config
+and drops to that owner with temporary journal-read permission only:
+  "$task_release/venv/bin/python" -B "$task_release/scripts/run_bridge_transition.py" prepare "$TASK_TARGET" "$task_proof" "$task_previous"
+  systemctl stop --no-block whatsapp-bridge.service
+Poll status without force. The ONLY permitted nonzero result is natural exit 1
+subsequently proven by finalize. If PID/cgroup remains alive, stop here. No kill,
+new owner, file movement, fence deletion or activation is permitted.
+  "$task_previous/venv/bin/python" -B "$task_previous/scripts/check_inbound_drain.py" --socket /run/redis/redis-server.sock --stable-seconds 10
+  systemctl stop --no-block shipment-bot.service
+Require API inactive, MainPID=0, empty cgroup and Result=success; poll, never kill.
+For Uvicorn 0.52.4, capture_signals deliberately re-raises SIGTERM AFTER _serve
+finishes: ExecMainCode=2/ExecMainStatus=15 is the documented graceful result.
+Accept that exact result only with Application shutdown complete and Finished
+server process logs, empty inbound work/leases, and no unfinished outbound or
+message-change operations. If graceful HTTP timeout cancels tasks, require
+matching completed dashboard SSE access logs for every canceled task; unidentified
+requests remain blockers. Do not generalize this exception to other signals,
+errors, healthy bridge shutdown or incomplete application shutdown.
+  "$task_previous/venv/bin/python" -B "$task_previous/scripts/check_inbound_drain.py" --socket /run/redis/redis-server.sock --stable-seconds 10
+Both queue/lease checks must pass without expiry manufacturing an empty queue.
+Redis remains running at the existing path; do not restore or change TTLs.
+
+3. Preserve evidence and finalize permanent abandonment while offline
+--------------------------------------------------------------------
+After all owners exit, copy complete linked-device data to a private same-server
+record directory using cp -a --reflink=auto; compare every file's SHA256/size and
+symlink target against source. Preserve a consistent database snapshot and Redis
+RDB evidence; never restore either over current state. These are local evidence,
+not independent backups. Off-server backup omission was explicitly accepted.
+Record selected identity's ticket/message/uncertain-delivery counts privately.
+  "$task_release/venv/bin/python" -B "$task_release/scripts/run_bridge_transition.py" finalize "$TASK_TARGET" "$task_proof" "$task_previous"
+This obtains exclusive ownership and writes ONLY the root quarantine manifest
+when every legacy transition gate passes. Do not edit evidence to satisfy it.
+As the actual data owner, run the committed offline validator:
+  node "$task_release/whatsapp_bridge/src/storage-tool.js" validate-quarantined "$task_data"
+Require six eligible IDs matching the proof, one selected quarantine, 14 fully
+replayed journals, one explicitly abandoned authentication store, zero incomplete
+business tails and authentication_reuse_allowed=false. All selected auth/state
+fingerprints must still match the offline copy. The default validator and every
+transforming tool intentionally refuse this evidence.
+
+4. Activate reviewed release, verify, then reopen ingress
+--------------------------------------------------------
+Stop only the runtime collector timer/service briefly during its atomic upgrade.
+Verify current/config have not changed since staging. Install candidate app.env
+mode640 root:whatsapp-support atomically; atomically switch current symlink to the
+approved release. Install updated export_runtime_metrics.py and reviewed storage
+alert rules at the existing configured paths; promtool check config before
+Prometheus reload. Leave other monitoring configuration unchanged.
+  systemctl start shipment-bot.service
+  systemctl start whatsapp-bridge.service
+Using the authenticated loopback /v1/status URL read from private config, require:
+- ready=true, eligible_lines=6, exact expected six IDs connected and paired;
+- selected ID lifecycle=decommissioned, isolation.safe=true, eligible=false;
+- no selected socket, QR or reconnect timer; fingerprints unchanged;
+- each eligible diagnostic configured_ip_family=4, transport.family=IPv4,
+  tls_authorized=true, current-generation heartbeat_successes>0;
+- no new persistence failures, no auth/state/shared integrity errors;
+- API /health=200, no overlapping process/session owner, callbacks progress.
+Run the existing root-only registry transaction, gated by durable AND running
+quarantine, to archive active tickets without customer notifications:
+  "$task_release/venv/bin/python" -B "$task_release/scripts/finalize_quarantined_registry.py" "$TASK_TARGET" --confirm-permanent-local-removal
+Verify selected mutable registry profile removed, all historical tickets/messages,
+attachments and uncertain send rows retained; no uncertain resends. Redis and
+media stay at existing paths. Restart only the collector, then:
+  systemctl start support-runtime-metrics.timer support-runtime-metrics.service
+  systemctl start application-storage-metrics.service whatsapp-storage-watchdog.service
+  "$task_release/venv/bin/python" -B "$task_release/scripts/attended_support_monitor.py" --once
+Wait for fresh samples; permitted quarantine warning is not a capacity failure.
+All six eligible TLS/IP metrics must agree with live status. Missing collectors,
+checkpoint/shared-store failures or extra unhealthy lines remain blockers.
+Only now restore the original Customer Support nginx vhost (nginx -t/reload),
+verify existing production /support returns200, and start ngrok. Verify original
+URL and API tunnel target unchanged. No DNS/Meta/webhook/network edits.
+Staff checks: login, office access, retained conversations/history/attachments,
+internal text/image in both directions, receipt accuracy and no duplicates.
+Do not automatically QR-link the abandoned number. Later explicit QR scans use a
+fresh identity; scoped IPv4 agent applies to every new/reconnected socket.
+Keep attended monitoring visible for at least60minutes; compare connection-hour
+failure rates over24hours. Do not claim network remediation from short uptime.
+Once accepted, remove only this deployment's runtime Restart=no overrides,
+daemon-reload; retain permanent safe bridge stop policy. Keep prior release,
+private snapshots, proof, original config and full incomplete evidence.
+
+Rollback limitations
+--------------------
+After quarantine, b5f8e35 is NOT a safe automatic rollback binary: it cannot
+interpret the quarantine ledger and could revive abandoned credentials. Retain
+it for comparison, not blind activation. Roll back IPv4 using the SAME reviewed
+quarantine-capable release: close ingress, authenticated shutdown-preflight,
+clean bridge drain, queue checks, clean API stop, offline validate-quarantined,
+restore previous transport setting only, start API then bridge, verify six lines
+and immutable quarantine, then reopen ingress. After new writes, preserve current
+authoritative database/Redis/media/auth state and request approval before rollback.
+Never restore an old manifest, database or session snapshot; never reuse the old
+credentials. Code rollback needs an independently reviewed quarantine-capable
+artifact. If a healthy-store or ownership gate fails, keep ingress closed and
+report the exact failure without force or automatic recovery.

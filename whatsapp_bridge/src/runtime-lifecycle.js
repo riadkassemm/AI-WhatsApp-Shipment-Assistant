@@ -3,7 +3,7 @@
 export function createRuntime({prepare, process: processOwner = process, logger = console,
   shutdownTimeoutMs = 30_000}) {
   let bridge, server, release, startPromise, serverClose;
-  let stopping = false, failed = false, deadline, finish;
+  let stopping = false, failed = false, deadline, finish, preparation;
   const done = new Promise(resolve => { finish = resolve; });
   const report = (event, error) => {
     const candidate = error?.code ?? error?.message;
@@ -23,7 +23,7 @@ export function createRuntime({prepare, process: processOwner = process, logger 
     try { return Promise.resolve(bridge?.close()); }
     catch (error) { return Promise.reject(error); }
   };
-  const stop = () => {
+  const beginStop = () => {
     if (stopping) return done;
     stopping = true;
     // The diagnostic deadline leaves five seconds before DEV's systemd limit.
@@ -75,6 +75,18 @@ export function createRuntime({prepare, process: processOwner = process, logger 
     });
     return done;
   };
+  const stop = () => {
+    if (stopping) return done;
+    if (!bridge?.initialized || !bridge.prepareShutdown) return beginStop();
+    // A rejected isolation gate must leave healthy sockets and the listener
+    // running. systemd must separately be configured not to SIGKILL on timeout.
+    preparation ??= (async () => {
+      try { await (bridge.beginShutdown ? bridge.beginShutdown() : bridge.prepareShutdown()); }
+      catch (error) { report('shutdown_preflight_blocked', error); return {aborted: true}; }
+      return beginStop();
+    })().finally(() => { preparation = null; });
+    return preparation;
+  };
   // Keep handlers installed through termination. A second signal must neither
   // bypass the drain nor restore Node's default abrupt signal termination.
   processOwner.on('SIGTERM', stop);
@@ -88,7 +100,10 @@ export function createRuntime({prepare, process: processOwner = process, logger 
       const {config, acquireDataDirectory, createBridge, createServer} = dependencies;
       release = await acquireDataDirectory(config.dataDir);
       if (stopping) return;
-      bridge = createBridge(config);
+      bridge = createBridge(config, {assertExclusiveOwnership: () => {
+        if (!release?.assertHeld) throw new Error('DIRECTORY_OWNERSHIP_UNPROVEN');
+        release.assertHeld();
+      }});
       if (stopping) return;
       // Bind health before replay. The HTTP layer rejects operational routes
       // until initialize() finishes; a live process is not a ready sender.

@@ -37,6 +37,7 @@ function mockSocket(mode = 'ack') {
   ws.isOpen = true;
   const socket = {
     ws, user: { id: '96170111111:1@s.whatsapp.net' }, calls: [],
+    bridgeTransportClosed: Promise.resolve(), // No physical transport in this mock.
     queries: [],
     ev: { process: handler => { socket.eventHandler = handler; return () => { socket.unsubscribeCount = (socket.unsubscribeCount || 0) + 1; }; } },
     end: () => {}, logout: async () => {},
@@ -445,7 +446,17 @@ test('removal preserves a fenced authentication failure instead of recommending 
     assert.equal(line.status, 'connected');
     assert.equal(line.session.ready, true);
     assert.equal(socket.queries.length, 0);
-  } finally {await assert.rejects(bridge.close(), /BRIDGE_SHUTDOWN_FAILED/);}
+    await assert.rejects(bridge.close(), /DIRECTORY_OWNERSHIP_UNPROVEN/);
+    assert.equal(bridge.stopping, false, 'missing ownership proof must abort before healthy shutdown');
+    assert.equal(line.socket, socket);
+    assert.equal(line.session.ready, true);
+  } finally {
+    // Undo only this test's synthetic failed flag to dispose mock handles.
+    // Production evidence is never cleared by the failed shutdown path.
+    target.auth.store.failed = false;
+    target.isolating = false;
+    await bridge.close();
+  }
 });
 
 test('an unlink timeout cannot pretend complete removal or erase saved credentials, and an explicit retry can finish', async t => {
@@ -1290,7 +1301,7 @@ test('a failed scheduled reconnect retries transient network errors with backoff
 });
 
 test('scheduled reconnect halts on persistence failure and never logs out or discards saved credentials', async t => {
-  const { bridge, line, socket } = await fixture(t);
+  const { bridge, line, socket } = await fixture(t, 'ack', {random: () => 0});
   const previousAuth = line.auth;
   const update = line.store.update.bind(line.store);
   let createSocketCalls = 0;
@@ -1304,7 +1315,8 @@ test('scheduled reconnect halts on persistence failure and never logs out or dis
   assert.equal(line.status, 'error');
   assert.match(line.error, /storage/);
   assert.equal(line.reconnectTimer, null);
-  assert.equal(line.auth, previousAuth);
+  assert.equal(line.auth.store, previousAuth.store, 'renewal retains the same durable authentication journal');
+  assert.deepEqual(line.auth.store.data.creds, previousAuth.store.data.creds);
   assert.equal(line.store.data.enabled, true);
   t.mock.timers.tick(60_000);
   assert.equal(createSocketCalls, 0);
@@ -2475,13 +2487,15 @@ test('confirmed logout does not authorize re-pairing or removal across an authen
   const sequence = line.auth.store.seq;
   line.auth.store.failed = true;
   bridge.makeSocket = () => {throw new Error('Must not connect a fenced session');};
-  await assert.rejects(bridge.connect(LINE), /STORAGE_RESTART_REQUIRED/);
+  await assert.rejects(bridge.connect(LINE), {code: 'AUTH_RECOVERY_REQUIRED'});
   await assert.rejects(bridge.removeLine(LINE), {code: 'AUTH_RECOVERY_REQUIRED'});
   assert.deepEqual(line.auth.store.data.creds.signedIdentityKey.public, retained);
   assert.equal(line.auth.store.seq, sequence);
   assert.ok(line.store.data.messages.ORIGINAL);
   assert.ok(!(bridge.manifest.data.removed_line_ids ?? []).includes(LINE));
   await assert.rejects(bridge.close());
+  // Test-only restoration so teardown can retire the synthetic owner.
+  line.auth.store.failed = false; line.isolating = false;
 });
 
 test('confirmed logout survives restart and allows removal without reconnecting revoked credentials', async t => {
@@ -2707,21 +2721,22 @@ test('failed registration drains prepared checkpoint owners before reusing the l
   assert.equal([...bridge.storageMonitor.stores.values()].some(entry => entry.store === prepared.store), false);
 });
 
-test('shutdown closes every store and maintenance owner even when one auth store has failed', async t => {
+test('shutdown leaves healthy stores open when a failed auth owner cannot be proven retired', async t => {
   const { bridge, line } = await fixture(t);
   const added = await bridge.addLine({ request_id: randomUUID(), expected_phone: '' });
   const other = bridge.getLine(added.line_id);
   const auth = line.auth;
   auth.store.failed = true;
   try {
-    await assert.rejects(bridge.close(), error => error instanceof AggregateError && error.message === 'BRIDGE_SHUTDOWN_FAILED');
-    assert.equal(auth.store.closed, true);
-    assert.equal(line.store.closed, true);
-    assert.equal(other.auth.store.closed, true);
-    assert.equal(other.store.closed, true);
-    assert.equal(bridge.outbox.closed, true);
-    await assert.rejects(other.auth.state.keys.set({ session: { late: Buffer.from([1]) } }), { code: 'AUTH_SESSION_RETIRED' });
-  } finally { auth.store.failed = false; }
+    await assert.rejects(bridge.close(), /DIRECTORY_OWNERSHIP_UNPROVEN/);
+    assert.equal(bridge.stopping, false);
+    assert.equal(auth.store.closed, false);
+    assert.equal(line.store.closed, false);
+    assert.equal(other.auth.store.closed, false);
+    assert.equal(other.store.closed, false);
+    assert.equal(bridge.outbox.closed, false);
+    await other.auth.state.keys.set({ session: { still_healthy: Buffer.from([1]) } });
+  } finally { auth.store.failed = false; line.isolating = false; } // Restore disposable mock for teardown only.
 });
 
 test('credential events admitted behind slow message work survive a proactive socket replacement', async t => {
@@ -2775,7 +2790,7 @@ test('credential persistence failures halt the owning session before a blocked m
     assert.equal(line.reconnectTimer, null);
     let created = 0;
     bridge.makeSocket = () => { created++; return mockSocket(); };
-    await assert.rejects(bridge.connect(LINE), /STORAGE_RESTART_REQUIRED/);
+    await assert.rejects(bridge.connect(LINE), {code: 'AUTH_RECOVERY_REQUIRED'});
     assert.equal(created, 0);
   } finally {
     messages.resolve();
@@ -2805,7 +2820,7 @@ test('incoming messages and delivery evidence accepted before credential failure
     await reported.promise;
     assert.equal(line.socket, null);
     assert.equal(line.status, 'error');
-    await assert.rejects(bridge.connect(LINE), /STORAGE_RESTART_REQUIRED/);
+    await assert.rejects(bridge.connect(LINE), {code: 'AUTH_RECOVERY_REQUIRED'});
     await socket.eventHandler({ 'messages.upsert': { messages: [original('AFTER_RETIREMENT', false)] } });
     blocked.resolve();
     await Promise.all([incoming, delivery, failingBatch]);
@@ -2900,13 +2915,17 @@ test('a rejected real provider key commit immediately stops its owning socket an
     blocked.resolve();
     await Promise.all([incoming, rejected]);
     assert.equal(line.store.data.messages.BEFORE_KEY_FAILURE.text, 'Original body');
-    await assert.rejects(bridge.connect(LINE), /STORAGE_RESTART_REQUIRED/);
+    await assert.rejects(bridge.connect(LINE), {code: 'AUTH_RECOVERY_REQUIRED'});
     assert.equal(socket.calls.length, 0);
   } finally {
     blocked.resolve(); await Promise.all([incoming, rejected]);
     await auth.drain().catch(() => {});
-    await assert.rejects(bridge.close(), /BRIDGE_SHUTDOWN_FAILED/);
-    auth.store.maxPending = 1000; auth.store.failed = false;
+    await assert.rejects(bridge.close(), /DIRECTORY_OWNERSHIP_UNPROVEN/);
+    // Dispose the isolated test's handles without fabricating a clean drain or
+    // clearing its unresolved intents. The real runtime must remain blocked.
+    await bridge.storageMonitor.close();
+    await Promise.allSettled([...bridge.ownedStores].map(store => store.close()));
+    bridge.closed = true;
   }
 });
 
@@ -3143,7 +3162,7 @@ test('credential failure flushes incoming messages and receipts retained by the 
     const saved = (await readJournal(line.store.filename, () => ({}))).data;
     assert.equal(saved.messages.BUFFERED_BEFORE_FAILURE.text, 'Original body');
     assert.equal(saved.messages.ORIGINAL.receipt, 'read');
-    await assert.rejects(bridge.connect(LINE), /STORAGE_RESTART_REQUIRED/);
+    await assert.rejects(bridge.connect(LINE), {code: 'AUTH_RECOVERY_REQUIRED'});
     assert.equal(socket.endCount, 1);
     assert.equal(socket.calls.length, 0);
   } finally {

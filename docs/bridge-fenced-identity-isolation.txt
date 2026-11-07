@@ -1,0 +1,249 @@
+SUPERSEDED: use docs/bridge-local-decommission-deployment.txt for the explicitly
+approved permanent abandonment transition. The recovery-only blocker and old
+identity/release assumptions below are historical; do not execute them verbatim.
+
+Fenced identity lifecycle isolation — review and conditional deployment
+======================================================================
+Prepared locally, 2026-11-07. No PROD/DEV access, restart, session changes,
+deployment, or merge is authorized by this document.
+
+Current production decision: NO-GO for restart / IPv4 activation
+---------------------------------------------------------------
+The last read-only assessment found production b5f8e35ceba5, six connected
+identities (90012, 90013, 90015, 90017, 90024, 90026), and fenced Beirut 90035.
+Its 477 historical intents (three mutating) have version-1 failure evidence,
+not a final settled-owner record. They are not 477 proven executing promises.
+
+THIS FIX DOES NOT INVENT THAT MISSING EVIDENCE. Version-1/incomplete evidence
+must still block shutdown and activation. The old running binary also cannot
+acquire new lifecycle behavior merely because a release is staged on disk.
+Do not use SIGKILL, a forced restart, hot-patching, the Node inspector, altered
+markers, removal, QR relinking, or a lower expected-line count to bootstrap it.
+A separately reviewed proof/preservation procedure for the current old owner
+is still required. If its final evidence cannot be obtained, remain NO-GO.
+
+Branch provenance
+-----------------
+Starts at 0f15957: reconciliation of merged main 020d891 (PRs #83/#84/#85)
+with already-deployed logout/removal commits e7f9014/b5f8e35. These existing
+production fixes are retained; current main alone would lose them. PR #86's
+later 6c826e7 change is NOT included. The PR diff against main therefore also
+shows already-deployed logout changes. Review the new isolation commit
+separately. Do not automatically merge this PR or PR #86.
+
+Root cause and new lifecycle contract
+------------------------------------
+Previously closeOnce drained all auth facades and then closed all owned
+journals. auth.drain -> JournalStore.flush rejects a failed auth store, even
+after all promises settle. Global readiness treated every failed auth store
+as a service-wide failure. Normal JournalStore.load could repair journal tails
+or remove checkpoint temporaries BEFORE noticing an authentication fence.
+
+The states exposed per identity are active, gracefully_retired,
+fenced_unresolved, and fenced_retained. Retention is NOT recovery:
+- A held data-directory lock is required, including after every async read.
+- A live owner must already be retired, have a confirmed closed transport and
+  released subscriptions, no provider/key/credential/journal/health/checkpoint
+  work, and a durable final evidence revision matching its actual in-memory
+  operation outcomes and uncertain credentials. Retention calls no end/drain.
+- All historical intent IDs must have completed/rejected wrapper outcomes;
+  provider outcomes may be completed/rejected/not_started, never unresolved.
+  Changed credentials/keys may remain uncertain: they are retained, not applied.
+- Read-only replay must validate the auth AND message-state journals, with no
+  incomplete tail. All auth/state files, markers and checkpoint leftovers are
+  privately fingerprinted before/after inspection and again before closure.
+- A failed-store facade is sealed in memory. No failed auth flush, commit,
+  compaction, marker clearing, credential comparison output or journal repair.
+  The ordinary JournalStore.close/flush behavior remains strict.
+- Fenced identity callbacks stay in the durable outbox; its message recovery,
+  upload, reconnect, reset and removal paths cannot write or submit anything.
+  Historical local media can still be read. Uncertain deliveries are not resent.
+- Six healthy identities use the normal auth/message/callback drain. Physical
+  transport closure is awaited before the directory ownership lock is released.
+- A preflight failure leaves the healthy sockets and HTTP listener running.
+  Missing final evidence on a cold start blocks all provider activation; the
+  authenticated status endpoint remains available. No missing proof is ignored.
+
+Readiness excludes ONLY the auth STORE_UNAVAILABLE issue for a positively
+retained identity. Raw storage failure and per-identity recovery requirements
+remain visible. Shared outbox/state failure, capacity, stale monitoring and
+unproven retention still block readiness. Operators must see the fenced warning.
+
+Focused local verification (synthetic/mocked only)
+--------------------------------------------------
+Use the repository Node dependencies and the approved local mock-test exception:
+  node --test whatsapp_bridge/test/fenced-auth.test.js
+  node --test whatsapp_bridge/test/auth-recovery.test.js whatsapp_bridge/test/server-lifecycle.test.js
+  node --test whatsapp_bridge/test/startup-lifecycle.test.js whatsapp_bridge/test/startup-health.test.js
+  node --test --test-name-pattern='shutdown|retirement|retired|credential|persistence failures|incoming messages and delivery evidence|provider logout|confirmed logout|removal' whatsapp_bridge/test/bridge.test.js
+  node --test --test-name-pattern='factory reuse|uncertain auth append|recovery fence|intent|active-session fence|bounded auth drain|coalesces|provider work cannot|already admitted callbacks' whatsapp_bridge/test/auth-storage.test.js
+  venv/bin/python -m pytest -q tests/test_runtime_metrics.py tests/test_attended_support_monitor.py
+  promtool test rules deployment/monitoring/storage-alerts-retirement-test.yml deployment/monitoring/storage-alerts-fenced-test.yml
+  git diff --check
+
+Coverage: six plus one, all 477 intents/three mutations, stopped and live failed
+owners, stalled operations, changed credentials, failed fsync, absent owner,
+partial/corrupt state, concurrent preflight, file identity/contents unchanged,
+no Beirut socket, retained callbacks/uncertain IDs, physical-close wait, signal
+abort, authenticated preflight, missing monitoring, shared-store failure,
+offline retained validation and refusal of compact/import/rollback export.
+
+Conditional deployment procedure — DO NOT RUN now
+--------------------------------------------------
+This supplements docs/bridge-ipv4-deployment.txt. That historical runbook has
+an obsolete release, eight-identity baseline and 17-store assertion. Do not
+execute it verbatim. The process below has an intentional hard bootstrap gate.
+
+0. Obtain separate approval of the exact new commit and of a verified transition
+   from the current binary. Resolve the version-1 evidence blocker first.
+   Reserve an attended window; no concurrent VPS upgrade, number removal or
+   relinking. Preserve all seven identities; expected ELIGIBLE identities = six.
+
+1. LOCAL: package only the separately approved committed artifact:
+     set -euo pipefail
+     : "${TASK_APPROVED_REV:?Set the separately approved full commit}"
+     git cat-file -e "$TASK_APPROVED_REV^{commit}"
+     task_bundle=$(mktemp -d /tmp/support-isolation-release.XXXXXX)
+     git archive --format=tar "$TASK_APPROVED_REV" -o "$task_bundle/source.tar"
+     printf '%s\n' "$TASK_APPROVED_REV" > "$task_bundle/REVISION"
+     (cd "$task_bundle" && sha256sum source.tar REVISION > SHA256SUMS)
+   Transfer to a NEW private record directory. Pin current symlink/REVISION,
+   preserve app.env and service/nginx configuration there, and retain the old
+   release. Stage using the isolated dependency installation and source checksum
+   comparison in sections 1–2 of the IPv4 runbook, substituting the approved
+   artifact and the ACTUAL current release. No service or persistent path moves.
+     node "$task_release/whatsapp_bridge/scripts/patch-baileys-lifecycle.js" --verify
+   Do not deploy uncommitted files or update a running release in place.
+
+2. BEFORE maintenance or any signal, the running implementation must positively
+   pass its shutdown preflight. On a release supporting this endpoint, run:
+     /opt/whatsapp-support/current/venv/bin/python -B - <<'PY'
+import json, urllib.request
+from dotenv import dotenv_values
+config = dotenv_values('/etc/whatsapp-support/app.env')
+request = urllib.request.Request('http://127.0.0.1:3001/v1/shutdown-preflight',
+    method='POST', headers={'Authorization': 'Bearer ' + config['WHATSAPP_LINKED_DEVICE_SECRET']})
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+with opener.open(request, timeout=60) as response:
+    result = json.load(response)
+assert result.get('shutdown_safe') is True
+runtime = result['runtime']
+assert runtime['eligible_lines'] == 6 and runtime['connected_lines'] == 6
+assert runtime['fenced_lines'] == [{'line_id': '90035', 'lifecycle': 'fenced_retained',
+    'isolation_safe': True, 'recovery_allowed': False}]
+print('RETIREMENT_PREFLIGHT_PASSED')
+PY
+   The current b5f8e35 binary does NOT have this endpoint. A 404, 503, timeout,
+   incomplete evidence, or mismatched inventory means STOP, not bypass.
+   The endpoint seals a proven failed owner only in RAM; it does not stop the
+   bridge, write credentials or recover a line. New signals recheck the proof.
+
+3. Only after Gate 2 and separate deployment approval: use the reviewed
+   stop_clean, protect_stop and ingress helpers from section 3 of the IPv4
+   runbook. Install the reviewed bridge retirement drop-in and use protect_stop
+   for the API during the attended window:
+     install -D -m0644 "$task_release/deployment/examples/whatsapp-bridge-fenced-retirement.conf" /etc/systemd/system/whatsapp-bridge.service.d/40-fenced-retirement.conf
+     systemctl daemon-reload
+     test "$(systemctl show whatsapp-bridge.service -p SendSIGKILL --value)" = no
+     test "$(systemctl show whatsapp-bridge.service -p TimeoutStopUSec --value)" = infinity
+   Runtime refusal alone cannot prevent systemd's old 35-second forced kill.
+   Retain this bridge drop-in while using the new lifecycle. An unproven owner
+   may block an unattended stop/reboot; this requires operator attention, not
+   forced termination. Do not apply the old runbook's override-removal step to it.
+   Close Customer Support ingress; stop ngrok; rerun preflight; stop bridge.
+   Keep API running for final callbacks. Require bridge inactive, MainPID=0,
+   Result=success and ExecMainStatus=0. Never kill or clear its ownership lock.
+     "$task_previous/venv/bin/python" -B "$task_previous/scripts/check_inbound_drain.py" --socket /run/redis/redis-server.sock --stable-seconds 10
+     stop_clean shipment-bot
+     "$task_previous/venv/bin/python" -B "$task_previous/scripts/check_inbound_drain.py" --socket /run/redis/redis-server.sock --stable-seconds 10
+   All queue, processing and lease gates remain unchanged. Do not expire work.
+
+4. Copy the stopped linked-device directory with cp -a --reflink=auto into a
+   NEW mode-0700 evidence directory and compare full file checksums, as in
+   snapshot_validate. Place this copy outside the live tree under a private
+   service-readable directory (not /root), preserve its ownership, and verify
+   that the bridge service user matches the original evidence owner. Run the
+   explicitly non-transforming validator as that owner; do not chown production:
+     task_evidence_user=$(stat -c %U /var/lib/whatsapp-support/linked-device)
+     runuser -u "$task_evidence_user" -- node "$task_release/whatsapp_bridge/src/storage-tool.js" validate-retained "$task_copy" > "$task_record/retained-validation.json"
+   Require eligible_lines exactly [90012,90013,90015,90017,90024,90026],
+   retained_lines exactly [90035], stores=15 and incomplete_tail_bytes=0 for
+   this inventory. Investigate any additional store; do not omit it silently.
+   The original validate/import/compact/export commands still reject fences.
+   Never pass a recovery command or a production directory to this validation.
+   Preserve DB, Redis, authentication, callbacks, deduplication, media and all
+   uncertain delivery records in place. No DB migrations or TTL rewrites.
+
+5. Set WHATSAPP_WS_IP_FAMILY=4 ONLY in the private bridge environment using
+   the reviewed atomic env update; retain app.env.before. The option keeps
+   hostname verification, TLS and SNI, and has no IPv6 fallback. No server-wide
+   resolver/network change. Activate the verified release symlink atomically.
+     systemctl start shipment-bot.service
+     systemctl start whatsapp-bridge.service
+   Before reopening ingress, use authenticated /v1/status and /v1/health/ready:
+   total=7; eligible=6; all six eligible connected/paired, supported diagnostics,
+   actual transport family IPv4, tls_authorized=true, fresh successful heartbeat;
+   Beirut=fenced_retained, eligible=false, no QR/socket/retry; unchanged hashes.
+   Pending callbacks on Beirut are preserved, NOT a requirement to reach zero.
+   Historical uncertainty is a comparison baseline, never a resend list.
+
+6. Install the reviewed runtime collector/monitor and alert rules atomically,
+   validate with promtool and reload monitoring through the approved deployment
+   procedure. Restart only the selected collection jobs, not unrelated services.
+   Verify support_bridge_lines=7, eligible_lines=6, fenced_lines=1,
+   fenced_unresolved_lines=0; warning BridgeIdentityFenced remains visible.
+   Missing collectors, disk exhaustion, shared failure and unproven isolation
+   must still alarm. Old collectors/rules cannot interpret the new health scope.
+   Restore Customer Support ingress, start ngrok, and perform staff login,
+   conversations, historical media, internal text/image and receipt checks.
+   Monitor all eligible heartbeat/endpoint families for 60 minutes and 24 hours.
+
+Rollback — preserve new authoritative state
+--------------------------------------------
+Do not restore old auth/Redis/DB snapshots over new writes. An old binary such
+as b5f8e35 cannot safely consume retained-fence lifecycle state; rolling its
+code back would reintroduce the shutdown/readiness defect. Keep it archived,
+but do not treat it as an automatically runnable rollback.
+
+The smallest transport rollback is the SAME reviewed isolation-capable code
+with WHATSAPP_WS_IP_FAMILY unset/0. Obtain separate approval; rerun preflight,
+maintenance, no-SIGKILL, clean-stop and queue gates. Preserve fresh evidence,
+atomically restore only the previous IP-family setting in app.env, then start
+API -> bridge and validate six eligible + fenced Beirut before ingress/ngrok.
+Do not copy the entire previous environment over unrelated current settings.
+
+If an isolation/code fault appears after writes begin, close ingress only as
+approved, preserve current state, and request a separately reviewed compatible
+rollback/hotfix. No fence clearing, forced termination, selective journal
+rewind, or uncertain-message replay is an acceptable rollback shortcut.
+
+Local verification result and change inventory
+----------------------------------------------
+PASS: 22 new isolation checks; 24 selected bridge lifecycle checks; 2 corrupt-store checks; 1 rejected-key check; 14 auth-storage checks; 11 auth-recovery checks; 5 HTTP lifecycle checks; 19 process lifecycle checks; 2 startup-health checks; 13 initialization checks; 6 storage-admission checks (including nested cases).
+PASS: 13 focused Python monitoring checks; both Prometheus alert fixtures; git diff --check. Local Node v26.13.0, Python 3.10.22. No full suite/build, live provider experiment, or production acceptance test.
+Existing tests were updated for explicit mock transport release, early fenced-operation rejection and abort-before-healthy-retirement. A flaky reconnect timer assertion now uses deterministic jitter.
+
+Files in the isolation commit (prior deployed baseline changes are separate):
+  deployment/examples/whatsapp-bridge-fenced-retirement.conf
+  deployment/monitoring/storage-alerts-fenced-test.yml
+  deployment/monitoring/storage-alerts-retirement-test.yml
+  deployment/monitoring/storage-alerts.yml
+  docs/bridge-fenced-identity-isolation.txt
+  docs/bridge-ipv4-deployment.txt
+  scripts/attended_support_monitor.py
+  scripts/export_runtime_metrics.py
+  tests/test_attended_support_monitor.py
+  tests/test_runtime_metrics.py
+  whatsapp_bridge/fixtures/startup-child.mjs
+  whatsapp_bridge/src/bridge.js
+  whatsapp_bridge/src/fenced-auth.js
+  whatsapp_bridge/src/index.js
+  whatsapp_bridge/src/journal-store.js
+  whatsapp_bridge/src/runtime-lifecycle.js
+  whatsapp_bridge/src/server.js
+  whatsapp_bridge/src/storage-tool.js
+  whatsapp_bridge/src/storage.js
+  whatsapp_bridge/test/bridge-initialization.test.js
+  whatsapp_bridge/test/bridge.test.js
+  whatsapp_bridge/test/fenced-auth.test.js
+  whatsapp_bridge/test/storage-admission.test.js

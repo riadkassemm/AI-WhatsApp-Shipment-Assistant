@@ -164,7 +164,7 @@ class WhatsAppRegistryRepository(RegistryMutationMixin):
                 raise
 
     async def prepare_linked_device_removal(
-        self, line_id: str, *, actor_id: int, close_active_tickets: bool,
+        self, line_id: str, *, actor_id: int | None, close_active_tickets: bool,
     ) -> int:
         """Stop routing before native logout; retain conversations until it succeeds."""
         await self.connect()
@@ -218,9 +218,9 @@ class WhatsAppRegistryRepository(RegistryMutationMixin):
                 raise
 
     async def finish_linked_device_removal(
-        self, line_id: str, *, actor_id: int, actor_name: str, close_active_tickets: bool,
+        self, line_id: str, *, actor_id: int | None, actor_name: str, close_active_tickets: bool, remote_unlinked: bool = True,
     ) -> list[dict[str, Any]]:
-        """Archive remaining conversations only after WhatsApp confirms logout."""
+        """Archive after confirmed remote unlink OR durable permanent quarantine."""
         await self.connect()
         assert self._pool is not None
         async with self.mutation_connection() as conn:
@@ -258,15 +258,17 @@ class WhatsAppRegistryRepository(RegistryMutationMixin):
                         await cur.execute(
                             """
                             INSERT INTO support_ticket_events (ticket_id, event_type, actor_type, actor_id, actor_name, details_json, created_at)
-                            VALUES (%s, %s, 'AGENT', %s, %s, %s, UTC_TIMESTAMP(6))
-                            """, (ticket["id"], event_type, str(actor_id), actor_name, details),
+                            VALUES (%s, %s, %s, %s, %s, %s, UTC_TIMESTAMP(6))
+                            """, (ticket["id"], event_type, "AGENT" if actor_id is not None else "SYSTEM",
+                                   str(actor_id) if actor_id is not None else "production-operator", actor_name, details),
                         )
                     if not await removed_number(cur, line_id):
                         await cur.execute(
                             """
                             INSERT INTO whatsapp_integration_audit (action, actor_staff_id, phone_number_id, details_json)
                             VALUES ('LINKED_DEVICE_LINE_REMOVED', %s, %s, %s)
-                            """, (actor_id, line_id, json.dumps({"closed_conversations": len(tickets), "unlinked": True})),
+                            """, (actor_id, line_id, json.dumps({"closed_conversations": len(tickets), "unlinked": remote_unlinked,
+                                "local_decommission": not remote_unlinked})),
                         )
                     await delete_number_profile(cur, row)
                 await conn.commit()
@@ -746,13 +748,14 @@ class WhatsAppRegistryService:
             line_id, actor_id=int(agent.id), close_active_tickets=close_active_tickets,
         )
 
-    async def finish_linked_device_removal(self, agent: SupportAgent, line_id: str, *, close_active_tickets: bool) -> int:
+    async def finish_linked_device_removal(self, agent: SupportAgent, line_id: str, *, close_active_tickets: bool, remote_unlinked: bool = True) -> int:
         self._require_manager(agent)
         tickets = await self.repository.finish_linked_device_removal(
             line_id, actor_id=int(agent.id), actor_name=agent.name, close_active_tickets=close_active_tickets,
+            remote_unlinked=remote_unlinked,
         )
         # Do not use normal ticket resolution: it sends a customer notice, and
-        # this account has already been unlinked from WhatsApp.
+        # the old session has been unlinked or permanently abandoned.
         from app.conversation_store import conversation_store
         from app.support_events import publish_support_event
 

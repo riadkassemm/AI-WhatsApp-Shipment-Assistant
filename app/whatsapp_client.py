@@ -537,6 +537,12 @@ class RoutedWhatsAppClient:
         return await client.upload_media(content=content, mime_type=mime_type, filename=filename, phone_number_id=line)
 
     async def download_media(self, media_id: str, *, phone_number_id: str | None = None) -> DownloadedWhatsAppMedia:
+        from app.config import quarantined_linked_device_line_ids
+        match = re.fullmatch(r"ldmedia:([0-9]{5,32}):[0-9a-fA-F-]{36}", media_id or "")
+        if match and match[1] in quarantined_linked_device_line_ids():
+            if phone_number_id and str(phone_number_id) != match[1]:
+                raise WhatsAppMediaError("This attachment belongs to a different WhatsApp line.", retryable=False)
+            return await linked_device_client.download_media(media_id, phone_number_id=match[1])
         try:
             client, line = self._route(phone_number_id, media_id)
         except WhatsAppSendError as exc:

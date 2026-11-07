@@ -207,8 +207,8 @@ assert.match(rows[1].children[1].textContent, /1 updates pending/);
 assert.match(rows[1].children[1].textContent, /1 failed updates need administrator attention/);
 assert.equal(rows[0].children[2].textContent, 'Remove and unlink');
 assert.equal(rows[0].children[2].disabled, false);
-assert.equal(rows[1].children[2].textContent, 'Pair WhatsApp');
-const unlink = rows[1].children[3];
+assert.equal(rows[1].children.some(node => node.textContent === 'Pair WhatsApp'), false, 'failed paired credentials must not be reused');
+const unlink = rows[1].children[2];
 assert.equal(unlink.textContent, 'Remove and unlink');
 assert.equal(unlink.disabled, false);
 unlink.onclick();
@@ -275,7 +275,7 @@ const api = async (path, options) => {
   assert.equal(state.linkedDeviceStatus.lines.length, 2);
   assert.equal(state.whatsappRegistry.numbers.length, 2);
   assert.equal(feedback.length, 0); // No success or optimistic disappearance.
-  assert.deepEqual(requests, [{path: '/api/support/whatsapp-linked-device/lines/90002', method: 'DELETE', body: {close_active_tickets: true}}]);
+  assert.deepEqual(requests, [{path: '/api/support/whatsapp-linked-device/lines/90002', method: 'DELETE', body: {close_active_tickets: true, mode: 'unlink'}}]);
   await removeLinkedDeviceNumber('90002');
   assert.equal(requests.length, 1); // No duplicate request while waiting.
   finish({configured: true, lines: [{line_id: '90001', status: 'connected'}],
@@ -1840,3 +1840,31 @@ def test_ticket_details_load_only_after_selection_not_pointer_hover() -> None:
     assert "takeTicketPrefetch" not in _HTML
     assert "const data = await api(detailPath);" in _HTML
     assert "requestId !== state.ticketRequest || String(state.ticketId) !== String(id)" in _HTML
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is unavailable")
+def test_failed_auth_removal_reports_local_abandonment_without_claiming_remote_unlink() -> None:
+    function = _HTML[_HTML.index("async function removeLinkedDeviceNumber("): _HTML.index("async function changeLinkedDeviceConnection(")]
+    script = r"""
+const assert = require('node:assert/strict');
+const state = {linkedDeviceBusy:false, whatsappBusy:false, linkedDeviceRequest:0,
+  linkedDeviceStatus:{lines:[{line_id:'99035',status:'error',lifecycle:'fenced_unresolved'}]}};
+const canManageWhatsApp=()=>true, clearWhatsAppFeedback=()=>{}, renderWhatsAppRegistry=()=>{},
+  renderLinkedDeviceStatus=()=>{}, saveLinkedDeviceAddition=()=>{}, loadWhatsAppRegistry=async()=>{};
+const feedback=[];
+const showWhatsAppFeedback=(kind,message)=>feedback.push({kind,message});
+const promptDialog=async p=>{assert.match(p.message,/credentials will never be reused/);assert.match(p.confirmLabel,/locally/);return 'REMOVE';};
+const api=async (url,options)=>{
+  assert.equal(JSON.parse(options.body).mode,'decommission');
+  return {quarantined:true,unlinked:false,message:'Removed from this application; WhatsApp device unlinking requires action.',
+    unlink_instruction:'Select only this application’s device on this number’s primary phone.'};
+};
+""" + function + r"""
+(async()=>{
+  await removeLinkedDeviceNumber('99035');
+  assert.equal(feedback.length,1);assert.match(feedback[0].message,/requires action/);
+  assert.match(feedback[0].message,/only this application/);assert.doesNotMatch(feedback[0].message,/removed and unlinked/);
+  assert.equal(state.linkedDeviceBusy,false);
+})().catch(error=>{console.error(error);process.exitCode=1});
+"""
+    subprocess.run(["node", "-e", script], check=True, timeout=10)

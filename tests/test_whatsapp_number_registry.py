@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import json
 import sys
 import types
 from pathlib import Path
@@ -459,7 +460,7 @@ def test_confirmed_removal_archives_only_target_line_preserving_history_and_owne
     assert [ticket["current_assignee_id"] for ticket in connection.tickets] == [9, 8, None, 7]
     assert [ticket["status"] for ticket in connection.tickets] == ["CLOSED", "CLOSED", "NEW", "RESOLVED"]
     assert [event[1] for event in connection.events] == ["TICKET_CLOSED", "CHAT_CLOSED"]
-    assert all(event[2:4] == ("10", "Admin") for event in connection.events)
+    assert all(event[2:5] == ("AGENT", "10", "Admin") for event in connection.events)
     assert connection.number is None
     assert connection.tickets[3]["business_number_retired_at"] == "retired"
     assert asyncio.run(repository.finish_linked_device_removal("90002", actor_id=10, actor_name="Admin", close_active_tickets=True)) == []
@@ -530,3 +531,16 @@ for (const role of ['admin', 'supervisor']) {
     result = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=10)
     assert result.returncode == 0, result.stderr
     assert "$('manageWhatsAppBtn').classList.toggle('hidden', !canLinkWhatsApp());" in html
+
+
+def test_local_decommission_audit_does_not_claim_remote_logout():
+    repository, connection = removal_repository()
+    asyncio.run(repository.prepare_linked_device_removal("90002", actor_id=None, close_active_tickets=True))
+    tickets = asyncio.run(repository.finish_linked_device_removal("90002", actor_id=None,
+        actor_name="Approved production operator", close_active_tickets=True, remote_unlinked=False))
+    assert len(tickets) == 2 and len(connection.tickets) == 4
+    assert all(event[2:5] == ("SYSTEM", "production-operator", "Approved production operator") for event in connection.events)
+    removal = next(params for action, params in connection.audits if action == "removed")
+    assert removal[0] is None
+    assert json.loads(removal[2])["unlinked"] is False
+    assert json.loads(removal[2])["local_decommission"] is True

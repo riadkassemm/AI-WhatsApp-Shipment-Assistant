@@ -553,8 +553,20 @@ def removal_bridge(linked_config, monkeypatch):
         state["enabled"] = False
         return len(state["tickets"])
 
-    async def remove(line_id):
+    async def remove(line_id, *, decommission=False, actor="administrator"):
         state["calls"].append(("remove", line_id))
+        if decommission:
+            assert actor == "7"
+            if state["fail"] == "writer_active":
+                error = api_module.WhatsAppSendError("Writer active", delivery_uncertain=False)
+                error.bridge_code = "DECOMMISSION_BLOCKED"
+                raise error
+            manifest = Path(settings.whatsapp_linked_device_data_directory) / "lines.json"
+            manifest.write_text(json.dumps({"version": 1, "lines": {}, "quarantined_lines": {line_id: {
+                "line_id": line_id, "state": "permanently_decommissioned", "reuse_allowed": False, "remote_unlinked": False}}}))
+            return {"line_id": line_id, "removed": True, "unlinked": False, "quarantined": True, "reuse_allowed": False,
+                    "message": "Removed from this application; WhatsApp device unlinking requires action.",
+                    "unlink_instruction": "On this number's primary phone, log out only this application's linked device."}
         if state["fail"] == "pending_logout":
             error = api_module.WhatsAppSendError("Bridge HTTP 409", delivery_uncertain=False)
             error.bridge_code = "AUTH_WORK_PENDING"
@@ -571,9 +583,10 @@ def removal_bridge(linked_config, monkeypatch):
         manifest.write_text(json.dumps({"version": 1, "lines": {}, "requests": {}, "removed_line_ids": [line_id]}))
         return {"line_id": line_id, "removed": True, "unlinked": True}
 
-    async def finish(agent, line_id, *, close_active_tickets):
+    async def finish(agent, line_id, *, close_active_tickets, remote_unlinked=True):
         from app.whatsapp_registry import WhatsAppRegistryError
         state["calls"].append(("finish", line_id, agent.id))
+        state["remote_unlinked"] = remote_unlinked
         if state["fail"] == "database":
             raise WhatsAppRegistryError("Database archive unavailable; retry removal.")
         closed = len(state["tickets"])
@@ -636,8 +649,8 @@ def test_remove_waits_for_logout_updates_without_closing_conversations(removal_b
 def test_remove_reports_authentication_recovery_without_recommending_retry_or_closing_history(removal_bridge):
     removal_bridge["fail"] = "auth_recovery"
     response = request("DELETE", "/api/support/whatsapp-linked-device/lines/90001", payload={"close_active_tickets": True})
-    assert response.status_code == 503
-    assert "administrator recovery review" in response.json()["detail"]
+    assert response.status_code == 409
+    assert "permanent local removal" in response.json()["detail"]
     assert "retry" not in response.json()["detail"].lower()
     assert not removal_bridge["enabled"]
     assert removal_bridge["tickets"] == [23]
@@ -822,3 +835,25 @@ def test_missing_phone_reaction_retries_for_target_recovery_then_acknowledges_ab
     sync.return_value = True
     response = request('POST', '/api/whatsapp/linked-device/events', payload=event)
     assert response.status_code == 200 and response.json()['status'] == 'applied'
+
+
+def test_decommission_preserves_history_and_reports_remote_action(removal_bridge):
+    path = "/api/support/whatsapp-linked-device/lines/90001"
+    result = request("DELETE", path, payload={"close_active_tickets": True, "mode": "decommission"})
+    assert result.status_code == 200
+    assert result.json()["quarantined"] is True and result.json()["unlinked"] is False
+    assert "requires action" in result.json()["message"]
+    assert removal_bridge["remote_unlinked"] is False
+    assert removal_bridge["tickets"] == []
+    assert api_module.get_transport("90001") == "removed"
+    assert request("DELETE", path, payload={"close_active_tickets": True, "mode": "decommission"}).status_code == 200
+    callback = request("POST", "/api/whatsapp/linked-device/events", payload=message_event())
+    assert callback.status_code == 409, "quarantine callbacks cannot be silently acknowledged and dropped"
+
+
+def test_decommission_active_writer_blocks_archival(removal_bridge):
+    removal_bridge["fail"] = "writer_active"
+    result = request("DELETE", "/api/support/whatsapp-linked-device/lines/90001", payload={"close_active_tickets": True, "mode": "decommission"})
+    assert result.status_code == 409
+    assert removal_bridge["tickets"] == [23]
+    assert not any(c[0] == "finish" for c in removal_bridge["calls"])

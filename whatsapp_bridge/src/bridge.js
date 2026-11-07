@@ -17,6 +17,8 @@ import { preserveNativeMutationMetadata } from './native-events.js';
 import { classifyDisconnect, reconnectDelay, newConnectionDiagnostics, observeHeartbeat, resetConnectionDiagnostics, beginInterruption, finishInterruption, EventLoopDiagnostics } from './connection-diagnostics.js';
 import { transportSnapshot, observeTransport, closeTransport } from './transport-diagnostics.js';
 import { createWebSocketAgent } from './websocket-transport.js';
+import { hasAuthFence, retainAuth } from './fenced-auth.js';
+import { publishQuarantine, loadQuarantine, removalResult } from './decommission.js';
 
 const silentLogger = pino({ level: 'silent' });
 const DEFAULT_MEDIA_HOST = 'mmg.whatsapp.net';
@@ -81,6 +83,8 @@ const transientConnectionError = error => ['ECONNRESET', 'ECONNREFUSED', 'ETIMED
 export class Bridge {
   constructor(config, dependencies = {}) {
     this.config = config;
+    this.assertExclusiveOwnership = dependencies.assertExclusiveOwnership ?? (() => { throw new Error('DIRECTORY_OWNERSHIP_UNPROVEN'); });
+    this.retainedStores = new Map();
     this.makeSocket = dependencies.makeSocket ?? makeWASocket;
     this.wsAgent = createWebSocketAgent(config.wsIpFamily);
     this.fetch = dependencies.fetch ?? fetch;
@@ -113,6 +117,8 @@ export class Bridge {
 
   assertRunning() {
     if (this.stopping) throw new BridgeError(503, 'STOPPING', 'The bridge is shutting down.');
+    if (this.startupIsolationBlocked) throw new BridgeError(503, 'AUTH_ISOLATION_UNPROVEN',
+      'Startup is blocked until fenced identity retirement evidence has been verified.');
   }
   initialize(options = {}) {
     this.initializePromise ??= this.initializeOnce(options);
@@ -142,13 +148,15 @@ export class Bridge {
       catch (error) { this.onError(error); }
     }
     const definitions = new Map(this.config.lines
-      .filter(line => !manifest.removed_line_ids.includes(line.line_id) &&
-        !(line.line_id === this.config.fallbackLineId && (Object.keys(manifest.lines).length || manifest.removed_line_ids.length)))
+      .filter(line => !manifest.removed_line_ids.includes(line.line_id) && !manifest.quarantined_lines[line.line_id] &&
+        !(line.line_id === this.config.fallbackLineId && (Object.keys(manifest.lines).length || manifest.removed_line_ids.length || Object.keys(manifest.quarantined_lines).length)))
       .map(line => [line.line_id, line]));
     for (const [id, expected] of Object.entries(manifest.lines)) {
       if (definitions.has(id) && definitions.get(id).expected_phone !== expected) throw new Error('The linked-device manifest conflicts with a configured line.');
       definitions.set(id, { line_id: id, expected_phone: expected });
     }
+    // Keep history observable, but never prepare a provider or writable store.
+    for (const id of Object.keys(manifest.quarantined_lines)) definitions.set(id, {line_id: id, expected_phone: ''});
     const prepared = [];
     const initializationFailed = (line, error) => {
       this.assertRunning();
@@ -177,6 +185,7 @@ export class Bridge {
       try {
         await this.prepareLine(line);
         this.assertRunning();
+        if (line.fencedAuth) continue;
         // No send call from the previous process can still be running. Preserve
         // its native ID and wait for a real provider echo to resolve uncertainty.
         if (Object.values(line.store.data.messages).some(record => record.pending_send)) {
@@ -192,6 +201,16 @@ export class Bridge {
       } catch (error) {
         initializationFailed(line, error);
       }
+    }
+    if ([...this.lines.values()].some(line => line.isolating && !line.fencedAuth?.isolation_safe)) {
+      // Do not activate ANY provider behind an unproven process transition.
+      // Keep authenticated diagnostics available; only a proven retention may
+      // exclude a failed identity from startup readiness and activation gates.
+      this.startupIsolationBlocked = true;
+      await this.storageMonitor.start();
+      this.initialized = true;
+      this.startupPhase = 'storage_degraded';
+      return this;
     }
     this.startupPhase = 'connecting';
     for (const line of prepared) {
@@ -237,7 +256,13 @@ export class Bridge {
   }
   async closeStore(store) {
     if (!store) return;
-    await store.close();
+    const retained = this.retainedStores.get(store);
+    if (retained) {
+      await retained.verify();
+      // No flush, checkpoint, health write or fence removal on this path.
+      store.closed = true;
+      store.maintenanceStopped = true;
+    } else await store.close();
     // Registrations/removals can repeat without restarting the process. Keep
     // failed cleanup owners, but release successfully closed historical data.
     this.ownedStores.delete(store);
@@ -253,6 +278,14 @@ export class Bridge {
   async prepareLine(line) {
     try {
       this.assertRunning();
+      const quarantine = this.manifest.data.quarantined_lines?.[line.line_id];
+      if (quarantine) { line.isolating = true; await this.attachQuarantine(line, quarantine); return; }
+      // Inspect BEFORE JournalStore.load: normal replay can repair a partial
+      // tail or remove checkpoint temporaries, which a fenced owner must retain.
+      if (!line.auth && await hasAuthFence(line.directory)) {
+        await this.isolateFencedLine(line);
+        return;
+      }
       await mkdir(path.join(line.directory, 'media'), { recursive: true, mode: 0o700 });
       this.assertRunning();
       // Optional media cleanup must not prevent intact credentials or incoming
@@ -324,7 +357,8 @@ export class Bridge {
           data.requests ??= {};
           // Keep an existing legacy fallback paired line routable when its first
           // additional line makes Python switch from fallback to manifest routing.
-          const fallback = !manifest.removed_line_ids.includes(this.config.fallbackLineId) && this.lines.get(this.config.fallbackLineId);
+          const fallback = !manifest.removed_line_ids.includes(this.config.fallbackLineId) &&
+            !manifest.quarantined_lines[this.config.fallbackLineId] && this.lines.get(this.config.fallbackLineId);
           if (fallback) data.lines[fallback.line_id] = fallback.expected_phone;
           data.lines[id] = phone;
           data.requests[requestId] = { line_id: id, expected_phone: phone };
@@ -349,11 +383,17 @@ export class Bridge {
     if (typeof id !== 'string' || !/^\d{5,32}$/.test(id)) throw new BridgeError(400, 'INVALID_LINE_ID', 'A numeric linked-device line ID is required.');
     const task = this.registrationTail.then(async () => {
       const manifest = validateLineManifest(this.manifest.data);
+      if (manifest.quarantined_lines[id]) return removalResult(manifest.quarantined_lines[id]);
       if (manifest.removed_line_ids.includes(id)) {
         await this.purgeRemovedLine(id);
         return { line_id: id, removed: true, unlinked: true };
       }
       const line = this.getLine(id);
+      if (line.auth?.store?.failed) {
+        line.status = 'error'; line.recoveryCategory = 'storage_failure'; line.retryBlocked = true;
+        line.error = 'This saved session requires administrator recovery review or explicit permanent local removal. Its evidence is retained.';
+      }
+      this.assertNotFenced(line);
       if (!line.store?.data) throw new BridgeError(503, 'LINE_STORAGE_UNAVAILABLE', 'Check this number session storage before removing it.');
       if (line.recoveryCategory === 'logged_out' || line.status === 'logged_out' || line.store.data.auth_reset_required) await this.waitForLoggedOutEvents(line);
       const creds = line.auth?.store?.data?.creds;
@@ -492,6 +532,7 @@ export class Bridge {
   }
   async purgeRemovedLine(id) {
     if (!/^\d{5,32}$/.test(id)) throw new Error('Invalid removal cleanup line ID.');
+    if (this.manifest?.data?.quarantined_lines?.[id]) throw new Error('QUARANTINE_PURGE_FORBIDDEN');
     await this.outbox.update(data => {
       data.entries = data.entries.filter(item => item.event.line_id !== id);
       data.dead_letters = (data.dead_letters ?? []).filter(item => item.event.line_id !== id);
@@ -505,12 +546,166 @@ export class Bridge {
     return line;
   }
 
+  assertQuarantineStopped(line) {
+    this.assertExclusiveOwnership();
+    if (line.connectPromise || line.removing || line.sendPending || line.reconnectTimer || this.callbackTasks.has(line.line_id)) throw new Error('QUARANTINE_WRITER_ACTIVE');
+    if (line.auth) {
+      if (!line.auth.quarantineIdle() || !line.session?.disposed || !line.session?.subscriptionReleased) throw new Error('QUARANTINE_WRITER_ACTIVE');
+      const store = line.quarantineBusinessStore ?? line.store;
+      if (!store || store.failed || store.pending || store.healthWrites || store.compactionPromise ||
+          store.activeCheckpoint || store.cleanupCheckpoint || store.maintenanceCleanupFailed) throw new Error('QUARANTINE_BUSINESS_WORK_UNSETTLED');
+    } else if (line.socket || line.session || line.generation !== 0) throw new Error('QUARANTINE_OWNER_UNPROVEN');
+  }
+
+  async attachQuarantine(line, record) {
+    const assertStopped = () => this.assertQuarantineStopped(line);
+    const retained = await loadQuarantine(line.directory, record, assertStopped);
+    for (const store of [line.auth?.store, line.store].filter(Boolean)) this.retainedStores.set(store, retained);
+    line.fencedAuth = retained; line.quarantined = true; line.isolating = true;
+    line.store = retained.stateStore; line.status = 'decommissioned'; line.retryBlocked = true;
+    line.error = removalResult(record).message; line.recoveryCategory = 'decommissioned';
+    line.display_phone_number = line.store.data.bound_phone || line.expected_phone;
+    // A quarantined state facade has no writer. Preserve reference to the old
+    // healthy business-store counters for live cessation checks after swapping.
+    this.storageMonitor.unregister(line.line_id);
+    this.storageMonitor.register(retained, {lineId: line.line_id, kind: 'auth'});
+    this.storageMonitor.register(line.store, {lineId: line.line_id, kind: 'state'});
+  }
+
+  async decommissionLine(id, {actor = 'administrator'} = {}) {
+    if (typeof id !== 'string' || !/^\d{5,32}$/.test(id)) throw new BridgeError(400, 'INVALID_LINE_ID', 'A numeric linked-device line ID is required.');
+    const task = this.registrationTail.then(async () => {
+      if (this.stopping) throw new BridgeError(503, 'STOPPING', 'The bridge is shutting down.');
+      const existing = validateLineManifest(this.manifest.data).quarantined_lines[id];
+      if (existing) {
+        const line = this.getLine(id);
+        if (!line.quarantined) await this.attachQuarantine(line, existing);
+        await line.fencedAuth.verify(); return removalResult(existing);
+      }
+      const line = this.getLine(id);
+      if (!line.auth?.store?.failed && !line.fencedAuth) throw new BridgeError(409, 'FAILED_SESSION_REQUIRED', 'Use normal unlinking for a healthy session.');
+      // The explicit administrator action closes admission for this identity
+      // even if cessation cannot yet be proven. It never reconnects to unlink.
+      line.isolating = true; line.retryBlocked = true;
+      clearTimeout(line.reconnectTimer); line.reconnectTimer = null;
+      this.reconnectSlots.delete(id); this.callbackWakeups.delete(id);
+      let timer;
+      try {
+        await Promise.race([Promise.all([line.eventTail, line.ackTail, line.sendTail, line.readTail, line.mediaTail,
+          ...line.confirmationTasks.values(), this.callbackTasks.get(id), this.recoveryTask]),
+        new Promise((_, reject) => {timer = setTimeout(() => reject(new Error('QUARANTINE_WRITER_ACTIVE')), 1000);})]);
+        this.assertQuarantineStopped(line);
+        // No failed-store flush. Sealing blocks even late rejected evidence
+        // writers; executing provider operations must already be zero.
+        line.auth?.sealQuarantine();
+        for (const store of [line.auth?.store, line.store].filter(Boolean)) store.maintenanceStopped = true;
+        line.quarantineBusinessStore = line.store;
+        const record = await publishQuarantine({manifest: this.manifest, id, directory: line.directory, actor,
+          proof: {kind: 'live_cessation', generation: line.generation},
+          remoteUnlinked: line.removalRemoteConfirmed === true || line.store?.data?.auth_reset_required === true,
+          assertStopped: () => this.assertQuarantineStopped(line)});
+        await this.attachQuarantine(line, record);
+        return removalResult(record);
+      } catch (error) {
+        this.onError(error);
+        throw new BridgeError(409, 'DECOMMISSION_BLOCKED', 'Local removal is paused because transport or writer cessation could not be verified. Saved evidence is unchanged; administrator review is required.');
+      } finally {clearTimeout(timer);}
+    });
+    this.registrationTail = task.catch(() => {});
+    return task;
+  }
+
+  assertNotFenced(line) {
+    if (line.quarantined || this.manifest.data.quarantined_lines?.[line.line_id]) throw new BridgeError(410, 'IDENTITY_DECOMMISSIONED', 'This session was permanently removed. Link a new session; the abandoned credentials cannot be reused.');
+    if (line.fencedAuth || line.isolating || line.auth?.store?.failed) {
+      const error = new BridgeError(409, 'AUTH_RECOVERY_REQUIRED',
+        'This identity is fenced for authentication review. Its saved session and messages are retained.');
+      error.delivery_uncertain = false;
+      error.bridgePersistenceFailure = true;
+      throw error;
+    }
+  }
+
+  isolateFencedLine(line) {
+    if (line.isolationPromise) return line.isolationPromise;
+    line.isolating = true; // This identity only; never closes a healthy transport.
+    line.status = 'error'; line.retryBlocked = true; line.recoveryCategory = 'storage_failure';
+    line.error = 'Authentication recovery is required. This identity remains offline; saved evidence is retained.';
+    clearTimeout(line.reconnectTimer); line.reconnectTimer = null;
+    this.reconnectSlots.delete(line.line_id);
+    line.isolationPromise = (async () => {
+      this.assertExclusiveOwnership();
+      if (line.fencedAuth) { await line.fencedAuth.verify(); return; }
+      if (line.connectPromise || line.removing) throw new Error('OWNERSHIP_TRANSITION_IN_PROGRESS');
+      if (line.auth) {
+        // No retire/end/flush calls here. A live failed transport must have
+        // completed retirement itself before this read-only gate can succeed.
+        if (!line.session?.disposed || !line.session?.subscriptionReleased || !line.auth.retainedIdle()) throw new Error('LIVE_OWNER_OR_WORK_UNCONFIRMED');
+        let timer;
+        try {
+          await Promise.race([Promise.all([line.eventTail, line.ackTail, line.sendTail, line.readTail, line.mediaTail,
+            ...line.confirmationTasks.values(), this.callbackTasks.get(line.line_id)]),
+          new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('LINE_WORK_NOT_SETTLED')), 1000); })]);
+        } finally { clearTimeout(timer); }
+        const store = line.store;
+        if (!store || store.failed || store.pending !== 0 || store.healthWrites !== 0 || store.compactionPromise ||
+            store.activeCheckpoint || store.cleanupCheckpoint || store.maintenanceCleanupFailed || line.sendPending) throw new Error('LINE_PERSISTENCE_UNCONFIRMED');
+      } else if (line.socket || line.session || line.generation !== 0) throw new Error('TRANSPORT_RELEASE_UNCONFIRMED');
+      const retained = await retainAuth(line.directory, {assertOwnership: this.assertExclusiveOwnership, auth: line.auth, stateStore: line.store});
+      line.fencedAuth = retained;
+      for (const store of [line.auth?.store, line.store].filter(Boolean)) this.retainedStores.set(store, retained);
+      line.store = retained.stateStore;
+      this.storageMonitor.register(retained, {lineId: line.line_id, kind: 'auth'});
+      this.storageMonitor.register(line.store, {lineId: line.line_id, kind: 'state'});
+      line.display_phone_number = line.store.data.bound_phone || line.expected_phone;
+      this.log({component: 'whatsapp_bridge', event: 'identity_fenced', line_id: line.line_id,
+        lifecycle: retained.state, blockers: retained.blockers, historical_intents: retained.historical_intents});
+    })().finally(() => { line.isolationPromise = null; });
+    return line.isolationPromise;
+  }
+
+  prepareShutdown() {
+    this.shutdownPreparation ??= (async () => {
+      for (const line of this.lines.values()) {
+        if (line.session && typeof line.transportClosed?.then !== 'function') throw new Error('TRANSPORT_RELEASE_UNCONFIRMED');
+        if (line.fencedAuth || line.isolating || line.auth?.store?.failed) {
+          await this.isolateFencedLine(line);
+          await line.fencedAuth.verify();
+        }
+      }
+      // Failed owners not assigned to a line cannot disappear through this path.
+      if ([...this.ownedStores].some(store => store.failed && !this.retainedStores.has(store))) throw new Error('UNISOLATED_STORE_FAILURE');
+    })().finally(() => { this.shutdownPreparation = null; });
+    return this.shutdownPreparation;
+  }
+
+  async beginShutdown() {
+    await this.prepareShutdown();
+    // Recheck live facts without yielding before closing global admission. A
+    // different identity can fail while the first one's files are inspected.
+    for (const line of this.lines.values()) {
+      if (line.session && typeof line.transportClosed?.then !== 'function') throw new Error('TRANSPORT_RELEASE_UNCONFIRMED');
+      if (line.fencedAuth || line.isolating || line.auth?.store?.failed) {
+        this.assertExclusiveOwnership();
+        if (!line.fencedAuth?.isolation_safe || (line.auth && !(line.quarantined ? line.auth.quarantineIdle() : line.auth.retainedIdle()))) throw new Error('AUTH_ISOLATION_UNPROVEN');
+      }
+    }
+    if ([...this.ownedStores].some(store => store.failed && !this.retainedStores.has(store))) throw new Error('UNISOLATED_STORE_FAILURE');
+    this.stopping = true;
+    this.initializationController.abort();
+  }
+
   lineStatus(line) {
     const creds = line.auth?.store?.data?.creds;
     const pending = this.outbox.data.entries.filter(item => item.event.line_id === line.line_id && !item.waiting_for_history);
     const oldest = pending.reduce((at, item) => Math.min(at, item.created_at ?? Date.now()), Date.now());
     return { line_id: line.line_id, display_phone_number: line.display_phone_number, status: line.status,
-      is_paired: !line.store?.data?.auth_reset_required && Boolean(creds?.registered || creds?.me?.id),
+      is_paired: !line.store?.data?.auth_reset_required && (line.fencedAuth?.paired ?? Boolean(creds?.registered || creds?.me?.id)),
+      lifecycle: line.fencedAuth?.state ?? (line.auth?.store?.failed || line.isolating ? 'fenced_unresolved' : line.gracefullyRetired ? 'gracefully_retired' : 'active'),
+      eligible: !line.fencedAuth && !line.isolating && !line.auth?.store?.failed,
+      isolation: line.fencedAuth ? {safe: line.fencedAuth.isolation_safe, blockers: line.fencedAuth.blockers,
+        historical_intents: line.fencedAuth.historical_intents, recovery_allowed: false} : null,
+      ...(line.quarantined ? {local_removal: removalResult(line.fencedAuth.record)} : {}),
       recovery_category: line.recoveryCategory,
       retry_scheduled: Boolean(line.reconnectTimer),
       diagnostics: { ...line.diagnostics,
@@ -535,17 +730,26 @@ export class Bridge {
     const storage = this.storageMonitor.status();
     const recoveryRequired = storage.stores.filter(store => store.failed)
       .map(store => ({line_id: store.line_id, kind: store.kind, code: 'STORAGE_RECOVERY_REQUIRED'}));
-    const criticalIssues = storage.issues.filter(issue => issue.level === 'critical');
+    const fenced = [...this.lines.values()].filter(line => line.fencedAuth || line.auth?.store?.failed || line.isolating);
+    const safelyRetained = new Set(fenced.filter(line => line.fencedAuth?.isolation_safe).map(line => line.line_id));
+    // Only an explicitly proven, retained auth failure is excluded. Shared
+    // failures, disk pressure, stale monitoring and state corruption still block.
+    const criticalIssues = storage.issues.filter(issue => issue.level === 'critical' &&
+      !(safelyRetained.has(issue.line_id) && issue.kind === 'auth' && issue.code === 'STORE_UNAVAILABLE'));
     const capacityOnly = criticalIssues.length > 0 && criticalIssues.every(issue =>
       ['DISK_SPACE_LOW', 'INODES_LOW'].includes(issue.code));
     const phase = this.stopping ? 'stopping' : !this.initialized ? this.startupPhase :
-      storage.level === 'critical' ? 'storage_degraded' : 'ready';
+      this.startupIsolationBlocked || criticalIssues.length || fenced.some(line => !line.fencedAuth?.isolation_safe) ? 'storage_degraded' : 'ready';
     return {live: !this.stopping, ready: phase === 'ready', phase,
+      eligible_storage_critical: criticalIssues.length > 0 || fenced.some(line => !line.fencedAuth?.isolation_safe),
       startup_elapsed_ms: this.initialized ? null : Date.now() - this.startedAt,
       recovery_required: recoveryRequired,
       recovery_mode: recoveryRequired.length ? 'review_required' :
         capacityOnly ? 'automatic_after_capacity_recovers' : criticalIssues.length ? 'operator_attention' : 'none',
       connected_lines: [...this.lines.values()].filter(line => line.status === 'connected').length,
+      eligible_lines: this.lines.size - fenced.length,
+      fenced_lines: fenced.map(line => ({line_id: line.line_id, lifecycle: line.fencedAuth?.state ?? 'fenced_unresolved',
+        isolation_safe: Boolean(line.fencedAuth?.isolation_safe), recovery_allowed: false})),
       configured_lines: this.lines.size};
   }
   status() { return { lines: [...this.lines.values()].map(line => this.lineStatus(line)),
@@ -565,6 +769,7 @@ export class Bridge {
   async connect(id) {
     this.assertRunning();
     const line = this.getLine(id);
+    this.assertNotFenced(line);
     if (line.removing) throw new BridgeError(503, 'LINE_REMOVING', 'This WhatsApp number is being removed.');
     if (line.socket && !line.session?.closed && ['connected', 'connecting', 'qr'].includes(line.status)) return this.lineStatus(line);
     if (line.connectPromise) return line.connectPromise;
@@ -588,6 +793,7 @@ export class Bridge {
   }
 
   async openSocket(line) {
+    this.assertNotFenced(line);
     if (this.stopping) throw new BridgeError(503, 'STOPPING', 'The bridge is shutting down.');
     if (line.recoveryCategory === 'logged_out' || line.status === 'logged_out' || line.store?.data?.auth_reset_required) await this.waitForLoggedOutEvents(line);
     const generation = ++line.generation;
@@ -1056,6 +1262,7 @@ export class Bridge {
     }
   }
   scheduleReconnect(line, restartRequired = false) {
+    if (line.fencedAuth || line.isolating || line.auth?.store?.failed) return;
     if (this.stopping || line.removing || line.retryBlocked || !line.store?.data?.enabled || line.status !== 'disconnected' || line.reconnectTimer) return;
     const now = Date.now();
     let at = now + reconnectDelay(line.reconnectAttempts ?? 0, restartRequired, this.random);
@@ -1095,6 +1302,7 @@ export class Bridge {
   }
 
   async disconnect(id) {
+    this.assertNotFenced(this.getLine(id));
     this.assertRunning();
     // Unlinking can outlive its HTTP connection. Share registration/removal
     // ownership so shutdown retains its stores until an admitted unlink ends.
@@ -1166,6 +1374,7 @@ export class Bridge {
     this.trace(line, 'connection_transition', { state: 'blocked', reason });
   }
   connected(line, expectedSocket = null) {
+    if (line.fencedAuth || line.isolating) this.assertNotFenced(line);
     if (line.removing) throw new BridgeError(503, 'LINE_REMOVING', 'This WhatsApp number is being removed.');
     const socket = line.socket;
     if (socket && line.session?.ready && socket.ws.isOpen !== true) this.restartStaleSocket(line, socket);
@@ -1427,6 +1636,9 @@ export class Bridge {
     });
   }
   mediaStorage(line, action) {
+    // A download can finish after identity retirement. Reject late publication;
+    // work admitted before the fence keeps its existing drain guarantee.
+    if (line.isolating || line.quarantined) this.assertNotFenced(line);
     const task = (line.mediaTail ?? Promise.resolve()).then(action);
     line.mediaTail = task.catch(() => {});
     return task;
@@ -1619,6 +1831,7 @@ export class Bridge {
   }
 
   async uploadMedia(id, payload) {
+    this.assertNotFenced(this.getLine(id));
     const line = this.getLine(id);
     if (line.removing) throw new BridgeError(503, 'LINE_REMOVING', 'This WhatsApp number is being removed.');
     if (!line.store?.data) throw new BridgeError(503, 'LINE_STORAGE_UNAVAILABLE', 'Check this line session storage before uploading media.');
@@ -1745,6 +1958,7 @@ export class Bridge {
   }
   async send(id, payload) {
     const line = this.getLine(id);
+    if (line.quarantined) this.assertNotFenced(line);
     const clientId = payload?.client_message_id;
     if (!clientId || typeof clientId !== 'string') return this.dispatchSend(id, payload);
     const key = crypto.createHash('sha256').update(clientId).digest('hex');
@@ -2005,7 +2219,7 @@ export class Bridge {
   }
 
   startWorkers() {
-    if (this.stopping || this.workerTimer || this.pendingTimer) return;
+    if (this.stopping || this.startupIsolationBlocked || this.workerTimer || this.pendingTimer) return;
     this.eventLoop.start();
     this.workerTimer = setInterval(() => this.deliverCallbacks().catch(this.onError), 1000);
     this.workerTimer.unref();
@@ -2029,7 +2243,7 @@ export class Bridge {
     for (const { event } of retained) {
       if (event.type !== 'message_deleted_for_everyone' || event.operation_id) continue;
       const line = this.lines.get(event.line_id);
-      if (!line?.store?.data || line.status === 'error' || line.removing) continue;
+      if (!line?.store?.data || line.status === 'error' || line.removing || line.isolating || line.fencedAuth) continue;
       try {
         const record = line.store.data.messages[unwrapId(line.line_id, event.message_id)];
         if (record?.deleted && record.message?.key?.fromMe === true && !record.client_message_id && record.tombstone_version !== 2) {
@@ -2038,7 +2252,7 @@ export class Bridge {
       } catch (error) { this.onError(error); }
     }
     for (const line of this.lines.values()) {
-      if (!line.store?.data || line.status === 'error' || line.removing) continue;
+      if (!line.store?.data || line.status === 'error' || line.removing || line.isolating || line.fencedAuth) continue;
       if (line.store.data.recover_until && Date.now() > line.store.data.recover_until) {
         try {
           await line.store.update(data => { delete data.recover_since; delete data.recover_until; });
@@ -2103,6 +2317,7 @@ export class Bridge {
     });
   }
   startLineCallbacks(id) {
+    if (this.lines.get(id)?.isolating || this.lines.get(id)?.fencedAuth) return Promise.resolve();
     if (this.callbackTasks.has(id)) return this.callbackTasks.get(id);
     const task = Promise.resolve().then(() => this.deliverLineCallbacks(id)).finally(() => {
       this.callbackTasks.delete(id);
@@ -2127,6 +2342,7 @@ export class Bridge {
     // One in-flight callback per line. A slow media/customer callback on one
     // number must not delay receipt of messages on every other office number.
     for (let count = 0; count < 100 && !this.stopping; count++) {
+      if (this.lines.get(id)?.isolating || this.lines.get(id)?.fencedAuth) return;
       const entry = this.outbox.data.entries.find(item => item.event.line_id === id && item.next_try <= Date.now() && !this.lines.get(item.event.line_id)?.removing &&
         !(this.manifest.data.removed_line_ids ?? []).includes(item.event.line_id));
       if (!entry) return;
@@ -2175,6 +2391,14 @@ export class Bridge {
     });
   }
   close() {
+    if (this.closePromise) return this.closePromise;
+    if (this.initialized && !this.stopping && [...this.lines.values()].some(line => line.fencedAuth || line.isolating || line.auth?.store?.failed)) {
+      // Direct callers get the same fail-before-interruption behavior as signals.
+      this.closePromise = this.beginShutdown().then(() => {
+        return this.closeOnce().finally(() => { this.closed = true; });
+      }).catch(error => { if (!this.stopping) this.closePromise = null; throw error; });
+      return this.closePromise;
+    }
     // Set admission fences synchronously, including while initialize() is
     // suspended in a store replay or socket/auth preparation.
     this.stopping = true;
@@ -2203,12 +2427,14 @@ export class Bridge {
       } catch (error) { failures.push(error); return Promise.resolve(); }
     };
     const stopStore = store => {
+      if (this.retainedStores.has(store) || [...this.lines.values()].some(line => line.fencedAuth?.stateStore === store)) return;
       if (store && !maintenance.has(store)) maintenance.set(store, begin(() => store.stopMaintenance()));
     };
     const stopLine = line => {
       clearTimeout(line.reconnectTimer);
       line.reconnectTimer = null;
       this.reconnectSlots.delete(line.line_id);
+      if (line.fencedAuth) return;
       if (!stoppedLines.has(line)) { stoppedLines.add(line); line.generation++; }
       if (line.auth && !authDrains.has(line.auth)) {
         begin(() => line.auth.retire());
@@ -2248,9 +2474,13 @@ export class Bridge {
         await line.eventTail;
         await line.ackTail;
         await Promise.allSettled(line.confirmationTasks.values());
+        // Auth settlement does not establish physical WebSocket ownership release.
+        if (line.session && typeof line.transportClosed?.then !== 'function') throw new Error('TRANSPORT_RELEASE_UNCONFIRMED');
+        await line.transportClosed;
       } catch (error) { failures.push(error); }
     }));
     await settled([...authDrains.values()]);
+    for (const line of this.lines.values()) if (!line.fencedAuth && !failures.length) line.gracefullyRetired = true;
     // Include failed/partially loaded stores, even when line.store or line.auth
     // could never be assigned. Only settled cleanup permits lock release.
     const stores = new Set([...this.ownedStores, this.outbox,

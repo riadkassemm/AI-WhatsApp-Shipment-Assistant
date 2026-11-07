@@ -6,9 +6,9 @@ tests:
     input_series:
       - {series: support_monitoring_expected, values: '1+0x10'}
       - {series: support_bridge_expected_lines, values: '6+0x10'}
-      - {series: support_bridge_lines, values: '6+0x10'}
+      - {series: support_bridge_eligible_lines, values: '6+0x10'}
       - {series: support_bridge_connected_lines, values: '6+0x4 5+0x5'}
-      - {series: support_bridge_paired_lines, values: '6+0x10'}
+      - {series: support_bridge_eligible_paired_lines, values: '6+0x10'}
       - {series: support_bridge_qr_codes, values: '0+0x10'}
       - {series: support_bridge_ready, values: '1+0x10'}
     alert_rule_test:
@@ -20,9 +20,9 @@ tests:
   - interval: 1m
     input_series:
       - {series: support_monitoring_expected, values: '1+0x10'}
-      - {series: support_bridge_lines, values: '6+0x10'}
+      - {series: support_bridge_eligible_lines, values: '6+0x10'}
       - {series: support_bridge_connected_lines, values: '6+0x10'}
-      - {series: support_bridge_paired_lines, values: '6+0x10'}
+      - {series: support_bridge_eligible_paired_lines, values: '6+0x10'}
       - {series: support_bridge_qr_codes, values: '0+0x10'}
       - {series: support_bridge_ready, values: '1+0x10'}
     alert_rule_test:
@@ -30,3 +30,15 @@ tests:
         alertname: BridgeDisconnected
         exp_alerts:
           - {exp_labels: {severity: critical}}
+  - interval: 1m
+    input_series:
+      - {series: support_monitoring_expected, values: '1+0x5'}
+      - {series: support_bridge_decommissioned_lines, values: '1+0x5'}
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: BridgeIdentityDecommissioned
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: "WhatsApp session permanently decommissioned; evidence retained"
+              description: "Remote unlink may require action on the selected number's primary phone. Never reuse abandoned credentials or replay uncertain deliveries."

@@ -4,6 +4,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import lockfile from 'proper-lockfile';
 import { BufferJSON, initAuthCreds, proto } from '@whiskeysockets/baileys';
 import { assessAuthRecovery } from './auth-recovery.js';
@@ -64,7 +65,12 @@ export class FileStore {
 export async function acquireDataDirectory(directory) {
   await mkdir(directory, { recursive: true, mode: 0o700 });
   await chmod(directory, 0o700);
-  return lockfile.lock(directory, { realpath: true, stale: 30_000, update: 10_000, retries: 0 });
+  let held = true;
+  const unlock = await lockfile.lock(directory, { realpath: true, stale: 30_000, update: 10_000, retries: 0,
+    onCompromised: error => { held = false; throw error; } });
+  const release = async () => { await unlock(); held = false; };
+  release.assertHeld = () => { if (!held) throw new Error('DIRECTORY_OWNERSHIP_UNPROVEN'); };
+  return release;
 }
 
 const cloneAuth = value => value === undefined ? undefined : JSON.parse(JSON.stringify(value, BufferJSON.replacer), BufferJSON.reviver);
@@ -79,7 +85,7 @@ const authOwners = new WeakMap();
 function authFacade(store, owner) {
   const creds = cloneAuth(store.data.creds);
   const credsDigest = () => crypto.createHash('sha256').update(JSON.stringify(creds, BufferJSON.replacer)).digest('hex');
-  let retired = false, retiring = false, drained = false;
+  let retired = false, retiring = false, drained = false, retained = false;
   const context = new AsyncLocalStorage();
   const pending = new Set(), tokens = new Set(), attached = new WeakSet();
   const failureEvidence = [];
@@ -131,7 +137,7 @@ function authFacade(store, owner) {
       } finally { failureWriting = false; }
     });
   };
-  const evidenceChanged = () => { if (reportedFailure) persistFailure(); };
+  const evidenceChanged = () => { if (reportedFailure && !retained) persistFailure(); };
   let directSetTail = Promise.resolve(), activeArm, activeDisarm, activeArmed = false;
   let outsideProviderTransaction, inProviderTransaction;
   const changeIntent = change => {
@@ -174,6 +180,7 @@ function authFacade(store, owner) {
     }
   };
   const active = evidence => {
+    if (retained) throw retiredAuth();
     if (owner.current !== auth) throw retiredAuth();
     const admitted = context.getStore();
     // A timeout deactivates tokens, but their already admitted continuations
@@ -295,6 +302,7 @@ function authFacade(store, owner) {
     return task;
   };
   const transition = async reset => {
+    if (retained) throw retiredAuth();
     if (owner.current !== auth) throw retiredAuth();
     auth.retire();
     const generation = ++owner.generation;
@@ -387,6 +395,36 @@ function authFacade(store, owner) {
         () => { transportState = 'unconfirmed'; evidenceChanged(); });
     },
     recoveryEventsReleased: () => { eventsReleased = true; evidenceChanged(); },
+    // Retention never establishes credential correctness. It only proves that
+    // the failed owner has stopped and that its final uncertain evidence exists.
+    // No disk reads/writes or promises may occur between this check and sealing.
+    retainedIdle: () => owner.current === auth && retired && transportState === 'closed' && eventsReleased &&
+      reportedFailure && store.failed && pending.size === 0 && tokens.size === 0 && credentialWrites === 0 &&
+      store.pending === 0 && store.healthWrites === 0 && !store.compactionPromise && !store.activeCheckpoint &&
+      !store.cleanupCheckpoint && !store.maintenanceCleanupFailed && !failureWriting && !evidenceWriteFailed &&
+      evidenceRevision === persistedRevision,
+    canRetain: recovery => {
+      if (!auth.retainedIdle() || !recovery) return false;
+      const current = recoverySnapshot();
+      // captured_at is observation time, not part of the durable owner state.
+      const {captured_at: _saved, ...saved} = recovery;
+      const {captured_at: _now, ...observed} = current;
+      return isDeepStrictEqual(saved, observed);
+    },
+    sealRetained: () => {
+      if (!auth.retainedIdle()) throw new Error('AUTH_ISOLATION_UNPROVEN');
+      retained = true;
+    },
+    // Permanent abandonment needs cessation, not proof that these credentials
+    // are reusable. Historical intents stay unresolved and are never applied.
+    quarantineIdle: () => owner.current === auth && retired && transportState === 'closed' && eventsReleased &&
+      store.failed && pending.size === 0 && tokens.size === 0 && credentialWrites === 0 &&
+      store.pending === 0 && store.healthWrites === 0 && !store.compactionPromise && !store.activeCheckpoint &&
+      !store.cleanupCheckpoint && !failureWriting,
+    sealQuarantine: () => {
+      if (!auth.quarantineIdle()) throw new Error('QUARANTINE_WRITER_ACTIVE');
+      retained = true;
+    },
     // Observation only: no flush, marker changes, provider calls or journal replay.
     assessRecovery: async ({timeoutMs = 1000} = {}) => {
       // A closing transport or settling callback may append evidence while the
@@ -433,6 +471,7 @@ function authFacade(store, owner) {
       return activeArm;
     },
     drain: async ({ timeoutMs = 20_000 } = {}) => {
+      if (retained) throw new Error('AUTH_RETAINED_OFFLINE');
       let timer;
       try {
         await activeArm;
@@ -506,6 +545,7 @@ export async function assertAuthRecoveryClear(filename) {
 }
 
 export async function createAuth(directory, { store, ...options } = {}) {
+  if (!store) await assertAuthRecoveryClear(path.join(directory, 'auth.json'));
   store ??= await new JournalStore(path.join(directory, 'auth.json'), () => ({ creds: initAuthCreds(), keys: {} }), options).load();
   try { await assertAuthRecoveryClear(store.filename); } catch (error) { store.failed = true; throw error; }
   if (authOwners.has(store)) return authOwners.get(store).current.renew();

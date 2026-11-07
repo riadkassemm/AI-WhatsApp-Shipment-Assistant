@@ -25,6 +25,23 @@ export function validateLineManifest(value) {
   if (!Array.isArray(removed) || removed.some(id => typeof id !== 'string' || !/^\d{5,32}$/.test(id)) ||
       !Array.isArray(removedRequests) || removedRequests.some(id => typeof id !== 'string' || !UUID_PATTERN.test(id))) throw new Error('Invalid linked-device removal ledger.');
   if (removed.some(id => Object.hasOwn(lines, id))) throw new Error('A removed linked-device line cannot remain active in the manifest.');
+  const quarantined = value.quarantined_lines ?? {};
+  if (!quarantined || typeof quarantined !== 'object' || Array.isArray(quarantined)) throw new Error('Invalid quarantine ledger.');
+  for (const [id, record] of Object.entries(quarantined)) {
+    if (!/^\d{5,32}$/.test(id) || record?.version !== 1 || record.line_id !== id ||
+        record.state !== 'permanently_decommissioned' || record.reuse_allowed !== false ||
+        typeof record.remote_unlinked !== 'boolean' || !UUID_PATTERN.test(record.audit_id ?? '') ||
+        !Number.isSafeInteger(record.created_at) || record.created_at <= 0 ||
+        !record.fingerprint || typeof record.fingerprint !== 'object' || Array.isArray(record.fingerprint) ||
+        !['live_cessation', 'process_exit'].includes(record.proof?.kind) ||
+        Object.hasOwn(lines, id) || removed.includes(id)) throw new Error('Invalid quarantine ledger.');
+    for (const [name, file] of Object.entries(record.fingerprint)) {
+      if (!/^(auth|state)\.json(?:\.[a-zA-Z0-9._-]+)?$/.test(name) ||
+          !/^[a-f0-9]{64}$/.test(file?.hash ?? '') || !Number.isSafeInteger(file?.size) || file.size < 0) throw new Error('Invalid quarantine fingerprint.');
+    }
+    if (!Object.keys(record.fingerprint).some(name => name.startsWith('auth.json')) ||
+        !Object.keys(record.fingerprint).some(name => name.startsWith('state.json'))) throw new Error('Incomplete quarantine fingerprint.');
+  }
   const rawRequests = value.requests ?? {};
   if (!rawRequests || typeof rawRequests !== 'object' || Array.isArray(rawRequests)) throw new Error('Invalid linked-device registration ledger.');
   const requests = Object.fromEntries(Object.entries(rawRequests).map(([id, item]) => {
@@ -35,7 +52,7 @@ export function validateLineManifest(value) {
     return [id.toLowerCase(), { line_id: item.line_id, expected_phone: phone }];
   }));
   if (removedRequests.some(id => Object.hasOwn(requests, id.toLowerCase()))) throw new Error('A removed registration request cannot remain active.');
-  return { version: 1, lines, requests, removed_line_ids: [...new Set(removed)], removed_request_ids: [...new Set(removedRequests.map(id => id.toLowerCase()))] };
+  return { version: 1, lines, requests, removed_line_ids: [...new Set(removed)], removed_request_ids: [...new Set(removedRequests.map(id => id.toLowerCase()))], quarantined_lines: quarantined };
 }
 
 export function phoneDigits(value, allowEmpty = false) {
