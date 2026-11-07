@@ -100,9 +100,14 @@ def summarize_storage(value: Any, registry: list[dict[str, Any]]) -> dict[str, A
         line_id = issue.get("line_id")
         if line_id is not None and str(line_id) not in by_id:
             continue
-        issues.append({"code": issue["code"], "level": issue["level"],
-                       "line_id": str(line_id) if line_id is not None else None,
-                       "name": by_id.get(str(line_id)) if line_id is not None else None})
+        safe = {"code": issue["code"], "level": issue["level"],
+                "line_id": str(line_id) if line_id is not None else None,
+                "name": by_id.get(str(line_id)) if line_id is not None else None}
+        # Store failure is not evidence of exhausted disk space. Retain only
+        # the fixed store kind so the dashboard can explain session recovery.
+        if isinstance(issue.get("kind"), str) and issue["kind"] in {"auth", "state", "outbox"}:
+            safe["kind"] = issue["kind"]
+        issues.append(safe)
     level = "critical" if any(issue["level"] == "critical" for issue in issues) else "warning" if issues else "ok"
     return {"level": level, "issues": issues}
 

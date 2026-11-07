@@ -115,6 +115,11 @@ async def linked_device_status(agent: SupportAgent = Depends(get_current_agent))
     # The bridge may have sessions that were removed from this server's config.
     # Never expose their QR codes or allow actions on those accounts.
     allowed = configured_linked_device_lines()
+    from app.whatsapp_line_health import summarize_storage
+
+    storage = summarize_storage(payload.get("storage"), [{"phone_number_id": line_id} for line_id in allowed])
+    recovery_categories = {"storage_failure", "authentication_failure", "session_conflict", "protocol_failure",
+                           "temporary_transport", "restart_required", "logged_out"}
     lines = []
     for item in payload.get("lines", []):
         if not isinstance(item, dict) or str(item.get("line_id")) not in allowed:
@@ -127,6 +132,10 @@ async def linked_device_status(agent: SupportAgent = Depends(get_current_agent))
             "is_paired": item.get("is_paired") is True,
             "qr_data_url": item.get("qr_data_url"),
             "error": item.get("error"),
+            "recovery_category": (item.get("recovery_category") if isinstance(item.get("recovery_category"), str)
+                                  and item["recovery_category"] in recovery_categories else None),
+            "storage_issues": [issue for issue in (storage or {}).get("issues", [])
+                               if issue["line_id"] in {None, line_id}],
             "active_transport": get_transport(line_id),
             "pending_callbacks": item.get("pending_callbacks", 0),
             "waiting_history_reactions": item.get("waiting_history_reactions", 0),

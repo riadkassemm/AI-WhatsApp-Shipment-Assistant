@@ -1,0 +1,158 @@
+Beirut session recovery: IPv4 deployment remains blocked
+=======================================================
+2026-11-07, production 194.5.152.173. Times below are Beirut time (UTC+02).
+This is an incident assessment, NOT permission to clear authentication fences.
+
+Confirmed evidence
+------------------
+The running release remains 487550d9986fe14e9c00c543084cc091b0e67b1f.
+The approved IPv4 artifact 69bedb4ccd181a9e772ca1b398ec758ef3f01f53 has not
+been activated. No production source/environment change or restart was made.
+At the investigation check, 7/8 lines were connected; Beirut (90011) was fenced.
+About 463 GB / 431 GiB was available (89%); 98.66% of inodes were available.
+The only critical storage issue was STORE_UNAVAILABLE, kind=auth, line=90011.
+Neither disk exhaustion nor a journal checksum failure was observed here.
+
+10:58:33.967  Last recorded successful heartbeat, about 60 ms RTT.
+10:58:36.935  Last raw and decoded receive activity on the retired transport.
+10:58:51.840  Last auth journal write, sequence 18658.
+10:59:01.311  First retained provider pipeline intent begins at sequence 18658.
+10:59:01.367  Second retained pipeline intent begins at the same sequence.
+10:59:11.866  Outgoing acknowledgement timeout.
+10:59:11.868  stale_transport blocks submissions; recovery scheduled.
+10:59:32.981  AUTH_TRANSACTION_DRAIN_TIMEOUT.
+10:59:33.432  A second drain-timeout error is logged.
+10:59:41.747  Auth store is reported unavailable. Replacement cannot use it.
+This predates the deployment attempt; it is not a deployment-induced failure.
+
+Read-only replay of the failed auth store verified snapshot checksum, journal
+checksums, contiguous sequence 18276 -> 18658, 382 journal records, and zero
+incomplete-tail bytes. Source hashes stayed unchanged throughout the read.
+Both retained pipeline intents contain zero recorded key-mutation batches and
+starting credentials equal to durable sequence 18658. The failure file contains
+one drain_timeout and two pipeline entries, each with zero recorded mutations.
+NONE of those failure entries contains final mutable credential evidence.
+An intact journal proves the integrity of committed records, not the absence
+of uncommitted provider work or the outcome of uncertain sends.
+
+A root-only, seven-file authentication evidence copy was checksum-verified on
+the same VPS under /root/support-beirut-auth-evidence-20261107-x39ghy21.
+It includes legacy base, snapshot, journal, active/intent/failure markers and
+health metadata. Source hashes before and after copying matched the copy.
+This is incident evidence, not a whole-system or independent disaster backup.
+No authentication credentials were exported to the laptop or committed to Git.
+Offline read-only replay of this copy also passed: sequence 18658, 382 records,
+zero incomplete-tail bytes. The authentication fence remains unresolved.
+
+Code findings
+-------------
+whatsapp_bridge/src/bridge.js:
+- restartStaleSocket blocks the line, requests socket.end and schedules recovery.
+- finishRetirement defers native end while accepted provider tasks remain.
+  This is necessary on a healthy transport to finish incoming callbacks safely.
+- Replacement must drain/renew the old auth owner before acquiring a new one.
+
+whatsapp_bridge/src/storage.js:
+- authFacade.drain has a 20-second deadline. Timeout marks the store failed and
+  retains authentication intent/failure/active evidence; renewal then fails closed.
+- runProvider can abandon a rejected operation only while the store is healthy,
+  recorded mutations are empty AND current credentials equal their starting value.
+- Once drain times out, even a later zero-mutation rejection cannot erase the fence.
+- drain_timeout and outer provider-failure evidence currently omit final creds.
+
+Strongly supported mechanism: failed receive progress leaves admitted provider
+tasks waiting for responses; controlled retirement defers native close until
+those tasks settle, while auth drain expires first. The available logs do not
+identify the two pipeline bodies or prove their final in-memory credentials.
+Do not call this corruption, a proven disk I/O error, or a proven safe-to-clear
+false positive. Do not extend timeouts merely to mask it.
+
+Completed local alert correction
+-------------------------------
+- app/whatsapp_line_health.py now retains only the allowlisted auth/state/outbox
+  kind along with already sanitized operational issue codes.
+- app/linked_device_api.py forwards an allowlisted recovery category (previously
+  dropped despite being consumed by the UI) and scoped sanitized storage issues.
+- app/static/support/actions.js differentiates session recovery, saved message
+  state, capacity, maintenance, and unavailable monitoring. Mixed causes retain
+  each explanation. Banner, composer, notifications and connection modal agree.
+- Disk advice requires DISK_SPACE_LOW or INODES_LOW. A fenced session does not
+  offer a pairing shortcut. Ordinary logout retains the existing pairing action.
+- Message acknowledgement, delivery, persistence and checkpoint code is untouched.
+
+Recovery prerequisites: unresolved mandatory gate
+------------------------------------------------
+Do NOT delete/rename any .auth-active/.auth-intent/.auth-failure marker, reset the
+store.failed flag, regenerate credentials, or restore older state over newer
+state. A process restart would lose remaining in-memory evidence and does not
+resolve this fence. The normal clean-stop gate can also fail on this failed store.
+
+Before any recovery mutation, an independently reviewed procedure must establish:
+1. The affected generation has no transport owner and all its admitted provider
+   work has settled. A disconnected status alone does not establish this.
+2. Final credential/key evidence is complete and agrees with committed sequence,
+   or an explicit reconciliation is justified by complete retained mutations.
+   Zero mutations plus matching STARTING credentials does not meet this gate.
+3. Recovery is rehearsed on a verified private copy, preserves the original
+   evidence, and cannot resend any uncertain delivery or create another owner.
+4. All journals, reservations, callbacks and message state remain consistent.
+
+The current running release has no supported interface exposing the final
+credential comparison or settled-provider evidence for this failed owner.
+No approved, data-preserving recovery command can therefore be supplied from
+the current on-disk evidence alone. Live debugger/heap capture was not attempted;
+it would require separate operational review because all eight lines share the
+process and captures could contain credentials and customer data.
+
+Proposed follow-up, separate from the UI patch:
+- Reproduce failed receive + pending query + retirement using mocked Baileys.
+- Distinguish healthy drain from already-failed transport retirement; settle
+  failed network waiters without discarding accepted callback/auth work. Preserve
+  fences for any mutation or uncertain provider outcome; no forced healthy close.
+- Persist private final credential evidence and pending-work/sequence context
+  for auth drain/provider failures, including a final settled-state record.
+  Keep payloads out of logs. Late rejected mutations must remain recoverable.
+- Review a narrowly scoped operator recovery method only after those proofs;
+  never make marker deletion or automatic retries the recovery mechanism.
+These changes are not implemented or deployed in this alert correction.
+
+Resuming the original IPv4 rollout
+---------------------------------
+The existing docs/bridge-ipv4-deployment.txt remains the execution procedure.
+Its original approval covers exact commit 69bedb4, not this later UI commit.
+Do not substitute a different artifact or skip readiness/journal/drain gates.
+After session recovery is proven, repeat preflight from scratch, then follow
+maintenance -> ngrok stop -> bridge drain/stop -> inbound drain -> API stop ->
+offline validation -> approved release activation -> readiness -> reopen ingress.
+Require eight owned IPv4 connections, TLS validation and successful heartbeat
+responses, then staff acceptance, at least 60 minutes of attended monitoring
+and a 24-hour comparison. None of those deployment verifications is claimed here.
+
+Focused local verification
+--------------------------
+Node v24.22.2 (matching production):
+  node tests/support_recovery_alert.test.cjs
+  Eight mocked renderer checks: auth/capacity/mixed/state/maintenance/unknown
+  causes, scoped composer, notification deduplication, monitor failure, modal
+  fencing and ordinary logout/connected behavior.
+
+Python mock checks:
+  venv/bin/python -m pytest -q -p no:cacheprovider \
+    tests/test_line_outage_resilience.py -k 'not browser'
+  venv/bin/python -m pytest -q -p no:cacheprovider \
+    tests/test_linked_device_api.py \
+    -k 'status_exposes_safe_recovery or linked_status_is_manager_only or status_allows_adding'
+  Twelve line-health and three API checks passed. The first sandboxed run
+  stalled at asyncio thread wakeup; rerunning outside the sandbox passed.
+No full suite, real WhatsApp connection or customer message was used.
+docs/screenshots/session-recovery-notice.png shows the actual renderers/styles
+against synthetic status data in local headless Chromium, not a live account.
+
+Manual acceptance after a separately reviewed UI release:
+- Session fence: session-recovery wording across banner, composer and modal,
+  no disk-space claim, no new pairing shortcut, healthy offices unaffected.
+- Real capacity warning: capacity-specific advice remains visible.
+- Checkpoint/monitor failures: their own actionable wording; mixed causes retained.
+- Ordinary logout/QR and connected states retain their current behavior.
+Current conclusion: UI correction ready for review; production IPv4 rollout
+NO-GO until the authentication recovery prerequisite is satisfied.
