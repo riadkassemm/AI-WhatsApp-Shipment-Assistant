@@ -1,0 +1,125 @@
+WhatsApp bridge: heartbeat accounting and recovery review
+========================================================
+Scope: local source, focused mock checks, Git/PR only. No server access,
+deployment, network-routing change, live identity test or session change.
+
+Confirmed defects addressed
+---------------------------
+Baileys 7.0.0-rc14 waitForMessage() resolves undefined after its query timeout.
+The previous diagnostic .then() counted this as a successful heartbeat. The
+pinned, checksum-verified patch now requires an IQ result with the ping's ID.
+Undefined is a query timeout; rejection/invalid results are errors. Only a
+validated result supplies success/RTT. No heartbeat interval, query deadline,
+message acknowledgment semantics or wire protocol is changed.
+
+Native Baileys end() awaited the WebSocket close handshake before publishing
+connection.update(close). Investigation observed a roughly 25–30 second gap
+between heartbeat_timeout and the bridge's blocked transition. The new native
+hook classifies the failure and blocks new sends immediately. Only the exact
+Baileys 408 "Connection was lost" liveness failure permits terminate() after
+1.5 seconds of unsuccessful close grace. Query timeout alone, logout, conflict,
+retirement and normal shutdown do not use accelerated termination.
+
+Replacement requires actual physical transport closure AND existing accepted
+provider/auth/message persistence drains. A timer or terminate() call is never
+proof of closure. No change to journal fsync/checkpointing, durable callbacks,
+deduplication, uncertain sends, media limits, forwarding or staff permissions.
+
+Expected reduction: up to about 28.5 seconds of the observed close-handshake
+wait. Query failure detection, auth drains, jitter/backoff, login and provider
+availability still contribute to total interruption; no total-time guarantee.
+
+Diagnostics
+-----------
+- Counters: heartbeat queries, confirmed results, query timeouts, query errors,
+  liveness failures, raw WebSocket frames and decoded provider frames.
+- Timestamps: query start/completion, last confirmed reply, last raw/decoded
+  receive, generation start and first detected failure. RTT is absent on failure.
+- Generation guards reject stale socket samples; per-query sequence guards
+  reject stale/duplicate completions. Endpoint/timing state resets on replacement.
+- Recovery uses monotonic time from the earliest observed query/transport failure
+  through readiness, including close/drain/backoff/login. A subsequent confirmed
+  heartbeat on an otherwise-ready socket can close a query-only interruption.
+  recovery_count therefore includes query-only recoveries, not just reconnects.
+- Endpoint: validated remote IP/family, local/remote ports, byte counters and
+  writable bytes; fixed WebSocket error codes and numeric close codes. Preserve
+  the last known endpoint of this generation after Node clears destroyed sockets.
+- Event-loop previous-window maximum/p99 and current-window maximum accompany
+  bounded heartbeat/transport logs. No log entry per frame; no customer content,
+  provider stanza, close reason, error message, credential or session key logged.
+- Passive ss -tinHO samples the existing endpoint tuples at collector cadence,
+  with a 2 second subprocess deadline, <=128 targets and bounded accepted output.
+  TCP retransmission segments/bytes, RTT/RTO and queues are per-socket gauges,
+  not process-lifetime counters. Missing fields/connections/permissions remain
+  unknown. Correlate with generation. Brief failures between scrapes may be missed.
+- Prometheus uses hashed identity and fixed family labels, never raw endpoint
+  labels. Restricted bridge status/logs retain endpoint attribution for diagnosis.
+- Diagnostics version 2 is required by the updated collector; old/missing
+  diagnostics alarm rather than appearing healthy. Added alerts cover unanswered
+  heartbeats despite active timers, query timeouts and unavailable TCP evidence.
+  Existing collector freshness/disconnect/storage/checkpoint alerts remain.
+
+Remaining cause to establish
+---------------------------
+The initiating receive failure is still unconfirmed. Current IPv6/IPv4 socket
+counts do not establish which historical failures used which family. These
+changes do not force IPv4 or claim to eliminate provider/network outages.
+Compare raw receive silence versus decoded silence, endpoint family, TCP queues
+and retransmission evidence, event-loop lag and generation-specific close codes
+across identities before choosing a routing/provider correction.
+
+Review/deployment boundaries
+---------------------------
+This branch is based on deployed commit 028048e, including the already-approved
+icon-only send indicator. PR is stacked on fix/support-submitting-indicator
+(PR #80) to keep unrelated UI changes out of this review. No automatic merge.
+After #80 merges, retarget/review the resulting diff against main before merging.
+
+A separately approved release must use a clean npm ci dependency tree. The
+patcher intentionally rejects the old modified node_modules or any unknown
+provider checksum. Do not edit/repatch a shared live dependency tree. Use the
+release's prestart --verify gate; deploy matching bridge, collector, helper and
+alert rules together. Verify ss (iproute2) is available to the existing runtime
+collector, in the same network namespace. Do not loosen service permissions
+merely to make optional TCP evidence available.
+
+Focused local verification commands (no servers or real WhatsApp connections)
+---------------------------------------------------------------------------
+node --test --test-isolation=none whatsapp_bridge/test/heartbeat-provider.test.js whatsapp_bridge/test/transport-diagnostics.test.js whatsapp_bridge/test/phase1-diagnostics.test.js whatsapp_bridge/test/provider-lifecycle.test.js whatsapp_bridge/test/provider-lifecycle-patch.test.js
+node --test --test-isolation=none --test-name-pattern='replacement waits for an admitted|credential events admitted behind|incoming messages and delivery evidence accepted|accepted incoming messages survive|socket renewal waits for real|retired provider pipelines preserve|terminal disconnect classification|durable uncertain reservation|disconnect during an unresolved|stale open event' whatsapp_bridge/test/bridge.test.js
+venv/bin/python -m pytest -q tests/test_runtime_metrics.py tests/test_bridge_tcp_diagnostics.py
+promtool check rules deployment/monitoring/storage-alerts.yml
+promtool test rules deployment/monitoring/storage-alerts-phase1-test.yml
+git diff --check
+
+These cover actual pinned provider code with mock physical transport/query,
+checksum/idempotence/tamper gates, pending auth drains, accepted incoming messages
+and late negative delivery evidence, terminal error retry blocking, socket
+ownership, correct heartbeat results, metric privacy and alert evaluations.
+Results: 26 focused provider/heartbeat/transport checks, 10 selected existing
+message/auth/delivery safety regressions, and 8 Python collector checks passed
+(44 total). Promtool validated all 28 rules and the focused alert test cases;
+whitespace checks passed. Local Node v26.13.0, Python 3.10.22, promtool 3.5.0.
+Production runtime/network behavior remains untested until deployment approval.
+No full suite, build, database connection or synthetic customer message.
+
+Manual verification AFTER separate deployment approval
+-----------------------------------------------------
+1. Check pinned provider patch verification and diagnostics version 2; all eight
+   identities must restore without pairing, new session owners or extra bridges.
+2. Observe all identities over at least 60 minutes (several prior 9–10 minute
+   cycles). Check per-generation heartbeat requests/successes/timeouts; timeouts
+   must not increment success or export a ~20 second RTT.
+3. If a natural failure occurs, verify immediate blocked transition, optional
+   failed_transport_terminate after 1.5 seconds, physical close before replacement,
+   retained auth/journal drains and recovery duration from the first failure.
+   Do not induce production failures or force relinking for this check.
+4. Correlate private endpoint/family logs, raw/decoded timestamps, TCP samples and
+   event-loop lag. Missing TCP evidence is an instrumentation limitation, not
+   proof of a healthy network. Do not publish IPs or private bridge responses.
+5. Staff verify conversations/history/media plus a text/image exchange with an
+   agreed internal recipient. Confirm status accuracy and no duplicates; never
+   blindly resend uncertainty. Watch callback/uncertain counts and storage health.
+6. Verify updated rules and collector freshness. If external notifications remain
+   unconfigured, retain attended monitoring. Escalate persistence failures,
+   session conflicts or prolonged outages; do not relink/rollback automatically.

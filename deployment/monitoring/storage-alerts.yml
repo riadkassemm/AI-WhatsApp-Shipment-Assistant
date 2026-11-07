@@ -96,6 +96,27 @@ groups:
         annotations:
           summary: "Heartbeat observation is delayed for {{ $labels.identity }}"
           description: "Compare provider heartbeat diagnostics with event-loop and host/network telemetry; no customer payload logging is required."
+      - alert: BridgeHeartbeatUnanswered
+        expr: ((time() - support_bridge_heartbeat_success_timestamp_seconds > 90) and (time() - support_bridge_generation_start_timestamp_seconds > 90)) and on (job, instance, identity) (support_bridge_identity_connected == 1)
+        for: 0m
+        labels: {severity: warning}
+        annotations:
+          summary: "No confirmed heartbeat reply for {{ $labels.identity }}"
+          description: "Timer execution is not a successful heartbeat. Compare query timeouts, raw/decoded receive timestamps, address family and TCP evidence."
+      - alert: BridgeHeartbeatQueryTimeouts
+        expr: increase(support_bridge_heartbeat_query_timeouts_total[10m]) > 0
+        for: 0m
+        labels: {severity: warning}
+        annotations:
+          summary: "A WhatsApp heartbeat query timed out for {{ $labels.identity }}"
+          description: "An undefined provider query result is a timeout, never a successful RTT. Correlate with recovery duration and receive-path diagnostics."
+      - alert: BridgeTcpDiagnosticsMissing
+        expr: (support_bridge_tcp_sample_up == 0) and on (job, instance, identity) (support_bridge_identity_connected == 1)
+        for: 2m
+        labels: {severity: warning}
+        annotations:
+          summary: "TCP evidence is unavailable for {{ $labels.identity }}"
+          description: "Check ss availability and collector permissions. Missing evidence does not mean zero retransmissions. No network probes or session restart are needed."
       - alert: BridgeEventLoopStalls
         expr: increase(support_bridge_event_loop_lag_spikes_total[10m]) > 0
         for: 0m

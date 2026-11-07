@@ -28,3 +28,51 @@ tests:
             exp_annotations:
               summary: "Bridge diagnostics are missing or stale"
               description: "Inspect collector health and the pinned provider diagnostic patch. Missing data is not evidence of healthy connections."
+
+  - interval: 30s
+    input_series:
+      - series: 'support_bridge_identity_connected{identity="silent"}'
+        values: '1+0x8'
+      - series: 'support_bridge_heartbeat_success_timestamp_seconds{identity="silent"}'
+        values: '0+0x8'
+      - series: 'support_bridge_generation_start_timestamp_seconds{identity="silent"}'
+        values: '0+0x8'
+      - series: 'support_bridge_heartbeat_sample_timestamp_seconds{identity="silent"}'
+        values: '0+30x8'
+      - series: 'support_bridge_identity_connected{identity="healthy"}'
+        values: '1+0x8'
+      - series: 'support_bridge_heartbeat_success_timestamp_seconds{identity="healthy"}'
+        values: '0+30x8'
+      - series: 'support_bridge_generation_start_timestamp_seconds{identity="healthy"}'
+        values: '0+0x8'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: BridgeHeartbeatUnanswered
+        exp_alerts:
+          - exp_labels: {identity: silent, severity: warning}
+            exp_annotations:
+              summary: "No confirmed heartbeat reply for silent"
+              description: "Timer execution is not a successful heartbeat. Compare query timeouts, raw/decoded receive timestamps, address family and TCP evidence."
+  - interval: 30s
+    input_series:
+      - series: 'support_bridge_heartbeat_query_timeouts_total{identity="timedout"}'
+        values: '0 0 1 1 1'
+      - series: 'support_bridge_identity_connected{identity="missing_tcp"}'
+        values: '1+0x8'
+      - series: 'support_bridge_tcp_sample_up{identity="missing_tcp"}'
+        values: '0+0x8'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: BridgeHeartbeatQueryTimeouts
+        exp_alerts:
+          - exp_labels: {identity: timedout, severity: warning}
+            exp_annotations:
+              summary: "A WhatsApp heartbeat query timed out for timedout"
+              description: "An undefined provider query result is a timeout, never a successful RTT. Correlate with recovery duration and receive-path diagnostics."
+      - eval_time: 2m
+        alertname: BridgeTcpDiagnosticsMissing
+        exp_alerts:
+          - exp_labels: {identity: missing_tcp, severity: warning}
+            exp_annotations:
+              summary: "TCP evidence is unavailable for missing_tcp"
+              description: "Check ss availability and collector permissions. Missing evidence does not mean zero retransmissions. No network probes or session restart are needed."
