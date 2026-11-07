@@ -70,9 +70,12 @@ Limits and review before a separately approved deployment
 - A genuinely stalled provider operation can still block its own identity's
   re-pair/removal. Wait for verified settlement or investigate that identity;
   never erase uncertain authentication or resend uncertain deliveries.
-- This branch is based on main and must be reconciled with the separate
-  proposed auth-evidence changes in PR #85 before combining either release.
-  It does not enable IPv4 mode or authorize resuming that rollout.
+- This branch now includes current main's PR #84/#85 changes. Failure writes
+  coalesce by evidence revision, retaining version-2 final credential, operation
+  and retiring-transport evidence without restoring repeated full-history
+  cloning. Failed publication remains a sticky recovery blocker. This combined
+  revision has not been deployed; production still uses b5f8e35. It does not
+  enable IPv4 mode or authorize resuming that rollout.
 - No database migration or dependency change. New logout state is additive.
   An older release does not understand auth_reset_required; do not roll back
   then connect a newly logged-out identity without reviewing retained state.

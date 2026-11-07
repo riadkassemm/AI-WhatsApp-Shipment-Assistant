@@ -66,6 +66,9 @@ export function createServer(bridge, config) {
       const id = parts[2];
       if (request.method === 'DELETE' && parts.length === 3) return send(response, 200, await bridge.removeLine(id));
       bridge.getLine(id);
+      if (request.method === 'GET' && parts.length === 4 && parts[3] === 'auth-recovery') {
+        return send(response, 200, await bridge.assessAuthenticationRecovery(id));
+      }
       if (request.method === 'GET' && parts.length === 5 && parts[3] === 'media') {
         const media = await bridge.downloadMedia(id, parts[4]);
         response.writeHead(200, { 'Content-Type': media.mime_type, 'Content-Length': media.content.length });

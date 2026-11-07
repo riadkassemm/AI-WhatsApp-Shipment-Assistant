@@ -73,6 +73,17 @@ def test_storage_health_exposes_only_known_operational_issues_for_enabled_lines(
     assert health.summarize_storage({"level": "warning", "issues": "private payload"}, REGISTRY) == {"level": "ok", "issues": []}
 
 
+def test_storage_health_retains_only_allowlisted_store_kinds():
+    summary = health.summarize_storage({"level": "critical", "issues": [
+        {"code": "STORE_UNAVAILABLE", "level": "critical", "line_id": "90020", "kind": kind,
+         "creds": "private session", "error": "private path"}
+        for kind in ["auth", "state", "outbox", "private value", {"secret": "value"}]
+    ]}, REGISTRY)
+    assert [issue.get("kind") for issue in summary["issues"]] == ["auth", "state", "outbox", None, None]
+    assert "private" not in json.dumps(summary)
+    assert "secret" not in json.dumps(summary)
+
+
 def test_unreachable_bridge_uses_fresh_independent_storage_report_and_redacts_details(tmp_path, monkeypatch):
     filename = tmp_path / "status.json"
     filename.write_text(json.dumps({"version": 1, "checked_at": 1000, "level": "critical", "secret": "private",

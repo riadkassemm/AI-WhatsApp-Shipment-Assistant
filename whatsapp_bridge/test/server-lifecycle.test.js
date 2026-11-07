@@ -8,6 +8,26 @@ import {BridgeError} from '../src/config.js';
 const gate = () => { let resolve; const promise = new Promise(done => {resolve = done;}); return {promise, resolve}; };
 const secret = 'isolated-http-lifecycle-secret';
 
+test('authentication assessment is authenticated, identity-scoped and read-only under concurrent requests', async t => {
+  const seen = [];
+  const server = createServer({getLine(id) {assert.equal(id, '90011');},
+    async assessAuthenticationRecovery(id) {seen.push(id); return {line_id: id, status: 'BLOCKED', recovery_allowed: false};}}, {secret});
+  server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  t.after(async () => {server.closeAllConnections(); await new Promise(resolve => server.close(resolve));});
+  const endpoint = `http://127.0.0.1:${server.address().port}/v1/lines/90011/auth-recovery`;
+  assert.equal((await fetch(endpoint)).status, 401);
+  assert.deepEqual(seen, []);
+  const responses = await Promise.all([0, 1, 2].map(() => fetch(endpoint, {headers: {authorization: `Bearer ${secret}`}})));
+  for (const response of responses) {
+    assert.equal(response.status, 200); assert.equal(response.headers.get('cache-control'), 'no-store');
+    assert.equal((await response.json()).recovery_allowed, false);
+  }
+  assert.deepEqual(seen, ['90011', '90011', '90011']);
+  const forbidden = await fetch(endpoint, {method: 'POST', headers: {authorization: `Bearer ${secret}`, 'content-type': 'application/json'}, body: '{}'});
+  assert.equal(forbidden.status, 404);
+  assert.equal(seen.length, 3, 'no recovery mutation route exists');
+});
+
 test('HTTP shutdown drains accepted work after its requesting client disconnects', async t => {
   const entered = gate(), release = gate(), finished = [];
   const bridge = {getLine() {}, async downloadMedia() {

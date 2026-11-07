@@ -58,6 +58,36 @@ def message_event():
     }
 
 
+def test_status_exposes_safe_recovery_reasons_for_configured_lines_only(linked_config, monkeypatch):
+    async def status():
+        return {"lines": [
+            {"line_id": "90001", "status": "error", "is_paired": True, "recovery_category": "storage_failure",
+             "creds": "private credentials"},
+            {"line_id": "90099", "status": "error", "recovery_category": "storage_failure"},
+        ], "storage": {"level": "critical", "issues": [
+            {"line_id": "90001", "code": "STORE_UNAVAILABLE", "kind": "auth", "level": "critical", "path": "private path"},
+            {"line_id": "90099", "code": "STORE_UNAVAILABLE", "kind": "auth", "level": "critical"},
+            {"code": "DISK_SPACE_LOW", "level": "warning"},
+        ]}}
+
+    monkeypatch.setattr(api_module.linked_device_client, "get_status", status)
+    response = request("GET", "/api/support/whatsapp-linked-device/status", role="agent")
+    assert response.status_code == 200
+    lines = response.json()["lines"]
+    assert len(lines) == 1
+    assert lines[0]["recovery_category"] == "storage_failure"
+    assert [issue["code"] for issue in lines[0]["storage_issues"]] == ["STORE_UNAVAILABLE", "DISK_SPACE_LOW"]
+    assert lines[0]["storage_issues"][0]["kind"] == "auth"
+    assert "private" not in response.text and "90099" not in response.text
+
+    async def invalid_category():
+        return {"lines": [{"line_id": "90001", "status": "error", "recovery_category": {"private": "value"}}]}
+
+    monkeypatch.setattr(api_module.linked_device_client, "get_status", invalid_category)
+    line = request("GET", "/api/support/whatsapp-linked-device/status").json()["lines"][0]
+    assert line["recovery_category"] is None and line["storage_issues"] == []
+
+
 def test_linked_callback_authentication_and_route_validation(linked_config, monkeypatch):
     import app.main as main_module
 
