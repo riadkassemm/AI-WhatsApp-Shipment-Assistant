@@ -13,7 +13,8 @@ import { MediaFiles } from './media-files.js';
 import { AckTracker } from './ack.js';
 import { inboundEvent, outgoingEvent, outgoingConfirmationEvent, messageTombstoneEvent, messageStatusEvent, mutationEvent, textBody, millis, eventId, disconnectReason, MEDIA_TYPES, RECEIPT_STATUSES, RECEIPT_RANK } from './events.js';
 import { preserveNativeMutationMetadata } from './native-events.js';
-import { classifyDisconnect, reconnectDelay, newConnectionDiagnostics, observeHeartbeat, EventLoopDiagnostics } from './connection-diagnostics.js';
+import { classifyDisconnect, reconnectDelay, newConnectionDiagnostics, observeHeartbeat, resetConnectionDiagnostics, beginInterruption, finishInterruption, EventLoopDiagnostics } from './connection-diagnostics.js';
+import { transportSnapshot, observeTransport, closeTransport } from './transport-diagnostics.js';
 
 const silentLogger = pino({ level: 'silent' });
 const DEFAULT_MEDIA_HOST = 'mmg.whatsapp.net';
@@ -561,6 +562,9 @@ export class Bridge {
       // Retired provider pipelines can emit their already accepted messages
       // while auth drains. Persist that final event tail before a new socket.
       await line.eventTail;
+      // A drained auth owner is necessary but not proof that the physical
+      // transport closed. Never replace an unresolved transport on a timer.
+      await line.transportClosed;
       this.assertRunning();
       await this.adoptRetiredPhone(line);
     } catch (error) {
@@ -580,15 +584,47 @@ export class Bridge {
     delete line.error;
     delete line.qr;
     delete line.qr_data_url;
+    resetConnectionDiagnostics(line.diagnostics, generation);
     let socket;
-    try { socket = this.makeSocket({ auth: auth.state, logger: silentLogger, browser: Browsers.ubuntu('Support Dashboard'),
-      bridgeConnectionDiagnostics: sample => {
-        if (generation !== line.generation || this.stopping) return;
-        if (observeHeartbeat(line.diagnostics, sample)) {
-          this.trace(line, sample.event, { frame_age_ms: line.diagnostics.heartbeat_frame_age_ms,
-            timer_delay_ms: line.diagnostics.heartbeat_timer_delay_ms,
-            rtt_ms: line.diagnostics.heartbeat_rtt_ms, event_loop: this.eventLoop.snapshot() });
+    const reportDiagnostic = sample => {
+      if (generation !== line.generation || this.stopping) return;
+      if (sample.event === 'transport_error') line.diagnostics.transport_error_code = sample.error_code;
+      if (sample.event === 'transport_closed') line.diagnostics.transport_close_code = sample.close_code;
+      const heartbeat = observeHeartbeat(line.diagnostics, sample);
+      if (heartbeat && sample.event === 'heartbeat_result' && line.session?.ready && !line.session.closed) {
+        const seconds = finishInterruption(line.diagnostics);
+        if (seconds != null) this.trace(line, 'heartbeat_recovered', { duration_ms: seconds * 1000 });
+      }
+      if (heartbeat || sample.transport) {
+        const current = sample.transport ?? (socket && transportSnapshot(socket.ws));
+        if (current) {
+          const previous = line.diagnostics.transport;
+          // Node can clear endpoint fields during destroy. Retain this
+          // generation's last known peer so the failure still has attribution.
+          line.diagnostics.transport = current.remote_ip || !previous ? current : {...current,
+            remote_ip: previous.remote_ip, family: previous.family,
+            local_port: previous.local_port, remote_port: previous.remote_port};
         }
+        this.trace(line, sample.event, { query_sequence: line.diagnostics.heartbeat_query_sequence,
+          query_elapsed_ms: line.diagnostics.heartbeat_query_elapsed_ms,
+          outcome: line.diagnostics.heartbeat_outcome, frame_at: line.diagnostics.last_frame_at,
+          raw_frame_at: line.diagnostics.last_raw_frame_at,
+          frame_age_ms: line.diagnostics.heartbeat_frame_age_ms,
+          timer_delay_ms: line.diagnostics.heartbeat_timer_delay_ms,
+          rtt_ms: line.diagnostics.heartbeat_rtt_ms, transport: line.diagnostics.transport,
+          close_code: line.diagnostics.transport_close_code, error_code: line.diagnostics.transport_error_code,
+          event_loop: this.eventLoop.snapshot() });
+      }
+    };
+    try { socket = this.makeSocket({ auth: auth.state, logger: silentLogger, browser: Browsers.ubuntu('Support Dashboard'),
+      bridgeConnectionDiagnostics: reportDiagnostic,
+      bridgeCloseTransport: (ws, error) => closeTransport(ws, error, reportDiagnostic),
+      bridgeTransportClosing: error => {
+        if (!socket || generation !== line.generation || this.stopping) return;
+        // Native Baileys end() bypasses the public socket.end wrapper. Fence
+        // sends and classify terminal errors before awaiting its close handshake.
+        this.observeDisconnect(line, socket, { lastDisconnect: { error } });
+        this.blockConnection(line, socket, 'provider_transport_failure');
       },
       bridgeTask: work => (...args) => {
         // The checksum-verified pinned provider exposes complete asynchronous
@@ -624,7 +660,9 @@ export class Bridge {
       auth.beforeRetire = socket.bridgePrepareRetirement?.bind(socket);
     } catch (error) { auth.retire(); throw error; }
     line.socket = socket;
-    line.diagnostics.supported = socket.bridgeConnectionDiagnosticsVersion === 1;
+    line.transportClosed = socket.bridgeTransportClosed;
+    line.diagnostics.supported = socket.bridgeConnectionDiagnosticsVersion === 2;
+    observeTransport(socket.ws, reportDiagnostic);
     const session = { generation, ready: false, closed: false };
     line.session = session;
     const onClose = () => {
@@ -889,14 +927,8 @@ export class Bridge {
       line.disconnectedSince = null;
       line.recoveryCategory = null;
       line.retryBlocked = false;
-      if (line.diagnostics.recovery_started_at != null) {
-        const seconds = Math.max(0, Date.now() - line.diagnostics.recovery_started_at) / 1000;
-        line.diagnostics.recovery_count++;
-        line.diagnostics.recovery_seconds_sum += seconds;
-        line.diagnostics.recovery_seconds_last = seconds;
-        delete line.diagnostics.recovery_started_at;
-        this.trace(line, 'recovery_completed', { duration_ms: seconds * 1000 });
-      }
+      const recoverySeconds = finishInterruption(line.diagnostics);
+      if (recoverySeconds != null) this.trace(line, 'recovery_completed', { duration_ms: recoverySeconds * 1000 });
       this.trace(line, 'connection_transition', { state: 'ready' });
       if (line.store.data.logged_out_at) await line.store.update(data => { delete data.logged_out_at; });
       if (line.store.data.recover_since && !line.store.data.recover_until) {
@@ -1047,7 +1079,7 @@ export class Bridge {
   blockConnection(line, socket, reason) {
     if (line.socket !== socket || !line.session || line.session.closed) return;
     line.disconnectedSince ??= Date.now();
-    line.diagnostics.recovery_started_at ??= Date.now();
+    beginInterruption(line.diagnostics);
     line.diagnostics.disconnects_total = (line.diagnostics.disconnects_total ?? 0) + 1;
     if (line.session.readyAt && Date.now() - line.session.readyAt >= 60_000) line.reconnectAttempts = 0;
     line.session.closed = true;

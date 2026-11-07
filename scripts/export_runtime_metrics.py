@@ -14,8 +14,10 @@ import urllib.parse
 
 try:
     from scripts.check_inbound_drain import inspect
+    from scripts.bridge_tcp_diagnostics import tcp_samples
 except ModuleNotFoundError:
     from check_inbound_drain import inspect
+    from bridge_tcp_diagnostics import tcp_samples
 
 CATEGORIES = ('temporary_transport', 'restart_required', 'logged_out', 'authentication_failure',
               'session_conflict', 'protocol_failure', 'storage_failure')
@@ -85,7 +87,8 @@ def number(value):
     return value
 
 
-def bridge_metrics(snapshot):
+def bridge_metrics(snapshot, tcp=None):
+    tcp = tcp or {}
     lines = snapshot['lines']
     if not isinstance(lines, list) or not 0 <= len(lines) <= 128:
         raise ValueError('INVALID_BRIDGE_LINES')
@@ -104,7 +107,7 @@ def bridge_metrics(snapshot):
         labels = 'identity="' + identity + '"'
         values['support_bridge_identity_connected{' + labels + '}'] = int(line.get('status') == 'connected')
         diagnostic = line.get('diagnostics') or {}
-        supported = diagnostic.get('supported') is True
+        supported = diagnostic.get('supported') is True and diagnostic.get('version') == 2
         diagnostics_ok = diagnostics_ok and supported
         values['support_bridge_identity_diagnostics_up{' + labels + '}'] = int(supported)
         if not supported:
@@ -115,6 +118,18 @@ def bridge_metrics(snapshot):
             'recovery_seconds_sum': diagnostic['recovery_seconds_sum'],
             'recovery_count': diagnostic['recovery_count'],
             'recovery_seconds_last': diagnostic['recovery_seconds_last'],
+            'generation': diagnostic['generation'],
+            'generation_start_timestamp_seconds': diagnostic['generation_started_at'] / 1000,
+            'heartbeat_requests_total': diagnostic['heartbeat_requests'],
+            'heartbeat_successes_total': diagnostic['heartbeat_successes'],
+            'heartbeat_query_timeouts_total': diagnostic['heartbeat_query_timeouts'],
+            'heartbeat_request_timestamp_seconds': (diagnostic['heartbeat_request_at'] or 0) / 1000,
+            'heartbeat_query_completed_timestamp_seconds': (diagnostic['heartbeat_query_completed_at'] or 0) / 1000,
+            'heartbeat_success_timestamp_seconds': (diagnostic['heartbeat_success_at'] or 0) / 1000,
+            'raw_frames_total': diagnostic['raw_frames'],
+            'decoded_frames_total': diagnostic['decoded_frames'],
+            'raw_frame_timestamp_seconds': (diagnostic['last_raw_frame_at'] or 0) / 1000,
+            'decoded_frame_timestamp_seconds': (diagnostic['last_frame_at'] or 0) / 1000,
             'heartbeat_errors_total': diagnostic['heartbeat_failures'],
             'heartbeat_timeouts_total': diagnostic['heartbeat_timeouts'],
             'heartbeat_frame_age_seconds': diagnostic['heartbeat_frame_age_ms'] / 1000,
@@ -126,6 +141,21 @@ def bridge_metrics(snapshot):
             'callback_dead_letters': line['failed_callbacks'],
             'uncertain_sends': line['uncertain_sends'],
         }
+        transport = diagnostic.get('transport') or {}
+        family = transport.get('family')
+        if family in {'IPv4', 'IPv6', 'unknown'}:
+            values['support_bridge_transport_family{' + labels + ',family="' + family + '"}'] = 1
+        sample = tcp.get(raw_id)
+        fields['tcp_sample_up'] = int(sample is not None)
+        if sample is not None:
+            # These are per-socket gauges: use the generation metric when
+            # comparing samples. A replacement connection resets TCP counters.
+            for name in ('receive_queue_bytes', 'send_queue_bytes', 'retransmitted_segments',
+                         'retransmitted_bytes', 'rtt_ms', 'rto_ms'):
+                if name in sample:
+                    fields['tcp_' + name] = sample[name]
+        if diagnostic.get('heartbeat_query_elapsed_ms') is not None:
+            fields['heartbeat_query_elapsed_seconds'] = diagnostic['heartbeat_query_elapsed_ms'] / 1000
         if diagnostic.get('heartbeat_rtt_ms') is not None:
             fields['heartbeat_rtt_seconds'] = diagnostic['heartbeat_rtt_ms'] / 1000
         for name, value in fields.items():
@@ -145,7 +175,7 @@ def bridge_metrics(snapshot):
     return values
 
 
-def collect(client, *, probe=api_probe, bridge=bridge_probe, database=database_probe, now=time.time):
+def collect(client, *, probe=api_probe, bridge=bridge_probe, database=database_probe, now=time.time, tcp=tcp_samples):
     values = {'support_runtime_check_timestamp_seconds': now()}
     try:
         values['support_api_up'] = int(probe())
@@ -160,7 +190,11 @@ def collect(client, *, probe=api_probe, bridge=bridge_probe, database=database_p
             support_bridge_paired_lines=sum(bool(line.get('is_paired')) for line in lines),
             support_bridge_qr_codes=sum(bool(line.get('qr')) for line in lines))
         try:
-            values.update(bridge_metrics(snapshot))
+            try:
+                samples = tcp(lines)
+            except Exception:
+                samples = {}
+            values.update(bridge_metrics(snapshot, samples))
         except Exception:
             values['support_bridge_diagnostics_up'] = 0
     except Exception:
