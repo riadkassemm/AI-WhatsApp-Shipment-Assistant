@@ -6,6 +6,7 @@ import pino from 'pino';
 import QRCode from 'qrcode';
 import { BridgeError, phoneDigits, wrapId, unwrapId, validateLineManifest, UUID_PATTERN, MANIFEST_MAX_BYTES } from './config.js';
 import { FileStore, createAuth } from './storage.js';
+import { assessAuthRecovery } from './auth-recovery.js';
 import { JournalStore, encode } from './journal-store.js';
 import { safeStorageCode } from './journal-maintenance.js';
 import { StorageMonitor } from './storage-monitor.js';
@@ -530,6 +531,17 @@ export class Bridge {
   status() { return { lines: [...this.lines.values()].map(line => this.lineStatus(line)),
     storage: this.storageMonitor.status(), runtime: this.runtimeHealth(), event_loop: this.eventLoop.snapshot() }; }
 
+  async assessAuthenticationRecovery(id) {
+    const line = this.getLine(id);
+    const result = line.auth ? await line.auth.assessRecovery() : assessAuthRecovery();
+    if (line.connectPromise || line.removing) {
+      result.blockers.push('OWNERSHIP_TRANSITION_IN_PROGRESS');
+      result.authentication_evidence_complete = false;
+      result.status = 'BLOCKED';
+    }
+    return {line_id: id, ...result};
+  }
+
   async connect(id) {
     this.assertRunning();
     const line = this.getLine(id);
@@ -543,6 +555,9 @@ export class Bridge {
   async openSocket(line) {
     if (this.stopping) throw new BridgeError(503, 'STOPPING', 'The bridge is shutting down.');
     const generation = ++line.generation;
+    // Retiring callbacks keep their own diagnostics object. Their evidence must
+    // survive a failed replacement without modifying the new generation's health.
+    line.diagnostics = {...line.diagnostics};
     line.retryBlocked = false;
     line.recoveryCategory = null;
     line.auth?.retire();
@@ -588,44 +603,45 @@ export class Bridge {
     delete line.qr;
     delete line.qr_data_url;
     resetConnectionDiagnostics(line.diagnostics, generation);
+    const diagnostics = line.diagnostics;
     let socket;
     const reportDiagnostic = sample => {
-      if (generation !== line.generation || this.stopping) return;
-      if (sample.event === 'transport_error') line.diagnostics.transport_error_code = sample.error_code;
-      if (sample.event === 'transport_closed') line.diagnostics.transport_close_code = sample.close_code;
-      if (sample.event === 'socket_error') line.diagnostics.socket_error_code = sample.error_code;
-      if (sample.event === 'socket_end') line.diagnostics.socket_end_at = Date.now();
+      const retiring = generation !== line.generation || this.stopping;
+      if (sample.event === 'transport_error') diagnostics.transport_error_code = sample.error_code;
+      if (sample.event === 'transport_closed') diagnostics.transport_close_code = sample.close_code;
+      if (sample.event === 'socket_error') diagnostics.socket_error_code = sample.error_code;
+      if (sample.event === 'socket_end') diagnostics.socket_end_at = Date.now();
       if (sample.event === 'socket_closed') {
-        line.diagnostics.socket_closed_at = Date.now();
-        line.diagnostics.socket_close_had_error = sample.had_error;
+        diagnostics.socket_closed_at = Date.now();
+        diagnostics.socket_close_had_error = sample.had_error;
       }
-      const heartbeat = observeHeartbeat(line.diagnostics, sample);
-      if (heartbeat && sample.event === 'heartbeat_result' && line.session?.ready && !line.session.closed) {
-        const seconds = finishInterruption(line.diagnostics);
+      const heartbeat = observeHeartbeat(diagnostics, sample);
+      if (!retiring && heartbeat && sample.event === 'heartbeat_result' && line.session?.ready && !line.session.closed) {
+        const seconds = finishInterruption(diagnostics);
         if (seconds != null) this.trace(line, 'heartbeat_recovered', { duration_ms: seconds * 1000 });
       }
       if (heartbeat || sample.transport) {
         const current = sample.transport ?? (socket && transportSnapshot(socket.ws));
         if (current) {
-          const previous = line.diagnostics.transport;
+          const previous = diagnostics.transport;
           // Node can clear endpoint fields during destroy. Retain this
           // generation's last known peer so the failure still has attribution.
-          line.diagnostics.transport = current.remote_ip || !previous ? current : {...current,
+          diagnostics.transport = current.remote_ip || !previous ? current : {...current,
             remote_ip: previous.remote_ip, family: previous.family,
             local_port: previous.local_port, remote_port: previous.remote_port};
         }
-        this.trace(line, sample.event, { query_sequence: line.diagnostics.heartbeat_query_sequence,
-          query_elapsed_ms: line.diagnostics.heartbeat_query_elapsed_ms,
-          outcome: line.diagnostics.heartbeat_outcome, frame_at: line.diagnostics.last_frame_at,
-          raw_frame_at: line.diagnostics.last_raw_frame_at,
-          frame_age_ms: line.diagnostics.heartbeat_frame_age_ms,
-          timer_delay_ms: line.diagnostics.heartbeat_timer_delay_ms,
-          rtt_ms: line.diagnostics.heartbeat_rtt_ms, transport: line.diagnostics.transport,
-          close_code: line.diagnostics.transport_close_code, error_code: line.diagnostics.transport_error_code,
+        this.trace(line, sample.event, { generation, retiring_generation: retiring, query_sequence: diagnostics.heartbeat_query_sequence,
+          query_elapsed_ms: diagnostics.heartbeat_query_elapsed_ms,
+          outcome: diagnostics.heartbeat_outcome, frame_at: diagnostics.last_frame_at,
+          raw_frame_at: diagnostics.last_raw_frame_at,
+          frame_age_ms: diagnostics.heartbeat_frame_age_ms,
+          timer_delay_ms: diagnostics.heartbeat_timer_delay_ms,
+          rtt_ms: diagnostics.heartbeat_rtt_ms, transport: diagnostics.transport,
+          close_code: diagnostics.transport_close_code, error_code: diagnostics.transport_error_code,
           configured_ip_family: this.config.wsIpFamily ?? 0,
-          socket_error_code: line.diagnostics.socket_error_code,
-          socket_end_at: line.diagnostics.socket_end_at, socket_closed_at: line.diagnostics.socket_closed_at,
-          socket_close_had_error: line.diagnostics.socket_close_had_error,
+          socket_error_code: diagnostics.socket_error_code,
+          socket_end_at: diagnostics.socket_end_at, socket_closed_at: diagnostics.socket_closed_at,
+          socket_close_had_error: diagnostics.socket_close_had_error,
           event_loop: this.eventLoop.snapshot() });
       }
     };
@@ -675,6 +691,7 @@ export class Bridge {
     } catch (error) { auth.retire(); throw error; }
     line.socket = socket;
     line.transportClosed = socket.bridgeTransportClosed;
+    auth.trackRecoveryTransport(line.transportClosed, generation);
     line.diagnostics.supported = socket.bridgeConnectionDiagnosticsVersion === 2;
     observeTransport(socket.ws, reportDiagnostic);
     const session = { generation, ready: false, closed: false };
@@ -700,6 +717,7 @@ export class Bridge {
       flushAcceptedBuffer();
       session.subscriptionReleased = true;
       session.restoreNativeEvents?.(); session.unsubscribe?.();
+      auth.recoveryEventsReleased();
     };
     const finishRetirement = (force = false) => {
       if (finishingRetirement) return;
