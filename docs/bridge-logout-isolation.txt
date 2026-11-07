@@ -1,4 +1,4 @@
-WhatsApp logout isolation — local fix, not deployed
+WhatsApp logout isolation — fix and approved retirement deployment
 =================================================
 
 Incident observed 2026-11-07 on production 194.5.152.173 (read-only).
@@ -92,3 +92,51 @@ Manual acceptance (isolated/mock first; production only after approval)
    mocks for this check; do not inject failures into production credentials.
 6. Verify ordinary sends/receipts/media with an agreed internal contact and
    monitor heartbeat delay, callback backlog and authentication failures.
+
+2026-11-07: explicit authorization to remove 90011 and 90030 and deploy
+-------------------------------------------------------------------
+Normal removal cannot drain their fenced auth stores. The approved operation
+retires only these IDs, rather than recovering/reusing their uncertain sessions.
+Do not clear their authentication fences or claim remote unlink for 90011.
+Keep credentials and all files on the VPS in a root-private retirement archive.
+
+Stage committed source/dependencies first; preserve current environment and
+IP-family selection. Monitoring now uses WHATSAPP_EXPECTED_IDENTITIES (default
+8); set it to 6 only for this explicitly approved retirement. Count expectations
+are independent of live connections. Invalid/missing metrics continue to alert.
+
+Close Customer Support ingress/ngrok, disable forced killing during shutdown,
+and let the old bridge retire all owners. The known failed auth stores can
+produce exit status 1: never label that a clean shutdown. Require natural
+process exit, no remaining service processes or bridge listener, zero inbound
+queues/leases, no new healthy-line auth fences, and full offline validation of
+all remaining journals before any replacement may start. A live owner,
+SIGKILL, deadline failure or any additional failed store aborts this operation.
+
+After API stop, preserve verified database/Redis snapshots and a checksum-
+verified copy of all application state. Move only the two retired directories
+out of the active bridge root, keeping their auth-active/auth-intent/auth-failure
+markers intact. Preserve the full original manifest, outbox, retired-phone map
+and private audit record. Tombstone only those IDs and their registration
+requests; retain their phone/offline history for future intentional re-linking.
+
+In one database transaction archive their active conversations using existing
+removal_details/history conventions and retain message rows, assignments and
+historical labels. Record a SYSTEM operator removal, with actor_staff_id NULL
+and remote_unlink_confirmed=false for 90011; do not impersonate a staff account.
+90030 has prior provider logout evidence. Remove only these registry profiles.
+Validate unchanged message records, all 31 schemas, other lines and retained
+uncertain records before starting the API then bridge. Redis data and TTLs are
+not restored, deleted or rewritten. Existing DB reconciliation closes stale
+conversation-cache ownership on next use of a newly linked line.
+
+Only after six ready, paired identities, successful heartbeats, healthy storage,
+checkpointing and fresh monitoring reopen ingress/ngrok and request staff
+acceptance. No QR scan, session duplication, uncertain-message replay, DNS
+change, host networking change, DEV access or Shipping Rates operation.
+
+Rollback requires preserving authoritative new writes. Keep retired IDs
+tombstoned; never restore their archived auth into the active root implicitly.
+The old source can be restored with the same six-line manifest and monitoring
+setting, subject to the logout-marker compatibility warning above. Do not
+roll back DB/Redis snapshots after activation or re-enable retired identities.
