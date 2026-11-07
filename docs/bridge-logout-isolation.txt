@@ -47,6 +47,10 @@ Changes
   Deactivate button, whose separate endpoint rejects active conversations.
   Explicit removal still confirms closing active conversations and preserves
   their database history. Permissions and remote-unlink confirmation remain.
+- An unlink attempt against a fenced authentication store reports
+  AUTH_RECOVERY_REQUIRED and retains the session-recovery classification.
+  The API/UI ask for administrator review rather than another unlink attempt.
+  Ordinary unconfirmed network unlink remains retryable; no fence is cleared.
 
 Verification scope
 Focused Node mocks and Python API/repository/DOM regressions only. No real
