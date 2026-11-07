@@ -99,13 +99,13 @@ test('configuration rejects weak secrets, nonnumeric lines, and public binds', (
 test('IPv4 policy covers eight identities and reconnect without duplicate ownership or uncertain replay', {timeout: 15000}, async t => {
   const dataDir = await mkdtemp(path.join(os.tmpdir(), 'bridge-ipv4-ownership-'));
   const ids = Array.from({length: 8}, (_, i) => String(91000 + i));
-  const sockets = [], optionsSeen = [], release = [];
+  const sockets = [], optionsSeen = [], release = [], diagnostics = [];
   let firstEnd;
   const firstEnding = new Promise(resolve => { firstEnd = resolve; });
   let holdFirst = false;
   const config = {secret: SECRET, wsIpFamily: 4, lines: ids.map(line_id => ({line_id, expected_phone: ''})),
     dataDir, callbackUrl: 'http://127.0.0.1/callback', maxMediaBytes: 1024, ackTimeoutMs: 100};
-  const bridge = new Bridge(config, {storageFilesystem: healthyStorage, log: () => {}, onError: () => {},
+  const bridge = new Bridge(config, {storageFilesystem: healthyStorage, log: x => diagnostics.push(x), onError: () => {},
     fetch: () => { throw new Error('No callback dispatch expected'); },
     makeSocket: options => {
       const index = sockets.length, socket = mockSocket();
@@ -155,10 +155,36 @@ test('IPv4 policy covers eight identities and reconnect without duplicate owners
   assert.equal(bridge.lineStatus(line).diagnostics.configured_ip_family, 4);
   optionsSeen[0].bridgeConnectionDiagnostics({event: 'socket_error', error_code: 'EPIPE',
     transport: {remote_ip: '2001:db8::1', family: 'IPv6'}});
-  assert.equal(line.diagnostics.socket_error_code, null, 'retired generation diagnostics are ignored');
+  assert.equal(line.diagnostics.socket_error_code, null, 'retired diagnostics cannot overwrite current health');
+  assert.ok(diagnostics.some(x => x.event === 'socket_error' && x.generation === 1 && x.retiring_generation && x.socket_error_code === 'EPIPE'));
   assert.deepEqual(line.store.data.messages.HELD_UNCERTAIN, saved);
   assert.deepEqual(bridge.outbox.data, outbox);
   assert.ok(sockets.every(socket => socket.calls.length === 0), 'no sends or uncertainty replays');
+});
+
+test('retiring diagnostics survive failed auth renewal without claiming replacement health', async t => {
+  let options;
+  const log = [];
+  const {bridge, line} = await fixture(t, 'ack', {log: x => log.push(x),
+    makeSocket: value => {options = value; return mockSocket();}});
+  const socket = line.socket;
+  options.bridgeConnectionDiagnostics({event: 'heartbeat_request', query_sequence: 1});
+  const previousGeneration = line.generation;
+  const drain = line.auth.drain;
+  line.auth.drain = async () => {throw Object.assign(new Error('synthetic drain timeout'), {code: 'AUTH_TRANSACTION_DRAIN_TIMEOUT'});};
+  bridge.blockConnection(line, socket, 'test_receive_failure');
+  try { await assert.rejects(bridge.connect(line.line_id), /synthetic drain timeout/); }
+  finally {line.auth.drain = drain;}
+  const before = structuredClone(line.diagnostics);
+  options.bridgeConnectionDiagnostics({event: 'heartbeat_query_timeout', query_sequence: 1, query_elapsed_ms: 20000});
+  options.bridgeConnectionDiagnostics({event: 'transport_closed', close_code: 1006,
+    transport: {remote_ip: '2001:db8::1', family: 'IPv6'}});
+  assert.deepEqual(line.diagnostics, before);
+  assert.ok(log.some(x => x.event === 'heartbeat_query_timeout' && x.generation === previousGeneration && x.retiring_generation));
+  assert.ok(log.some(x => x.event === 'transport_closed' && x.generation === previousGeneration && x.close_code === 1006));
+  assert.equal(line.session.ready, false);
+  assert.equal(line.socket, null);
+  assert.equal(socket.calls.length, 0);
 });
 
 test('dynamic line registrations allocate IDs atomically, avoid reserved IDs, and replay across restarts without touching connected sockets', async t => {
