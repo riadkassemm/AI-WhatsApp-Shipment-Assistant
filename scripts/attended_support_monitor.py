@@ -57,7 +57,7 @@ def collect(read=query):
         for alert in read('ALERTS{alertstate="firing",severity="warning"}'):
             name = alert.get('metric', {}).get('alertname', '')
             if name in {'BridgeRepeatedDisconnects', 'BridgeHeartbeatDelayed', 'BridgeEventLoopStalls',
-                        'BridgeCallbackBacklog', 'BridgeCallbackDeadLetters', 'SupportDeliveryUncertaintyIncreased', 'BridgeIdentityFenced'}:
+                        'BridgeCallbackBacklog', 'BridgeCallbackDeadLetters', 'SupportDeliveryUncertaintyIncreased', 'BridgeIdentityFenced', 'BridgeIdentityDecommissioned'}:
                 attention.append(name)
     except Exception:
         checks['warning_alerts_readable'] = False

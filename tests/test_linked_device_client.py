@@ -711,3 +711,41 @@ def test_delivery_lookup_rejects_invalid_evidence(bridge, payload):
     with pytest.raises(WhatsAppSendError):
         asyncio.run(LinkedDeviceWhatsAppClient().get_delivery_status(
             phone='96171111111', client_message_id='transport-key', phone_number_id='10001'))
+
+
+def test_quarantine_blocks_sends_but_preserves_local_media(bridge, monkeypatch, tmp_path):
+    import json
+    from app.config import quarantined_linked_device_line_ids
+    directory = tmp_path / "quarantined"
+    directory.mkdir()
+    monkeypatch.setattr(settings, "whatsapp_linked_device_data_directory", str(directory))
+    (directory / "lines.json").write_text(json.dumps({"version": 1, "lines": {}, "quarantined_lines": {"10001": {
+        "line_id": "10001", "state": "permanently_decommissioned", "reuse_allowed": False, "remote_unlinked": False}}}))
+    def respond(request):
+        assert request.method == "GET"
+        assert request.url.path.endswith(MEDIA)
+        return httpx.Response(200, content=b"preserved image", headers={"content-type": "image/jpeg"})
+    requests = bridge(respond)
+    async def run():
+        client = RoutedWhatsAppClient()
+        assert quarantined_linked_device_line_ids() == {"10001"}
+        assert get_transport("10001") == "removed"
+        media = await client.download_media(MEDIA, phone_number_id="10001")
+        assert media.content == b"preserved image"
+        with pytest.raises(WhatsAppMediaError):
+            await client.download_media(MEDIA, phone_number_id="10002")
+        with pytest.raises(WhatsAppSendError):
+            await client.send_text("96170000000", "blocked", phone_number_id="10001")
+    asyncio.run(run())
+    assert len(requests) == 1
+
+
+def test_decommission_client_accepts_explicit_local_result_without_claiming_unlink(bridge):
+    import json
+    def respond(request):
+        assert request.method == "POST" and request.url.path == "/v1/lines/10001/decommission"
+        assert json.loads(request.content) == {"confirm_line_id": "10001", "actor": "7"}
+        return httpx.Response(200, json={"line_id": "10001", "removed": True, "unlinked": False, "quarantined": True, "reuse_allowed": False})
+    bridge(respond)
+    result = asyncio.run(LinkedDeviceWhatsAppClient().remove_line("10001", decommission=True, actor="7"))
+    assert result["unlinked"] is False

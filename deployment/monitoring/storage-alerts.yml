@@ -74,6 +74,13 @@ groups:
         labels: {severity: critical}
         annotations:
           summary: "Fenced identity lacks safe retirement evidence; do not restart"
+      - alert: BridgeIdentityDecommissioned
+        expr: (support_bridge_decommissioned_lines > 0) and on() (support_monitoring_expected == 1)
+        for: 0m
+        labels: {severity: warning}
+        annotations:
+          summary: "WhatsApp session permanently decommissioned; evidence retained"
+          description: "Remote unlink may require action on the selected number's primary phone. Never reuse abandoned credentials or replay uncertain deliveries."
       - alert: InboundWorkUnresolved
         expr: (support_inbound_pending > 0 or support_inbound_inflight > 0 or support_inbound_invalid > 0) and on() (support_monitoring_expected == 1)
         for: 5m

@@ -12,7 +12,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
-from app.config import removed_linked_device_line_ids, settings
+from app.config import removed_linked_device_line_ids, quarantined_linked_device_line_ids, settings
 from app.customer_directory import normalize_phone
 from app.support_auth import SupportAgent, get_current_agent, require_support_csrf
 from app.support_media import SupportMediaError
@@ -62,6 +62,7 @@ class RemoveLinkedDeviceLineRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     close_active_tickets: bool = Field(default=False, strict=True)
+    mode: Literal["unlink", "decommission"] = "unlink"
 
 
 class LinkedDeviceEvent(BaseModel):
@@ -249,24 +250,28 @@ async def remove_linked_device_line(
                 agent, line_id, close_active_tickets=body.close_active_tickets,
             )
             try:
-                result = await linked_device_client.remove_line(line_id)
+                result = await linked_device_client.remove_line(line_id, decommission=True, actor=str(agent.id)) if body.mode == "decommission" else await linked_device_client.remove_line(line_id)
             except WhatsAppSendError as exc:
                 if getattr(exc, "bridge_code", None) == "AUTH_WORK_PENDING":
                     raise HTTPException(409, "This number is inactive while WhatsApp logout finishes accepted updates. Its conversations are retained. Wait, then retry Remove and unlink.") from exc
                 if getattr(exc, "bridge_code", None) == "AUTH_RECOVERY_REQUIRED":
-                    raise HTTPException(503, "This number is inactive and its saved session requires administrator recovery review before removal or reconnecting. Its conversations and saved state are retained.") from exc
+                    raise HTTPException(409, "This saved session cannot safely unlink through WhatsApp. Use permanent local removal; its conversations and authentication evidence will be retained.") from exc
+                if getattr(exc, "bridge_code", None) == "DECOMMISSION_BLOCKED":
+                    raise HTTPException(409, "Local removal is waiting for verified transport and writer shutdown. No evidence was deleted; administrator review is required.") from exc
                 raise HTTPException(503, "The number is inactive in the app, but WhatsApp unlinking did not finish. Its conversations are retained. Retry Remove and unlink, or add it back to the app if it is still connected.") from exc
-            if not isinstance(result, dict) or str(result.get("line_id")) != line_id or result.get("removed") is not True or result.get("unlinked") is not True:
+            quarantined = isinstance(result, dict) and result.get("quarantined") is True and result.get("reuse_allowed") is False and type(result.get("unlinked")) is bool
+            if not isinstance(result, dict) or str(result.get("line_id")) != line_id or result.get("removed") is not True or not (quarantined or result.get("unlinked") is True):
                 raise HTTPException(503, "WhatsApp did not confirm unlinking. The number remains inactive and its conversations are retained. Retry Remove and unlink.")
             try:
                 closed = await whatsapp_registry_service.finish_linked_device_removal(
                     agent, line_id, close_active_tickets=body.close_active_tickets,
+                    **({"remote_unlinked": result["unlinked"]} if quarantined else {}),
                 )
             except (WhatsAppRegistryConflictError, WhatsAppRegistryValidationError):
                 raise
             except Exception as exc:
-                logger.exception("WhatsApp unlinked but conversation archival failed: line_id=%s", line_id)
-                raise HTTPException(503, "WhatsApp was unlinked, but closing its conversations could not finish. Their history is retained. Retry Remove and unlink to complete removal.") from exc
+                logger.exception("WhatsApp local removal completed but conversation archival failed: line_id=%s", line_id)
+                raise HTTPException(503, "The number was removed locally, but closing its conversations could not finish. Their history is retained. Retry removal to complete archival.") from exc
             registry = await whatsapp_registry_service.list_payload(agent)
         # Successful native removal must not be reported as failure merely
         # because a subsequent status fetch races a bridge restart.
@@ -274,7 +279,9 @@ async def remove_linked_device_line(
             status = await linked_device_status(agent)
         except HTTPException:
             status = {"configured": True, "lines": [], "default_transport": settings.whatsapp_transport, "status_unavailable": True}
-        return {**status, "removed_line_id": line_id, "unlinked": True, "closed_conversations": closed, "registry": registry}
+        return {**status, "removed_line_id": line_id, "unlinked": result.get("unlinked") is True,
+                "quarantined": quarantined, "message": result.get("message"), "unlink_instruction": result.get("unlink_instruction"),
+                "closed_conversations": closed, "registry": registry}
     except WhatsAppRegistryConflictError as exc:
         raise HTTPException(409, str(exc)) from exc
     except WhatsAppRegistryValidationError as exc:
@@ -301,6 +308,9 @@ async def receive_linked_device_event(request: Request):
         event = LinkedDeviceEvent.model_validate(json.loads(chunks))
     except (ValueError, ValidationError) as exc:
         raise HTTPException(400, "Invalid linked device event.") from exc
+    if event.line_id in quarantined_linked_device_line_ids():
+        # Do not acknowledge-and-drop a stale request from preserved outbox work.
+        raise HTTPException(409, "This identity is quarantined; callback evidence must be retained.")
     if event.line_id in removed_linked_device_line_ids():
         return {"status": "ignored", "reason": "removed_line"}
     _require_line(event.line_id)

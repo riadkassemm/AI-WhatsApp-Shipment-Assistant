@@ -1498,8 +1498,11 @@ async function addLinkedDeviceNumber() {
 
 async function removeLinkedDeviceNumber(lineId) {
   if (!canManageWhatsApp() || state.linkedDeviceBusy || state.whatsappBusy) return;
-  const typed = await promptDialog({title: 'Remove and unlink number?', label: 'Type REMOVE to confirm', confirmLabel: 'Remove and unlink', tone: 'danger',
-    message: 'Remove and unlink this WhatsApp number? Active conversations do not prevent removal: they will be closed and their chat history kept. Only this number will be signed out and removed from the app.'});
+  const line = state.linkedDeviceStatus?.lines?.find(item => String(item.line_id) === String(lineId));
+  const decommission = line?.recovery_category === 'storage_failure' || String(line?.lifecycle || '').startsWith('fenced_');
+  const typed = await promptDialog({title: decommission ? 'Remove failed session locally?' : 'Remove and unlink number?', label: 'Type REMOVE to confirm', confirmLabel: decommission ? 'Remove locally' : 'Remove and unlink', tone: 'danger',
+    message: decommission ? 'Permanently remove this failed session from this application? Its credentials will never be reused. Conversations, attachments and unresolved delivery evidence stay retained. WhatsApp device unlinking may require action on this number’s primary phone.' :
+      'Remove and unlink this WhatsApp number? Active conversations do not prevent removal: they will be closed and their chat history kept. Only this number will be signed out and removed from the app.'});
   if (typeof typed !== 'string' || typed.trim().toUpperCase() !== 'REMOVE') {
     if (typeof typed === 'string') showWhatsAppFeedback('whatsappError', 'Nothing was removed. Type REMOVE to confirm removal.');
     return;
@@ -1511,12 +1514,12 @@ async function removeLinkedDeviceNumber(lineId) {
   if (state.whatsappRegistry) renderWhatsAppRegistry(state.whatsappRegistry);
   try {
     const payload = await api('/api/support/whatsapp-linked-device/lines/' + encodeURIComponent(lineId), {
-      method: 'DELETE', body: JSON.stringify({close_active_tickets: true}),
+      method: 'DELETE', body: JSON.stringify({close_active_tickets: true, mode: decommission ? 'decommission' : 'unlink'}),
     });
     saveLinkedDeviceAddition(null);
     if (payload.registry) renderWhatsAppRegistry(payload.registry);
     renderLinkedDeviceStatus(payload);
-    showWhatsAppFeedback('whatsappSuccess', 'WhatsApp number removed and unlinked. Its chat history remains available.');
+    showWhatsAppFeedback('whatsappSuccess', payload.quarantined ? [payload.message, payload.unlink_instruction, 'Its chat history remains available.'].filter(Boolean).join(' ') : 'WhatsApp number removed and unlinked. Its chat history remains available.');
   } catch (error) {
     showWhatsAppFeedback('whatsappError', error.message);
   } finally {

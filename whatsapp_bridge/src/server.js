@@ -71,6 +71,11 @@ export function createServer(bridge, config) {
       }
       if (parts[0] !== 'v1' || parts[1] !== 'lines' || !/^\d{5,32}$/.test(parts[2] ?? '')) throw new BridgeError(404, 'NOT_FOUND', 'Unknown bridge endpoint.');
       const id = parts[2];
+      if (request.method === 'POST' && parts.length === 4 && parts[3] === 'decommission') {
+        const payload = await readJson(request, 1024);
+        if (payload.confirm_line_id !== id || typeof payload.actor !== 'string' || !payload.actor.trim() || payload.actor.length > 128) throw new BridgeError(400, 'DECOMMISSION_CONFIRMATION_REQUIRED', 'Confirm the selected identity and administrator.');
+        return send(response, 200, await bridge.decommissionLine(id, {actor: payload.actor}));
+      }
       if (request.method === 'DELETE' && parts.length === 3) return send(response, 200, await bridge.removeLine(id));
       bridge.getLine(id);
       if (request.method === 'GET' && parts.length === 4 && parts[3] === 'auth-recovery') {

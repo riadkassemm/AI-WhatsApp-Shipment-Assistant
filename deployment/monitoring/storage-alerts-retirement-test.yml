@@ -30,3 +30,15 @@ tests:
         alertname: BridgeDisconnected
         exp_alerts:
           - {exp_labels: {severity: critical}}
+  - interval: 1m
+    input_series:
+      - {series: support_monitoring_expected, values: '1+0x5'}
+      - {series: support_bridge_decommissioned_lines, values: '1+0x5'}
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: BridgeIdentityDecommissioned
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: "WhatsApp session permanently decommissioned; evidence retained"
+              description: "Remote unlink may require action on the selected number's primary phone. Never reuse abandoned credentials or replay uncertain deliveries."

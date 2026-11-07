@@ -1,3 +1,7 @@
+SUPERSEDED: use docs/bridge-local-decommission-deployment.txt for the explicitly
+approved permanent abandonment transition. The recovery-only blocker and old
+identity/release assumptions below are historical; do not execute them verbatim.
+
 PR #82 deployment readiness and production procedure
 ===================================================
 SUPERSEDED SAFETY BASELINE (2026-11-07): see bridge-fenced-identity-isolation.txt

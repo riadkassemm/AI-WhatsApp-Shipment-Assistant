@@ -49,7 +49,7 @@ export function assessAuthRetention({failure, active, intents, journal}) {
     recovery_allowed: false, blockers: [...blockers], historical_intents: Array.isArray(retained) ? retained.length : null};
 }
 
-async function inventory(directory) {
+export async function inventory(directory) {
   const dir = await fs.lstat(directory);
   if (!dir.isDirectory() || dir.isSymbolicLink() || (dir.mode & 0o077) || dir.uid !== process.getuid()) throw blocked('PRIVATE_EVIDENCE_REQUIRED');
   const result = {};

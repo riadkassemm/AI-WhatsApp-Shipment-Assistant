@@ -415,6 +415,16 @@ function authFacade(store, owner) {
       if (!auth.retainedIdle()) throw new Error('AUTH_ISOLATION_UNPROVEN');
       retained = true;
     },
+    // Permanent abandonment needs cessation, not proof that these credentials
+    // are reusable. Historical intents stay unresolved and are never applied.
+    quarantineIdle: () => owner.current === auth && retired && transportState === 'closed' && eventsReleased &&
+      store.failed && pending.size === 0 && tokens.size === 0 && credentialWrites === 0 &&
+      store.pending === 0 && store.healthWrites === 0 && !store.compactionPromise && !store.activeCheckpoint &&
+      !store.cleanupCheckpoint && !failureWriting,
+    sealQuarantine: () => {
+      if (!auth.quarantineIdle()) throw new Error('QUARANTINE_WRITER_ACTIVE');
+      retained = true;
+    },
     // Observation only: no flush, marker changes, provider calls or journal replay.
     assessRecovery: async ({timeoutMs = 1000} = {}) => {
       // A closing transport or settling callback may append evidence while the

@@ -446,7 +446,17 @@ test('removal preserves a fenced authentication failure instead of recommending 
     assert.equal(line.status, 'connected');
     assert.equal(line.session.ready, true);
     assert.equal(socket.queries.length, 0);
-  } finally {await assert.rejects(bridge.close(), /BRIDGE_SHUTDOWN_FAILED/);}
+    await assert.rejects(bridge.close(), /DIRECTORY_OWNERSHIP_UNPROVEN/);
+    assert.equal(bridge.stopping, false, 'missing ownership proof must abort before healthy shutdown');
+    assert.equal(line.socket, socket);
+    assert.equal(line.session.ready, true);
+  } finally {
+    // Undo only this test's synthetic failed flag to dispose mock handles.
+    // Production evidence is never cleared by the failed shutdown path.
+    target.auth.store.failed = false;
+    target.isolating = false;
+    await bridge.close();
+  }
 });
 
 test('an unlink timeout cannot pretend complete removal or erase saved credentials, and an explicit retry can finish', async t => {

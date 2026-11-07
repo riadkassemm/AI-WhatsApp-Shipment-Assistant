@@ -101,6 +101,7 @@ def bridge_metrics(snapshot, tcp=None):
         support_bridge_eligible_paired_lines=sum(bool(line.get('is_paired')) for line in eligible),
         support_bridge_fenced_lines=sum(str(line.get('lifecycle', '')).startswith('fenced_') for line in lines),
         support_bridge_fenced_unresolved_lines=sum(line.get('lifecycle') == 'fenced_unresolved' for line in lines),
+        support_bridge_decommissioned_lines=sum(line.get('lifecycle') == 'decommissioned' for line in lines),
         support_bridge_eligible_storage_critical=int(snapshot.get('runtime', {}).get('eligible_storage_critical') is not False))
     diagnostics_ok = bool(lines)
     identities = set()
@@ -112,7 +113,8 @@ def bridge_metrics(snapshot, tcp=None):
         identity = hashlib.sha256(raw_id.encode()).hexdigest()[:16]
         labels = 'identity="' + identity + '"'
         values['support_bridge_identity_connected{' + labels + '}'] = int(line.get('status') == 'connected')
-        retained = line.get('lifecycle') == 'fenced_retained' and line.get('isolation', {}).get('safe') is True
+        retained = line.get('lifecycle') in {'fenced_retained', 'decommissioned'} and line.get('isolation', {}).get('safe') is True
+        values['support_bridge_identity_decommissioned{' + labels + '}'] = int(line.get('lifecycle') == 'decommissioned')
         values['support_bridge_identity_fenced{' + labels + '}'] = int(str(line.get('lifecycle', '')).startswith('fenced_'))
         values['support_bridge_identity_retained{' + labels + '}'] = int(retained)
         # Fenced identities still expose callback and uncertainty backlogs even

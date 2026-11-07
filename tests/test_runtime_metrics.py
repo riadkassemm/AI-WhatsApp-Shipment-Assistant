@@ -135,3 +135,17 @@ def test_fenced_identity_keeps_backlog_metrics_without_claiming_transport_health
     assert bridge_metrics(data)['support_bridge_fenced_unresolved_lines'] == 1
     del data['runtime']
     assert bridge_metrics(data)['support_bridge_eligible_storage_critical'] == 1
+
+
+def test_decommissioned_identity_keeps_uncertainty_visible_without_counting_as_eligible():
+    data = snapshot()
+    data['lines'] = data['lines'][:7]
+    data['runtime'] = {'eligible_storage_critical': False}
+    data['lines'][-1].update(status='decommissioned', lifecycle='decommissioned', eligible=False,
+        is_paired=False, isolation={'safe': True}, diagnostics={}, uncertain_sends=41, pending_callbacks=2)
+    metrics = bridge_metrics(data)
+    assert metrics['support_bridge_eligible_lines'] == 6
+    assert metrics['support_bridge_decommissioned_lines'] == 1
+    assert metrics['support_bridge_fenced_unresolved_lines'] == 0
+    assert metrics['support_bridge_diagnostics_up'] == 1
+    assert any(k.startswith('support_bridge_uncertain_sends{') and v == 41 for k, v in metrics.items())
