@@ -83,7 +83,7 @@ function authFacade(store, owner) {
   const context = new AsyncLocalStorage();
   const pending = new Set(), tokens = new Set(), attached = new WeakSet();
   const failureEvidence = [];
-  let failureTail = Promise.resolve(), reportedFailure = false;
+  let failureTail = Promise.resolve(), reportedFailure = false, failureWriting = false;
   const ownerId = crypto.randomUUID(), authGeneration = owner.generation, failedOperations = new Map();
   let evidenceRevision = 0, persistedRevision = 0, evidenceWriteFailed = false, credentialWrites = 0;
   let transportState = 'unknown', connectionGeneration = null, eventsReleased = false;
@@ -102,21 +102,34 @@ function authFacade(store, owner) {
     credentials: cloneAuth(creds) });
   const persistFailure = error => {
     for (const token of tokens) failedOperations.set(token.id, operationEvidence(token));
-    const revision = ++evidenceRevision;
-    const saved = cloneAuth({ version: 2, failures: failureEvidence, recovery: recoverySnapshot() });
-    failureTail = failureTail.then(() => {
-      // Earlier queued writes may fail after this snapshot was captured. A
-      // later successful write must not erase that durability warning.
-      saved.recovery.evidence_write_failed ||= evidenceWriteFailed;
-      return atomicWrite(store.filename + '.auth-failure', saved);
-    })
-      .then(() => { persistedRevision = revision; }).catch(fenceError => {
-        evidenceWriteFailed = true;
-        if (error) error.authFencePersistenceFailed = true;
-        fenceError.bridgePersistenceFailure = true;
-        fenceError.code = 'AUTH_FAILURE_FENCE_UNWRITABLE';
-        auth.onFailure?.(fenceError);
-      });
+    evidenceRevision++;
+    if (failureWriting) return;
+    failureWriting = true;
+    failureTail = failureTail.then(async () => {
+      try {
+        let attemptedRevision = 0;
+        while (attemptedRevision !== evidenceRevision) {
+          const revision = evidenceRevision;
+          try {
+            // Entries are immutable at admission. Coalesce bursts without
+            // repeatedly cloning the entire history; include the latest final
+            // operation/credential/transport evidence, even with no new failure.
+            const saved = { version: 2, failures: failureEvidence.slice(), recovery: recoverySnapshot() };
+            await atomicWrite(store.filename + '.auth-failure', saved);
+            persistedRevision = revision;
+          } catch (fenceError) {
+            // A later successful snapshot must retain this durability warning.
+            evidenceWriteFailed = true;
+            if (error) error.authFencePersistenceFailed = true;
+            fenceError.bridgePersistenceFailure = true;
+            fenceError.code = 'AUTH_FAILURE_FENCE_UNWRITABLE';
+            auth.onFailure?.(fenceError);
+          }
+          // Do not spin retrying a failed write without new evidence.
+          attemptedRevision = revision;
+        }
+      } finally { failureWriting = false; }
+    });
   };
   const evidenceChanged = () => { if (reportedFailure) persistFailure(); };
   let directSetTail = Promise.resolve(), activeArm, activeDisarm, activeArmed = false;
@@ -183,7 +196,11 @@ function authFacade(store, owner) {
     // A known rejected mutation must not disappear on process restart. Retain
     // its private evidence and require explicit recovery before another socket
     // uses these credentials. Never automatically clear this fence.
-    failureEvidence.push({ ...evidence, creds: evidence?.creds ?? cloneAuth(creds) });
+    // Snapshot only the new evidence at admission. Cloning the entire growing
+    // history on every rejection made an auth-failure burst quadratic and could
+    // starve heartbeat timers for every identity in this process. Coalesce
+    // writes while retaining every entry; drain still waits for the last one.
+    failureEvidence.push(cloneAuth({ ...evidence, creds: evidence?.creds ?? creds }));
     persistFailure(error);
     if (!reportedFailure) { reportedFailure = true; auth.onFailure?.(error); }
   };

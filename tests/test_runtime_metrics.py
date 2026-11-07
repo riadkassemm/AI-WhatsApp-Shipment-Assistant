@@ -41,6 +41,23 @@ def test_unreachable_services_report_failure_without_exception_details():
     assert 'private' not in output
 
 
+def test_expected_identity_count_is_independent_of_live_connections(monkeypatch):
+    monkeypatch.setenv('WHATSAPP_EXPECTED_IDENTITIES', '6')
+    data = snapshot()
+    data['lines'] = data['lines'][:5]
+    output = collect(EmptyRedis(), probe=lambda: True, bridge=lambda: data, database=lambda: {})
+    assert 'support_bridge_expected_lines 6\n' in output
+    assert 'support_bridge_connected_lines 5\n' in output
+    for invalid in ('0', '-1', '129', 'private-invalid-value'):
+        monkeypatch.setenv('WHATSAPP_EXPECTED_IDENTITIES', invalid)
+        output = collect(EmptyRedis(), probe=lambda: True, bridge=lambda: data, database=lambda: {})
+        assert 'support_bridge_expected_lines 0\n' in output
+        assert 'private-invalid-value' not in output
+    monkeypatch.delenv('WHATSAPP_EXPECTED_IDENTITIES')
+    output = collect(EmptyRedis(), probe=lambda: True, bridge=lambda: data, database=lambda: {})
+    assert 'support_bridge_expected_lines 8\n' in output
+
+
 def test_missing_or_nonfinite_diagnostics_do_not_masquerade_as_health():
     for bad in [None, float('nan')]:
         data = snapshot()

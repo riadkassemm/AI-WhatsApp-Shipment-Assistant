@@ -233,3 +233,49 @@ test('read-only observation remains bounded when private evidence I/O stalls', a
     assert.equal(result.recovery_allowed, false);
   } finally {release.resolve(); await auth.assessRecovery(); mock.mock.restore();}
 });
+
+test('coalesced failure writes retain final recovery changes without requiring another failure', async t => {
+  const {auth, closed} = await fixture(t);
+  const rename = fs.rename, entered = gate(), release = gate();
+  let writes = 0;
+  const mock = t.mock.method(fs, 'rename', async (source, destination) => {
+    if (String(destination).endsWith('.auth-failure')) {
+      writes++;
+      if (writes === 1) {entered.resolve(); await release.promise;}
+    }
+    return rename(source, destination);
+  });
+  const original = auth.state.creds.nextPreKeyId;
+  try {
+    auth.store.failed = true;
+    await assert.rejects(auth.saveCreds(), /STORAGE_RESTART_REQUIRED/);
+    await entered.promise;
+    auth.state.creds.nextPreKeyId = original + 100;
+    auth.retire(); closed.resolve(); auth.recoveryEventsReleased();
+    const pending = await auth.assessRecovery({timeoutMs: 10});
+    assert.equal(pending.recovery_allowed, false);
+    assert.ok(pending.blockers.includes('EVIDENCE_DURABILITY_UNCONFIRMED'));
+    assert.equal(writes, 1);
+    release.resolve();
+    let evidence = await failure(auth);
+    assert.equal(writes, 2);
+    assert.equal(evidence.version, 2);
+    assert.equal(evidence.failures.length, 1);
+    assert.equal(evidence.failures[0].creds.nextPreKeyId, original, 'initial failure evidence is immutable');
+    assert.equal(evidence.recovery.credentials.nextPreKeyId, original + 100);
+    assert.equal(evidence.recovery.retired, true);
+    assert.equal(evidence.recovery.transport_state, 'closed');
+    assert.equal(evidence.recovery.events_released, true);
+    assert.equal(evidence.recovery.pending_operations, 0);
+    assert.equal(evidence.recovery.settled, true);
+    const revision = evidence.recovery.revision;
+    auth.state.creds.nextPreKeyId = original + 200;
+    auth.recoveryEventsReleased();
+    evidence = await failure(auth);
+    assert.equal(writes, 3, 'a new revision after the writer finishes must start another write');
+    assert.ok(evidence.recovery.revision > revision);
+    assert.equal(evidence.recovery.credentials.nextPreKeyId, original + 200);
+    assert.equal(evidence.failures[0].creds.nextPreKeyId, original);
+    assert.equal(auth.store.data.creds.nextPreKeyId, original, 'evidence is never committed as authentication');
+  } finally {release.resolve(); await auth.assessRecovery(); mock.mock.restore();}
+});

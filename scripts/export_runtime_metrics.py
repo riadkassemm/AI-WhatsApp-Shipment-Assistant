@@ -186,6 +186,13 @@ def bridge_metrics(snapshot, tcp=None):
 def collect(client, *, probe=api_probe, bridge=bridge_probe, database=database_probe, now=time.time, tcp=tcp_samples):
     values = {'support_runtime_check_timestamp_seconds': now()}
     try:
+        expected = int(os.environ.get('WHATSAPP_EXPECTED_IDENTITIES', '8'))
+        if not 1 <= expected <= 128:
+            raise ValueError('INVALID_EXPECTED_IDENTITIES')
+    except ValueError:
+        expected = 0  # Invalid configuration must alarm, not match an empty bridge.
+    values['support_bridge_expected_lines'] = expected
+    try:
         values['support_api_up'] = int(probe())
     except Exception:
         values['support_api_up'] = 0

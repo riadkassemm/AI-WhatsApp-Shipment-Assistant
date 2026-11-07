@@ -58,7 +58,7 @@ groups:
         for: 2m
         labels: {severity: critical}
       - alert: BridgeDisconnected
-        expr: (support_bridge_ready == 0 or absent(support_bridge_ready) or support_bridge_connected_lines < support_bridge_lines or support_bridge_lines != 8 or absent(support_bridge_connected_lines) or support_bridge_paired_lines != 8 or absent(support_bridge_paired_lines) or support_bridge_qr_codes != 0 or absent(support_bridge_qr_codes)) and on() (support_monitoring_expected == 1)
+        expr: (support_bridge_ready == 0 or absent(support_bridge_ready) or support_bridge_connected_lines < support_bridge_lines or support_bridge_lines != on(job, instance) support_bridge_expected_lines or absent(support_bridge_lines) or support_bridge_expected_lines < 1 or absent(support_bridge_expected_lines) or absent(support_bridge_connected_lines) or support_bridge_paired_lines != on(job, instance) support_bridge_expected_lines or absent(support_bridge_paired_lines) or support_bridge_qr_codes != 0 or absent(support_bridge_qr_codes)) and on() (support_monitoring_expected == 1)
         for: 2m
         labels: {severity: critical}
       - alert: InboundWorkUnresolved

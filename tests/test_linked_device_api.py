@@ -328,6 +328,18 @@ def test_linked_disconnect_requires_line_removed_from_app(linked_config, monkeyp
     assert request("POST", "/api/support/whatsapp-linked-device/lines/90001/disconnect").status_code == 409
 
 
+def test_linked_repair_waits_for_logout_updates_without_claiming_bridge_outage(linked_config, monkeypatch):
+    async def pending(_line):
+        error = api_module.WhatsAppSendError("Bridge HTTP 409", delivery_uncertain=False)
+        error.bridge_code = "AUTH_WORK_PENDING"
+        raise error
+
+    monkeypatch.setattr(api_module.linked_device_client, "connect", pending)
+    response = request("POST", "/api/support/whatsapp-linked-device/lines/90001/connect")
+    assert response.status_code == 409
+    assert "still finishing accepted updates" in response.json()["detail"]
+
+
 @pytest.fixture
 def allocation_bridge(linked_config, monkeypatch):
     from app.whatsapp_registry import whatsapp_registry_service
@@ -543,8 +555,16 @@ def removal_bridge(linked_config, monkeypatch):
 
     async def remove(line_id):
         state["calls"].append(("remove", line_id))
+        if state["fail"] == "pending_logout":
+            error = api_module.WhatsAppSendError("Bridge HTTP 409", delivery_uncertain=False)
+            error.bridge_code = "AUTH_WORK_PENDING"
+            raise error
         if state["fail"] == "native":
             raise api_module.WhatsAppSendError("Unlink confirmation unavailable", delivery_uncertain=True)
+        if state["fail"] == "auth_recovery":
+            error = api_module.WhatsAppSendError("Bridge HTTP 503", delivery_uncertain=False)
+            error.bridge_code = "AUTH_RECOVERY_REQUIRED"
+            raise error
         if state["fail"] == "unconfirmed":
             return {"line_id": line_id, "removed": True, "unlinked": False}
         manifest = Path(settings.whatsapp_linked_device_data_directory) / "lines.json"
@@ -599,6 +619,26 @@ def test_remove_does_not_close_conversations_when_whatsapp_unlink_is_unconfirmed
     removal_bridge["fail"] = failure
     response = request("DELETE", "/api/support/whatsapp-linked-device/lines/90001", payload={"close_active_tickets": True})
     assert response.status_code == 503
+    assert not removal_bridge["enabled"]
+    assert removal_bridge["tickets"] == [23]
+    assert not any(call[0] == "finish" for call in removal_bridge["calls"])
+
+
+def test_remove_waits_for_logout_updates_without_closing_conversations(removal_bridge):
+    removal_bridge["fail"] = "pending_logout"
+    response = request("DELETE", "/api/support/whatsapp-linked-device/lines/90001", payload={"close_active_tickets": True})
+    assert response.status_code == 409
+    assert "logout finishes accepted updates" in response.json()["detail"]
+    assert removal_bridge["tickets"] == [23]
+    assert not any(call[0] == "finish" for call in removal_bridge["calls"])
+
+
+def test_remove_reports_authentication_recovery_without_recommending_retry_or_closing_history(removal_bridge):
+    removal_bridge["fail"] = "auth_recovery"
+    response = request("DELETE", "/api/support/whatsapp-linked-device/lines/90001", payload={"close_active_tickets": True})
+    assert response.status_code == 503
+    assert "administrator recovery review" in response.json()["detail"]
+    assert "retry" not in response.json()["detail"].lower()
     assert not removal_bridge["enabled"]
     assert removal_bridge["tickets"] == [23]
     assert not any(call[0] == "finish" for call in removal_bridge["calls"])

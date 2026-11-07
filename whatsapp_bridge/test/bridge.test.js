@@ -417,6 +417,37 @@ test('a disconnected saved session reconnects only to confirm unlink while the e
   assert.equal(bridge.lines.has(added.line_id), false);
 });
 
+test('removal preserves a fenced authentication failure instead of recommending another unlink attempt', async t => {
+  const {bridge, line, socket} = await fixture(t);
+  const added = await bridge.addLine({request_id: randomUUID()});
+  const target = bridge.getLine(added.line_id);
+  target.auth.state.creds.registered = true;
+  target.auth.state.creds.me = {id: '96170222222:2@s.whatsapp.net'};
+  await target.auth.saveCreds();
+  const credentials = createHash('sha256').update(JSON.stringify(target.auth.store.data.creds)).digest('hex');
+  target.status = 'error';
+  target.auth.store.failed = true;
+  bridge.makeSocket = () => {throw new Error('A fenced session must not create another transport');};
+  try {
+    await assert.rejects(bridge.removeLine(added.line_id), error =>
+      error.code === 'AUTH_RECOVERY_REQUIRED' && error.bridgePersistenceFailure === true);
+    assert.equal(target.status, 'error');
+    assert.equal(target.recoveryCategory, 'storage_failure');
+    assert.equal(target.retryBlocked, true);
+    assert.match(target.error, /administrator recovery review/i);
+    assert.doesNotMatch(target.error, /retry removal/i);
+    assert.equal(target.auth.store.failed, true);
+    assert.equal(createHash('sha256').update(JSON.stringify(target.auth.store.data.creds)).digest('hex'), credentials);
+    assert.equal(bridge.lines.has(added.line_id), true);
+    assert.ok(!(bridge.manifest.data.removed_line_ids ?? []).includes(added.line_id));
+    assert.equal(target.removalRemoteConfirmed, undefined);
+    assert.equal(line.socket, socket);
+    assert.equal(line.status, 'connected');
+    assert.equal(line.session.ready, true);
+    assert.equal(socket.queries.length, 0);
+  } finally {await assert.rejects(bridge.close(), /BRIDGE_SHUTDOWN_FAILED/);}
+});
+
 test('an unlink timeout cannot pretend complete removal or erase saved credentials, and an explicit retry can finish', async t => {
   const { bridge, line, socket, dataDir } = await fixture(t);
   line.auth.state.creds.registered = true;
@@ -1289,13 +1320,16 @@ test('provider logout and bridge shutdown suppress scheduled reconnect attempts'
   assert.equal(line.store.data.enabled, false);
   t.mock.timers.tick(60_000);
   assert.equal(calls, 0);
-  await line.store.update(data => { data.enabled = true; });
-  line.status = 'disconnected';
+  // Start a new, explicitly requested session before testing normal transport
+  // recovery. Toggling enabled alone cannot un-revoke a logged-out session.
+  await bridge.connect(LINE);
+  assert.equal(calls, 1);
+  bridge.blockConnection(line, line.socket, 'synthetic_reconnect');
   bridge.scheduleReconnect(line);
   assert.ok(line.reconnectTimer);
   bridge.stopping = true;
-  t.mock.timers.tick(1000);
-  assert.equal(calls, 0);
+  t.mock.timers.tick(60_000); // Includes the reconnect backoff and jitter.
+  assert.equal(calls, 1);
   assert.equal(line.reconnectTimer, null);
 });
 
@@ -2333,6 +2367,138 @@ test('messages recovered after an outage become staff-only snapshots', () => {
   assert.equal(recovered.recovered, true);
   assert.notEqual(recovered.event_id, normal.event_id);
   assert.equal(recovered.payload.entry[0].changes[0].value.messages[0].type, 'text');
+});
+
+test('provider logout never drains its own accepted pipeline or resets credentials inside the event handler', async t => {
+  const { bridge, line, socket } = await fixture(t);
+  const auth = line.auth;
+  auth.state.creds.registered = true;
+  auth.state.creds.me = socket.user;
+  await auth.saveCreds();
+  const identity = Buffer.from(auth.store.data.creds.signedIdentityKey.public);
+  // A real accepted provider task can await a queued connection event. A
+  // reset from that event waits for this same task and poisons intact auth.
+  const drain = auth.drain;
+  auth.drain = () => drain({timeoutMs: 30});
+  await auth.trackProviderTask(() => socket.eventHandler({'connection.update': {
+    connection: 'close', lastDisconnect: {error: {output: {statusCode: DisconnectReason.loggedOut}}},
+  }}));
+  assert.equal(auth.store.failed, false);
+  assert.equal(line.auth, auth);
+  assert.deepEqual(auth.store.data.creds.signedIdentityKey.public, identity);
+  assert.equal(bridge.lineStatus(line).status, 'logged_out');
+  assert.equal(bridge.lineStatus(line).is_paired, false);
+  assert.equal(line.reconnectTimer, null);
+  assert.equal(line.store.data.auth_reset_required, true);
+  await assert.rejects(stat(auth.store.filename + '.auth-failure'), {code: 'ENOENT'});
+});
+
+test('logged-out history finishes before explicit re-pair without blocking another identity or replaying uncertain sends', async t => {
+  const { bridge, line, socket } = await fixture(t);
+  const other = await bridge.addLine({request_id: randomUUID()});
+  const healthySocket = mockSocket();
+  healthySocket.user.id = '96170222222:1@s.whatsapp.net';
+  bridge.makeSocket = () => healthySocket;
+  await bridge.connect(other.line_id);
+  const healthy = bridge.getLine(other.line_id);
+  await bridge.connectionUpdate(healthy, healthySocket, {connection: 'open'});
+  const auth = line.auth;
+  let entered, release;
+  const started = new Promise(resolve => {entered = resolve;});
+  const gate = new Promise(resolve => {release = resolve;});
+  const work = auth.trackProviderTask(async () => {
+    entered(); await gate;
+    auth.state.creds.myAppStateKeyId = 'mock-final-update';
+    await socket.eventHandler({'creds.update': {}, 'messages.upsert': {type: 'notify', messages: [original('ACCEPTED-LOGOUT', false)]}});
+  });
+  await started;
+  await line.store.update(data => {data.messages.UNCERTAIN = {
+    message: original('UNCERTAIN'), client_message_id: 'stable-client', delivery_uncertain: true,
+    phone: PHONE, timestamp: Date.now(),
+  };});
+  const retained = structuredClone(line.store.data.messages.UNCERTAIN);
+  try {
+    await socket.eventHandler({'connection.update': {connection: 'close',
+      lastDisconnect: {error: {output: {statusCode: DisconnectReason.loggedOut}}}}});
+    const generation = line.generation;
+    await assert.rejects(bridge.connect(LINE), {code: 'AUTH_WORK_PENDING'});
+    await assert.rejects(bridge.removeLine(LINE), {code: 'AUTH_WORK_PENDING'});
+    assert.equal(line.generation, generation);
+    assert.equal(auth.store.failed, false);
+    assert.equal(line.store.data.enabled, false);
+    assert.equal(healthy.socket, healthySocket);
+    assert.equal(healthy.session.ready, true);
+  } finally { release(); }
+  await work;
+  assert.equal(auth.store.data.creds.myAppStateKeyId, 'mock-final-update');
+  assert.ok(line.store.data.messages['ACCEPTED-LOGOUT']);
+  const repaired = mockSocket();
+  let creations = 0;
+  bridge.makeSocket = () => {creations++; return repaired;};
+  await Promise.all([bridge.connect(LINE), bridge.connect(LINE)]);
+  assert.equal(creations, 1);
+  assert.equal(line.store.data.auth_reset_required, undefined);
+  assert.equal(line.auth.store.data.creds.myAppStateKeyId, undefined);
+  assert.deepEqual(line.store.data.messages.UNCERTAIN, retained);
+  assert.equal(repaired.calls.length, 0);
+  assert.equal(healthy.session.ready, true);
+});
+
+test('a re-pair click waits for the queued logout marker before choosing reset rather than renewal', async t => {
+  const { bridge, line, socket } = await fixture(t);
+  line.auth.state.creds.registered = true;
+  await line.auth.saveCreds();
+  const blocked = gate();
+  line.eventTail = blocked.promise;
+  const logout = socket.eventHandler({'connection.update': {connection: 'close',
+    lastDisconnect: {error: {output: {statusCode: DisconnectReason.loggedOut}}}}});
+  assert.equal(line.recoveryCategory, 'logged_out');
+  assert.equal(line.store.data.auth_reset_required, undefined);
+  let creations = 0;
+  bridge.makeSocket = options => {
+    creations++;
+    assert.equal(options.auth.creds.registered, false, 'never reconnect the revoked credentials');
+    return mockSocket();
+  };
+  const reconnect = bridge.connect(LINE);
+  assert.equal(creations, 0);
+  blocked.resolve();
+  await Promise.all([logout, reconnect]);
+  assert.equal(creations, 1);
+});
+
+test('confirmed logout does not authorize re-pairing or removal across an authentication recovery fence', async t => {
+  const { bridge, line, socket } = await fixture(t);
+  await socket.eventHandler({'connection.update': {connection: 'close',
+    lastDisconnect: {error: {output: {statusCode: DisconnectReason.loggedOut}}}}});
+  const retained = Buffer.from(line.auth.store.data.creds.signedIdentityKey.public);
+  const sequence = line.auth.store.seq;
+  line.auth.store.failed = true;
+  bridge.makeSocket = () => {throw new Error('Must not connect a fenced session');};
+  await assert.rejects(bridge.connect(LINE), /STORAGE_RESTART_REQUIRED/);
+  await assert.rejects(bridge.removeLine(LINE), {code: 'AUTH_RECOVERY_REQUIRED'});
+  assert.deepEqual(line.auth.store.data.creds.signedIdentityKey.public, retained);
+  assert.equal(line.auth.store.seq, sequence);
+  assert.ok(line.store.data.messages.ORIGINAL);
+  assert.ok(!(bridge.manifest.data.removed_line_ids ?? []).includes(LINE));
+  await assert.rejects(bridge.close());
+});
+
+test('confirmed logout survives restart and allows removal without reconnecting revoked credentials', async t => {
+  const { bridge, config, line, socket } = await fixture(t);
+  line.auth.state.creds.registered = true;
+  line.auth.state.creds.me = socket.user;
+  await line.auth.saveCreds();
+  await socket.eventHandler({'connection.update': {connection: 'close',
+    lastDisconnect: {error: {output: {statusCode: DisconnectReason.loggedOut}}}}});
+  await bridge.close();
+  const restarted = new Bridge(config, {storageFilesystem: healthyStorage, log: () => {}, onError: () => {},
+    makeSocket: () => {throw new Error('Revoked session must not reconnect');}});
+  t.after(() => restarted.close());
+  await restarted.initialize({autoConnect: false});
+  assert.equal(restarted.lineStatus(restarted.getLine(LINE)).status, 'logged_out');
+  assert.equal(restarted.lineStatus(restarted.getLine(LINE)).is_paired, false);
+  assert.deepEqual(await restarted.removeLine(LINE), {line_id: LINE, removed: true, unlinked: true});
 });
 
 test('a WhatsApp logout records why and when, and re-pairing recovers the gap', async t => {

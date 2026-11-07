@@ -1127,7 +1127,10 @@ function renderWhatsAppRegistry(payload) {
     action.onclick = () => setWhatsAppNumberState(item.phone_number_id, !item.is_enabled);
     // Everyone can add a number to the app; deactivating and removing stay with managers.
     const manager = canManageWhatsApp();
-    if (!item.is_enabled || manager) actions.append(action);
+    // Linked numbers have one removal flow that explicitly closes active
+    // conversations and retains their history. Do not send managers through
+    // the separate deactivation endpoint, which rejects active conversations.
+    if (!item.is_enabled || (manager && item.source !== 'LINKED_DEVICE')) actions.append(action);
     if (manager && item.source === 'LINKED_DEVICE') {
       const remove = document.createElement('button');
       remove.type = 'button'; remove.className = 'btn small danger';
@@ -1495,10 +1498,8 @@ async function addLinkedDeviceNumber() {
 
 async function removeLinkedDeviceNumber(lineId) {
   if (!canManageWhatsApp() || state.linkedDeviceBusy || state.whatsappBusy) return;
-  const line = (state.linkedDeviceStatus?.lines || []).find(item => String(item.line_id) === String(lineId));
-  const advice = line?.status === 'logged_out' ? 'If WhatsApp logged this number out, use Re-pair instead: nothing is closed. ' : '';
   const typed = await promptDialog({title: 'Remove and unlink number?', label: 'Type REMOVE to confirm', confirmLabel: 'Remove and unlink', tone: 'danger',
-    message: advice + 'Remove and unlink this WhatsApp number completely? It will be signed out and removed from the app. Active conversations on this number will be closed; their chat history will be kept.'});
+    message: 'Remove and unlink this WhatsApp number? Active conversations do not prevent removal: they will be closed and their chat history kept. Only this number will be signed out and removed from the app.'});
   if (typeof typed !== 'string' || typed.trim().toUpperCase() !== 'REMOVE') {
     if (typeof typed === 'string') showWhatsAppFeedback('whatsappError', 'Nothing was removed. Type REMOVE to confirm removal.');
     return;

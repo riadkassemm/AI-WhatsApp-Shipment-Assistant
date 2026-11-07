@@ -287,6 +287,11 @@ export class Bridge {
       line.auth ??= await this.loadAuth(line);
       this.assertRunning();
       line.display_phone_number = line.store.data.bound_phone || line.expected_phone;
+      if (line.store.data.auth_reset_required) {
+        line.status = 'logged_out';
+        line.retryBlocked = true;
+        line.recoveryCategory = 'logged_out';
+      }
     } catch (error) { if (!this.stopping) error.bridgePersistenceFailure = true; throw error; }
   }
   async addLine(payload) {
@@ -350,6 +355,7 @@ export class Bridge {
       }
       const line = this.getLine(id);
       if (!line.store?.data) throw new BridgeError(503, 'LINE_STORAGE_UNAVAILABLE', 'Check this number session storage before removing it.');
+      if (line.recoveryCategory === 'logged_out' || line.status === 'logged_out' || line.store.data.auth_reset_required) await this.waitForLoggedOutEvents(line);
       const creds = line.auth?.store?.data?.creds;
       const keyBytes = value => value instanceof Uint8Array && value.length >= 32;
       const keyPair = value => keyBytes(value?.public) && keyBytes(value?.private);
@@ -407,13 +413,26 @@ export class Bridge {
         line.store = null;
         return { line_id: id, removed: true, unlinked: true };
       } catch (error) {
+        const authRecoveryRequired = line.auth?.store?.failed === true || error?.code === 'AUTH_RECOVERY_REQUIRED';
+        if (authRecoveryRequired) {
+          // A failed reconnect for unlinking must not hide an auth fence behind
+          // a generic provider retry. No credentials or removal ledger change.
+          error = new BridgeError(503, 'AUTH_RECOVERY_REQUIRED',
+            'This saved session requires administrator recovery review before removal or reconnecting. Its saved state is retained.');
+          error.bridgePersistenceFailure = true;
+        }
         if ((this.manifest.data.removed_line_ids ?? []).includes(id)) this.lines.delete(id);
         else {
-          if (line.socket !== previousSocket || previousStatus !== 'connected' || line.removalRemoteConfirmed) this.stopRemovedSocket(line);
+          if (authRecoveryRequired || line.socket !== previousSocket || previousStatus !== 'connected' || line.removalRemoteConfirmed) this.stopRemovedSocket(line);
           await line.eventTail;
           await line.store.update(data => { data.enabled = previousEnabled; });
           line.status = line.socket && previousStatus === 'connected' ? 'connected' : 'error';
-          if (line.status === 'error') line.error = 'This number could not be fully removed. Its saved session is retained; retry removal.';
+          if (authRecoveryRequired) {
+            line.recoveryCategory = 'storage_failure';
+            line.diagnostics.last_category = 'storage_failure';
+            line.retryBlocked = true;
+            line.error = error.message;
+          } else if (line.status === 'error') line.error = 'This number could not be fully removed. Its saved session is retained; retry removal.';
         }
         throw error;
       } finally {
@@ -461,7 +480,8 @@ export class Bridge {
         content: [{ tag: 'remove-companion-device', attrs: { jid, reason: 'user_initiated' } }] }, this.config.removalQueryTimeoutMs ?? 15_000);
       if (result?.tag !== 'iq' || result.attrs?.type !== 'result') throw new Error('No explicit unlink acknowledgment');
       line.removalRemoteConfirmed = true;
-    } catch {
+    } catch (cause) {
+      if (cause?.bridgePersistenceFailure) throw cause;
       // A real server logged-out response proves the saved companion is already
       // invalid, including when removal closes the socket before its IQ reply.
       if (line.removalRemoteConfirmed) return;
@@ -490,7 +510,7 @@ export class Bridge {
     const pending = this.outbox.data.entries.filter(item => item.event.line_id === line.line_id && !item.waiting_for_history);
     const oldest = pending.reduce((at, item) => Math.min(at, item.created_at ?? Date.now()), Date.now());
     return { line_id: line.line_id, display_phone_number: line.display_phone_number, status: line.status,
-      is_paired: Boolean(creds?.registered || creds?.me?.id),
+      is_paired: !line.store?.data?.auth_reset_required && Boolean(creds?.registered || creds?.me?.id),
       recovery_category: line.recoveryCategory,
       retry_scheduled: Boolean(line.reconnectTimer),
       diagnostics: { ...line.diagnostics,
@@ -552,8 +572,24 @@ export class Bridge {
     return line.connectPromise;
   }
 
+  async waitForLoggedOutEvents(line) {
+    // A provider logout revokes the session but does not cancel already
+    // accepted history/auth work. An explicit re-pair must wait for that work;
+    // never turn an early button click into a destructive drain timeout.
+    const assertIdle = () => {
+      if (line.auth?.hasProviderWork()) throw new BridgeError(409, 'AUTH_WORK_PENDING',
+        'WhatsApp logout is still finishing accepted updates. Wait before re-pairing or removing this number.');
+    };
+    assertIdle();
+    // status changes before its journal update completes. Do not let a click
+    // in that gap renew the revoked credentials instead of preparing a re-pair.
+    await line.eventTail;
+    assertIdle();
+  }
+
   async openSocket(line) {
     if (this.stopping) throw new BridgeError(503, 'STOPPING', 'The bridge is shutting down.');
+    if (line.recoveryCategory === 'logged_out' || line.status === 'logged_out' || line.store?.data?.auth_reset_required) await this.waitForLoggedOutEvents(line);
     const generation = ++line.generation;
     // Retiring callbacks keep their own diagnostics object. Their evidence must
     // survive a failed replacement without modifying the new generation's health.
@@ -571,9 +607,17 @@ export class Bridge {
     try {
       if (!line.store?.data) await this.prepareLine(line);
       this.assertRunning();
+      line.auth ??= await this.loadAuth(line);
+      if (line.store.data.auth_reset_required) {
+        await line.eventTail;
+        await line.transportClosed;
+        this.assertRunning();
+        // Reset only on an explicit re-pair, after the revoked transport and
+        // its admitted operations finish. Failed auth stores still refuse it.
+        line.auth = await line.auth.reset();
+        await line.store.update(data => { delete data.auth_reset_required; });
+      } else line.auth = await line.auth.renew();
       await line.store.update(data => { data.enabled = true; });
-      this.assertRunning();
-      line.auth = line.auth ? await line.auth.renew() : await this.loadAuth(line);
       if (this.stopping || generation !== line.generation) {
         line.auth.retire(); await line.auth.drain(); return this.lineStatus(line);
       }
@@ -986,19 +1030,20 @@ export class Bridge {
         this.reconnectSlots.delete(line.line_id);
         line.status = 'logged_out';
         line.error = 'This linked device was logged out. Connect and scan a new QR code.';
-        const auth = line.auth;
         const reason = disconnectReason(update.lastDisconnect?.error);
         const offlineSince = line.disconnectedSince ?? Date.now();
         await line.store.update(data => {
           data.enabled = false;
           data.logout_reason = reason;
           data.logged_out_at = Date.now();
+          data.auth_reset_required = true;
           // Re-pairing recovers what customers sent from here on. Keep the earliest point.
           data.recover_since = Math.min(data.recover_since ?? Infinity, offlineSince - RECOVERY_MARGIN_MS);
           delete data.recover_until;
         });
-        if (line.session !== session) return;
-        line.auth = await auth.reset();
+        // Do not drain/reset from inside the event tail: accepted provider
+        // pipelines can be waiting for this event to finish. Retain credentials
+        // until an explicit re-pair/removal, letting those pipelines settle.
       } else if (line.retryBlocked) {
         line.status = 'error';
         line.error = line.recoveryCategory === 'session_conflict'

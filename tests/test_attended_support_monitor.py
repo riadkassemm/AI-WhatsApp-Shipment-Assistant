@@ -5,7 +5,8 @@ def test_missing_metrics_cannot_be_reported_as_healthy():
     report = collect(lambda _: [])
     assert not report['healthy']
     assert 'runtime_collector_fresh' in report['failed_checks']
-    assert 'all_eight_lines_connected' in report['failed_checks']
+    assert 'all_expected_lines_connected' in report['failed_checks']
+    assert 'expected_identity_count_valid' in report['failed_checks']
 
 
 def test_attended_monitor_fails_when_prometheus_unreachable():

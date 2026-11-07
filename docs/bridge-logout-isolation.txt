@@ -1,0 +1,149 @@
+WhatsApp logout isolation — fix and approved retirement deployment
+=================================================
+
+Incident observed 2026-11-07 on production 194.5.152.173 (read-only).
+Times below are Beirut time, UTC+02.
+
+Confirmed evidence
+- 12:10:04: newly linked identity 90030 received provider status 401 (logout).
+- 12:10:24: AUTH_TRANSACTION_DRAIN_TIMEOUT, followed by 879
+  STORAGE_RESTART_REQUIRED errors through 12:11:45.
+- At 12:11:45, heartbeat timers on the six other connected identities were
+  60–69 seconds late; all six closed with status 408. They recovered by
+  12:11:50. The bridge process did not restart.
+- The logged-out identity retained private authentication failure/intent
+  evidence. No credentials or customer payloads were copied into this report.
+- Recent removal requests for 90011 and 90030 returned HTTP 503; these were
+  not the active-conversation HTTP 409 guard.
+
+Mechanism and limits
+connectionUpdate() called auth.reset() from its serialized event handler.
+reset() drains admitted provider work, including work that can itself await
+the event handler. A focused mock reproduces that circular wait and a false
+authentication fence. The production logs establish a logout-time drain
+failure, but do not identify every pending provider operation or prove that
+this exact circular wait accounted for all of them.
+
+storage.js cloned the entire accumulated failure history synchronously on
+every rejection and queued a full rewrite for every error. This quadratic
+work strongly explains why an identity-specific failure stalled shared
+heartbeat timers. No CPU profile was collected during the incident. The
+status-unavailable banner reflected a temporarily unresponsive bridge; it
+did not prove disk exhaustion. This incident is distinct from the earlier
+IPv6 receive-path investigation.
+
+Changes
+- Persist a confirmed logout and disable automatic reconnect; do not reset
+  credentials inside the event handler. Accepted provider work can finish.
+- Explicit re-pair waits for the queued logout record and physical transport
+  closure, then resets only after the old authentication owner drains.
+- If accepted provider work remains, re-pair/removal returns AUTH_WORK_PENDING
+  with an actionable HTTP 409, without creating an authentication failure.
+- Persist auth_reset_required until the explicit reset completes; restart
+  retains the logged-out status. Revoked credentials are not reported paired.
+- Coalesce failure snapshots while retaining immutable evidence for every
+  rejected operation. Drain still awaits durable evidence. Fences are retained.
+- Managers use Remove and unlink for linked numbers. Remove the competing
+  Deactivate button, whose separate endpoint rejects active conversations.
+  Explicit removal still confirms closing active conversations and preserves
+  their database history. Permissions and remote-unlink confirmation remain.
+- An unlink attempt against a fenced authentication store reports
+  AUTH_RECOVERY_REQUIRED and retains the session-recovery classification.
+  The API/UI ask for administrator review rather than another unlink attempt.
+  Ordinary unconfirmed network unlink remains retryable; no fence is cleared.
+
+Verification scope
+Focused Node mocks and Python API/repository/DOM regressions only. No real
+WhatsApp messages, live reconnects, production writes, or DEV access.
+Checks cover pending logout operations, concurrent re-pair clicks, queued
+logout persistence, restart, revoked-session removal, recovery-fence refusal,
+late accepted messages/credentials, uncertain-send retention during re-pair,
+healthy-identity isolation, failure bursts and private evidence permissions.
+Existing removal regressions cover active conversations, remote confirmation,
+manager authorization, CSRF, retry safety, and conversation-history retention.
+Results: 21 focused Node checks and 23 API/repository/DOM checks passed;
+git diff --check passed. No full suite or production experiment was run.
+An existing logout/shutdown test also failed on untouched main: it simulated
+re-enabling a revoked session without clearing terminal policy and assumed a
+one-second reconnect timer despite jitter. It now uses explicit re-pairing and
+advances past the backoff before checking shutdown suppression.
+
+Limits and review before a separately approved deployment
+- This does not reconcile or clear existing production authentication fences
+  (including 90011/90030). Do not interpret it as recovery authorization.
+- A genuinely stalled provider operation can still block its own identity's
+  re-pair/removal. Wait for verified settlement or investigate that identity;
+  never erase uncertain authentication or resend uncertain deliveries.
+- This branch now includes current main's PR #84/#85 changes. Failure writes
+  coalesce by evidence revision, retaining version-2 final credential, operation
+  and retiring-transport evidence without restoring repeated full-history
+  cloning. Failed publication remains a sticky recovery blocker. This combined
+  revision has not been deployed; production still uses b5f8e35. It does not
+  enable IPv4 mode or authorize resuming that rollout.
+- No database migration or dependency change. New logout state is additive.
+  An older release does not understand auth_reset_required; do not roll back
+  then connect a newly logged-out identity without reviewing retained state.
+
+Manual acceptance (isolated/mock first; production only after approval)
+1. With two separate test identities, log one out on its phone while admitted
+   history work is pending. Healthy identity stays ready; no shared heartbeat
+   stall. Target shows Logged out, no scheduled reconnect, and retains history.
+2. Try re-pair/removal before work finishes: clear wait response, no new auth
+   fence. After work finishes, one explicit re-pair creates one QR owner.
+3. Restart gracefully after confirmed logout: target remains logged out. All
+   other identities restore normally. Never create duplicate session owners.
+4. As manager, Remove and unlink a test number with active conversations;
+   confirm REMOVE. Verify only its conversations close and remain readable.
+   A cancelled dialog or rejected remote unlink must not close conversations.
+5. A fenced authentication store must continue to refuse reset/removal. Use
+   mocks for this check; do not inject failures into production credentials.
+6. Verify ordinary sends/receipts/media with an agreed internal contact and
+   monitor heartbeat delay, callback backlog and authentication failures.
+
+2026-11-07: explicit authorization to remove 90011 and 90030 and deploy
+-------------------------------------------------------------------
+Normal removal cannot drain their fenced auth stores. The approved operation
+retires only these IDs, rather than recovering/reusing their uncertain sessions.
+Do not clear their authentication fences or claim remote unlink for 90011.
+Keep credentials and all files on the VPS in a root-private retirement archive.
+
+Stage committed source/dependencies first; preserve current environment and
+IP-family selection. Monitoring now uses WHATSAPP_EXPECTED_IDENTITIES (default
+8); set it to 6 only for this explicitly approved retirement. Count expectations
+are independent of live connections. Invalid/missing metrics continue to alert.
+
+Close Customer Support ingress/ngrok, disable forced killing during shutdown,
+and let the old bridge retire all owners. The known failed auth stores can
+produce exit status 1: never label that a clean shutdown. Require natural
+process exit, no remaining service processes or bridge listener, zero inbound
+queues/leases, no new healthy-line auth fences, and full offline validation of
+all remaining journals before any replacement may start. A live owner,
+SIGKILL, deadline failure or any additional failed store aborts this operation.
+
+After API stop, preserve verified database/Redis snapshots and a checksum-
+verified copy of all application state. Move only the two retired directories
+out of the active bridge root, keeping their auth-active/auth-intent/auth-failure
+markers intact. Preserve the full original manifest, outbox, retired-phone map
+and private audit record. Tombstone only those IDs and their registration
+requests; retain their phone/offline history for future intentional re-linking.
+
+In one database transaction archive their active conversations using existing
+removal_details/history conventions and retain message rows, assignments and
+historical labels. Record a SYSTEM operator removal, with actor_staff_id NULL
+and remote_unlink_confirmed=false for 90011; do not impersonate a staff account.
+90030 has prior provider logout evidence. Remove only these registry profiles.
+Validate unchanged message records, all 31 schemas, other lines and retained
+uncertain records before starting the API then bridge. Redis data and TTLs are
+not restored, deleted or rewritten. Existing DB reconciliation closes stale
+conversation-cache ownership on next use of a newly linked line.
+
+Only after six ready, paired identities, successful heartbeats, healthy storage,
+checkpointing and fresh monitoring reopen ingress/ngrok and request staff
+acceptance. No QR scan, session duplication, uncertain-message replay, DNS
+change, host networking change, DEV access or Shipping Rates operation.
+
+Rollback requires preserving authoritative new writes. Keep retired IDs
+tombstoned; never restore their archived auth into the active root implicitly.
+The old source can be restored with the same six-line manifest and monitoring
+setting, subject to the logout-marker compatibility warning above. Do not
+roll back DB/Redis snapshots after activation or re-enable retired identities.
