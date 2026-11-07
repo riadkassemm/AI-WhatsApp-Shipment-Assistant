@@ -53,10 +53,15 @@ async function nativeFixture(t) {
     }, storageFilesystem: healthyStorage, onError: error => diagnostics.push({ bridge_error: error.message }), log: () => {},
   }).initialize({ autoConnect: false });
   t.after(async () => {
-    wireRelease.resolve(); await bridge.close();
+    wireRelease.resolve();
+    await new Promise(resolve => setImmediate(resolve));
+    await bridge.close();
     await rm(directory, { recursive: true, force: true });
   });
   await bridge.connect(LINE);
+  // Settle Baileys' initial nextTick buffer admission before simulating a
+  // running connection failure; otherwise the fixture buffers after teardown.
+  await new Promise(resolve => setImmediate(resolve));
   const line = bridge.getLine(LINE), socket = line.socket;
   assert.equal(socket.bridgeTaskVersion, 1, 'tests require the checksum-verified installed provider patch');
   return { bridge, line, socket, wireStarted, wireRelease, sends: () => sends,
@@ -174,4 +179,70 @@ test('actual unavailable and decrypt-failure stubs remain recoverable when their
       await assert.rejects(readFile(line.auth.store.filename + '.auth-active'), { code: 'ENOENT' });
     } finally { wireRelease.resolve(); await Promise.allSettled([processing, closing]); }
   }
+});
+
+test('native provider failure blocks immediately and replacement waits for physical closure', async t => {
+  const {bridge, line, socket, wireRelease} = await nativeFixture(t);
+  wireRelease.resolve();
+  line.session.ready = true; line.status = 'connected';
+  const raw = socket.ws.socket;
+  const closeStarted = gate(), releaseClose = gate();
+  raw.close = () => {
+    raw.readyState = 2; closeStarted.resolve();
+    releaseClose.promise.then(() => { raw.readyState = 3; raw.emit('close', 1006); });
+  };
+  // Invoke a real native provider end path, not the bridge's public end wrapper.
+  socket.ws.emit('CB:failure', {attrs: {reason: '408'}});
+  assert.equal(line.session.ready, false);
+  assert.equal(line.status, 'disconnected');
+  assert.equal(line.diagnostics.disconnects.temporary_transport, 1);
+  await closeStarted.promise;
+  let replaced = false;
+  const renewal = bridge.connect(LINE).then(() => {replaced = true;});
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(replaced, false);
+  assert.equal(line.socket, null);
+  releaseClose.resolve(); await renewal;
+  assert.notEqual(line.socket, socket);
+  assert.equal(line.diagnostics.generation, 2);
+  assert.equal(line.diagnostics.recovery_started_at != null, true, 'first failure survives transport replacement');
+});
+
+test('native auth and conflict failures block retry before delayed close and never accelerate termination', async t => {
+  for (const [reason, category] of [['401', 'logged_out'], ['403', 'authentication_failure'], ['440', 'session_conflict']]) {
+    const {bridge, line, socket, wireRelease} = await nativeFixture(t);
+    wireRelease.resolve();
+    const raw = socket.ws.socket;
+    const closeStarted = gate(), releaseClose = gate(); let terminated = false;
+    raw.terminate = () => { terminated = true; };
+    raw.close = () => {
+      raw.readyState = 2; closeStarted.resolve();
+      releaseClose.promise.then(() => { raw.readyState = 3; raw.emit('close', 1006); });
+    };
+    socket.ws.emit('CB:failure', {attrs: {reason}});
+    assert.equal(line.retryBlocked, true);
+    assert.equal(line.recoveryCategory, category);
+    bridge.scheduleReconnect(line);
+    assert.equal(Boolean(line.reconnectTimer), false);
+    await closeStarted.promise;
+    assert.equal(terminated, false);
+    releaseClose.resolve(); await socket.bridgeTransportClosed;
+    await new Promise(resolve => setImmediate(resolve));
+    await line.eventTail;
+    assert.equal(Boolean(line.reconnectTimer), false);
+  }
+});
+
+test('installed waitForMessage resolves undefined on timeout and releases its response listeners', async t => {
+  const {socket} = await nativeFixture(t);
+  t.mock.timers.enable({apis: ['setTimeout']});
+  try {
+    const beforeClose = socket.ws.listenerCount('close');
+    const waiting = socket.waitForMessage('synthetic-heartbeat-timeout', 20000);
+    assert.equal(socket.ws.listenerCount('TAG:synthetic-heartbeat-timeout'), 1);
+    t.mock.timers.tick(20000);
+    assert.equal(await waiting, undefined);
+    assert.equal(socket.ws.listenerCount('TAG:synthetic-heartbeat-timeout'), 0);
+    assert.equal(socket.ws.listenerCount('close'), beforeClose);
+  } finally { t.mock.timers.reset(); }
 });

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { classifyDisconnect, reconnectDelay, newConnectionDiagnostics, observeHeartbeat } from '../src/connection-diagnostics.js';
+import { classifyDisconnect, reconnectDelay, newConnectionDiagnostics, observeHeartbeat, beginInterruption, finishInterruption, resetConnectionDiagnostics } from '../src/connection-diagnostics.js';
 import { Bridge } from '../src/bridge.js';
 
 const gate = () => { let resolve; const promise = new Promise(done => { resolve = done; }); return {promise, resolve}; };
@@ -26,11 +26,13 @@ test('diagnostics keep bounded timing fields without copying provider payloads',
   const diagnostics = newConnectionDiagnostics();
   observeHeartbeat(diagnostics, {event: 'decoded_frame', credentials: 'secret'}, 10);
   observeHeartbeat(diagnostics, {event: 'heartbeat_tick', frame_age_ms: 35100, timer_delay_ms: 1200, body: 'private'}, 20);
-  observeHeartbeat(diagnostics, {event: 'heartbeat_result', rtt_ms: 35}, 30);
+  observeHeartbeat(diagnostics, {event: 'heartbeat_request', query_sequence: 1}, 25);
+  observeHeartbeat(diagnostics, {event: 'heartbeat_result', query_sequence: 1, rtt_ms: 35}, 30);
   observeHeartbeat(diagnostics, {event: 'heartbeat_timeout'}, 40);
   assert.equal(diagnostics.last_frame_at, 10);
   assert.equal(diagnostics.heartbeat_timer_delay_ms, 1200);
-  assert.equal(diagnostics.heartbeat_rtt_ms, 35);
+  assert.equal(diagnostics.heartbeat_rtt_ms, null);
+  assert.equal(diagnostics.heartbeat_successes, 1);
   assert.equal(diagnostics.heartbeat_timeouts, 1);
   assert.doesNotMatch(JSON.stringify(diagnostics), /secret|private|credentials/);
 });
@@ -68,4 +70,35 @@ test('durable enqueue wakes callbacks immediately and never overlaps a line owne
   assert.equal(calls, 2, 'enqueue racing the running task is not forgotten');
   assert.equal(maximum, 1);
   bridge.stopping = true; clearImmediate(bridge.callbackWakeHandle);
+});
+
+
+test('undefined query timeout never creates RTT or success, and late results cannot downgrade current evidence', () => {
+  const d = newConnectionDiagnostics();
+  observeHeartbeat(d, {event: 'heartbeat_request', query_sequence: 1}, 100);
+  observeHeartbeat(d, {event: 'heartbeat_query_timeout', query_sequence: 1, query_elapsed_ms: 20000}, 20100);
+  assert.equal(d.heartbeat_successes, 0);
+  assert.equal(d.heartbeat_query_timeouts, 1);
+  assert.equal(d.heartbeat_rtt_ms, null);
+  assert.equal(d.recovery_started_at, 20100);
+  observeHeartbeat(d, {event: 'heartbeat_request', query_sequence: 2}, 30100);
+  observeHeartbeat(d, {event: 'heartbeat_result', query_sequence: 2, rtt_ms: 20}, 30120);
+  observeHeartbeat(d, {event: 'heartbeat_error', query_sequence: 1}, 30130);
+  observeHeartbeat(d, {event: 'heartbeat_result', query_sequence: 2, rtt_ms: 500}, 30140);
+  assert.equal(d.heartbeat_successes, 1);
+  assert.equal(d.heartbeat_failures, 0);
+  assert.equal(d.heartbeat_rtt_ms, 20);
+  assert.equal(d.heartbeat_outcome, 'success');
+});
+
+test('recovery spans first failure through new-generation readiness using monotonic time', () => {
+  const d = newConnectionDiagnostics();
+  beginInterruption(d, 10000, 100);
+  beginInterruption(d, 30000, 20100);
+  resetConnectionDiagnostics(d, 2);
+  assert.equal(d.recovery_started_at, 10000);
+  assert.equal(d.heartbeat_success_at, null);
+  assert.equal(finishInterruption(d, 25100), 25);
+  assert.equal(d.recovery_seconds_last, 25);
+  assert.equal(finishInterruption(d, 25200), null);
 });
