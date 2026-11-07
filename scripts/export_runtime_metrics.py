@@ -96,6 +96,12 @@ def bridge_metrics(snapshot, tcp=None):
         'support_bridge_connected_lines': sum(line.get('status') == 'connected' for line in lines),
         'support_bridge_paired_lines': sum(bool(line.get('is_paired')) for line in lines),
         'support_bridge_qr_codes': sum(bool(line.get('qr')) for line in lines)}
+    eligible = [line for line in lines if line.get('eligible', True) is True]
+    values.update(support_bridge_eligible_lines=len(eligible),
+        support_bridge_eligible_paired_lines=sum(bool(line.get('is_paired')) for line in eligible),
+        support_bridge_fenced_lines=sum(str(line.get('lifecycle', '')).startswith('fenced_') for line in lines),
+        support_bridge_fenced_unresolved_lines=sum(line.get('lifecycle') == 'fenced_unresolved' for line in lines),
+        support_bridge_eligible_storage_critical=int(snapshot.get('runtime', {}).get('eligible_storage_critical') is not False))
     diagnostics_ok = bool(lines)
     identities = set()
     for line in lines:
@@ -106,9 +112,18 @@ def bridge_metrics(snapshot, tcp=None):
         identity = hashlib.sha256(raw_id.encode()).hexdigest()[:16]
         labels = 'identity="' + identity + '"'
         values['support_bridge_identity_connected{' + labels + '}'] = int(line.get('status') == 'connected')
+        retained = line.get('lifecycle') == 'fenced_retained' and line.get('isolation', {}).get('safe') is True
+        values['support_bridge_identity_fenced{' + labels + '}'] = int(str(line.get('lifecycle', '')).startswith('fenced_'))
+        values['support_bridge_identity_retained{' + labels + '}'] = int(retained)
+        # Fenced identities still expose callback and uncertainty backlogs even
+        # though starting a transport to obtain heartbeat metrics is forbidden.
+        for metric, field in [('callback_pending', 'pending_callbacks'), ('callback_oldest_age_seconds', 'oldest_callback_age_seconds'),
+                ('callback_waiting_history', 'waiting_history_reactions'), ('callback_dead_letters', 'failed_callbacks'),
+                ('uncertain_sends', 'uncertain_sends')]:
+            values['support_bridge_' + metric + '{' + labels + '}'] = number(line[field])
         diagnostic = line.get('diagnostics') or {}
         supported = diagnostic.get('supported') is True and diagnostic.get('version') == 2
-        diagnostics_ok = diagnostics_ok and supported
+        diagnostics_ok = diagnostics_ok and (supported or retained)
         values['support_bridge_identity_diagnostics_up{' + labels + '}'] = int(supported)
         if not supported:
             continue

@@ -55,6 +55,13 @@ export function createServer(bridge, config) {
       try { parts = pathname.split('/').filter(Boolean).map(decodeURIComponent); }
       catch { throw new BridgeError(400, 'INVALID_PATH', 'The bridge endpoint contains invalid URL encoding.'); }
       if (request.method === 'GET' && pathname === '/v1/status') return send(response, 200, bridge.status());
+      if (request.method === 'POST' && pathname === '/v1/shutdown-preflight') {
+        // Explicit operator action: seals only proven failed owners in memory.
+        // No signals, healthy socket closure, credential writes or fence clearing.
+        try { await bridge.prepareShutdown(); }
+        catch (error) { return send(response, 503, {shutdown_safe: false, code: safeStorageCode(error), runtime: bridge.runtimeHealth()}); }
+        return send(response, 200, {shutdown_safe: true, runtime: bridge.runtimeHealth()});
+      }
       if (request.method === 'GET' && pathname === '/v1/storage') {
         if (!bridge.storageMonitor) throw new BridgeError(503, 'STORAGE_MONITOR_UNAVAILABLE', 'Storage monitoring is not initialized.');
         return send(response, 200, bridge.storageMonitor.status());

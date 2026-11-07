@@ -17,11 +17,12 @@ CHECKS = {
     'delivery_monitoring_present': 'support_delivery_database_check_up == 1',
     'event_loop_observer_fresh': 'time() - support_bridge_event_loop_sample_timestamp_seconds < 60',
     'expected_identity_count_valid': 'support_bridge_expected_lines > 0',
-    'expected_identity_count_present': 'support_bridge_lines == on(job, instance) support_bridge_expected_lines',
+    'expected_identity_count_present': 'support_bridge_eligible_lines == on(job, instance) support_bridge_expected_lines',
     'all_expected_lines_connected': 'support_bridge_connected_lines == on(job, instance) support_bridge_expected_lines',
-    'all_expected_lines_paired': 'support_bridge_paired_lines == on(job, instance) support_bridge_expected_lines',
+    'all_expected_lines_paired': 'support_bridge_eligible_paired_lines == on(job, instance) support_bridge_expected_lines',
+    'fenced_retirement_proven': 'support_bridge_fenced_unresolved_lines == 0',
     'no_pairing_required': 'support_bridge_qr_codes == 0',
-    'storage_safe': 'bridge_storage_health_level < 2',
+    'storage_safe': 'support_bridge_eligible_storage_critical == 0',
     'checkpoint_healthy': 'bridge_storage_checkpoint_failed == 0',
     'node_exporter_up': 'up{job="node"} == 1',
     'no_inbound_corruption': 'support_inbound_invalid == 0',
@@ -56,7 +57,7 @@ def collect(read=query):
         for alert in read('ALERTS{alertstate="firing",severity="warning"}'):
             name = alert.get('metric', {}).get('alertname', '')
             if name in {'BridgeRepeatedDisconnects', 'BridgeHeartbeatDelayed', 'BridgeEventLoopStalls',
-                        'BridgeCallbackBacklog', 'BridgeCallbackDeadLetters', 'SupportDeliveryUncertaintyIncreased'}:
+                        'BridgeCallbackBacklog', 'BridgeCallbackDeadLetters', 'SupportDeliveryUncertaintyIncreased', 'BridgeIdentityFenced'}:
                 attention.append(name)
     except Exception:
         checks['warning_alerts_readable'] = False

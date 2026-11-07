@@ -1,5 +1,11 @@
 PR #82 deployment readiness and production procedure
 ===================================================
+SUPERSEDED SAFETY BASELINE (2026-11-07): see bridge-fenced-identity-isolation.txt
+before using this historical procedure. Production is now b5f8e35 with six
+eligible identities and fenced 90035. Version-1 final evidence remains a hard
+restart blocker. The eight-identity / 17-store / 487550d checks below are NOT
+current deployment authorization and must not be executed verbatim.
+
 Prepared 2026-11-07. DO NOT EXECUTE until explicit production approval.
 No production configuration, source, persistent state or service was changed
 during preparation. No DEV access. Do not merge a PR as part of this procedure.

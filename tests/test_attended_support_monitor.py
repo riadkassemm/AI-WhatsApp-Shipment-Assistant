@@ -30,3 +30,15 @@ def test_short_flap_warning_is_visible_even_after_connectivity_recovers():
     assert report["healthy"]
     assert report["attention"] == ["BridgeRepeatedDisconnects"]
     assert "private" not in str(report)
+
+
+def test_retained_identity_requires_visible_operator_attention():
+    def read(expression):
+        if 'severity="critical"' in expression:
+            return []
+        if 'severity="warning"' in expression:
+            return [{'metric': {'alertname': 'BridgeIdentityFenced'}}]
+        return [{'value': [0, '1']}]
+    report = collect(read)
+    assert report['healthy']
+    assert report['attention'] == ['BridgeIdentityFenced']

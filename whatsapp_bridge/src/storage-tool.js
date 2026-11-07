@@ -6,9 +6,10 @@ import { pathToFileURL } from 'node:url';
 import { acquireDataDirectory, atomicWrite, assertAuthRecoveryClear } from './storage.js';
 import { JournalStore, readJournal, encode, hash } from './journal-store.js';
 import { readStorageConfig } from './config.js';
+import { hasAuthFence, inspectAuthRetention } from './fenced-auth.js';
 
 export async function storageTool(command, directory, destination, {maintenance = readStorageConfig().maintenance} = {}) {
-  if (!['validate', 'import', 'compact', 'export'].includes(command)) throw new Error('INVALID_COMMAND');
+  if (!['validate', 'validate-retained', 'import', 'compact', 'export'].includes(command)) throw new Error('INVALID_COMMAND');
   directory = path.resolve(directory);
   if (command === 'export') {
     if (!destination || path.resolve(destination).startsWith(directory + path.sep) || path.resolve(destination) === directory) throw new Error('INVALID_EXPORT_DESTINATION');
@@ -30,8 +31,18 @@ export async function storageTool(command, directory, destination, {maintenance 
     // Older bridges cannot interpret provider transaction intents/failures.
     // No command may report a rollback-ready export or rewrite another store
     // while unresolved authentication evidence remains anywhere in this copy.
+    const retainedLines = [], eligibleLines = [];
     for (const relative of files) {
-      if (path.basename(relative) === 'auth.json') await assertAuthRecoveryClear(path.join(directory, relative));
+      if (path.basename(relative) !== 'auth.json') continue;
+      const identityDirectory = path.dirname(path.join(directory, relative));
+      if (command === 'validate-retained' && await hasAuthFence(identityDirectory)) {
+        const evidence = await inspectAuthRetention(identityDirectory, release.assertHeld);
+        if (!evidence.result.isolation_safe) throw new Error('AUTH_ISOLATION_UNPROVEN');
+        retainedLines.push(path.dirname(relative));
+      } else {
+        await assertAuthRecoveryClear(path.join(directory, relative));
+        eligibleLines.push(path.dirname(relative));
+      }
     }
     // Validate every store before creating an export or changing any checkpoint.
     const states = [];
@@ -62,13 +73,14 @@ export async function storageTool(command, directory, destination, {maintenance 
       }
     }
     return {stores: states.length, messages: states.reduce((n, state) => n + Object.keys(state.data.messages ?? {}).length, 0),
-      incomplete_tail_bytes: states.reduce((n, state) => n + (state.incompleteTailBytes ?? 0), 0)};
+      incomplete_tail_bytes: states.reduce((n, state) => n + (state.incompleteTailBytes ?? 0), 0),
+      ...(command === 'validate-retained' ? {retained_lines: retainedLines.sort(), eligible_lines: eligibleLines.sort(), recovery_allowed: false} : {})};
   } finally { await release(); }
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
   const [command, directory, destination] = process.argv.slice(2);
-  if (!directory) { console.error('Usage: node src/storage-tool.js validate|import|compact|export DATA_DIRECTORY [NEW_EXPORT_DIRECTORY]'); process.exitCode = 1; }
+  if (!directory) { console.error('Usage: node src/storage-tool.js validate|validate-retained|import|compact|export DATA_DIRECTORY [NEW_EXPORT_DIRECTORY]'); process.exitCode = 1; }
   else storageTool(command, directory, destination).then(result => console.log(JSON.stringify(result)))
     .catch(() => { console.error('Storage operation failed. Directory must be offline, readable, valid, and privately writable. Original history was retained.'); process.exitCode = 1; });
 }

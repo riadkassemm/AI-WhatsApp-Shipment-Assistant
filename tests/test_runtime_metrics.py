@@ -111,3 +111,27 @@ def test_ip_policy_tls_and_kernel_progress_are_exported_without_endpoint_or_erro
         assert any(k.startswith('support_bridge_' + name + '{') and v == expected for k, v in metrics.items())
     assert '192.0.2' not in str(metrics) and 'private' not in str(metrics)
     assert not any(k.startswith('support_bridge_tcp_send_window_bytes') for k in metrics)
+
+
+def test_fenced_identity_keeps_backlog_metrics_without_claiming_transport_health():
+    data = snapshot()
+    data['lines'] = data['lines'][:7]
+    data['runtime'] = {'eligible_storage_critical': False}
+    line = data['lines'][-1]
+    line.update(status='error', lifecycle='fenced_retained', eligible=False,
+                isolation={'safe': True}, diagnostics={}, uncertain_sends=36, pending_callbacks=2)
+    metrics = bridge_metrics(data)
+    assert metrics['support_bridge_lines'] == 7
+    assert metrics['support_bridge_eligible_lines'] == 6
+    assert metrics['support_bridge_eligible_paired_lines'] == 6
+    assert metrics['support_bridge_fenced_lines'] == 1
+    assert metrics['support_bridge_fenced_unresolved_lines'] == 0
+    assert metrics['support_bridge_diagnostics_up'] == 1
+    assert metrics['support_bridge_eligible_storage_critical'] == 0
+    assert any(k.startswith('support_bridge_uncertain_sends{') and v == 36 for k, v in metrics.items())
+    assert any(k.startswith('support_bridge_identity_diagnostics_up{') and v == 0 for k, v in metrics.items())
+    line.update(lifecycle='fenced_unresolved', isolation={'safe': False})
+    assert bridge_metrics(data)['support_bridge_diagnostics_up'] == 0
+    assert bridge_metrics(data)['support_bridge_fenced_unresolved_lines'] == 1
+    del data['runtime']
+    assert bridge_metrics(data)['support_bridge_eligible_storage_critical'] == 1
