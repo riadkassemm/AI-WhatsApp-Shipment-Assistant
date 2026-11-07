@@ -8,7 +8,10 @@ class EmptyRedis:
 
 def snapshot():
     return {'ready': True, 'lines': [{'line_id': str(90000 + index), 'status': 'connected', 'is_paired': True,
-        'diagnostics': {'supported': True, 'disconnects_total': 3, 'disconnects': {'temporary_transport': 3},
+        'diagnostics': {'supported': True, 'version': 2, 'generation': 1, 'generation_started_at': 100000,
+            'heartbeat_requests': 10, 'heartbeat_successes': 7, 'heartbeat_query_timeouts': 3,
+            'heartbeat_request_at': 119500, 'heartbeat_query_completed_at': 120000, 'heartbeat_success_at': 120000, 'raw_frames': 20, 'decoded_frames': 20,
+            'last_raw_frame_at': 120000, 'last_frame_at': 120000, 'disconnects_total': 3, 'disconnects': {'temporary_transport': 3},
             'reconnect_attempts': 3, 'recovery_count': 3, 'recovery_seconds_sum': 9, 'recovery_seconds_last': 3,
             'heartbeat_failures': 0, 'heartbeat_timeouts': 3, 'heartbeat_frame_age_ms': 100,
             'heartbeat_timer_delay_ms': 25, 'heartbeat_observed_at': 123000, 'heartbeat_rtt_ms': 500},
@@ -53,3 +56,25 @@ def test_unknown_reason_text_is_never_a_metric_label():
     data['lines'][0]['diagnostics']['disconnects']['private provider payload'] = 999
     output = str(bridge_metrics(data))
     assert 'private provider payload' not in output
+
+
+def test_old_diagnostics_and_timeouts_do_not_claim_successful_heartbeat():
+    data = snapshot()
+    d = data['lines'][0]['diagnostics']
+    d.update(heartbeat_success_at=None, heartbeat_rtt_ms=None, heartbeat_successes=0,
+             heartbeat_query_elapsed_ms=20000)
+    metrics = bridge_metrics(data)
+    assert not any(key.startswith('support_bridge_heartbeat_rtt_seconds') and value == 20
+                   for key, value in metrics.items())
+    assert any(key.startswith('support_bridge_heartbeat_success_timestamp_seconds') and value == 0
+               for key, value in metrics.items())
+    d['version'] = 1
+    assert bridge_metrics(data)['support_bridge_diagnostics_up'] == 0
+
+
+def test_tcp_metric_labels_never_include_endpoints_or_untrusted_fields():
+    data = snapshot()
+    data['lines'][0]['diagnostics']['transport'] = {'remote_ip': '2001:db8::1', 'family': 'IPv6'}
+    metrics = bridge_metrics(data, {'90000': {'retransmitted_segments': 3, 'private_payload': 99}})
+    assert any(key.startswith('support_bridge_tcp_retransmitted_segments') and value == 3 for key, value in metrics.items())
+    assert '2001:db8' not in str(metrics) and 'private_payload' not in str(metrics)
