@@ -417,6 +417,37 @@ test('a disconnected saved session reconnects only to confirm unlink while the e
   assert.equal(bridge.lines.has(added.line_id), false);
 });
 
+test('removal preserves a fenced authentication failure instead of recommending another unlink attempt', async t => {
+  const {bridge, line, socket} = await fixture(t);
+  const added = await bridge.addLine({request_id: randomUUID()});
+  const target = bridge.getLine(added.line_id);
+  target.auth.state.creds.registered = true;
+  target.auth.state.creds.me = {id: '96170222222:2@s.whatsapp.net'};
+  await target.auth.saveCreds();
+  const credentials = createHash('sha256').update(JSON.stringify(target.auth.store.data.creds)).digest('hex');
+  target.status = 'error';
+  target.auth.store.failed = true;
+  bridge.makeSocket = () => {throw new Error('A fenced session must not create another transport');};
+  try {
+    await assert.rejects(bridge.removeLine(added.line_id), error =>
+      error.code === 'AUTH_RECOVERY_REQUIRED' && error.bridgePersistenceFailure === true);
+    assert.equal(target.status, 'error');
+    assert.equal(target.recoveryCategory, 'storage_failure');
+    assert.equal(target.retryBlocked, true);
+    assert.match(target.error, /administrator recovery review/i);
+    assert.doesNotMatch(target.error, /retry removal/i);
+    assert.equal(target.auth.store.failed, true);
+    assert.equal(createHash('sha256').update(JSON.stringify(target.auth.store.data.creds)).digest('hex'), credentials);
+    assert.equal(bridge.lines.has(added.line_id), true);
+    assert.ok(!(bridge.manifest.data.removed_line_ids ?? []).includes(added.line_id));
+    assert.equal(target.removalRemoteConfirmed, undefined);
+    assert.equal(line.socket, socket);
+    assert.equal(line.status, 'connected');
+    assert.equal(line.session.ready, true);
+    assert.equal(socket.queries.length, 0);
+  } finally {await assert.rejects(bridge.close(), /BRIDGE_SHUTDOWN_FAILED/);}
+});
+
 test('an unlink timeout cannot pretend complete removal or erase saved credentials, and an explicit retry can finish', async t => {
   const { bridge, line, socket, dataDir } = await fixture(t);
   line.auth.state.creds.registered = true;
@@ -2445,7 +2476,7 @@ test('confirmed logout does not authorize re-pairing or removal across an authen
   line.auth.store.failed = true;
   bridge.makeSocket = () => {throw new Error('Must not connect a fenced session');};
   await assert.rejects(bridge.connect(LINE), /STORAGE_RESTART_REQUIRED/);
-  await assert.rejects(bridge.removeLine(LINE), /STORAGE_RESTART_REQUIRED/);
+  await assert.rejects(bridge.removeLine(LINE), {code: 'AUTH_RECOVERY_REQUIRED'});
   assert.deepEqual(line.auth.store.data.creds.signedIdentityKey.public, retained);
   assert.equal(line.auth.store.seq, sequence);
   assert.ok(line.store.data.messages.ORIGINAL);

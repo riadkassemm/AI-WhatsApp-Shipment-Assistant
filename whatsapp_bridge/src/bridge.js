@@ -413,13 +413,26 @@ export class Bridge {
         line.store = null;
         return { line_id: id, removed: true, unlinked: true };
       } catch (error) {
+        const authRecoveryRequired = line.auth?.store?.failed === true || error?.code === 'AUTH_RECOVERY_REQUIRED';
+        if (authRecoveryRequired) {
+          // A failed reconnect for unlinking must not hide an auth fence behind
+          // a generic provider retry. No credentials or removal ledger change.
+          error = new BridgeError(503, 'AUTH_RECOVERY_REQUIRED',
+            'This saved session requires administrator recovery review before removal or reconnecting. Its saved state is retained.');
+          error.bridgePersistenceFailure = true;
+        }
         if ((this.manifest.data.removed_line_ids ?? []).includes(id)) this.lines.delete(id);
         else {
-          if (line.socket !== previousSocket || previousStatus !== 'connected' || line.removalRemoteConfirmed) this.stopRemovedSocket(line);
+          if (authRecoveryRequired || line.socket !== previousSocket || previousStatus !== 'connected' || line.removalRemoteConfirmed) this.stopRemovedSocket(line);
           await line.eventTail;
           await line.store.update(data => { data.enabled = previousEnabled; });
           line.status = line.socket && previousStatus === 'connected' ? 'connected' : 'error';
-          if (line.status === 'error') line.error = 'This number could not be fully removed. Its saved session is retained; retry removal.';
+          if (authRecoveryRequired) {
+            line.recoveryCategory = 'storage_failure';
+            line.diagnostics.last_category = 'storage_failure';
+            line.retryBlocked = true;
+            line.error = error.message;
+          } else if (line.status === 'error') line.error = 'This number could not be fully removed. Its saved session is retained; retry removal.';
         }
         throw error;
       } finally {
@@ -467,7 +480,8 @@ export class Bridge {
         content: [{ tag: 'remove-companion-device', attrs: { jid, reason: 'user_initiated' } }] }, this.config.removalQueryTimeoutMs ?? 15_000);
       if (result?.tag !== 'iq' || result.attrs?.type !== 'result') throw new Error('No explicit unlink acknowledgment');
       line.removalRemoteConfirmed = true;
-    } catch {
+    } catch (cause) {
+      if (cause?.bridgePersistenceFailure) throw cause;
       // A real server logged-out response proves the saved companion is already
       // invalid, including when removal closes the socket before its IQ reply.
       if (line.removalRemoteConfirmed) return;

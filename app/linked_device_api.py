@@ -253,6 +253,8 @@ async def remove_linked_device_line(
             except WhatsAppSendError as exc:
                 if getattr(exc, "bridge_code", None) == "AUTH_WORK_PENDING":
                     raise HTTPException(409, "This number is inactive while WhatsApp logout finishes accepted updates. Its conversations are retained. Wait, then retry Remove and unlink.") from exc
+                if getattr(exc, "bridge_code", None) == "AUTH_RECOVERY_REQUIRED":
+                    raise HTTPException(503, "This number is inactive and its saved session requires administrator recovery review before removal or reconnecting. Its conversations and saved state are retained.") from exc
                 raise HTTPException(503, "The number is inactive in the app, but WhatsApp unlinking did not finish. Its conversations are retained. Retry Remove and unlink, or add it back to the app if it is still connected.") from exc
             if not isinstance(result, dict) or str(result.get("line_id")) != line_id or result.get("removed") is not True or result.get("unlinked") is not True:
                 raise HTTPException(503, "WhatsApp did not confirm unlinking. The number remains inactive and its conversations are retained. Retry Remove and unlink.")
