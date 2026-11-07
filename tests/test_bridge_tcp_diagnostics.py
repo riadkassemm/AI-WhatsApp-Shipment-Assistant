@@ -33,3 +33,22 @@ def test_missing_ss_permissions_timeouts_and_invalid_endpoints_are_unknown():
     def never(*args, **kwargs):
         raise AssertionError('invalid targets must not execute ss')
     assert tcp_samples([{'line_id': '90001', 'diagnostics': {'transport': {'remote_ip': 'bad'}}}], never) == {}
+
+
+def test_tcp_receive_ack_progress_and_capture_bounds_are_optional_and_passive():
+    times = iter([100.0, 100.25])
+    def run(*args, **kwargs):
+        return SimpleNamespace(stdout='0 74 [2001:db8::2]:34000 [2001:db8::1]:443 cubic '
+            'bytes_sent:1000 bytes_acked:900 bytes_received:2000 segs_in:18 data_segs_in:10 '
+            'unacked:1 lastrcv:20000 lastack:21000 snd_wnd:65535\n'
+            '0 0 192.0.2.2:34001 192.0.2.1:443 cubic rtt:8/2\n')
+    samples = tcp_samples(lines(), run, now=lambda: next(times))
+    observed = samples['90001']
+    for key, value in {'bytes_sent': 1000, 'bytes_acked': 900, 'bytes_received': 2000,
+                       'segments_in': 18, 'data_segments_in': 10, 'unacked_segments': 1,
+                       'last_receive_ms': 20000, 'last_ack_receive_ms': 21000,
+                       'send_window_bytes': 65535}.items():
+        assert observed[key] == value
+        assert key not in samples['90002'], 'absent kernel counters remain unknown'
+    assert observed['sample_started_timestamp_seconds'] == 100
+    assert observed['sample_timestamp_seconds'] == 100.25

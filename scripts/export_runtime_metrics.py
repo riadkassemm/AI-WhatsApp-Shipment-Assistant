@@ -145,13 +145,21 @@ def bridge_metrics(snapshot, tcp=None):
         family = transport.get('family')
         if family in {'IPv4', 'IPv6', 'unknown'}:
             values['support_bridge_transport_family{' + labels + ',family="' + family + '"}'] = 1
+        configured_family = diagnostic.get('configured_ip_family')
+        if type(configured_family) is int and configured_family in (0, 4):
+            fields['configured_ip_family'] = configured_family
+        if type(transport.get('tls_authorized')) is bool:
+            fields['transport_tls_authorized'] = int(transport['tls_authorized'])
         sample = tcp.get(raw_id)
         fields['tcp_sample_up'] = int(sample is not None)
         if sample is not None:
             # These are per-socket gauges: use the generation metric when
             # comparing samples. A replacement connection resets TCP counters.
             for name in ('receive_queue_bytes', 'send_queue_bytes', 'retransmitted_segments',
-                         'retransmitted_bytes', 'rtt_ms', 'rto_ms'):
+                         'retransmitted_bytes', 'rtt_ms', 'rto_ms', 'bytes_received', 'bytes_acked',
+                         'bytes_sent', 'segments_in', 'data_segments_in', 'unacked_segments',
+                         'last_receive_ms', 'last_ack_receive_ms', 'send_window_bytes',
+                         'sample_started_timestamp_seconds', 'sample_timestamp_seconds'):
                 if name in sample:
                     fields['tcp_' + name] = sample[name]
         if diagnostic.get('heartbeat_query_elapsed_ms') is not None:

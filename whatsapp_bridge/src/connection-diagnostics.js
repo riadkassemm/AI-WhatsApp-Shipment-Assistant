@@ -31,7 +31,8 @@ function generationDiagnostics() {
     heartbeat_request_at: null, heartbeat_success_at: null, heartbeat_query_completed_at: null,
     heartbeat_rtt_ms: null, heartbeat_query_elapsed_ms: null, heartbeat_query_sequence: 0,
     heartbeat_outcome: 'unknown', heartbeat_frame_age_ms: 0, heartbeat_timer_delay_ms: 0,
-    transport: null, transport_error_code: null, transport_close_code: null };
+    transport: null, transport_error_code: null, transport_close_code: null,
+    socket_error_code: null, socket_end_at: null, socket_closed_at: null, socket_close_had_error: null };
 }
 
 export function resetConnectionDiagnostics(diagnostics, generation) {

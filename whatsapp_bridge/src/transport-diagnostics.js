@@ -1,7 +1,9 @@
 import { isIP } from 'node:net';
 
 const networkErrors = new Set(['ECONNRESET', 'ECONNREFUSED', 'EPIPE', 'ETIMEDOUT',
-  'ENETUNREACH', 'EHOSTUNREACH', 'EAI_AGAIN', 'ENOTFOUND', 'ERR_TLS_CERT_ALTNAME_INVALID']);
+  'ENETUNREACH', 'EHOSTUNREACH', 'EAI_AGAIN', 'ENOTFOUND', 'EACCES', 'EADDRNOTAVAIL',
+  'ERR_TLS_CERT_ALTNAME_INVALID', 'CERT_HAS_EXPIRED', 'DEPTH_ZERO_SELF_SIGNED_CERT',
+  'UNABLE_TO_VERIFY_LEAF_SIGNATURE', 'ERR_SSL_WRONG_VERSION_NUMBER']);
 const count = value => Number.isSafeInteger(value) && value >= 0 ? value : null;
 
 // Only endpoint metadata and counters. Never inspect URLs, headers, frames,
@@ -14,14 +16,33 @@ export function transportSnapshot(ws) {
     family: family === 4 ? 'IPv4' : family === 6 ? 'IPv6' : 'unknown',
     local_port: count(tcp?.localPort), remote_port: count(tcp?.remotePort),
     bytes_read: count(tcp?.bytesRead), bytes_written: count(tcp?.bytesWritten),
-    writable_bytes: count(tcp?.writableLength), ready_state: count(raw?.readyState) };
+    writable_bytes: count(tcp?.writableLength), ready_state: count(raw?.readyState),
+    tls_authorized: typeof tcp?.authorized === 'boolean' ? tcp.authorized : null };
 }
 
 export function observeTransport(ws, report) {
   const raw = ws?.socket;
   if (!raw?.on) return () => {};
+  let observedSocket;
   const emit = sample => { try { report({ ...sample, transport: transportSnapshot(ws) }); } catch {} };
-  const onOpen = () => emit({ event: 'transport_open' });
+  const onSocketError = error => emit({event: 'socket_error',
+    error_code: networkErrors.has(error?.code) ? error.code : 'OTHER'});
+  const onSocketEnd = () => emit({event: 'socket_end'});
+  const onSocketClose = hadError => emit({event: 'socket_closed',
+    had_error: typeof hadError === 'boolean' ? hadError : null});
+  const onOpen = () => {
+    const tcp = raw._socket;
+    if (tcp?.prependListener && !observedSocket) {
+      observedSocket = tcp;
+      // ws can consume an underlying TLS/socket error without forwarding it.
+      // Observe codes before its close cleanup clears the endpoint. No data
+      // listeners, stream reads, socket actions or changes to error handling.
+      tcp.prependListener('error', onSocketError);
+      tcp.prependListener('end', onSocketEnd);
+      tcp.prependListener('close', onSocketClose);
+    }
+    emit({ event: 'transport_open' });
+  };
   const onError = error => emit({ event: 'transport_error',
     error_code: networkErrors.has(error?.code) ? error.code : 'OTHER' });
   const onClose = code => {
@@ -30,6 +51,9 @@ export function observeTransport(ws, report) {
   };
   const cleanup = () => {
     raw.off('open', onOpen); raw.off('error', onError); raw.off('close', onClose);
+    observedSocket?.off('error', onSocketError);
+    observedSocket?.off('end', onSocketEnd);
+    observedSocket?.off('close', onSocketClose);
   };
   raw.on('open', onOpen); raw.on('error', onError); raw.on('close', onClose);
   if (ws.isOpen) onOpen();

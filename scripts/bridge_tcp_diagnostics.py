@@ -4,6 +4,7 @@ from __future__ import annotations
 import ipaddress
 import re
 import subprocess
+import time
 from typing import Any, Callable
 
 
@@ -12,7 +13,8 @@ def endpoint(value: str) -> tuple[str, int]:
     return str(ipaddress.ip_address(host.strip('[]'))), int(port)
 
 
-def tcp_samples(lines: list[dict[str, Any]], run: Callable[..., Any] = subprocess.run) -> dict[str, dict[str, float]]:
+def tcp_samples(lines: list[dict[str, Any]], run: Callable[..., Any] = subprocess.run,
+                now: Callable[[], float] = time.time) -> dict[str, dict[str, float]]:
     """No probes, packet capture, process listing, payloads or socket changes.
 
     Missing permissions/ss/connections return no evidence, never zero loss.
@@ -36,8 +38,10 @@ def tcp_samples(lines: list[dict[str, Any]], run: Callable[..., Any] = subproces
     command = ['ss', '-tinHO', 'state', 'established', '(',
                *' or '.join(f'sport = :{port}' for port in ports).split(), ')']
     try:
+        started_at = now()
         result = run(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                      text=True, timeout=2, check=True)
+        sampled_at = now()
         if len(result.stdout) > 262144:
             return {}
     except (OSError, subprocess.SubprocessError):
@@ -54,9 +58,19 @@ def tcp_samples(lines: list[dict[str, Any]], run: Callable[..., Any] = subproces
             if not identity or min(receive_queue, send_queue) < 0:
                 continue
             info = ' '.join(fields[4:])
-            sample = {'receive_queue_bytes': receive_queue, 'send_queue_bytes': send_queue}
+            sample = {'receive_queue_bytes': receive_queue, 'send_queue_bytes': send_queue,
+                      'sample_started_timestamp_seconds': started_at, 'sample_timestamp_seconds': sampled_at}
             patterns = {'retransmitted_segments': r'\bretrans:\d+/(\d+)\b',
                         'retransmitted_bytes': r'\bbytes_retrans:(\d+)\b',
+                        'bytes_received': r'\bbytes_received:(\d+)\b',
+                        'bytes_acked': r'\bbytes_acked:(\d+)\b',
+                        'bytes_sent': r'\bbytes_sent:(\d+)\b',
+                        'segments_in': r'\bsegs_in:(\d+)\b',
+                        'data_segments_in': r'\bdata_segs_in:(\d+)\b',
+                        'unacked_segments': r'\bunacked:(\d+)\b',
+                        'last_receive_ms': r'\blastrcv:(\d+)\b',
+                        'last_ack_receive_ms': r'\blastack:(\d+)\b',
+                        'send_window_bytes': r'\bsnd_wnd:(\d+)\b',
                         'rtt_ms': r'\brtt:(\d+(?:\.\d+)?)/', 'rto_ms': r'\brto:(\d+(?:\.\d+)?)\b'}
             for name, pattern in patterns.items():
                 match = re.search(pattern, info)
