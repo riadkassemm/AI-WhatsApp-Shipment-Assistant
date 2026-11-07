@@ -190,3 +190,37 @@ def test_watchdog_service_is_independent_read_only_bounded_and_timer_enabled_sep
     timer.read("deployment/dev-vps/whatsapp-storage-watchdog.timer")
     assert timer["Timer"]["OnUnitActiveSec"] == "60s"
     assert timer["Install"]["WantedBy"] == "timers.target"
+
+
+def test_quarantine_warning_requires_positive_cessation_and_preserves_other_failures():
+    from copy import deepcopy
+    snapshot = {"storage": {"level": "critical", "issues": [
+        {"code": "STORE_UNAVAILABLE", "level": "critical", "kind": "auth", "line_id": "99035"}]},
+        "lines": [{"line_id": "99035", "lifecycle": "decommissioned", "eligible": False,
+                   "isolation": {"safe": True, "recovery_allowed": False},
+                   "local_removal": {"line_id": "99035", "removed": True, "quarantined": True, "reuse_allowed": False}}]}
+    result = watchdog.quarantine_storage_status(snapshot)
+    assert result["level"] == "warning"
+    assert result["issues"][0]["code"] == "IDENTITY_DECOMMISSIONED"
+    assert snapshot["storage"]["level"] == "critical", "raw evidence is never rewritten"
+    for change in [{"eligible": True}, {"lifecycle": "fenced_unresolved"}, {"isolation": {"safe": False}}, {"local_removal": {}}]:
+        invalid = deepcopy(snapshot)
+        invalid["lines"][0].update(change)
+        assert watchdog.quarantine_storage_status(invalid)["level"] == "critical"
+    for issue in [{"code": "DISK_SPACE_LOW"}, {"code": "INODES_LOW"}, {"code": "COMPACTION_FAILED"},
+                  {"code": "STORE_UNAVAILABLE", "kind": "outbox"},
+                  {"code": "STORE_UNAVAILABLE", "kind": "state", "line_id": "99035"},
+                  {"code": "STORE_UNAVAILABLE", "kind": "auth", "line_id": "99012"}]:
+        mixed = deepcopy(snapshot)
+        mixed["storage"]["issues"].append({**issue, "level": "critical"})
+        assert watchdog.quarantine_storage_status(mixed)["level"] == "critical"
+    missing = deepcopy(snapshot)
+    missing["storage"]["issues"] = []
+    with pytest.raises(ValueError, match="UNACCOUNTED"):
+        watchdog.quarantine_storage_status(missing)
+    unknown = deepcopy(snapshot)
+    unknown["storage"]["issues"].append({"code": "UNKNOWN_NEW_FAILURE", "level": "critical"})
+    with pytest.raises(ValueError, match="INVALID_BRIDGE_HEALTH"):
+        watchdog.quarantine_storage_status(unknown)
+    output = watchdog.collect({}, filesystem=lambda _: disk(), probe=lambda _: result)
+    assert output["level"] == "warning" and output["issues"][0]["code"] == "IDENTITY_DECOMMISSIONED"
