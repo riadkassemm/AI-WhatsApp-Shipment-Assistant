@@ -7,7 +7,7 @@ from app.support_auth import SupportAgent, get_current_agent
 router = APIRouter(prefix="/api/support/whatsapp-linked-device", tags=["bridge-management"])
 
 
-def management_reader(response: Response, agent: SupportAgent = Depends(get_current_agent)) -> SupportAgent:
+async def management_reader(response: Response, agent: SupportAgent = Depends(get_current_agent)) -> SupportAgent:
     response.headers["Cache-Control"] = "no-store"
     if not agent.can_view_whatsapp_management:
         raise HTTPException(403, "Only Admins and Super Admins can view WhatsApp management.")

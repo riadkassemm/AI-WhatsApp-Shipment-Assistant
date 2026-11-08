@@ -142,6 +142,20 @@ def describe_line(line_id: str, row: dict, raw: dict | None, storage: Any,
     else:
         explanation = REASONS.get(category, "Connected to WhatsApp." if state == "connected" else "WhatsApp is temporarily unavailable." if raw else "Connection telemetry is unavailable. The current state cannot be verified.")
     scoped_storage = summarize_storage(storage, [{"phone_number_id": line_id}])
+    # A missing/invalid issue list cannot establish healthy storage. In
+    # particular, do not turn a future/unknown critical code into green health.
+    storage_payload = mapping(storage)
+    storage_issues = storage_payload.get("issues")
+    complete_storage = isinstance(storage_issues, list) and all(
+        summarize_storage({"level": "warning", "issues": [issue]},
+                          [{"phone_number_id": str(mapping(issue).get("line_id") or line_id)}])["issues"]
+        for issue in storage_issues
+    )
+    if (not complete_storage or
+            (choice(storage_payload.get("level"), {"warning", "critical"}) and not storage_issues)):
+        scoped_storage = {"level": "unknown", "issues": (scoped_storage or {}).get("issues", [])}
+        if storage_payload:
+            blockers.append("STORAGE_TELEMETRY_INCOMPLETE")
     # Missing/unsupported monitoring is unknown, never healthy by omission.
     storage_state = scoped_storage or {"level": "unknown", "issues": []}
     storage_state["checked_at_ms"] = number(mapping(storage).get("checked_at"))

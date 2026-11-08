@@ -198,14 +198,14 @@ def test_slow_health_probe_caches_from_completion_for_waiting_staff(monkeypatch)
 
 
 def test_storage_banner_warns_before_outage_without_suggesting_pairing():
-    source = Path("app/static/support/actions.js").read_text()
+    source = (Path(__file__).resolve().parents[1] / "app/static/support/actions.js").read_text()
     helpers = source[source.index("const LINE_HEALTH_INTERVAL_MS"):source.index("function linkedDeviceAdditionStorageKey(")]
     script = r"""
 const assert = require('node:assert/strict');
 function element() {return {dataset: {}, textContent: '', classList: {hidden: true, toggle(_, value) {this.hidden = value}}}}
 const elements = {lineAlertBanner: element(), lineAlertText: element(), lineAlertActionBtn: element(), composerHelp: element()};
 const $ = id => elements[id], text = (node, value) => {node.textContent = value};
-const canLinkWhatsApp = () => true, sounds = [], notifyNewCustomerActivity = value => sounds.push(value);
+const canViewBridgeManagement = () => true, sounds = [], notifyNewCustomerActivity = value => sounds.push(value);
 const state = {lineAlertsSeen: new Set(), currentTicketData: {ticket: {business_phone_number_id: '90020'}, permissions: {can_reply: true}}};
 """ + helpers + r"""
 const payload = {lines: [{line_id:'90020', name:'Saida Office', status:'connected', alert:false}],
@@ -280,7 +280,7 @@ def test_only_known_safe_bridge_outages_or_pressure_hold_a_reply():
 
 
 def test_banner_and_composer_explain_an_outage():
-    source = Path("app/static/support/actions.js").read_text()
+    source = (Path(__file__).resolve().parents[1] / "app/static/support/actions.js").read_text()
     helpers = source[source.index("const LINE_HEALTH_INTERVAL_MS"):source.index("function linkedDeviceAdditionStorageKey(")]
     script = r"""
 const assert = require('node:assert/strict');
@@ -289,7 +289,7 @@ const elements = {lineAlertBanner: element(), lineAlertText: element(), lineAler
 const $ = id => elements[id];
 const text = (node, value) => {node.textContent = value};
 let staff = false;
-const canLinkWhatsApp = () => staff;
+const canViewBridgeManagement = () => staff;
 const sounds = [];
 const notifyNewCustomerActivity = message => sounds.push(message);
 const state = {authenticated: true, lineHealthAt: 0, lineAlertsSeen: new Set(),

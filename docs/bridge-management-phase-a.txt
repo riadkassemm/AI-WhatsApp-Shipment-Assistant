@@ -74,11 +74,13 @@ app/support_ui.py, app/templates/support.html, and app/static/support/
 Regressions: tests/test_bridge_management.py, tests/bridge_management_ui.test.cjs,
 tests/test_linked_device_api.py, tests/test_whatsapp_number_registry.py.
 
-Verification after separately approved DEV deployment
------------------------------------------------------
-Use isolated/mock WhatsApp identities. Preserve DEV persistent files and sessions.
-Never use production credentials or send customer messages. No DEV access,
-deployment, local application execution or test run is authorized by this file.
+Verification and production-only workflow
+----------------------------------------
+The user authorized focused local checks with mocks and isolated data. Do not
+access DEV. Implement locally, commit, push, review a PR, then obtain explicit
+approval before production deployment. Never use production credentials in tests
+or send customer messages. See bridge-management-production.txt for the review
+results, live read-only observations, activation gates and rollback procedure.
 
 1. Sign in separately as regular staff, Admin and Super Admin. Regular staff
    retain normal tickets, media and outage status. Only the two manager roles
@@ -110,15 +112,19 @@ deployment, local application execution or test run is authorized by this file.
    lines must distinguish confirmed remote unlink from unconfirmed local removal.
    Inspect technical blocker codes as Super Admin without clearing any fence.
 
-Focused automated checks to run on approved DEV, separately (historical unit
-modules install dependency doubles):
+Focused automated checks, separately (historical unit modules install dependency
+doubles). Run from an isolated directory without .env and with an explicit
+PYTHONPATH to the repository; use absolute test paths where necessary:
   venv/bin/python -m pytest -q tests/test_bridge_management.py
   venv/bin/python -m pytest -q tests/test_linked_device_api.py
   venv/bin/python -m pytest -q tests/test_whatsapp_number_registry.py
+  venv/bin/python -m pytest -q tests/test_bridge_management_release.py
+  SUPPORT_TEST_BROWSER=chromium venv/bin/python -m pytest -q tests/test_bridge_management_browser.py
   node tests/bridge_management_ui.test.cjs
   venv/bin/python scripts/check_support_assets.py
-  venv/bin/python -m compileall -q app tests
-Local review: git diff --check. No full suite or unrelated build is needed.
+Local review: parse changed Python files and git diff --check. No full suite or
+unrelated build is needed. Existing authenticated reads may update the staff
+session last_seen timestamp; management never writes WhatsApp/customer state.
 
 Phase B remains separate: safe reconnect, durable pause/resume and deferred
 work, operation journal/idempotency, per-identity lifecycle locking, action rate
