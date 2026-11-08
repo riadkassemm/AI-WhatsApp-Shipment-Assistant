@@ -609,7 +609,9 @@ def test_image_editor_asset_is_served_with_upload_limit(monkeypatch: pytest.Monk
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is unavailable")
 def test_text_send_clears_composer_before_provider_response() -> None:
-    send = _HTML[_HTML.index("async function sendMessage()"): _HTML.index("function showMessagePreferencesError(")]
+    media = _ASSETS['media.js']
+    actions = _ASSETS['actions.js']
+    send = media[media.index("async function sendMessage()"):] + actions[:actions.index("function showMessagePreferencesError(")]
     timeline = _HTML[_HTML.index("function upsertTimelineMessage("): _HTML.index("function renderConversation(")]
     script = r"""
 const assert = require('node:assert/strict');
@@ -801,7 +803,9 @@ def test_remote_edit_keeps_draft_on_rejection_and_checks_message_owner() -> None
     cache_change = _HTML[_HTML.index("function changeCachedMessage("): _HTML.index("function upsertTimelineMessage(")]
     controls = _HTML[_HTML.index("function canChangeWhatsAppMessage("): _HTML.index("async function sendMessageReaction(")]
     add_message = _HTML[_HTML.index("function addMessage("): _HTML.index("function addEvent(")]
-    sending = _HTML[_HTML.index("async function sendMessage()"): _HTML.index("function showMessagePreferencesError(")]
+    media = _ASSETS['media.js']
+    actions = _ASSETS['actions.js']
+    sending = media[media.index("async function sendMessage()"):] + actions[:actions.index("function showMessagePreferencesError(")]
     script = r"""
 const assert = require('node:assert/strict');
 class Element {

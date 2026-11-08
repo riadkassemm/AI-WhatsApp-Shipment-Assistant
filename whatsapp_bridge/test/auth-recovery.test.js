@@ -42,6 +42,33 @@ async function twoStalled(auth) {
   return {release, settled};
 }
 
+for (const fenced of [false, true]) test(`repeated live assessment preserves every auth file (${fenced ? 'fenced' : 'active'})`, async t => {
+  const {auth, directory, closed} = await fixture(t);
+  if (fenced) {
+    const {release, settled} = await twoStalled(auth);
+    release.resolve(); await settled; closed.resolve(); auth.recoveryEventsReleased();
+    await auth.assessRecovery(); // Wait for already accepted evidence writes.
+  }
+  const inventory = async () => {
+    const result = {};
+    for (const name of (await fs.readdir(directory)).sort()) {
+      const file = path.join(directory, name), stat = await fs.stat(file);
+      if (stat.isFile()) result[name] = {hash: await digest(file), mode: stat.mode, mtime: stat.mtimeMs};
+    }
+    return result;
+  };
+  const before = await inventory(), sequence = auth.store.seq, failed = auth.store.failed;
+  const traps = [t.mock.method(auth, 'renew', () => {throw new Error('Unexpected renewal');}),
+    t.mock.method(auth, 'saveCreds', () => {throw new Error('Unexpected credential write');}),
+    t.mock.method(auth.store, 'flush', () => {throw new Error('Unexpected flush');})];
+  try {
+    const results = await Promise.all(Array.from({length: 8}, () => auth.assessRecovery()));
+    assert.ok(results.every(result => result.recovery_allowed === false));
+    assert.deepEqual(await inventory(), before);
+    assert.equal(auth.store.seq, sequence); assert.equal(auth.store.failed, failed);
+  } finally {for (const trap of traps) trap.mock.restore();}
+});
+
 test('two stalled operations retain unresolved and final outcomes without unlocking authentication', async t => {
   const {auth, directory, closed} = await fixture(t);
   const {release, settled} = await twoStalled(auth);

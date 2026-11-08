@@ -1,4 +1,4 @@
-"""Focused read-only/RBAC regressions. Run on approved DEV, with no real bridge."""
+"""Focused read-only/RBAC regressions using isolated data and no real bridge."""
 import asyncio
 import json
 from datetime import datetime

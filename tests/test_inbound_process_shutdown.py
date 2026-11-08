@@ -45,11 +45,11 @@ async def fixture():
 '''
     (tmp_path / 'shutdown_fixture.py').write_text(source)
     sock = tmp_path / 'http.sock'
-    env = {**os.environ, 'PYTHONPATH': str(Path.cwd()), 'OPENAI_API_KEY': 'fixture-only'}
+    env = {**os.environ, 'PYTHONPATH': str(Path(__file__).resolve().parents[1]), 'OPENAI_API_KEY': 'fixture-only'}
     with (tmp_path / 'process.log').open('w') as log:
         process = subprocess.Popen([sys.executable, '-m', 'uvicorn', 'shutdown_fixture:app',
                                     '--app-dir', str(tmp_path), '--uds', str(sock),
-                                    '--timeout-graceful-shutdown', '0'], env=env, stdout=log, stderr=log)
+                                    '--timeout-graceful-shutdown', '0'], env=env, cwd=tmp_path, stdout=log, stderr=log)
         def wait_for(name):
             deadline = time.monotonic() + 20
             while not (tmp_path / name).exists():
