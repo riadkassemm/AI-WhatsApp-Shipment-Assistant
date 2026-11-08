@@ -36,6 +36,18 @@ class SupportAgent:
         return self.role in {"supervisor", "admin"}
 
     @property
+    def can_view_whatsapp_management(self) -> bool:
+        return self.role in {"admin", "supervisor"}
+
+    @property
+    def can_manage_whatsapp_connections(self) -> bool:
+        return self.role == "supervisor"
+
+    @property
+    def can_assess_whatsapp_authentication(self) -> bool:
+        return self.role == "supervisor"
+
+    @property
     def is_staff(self) -> bool:
         """Any staff role: agent, Admin or Super Admin."""
         return self.role in _ALLOWED_ROLES

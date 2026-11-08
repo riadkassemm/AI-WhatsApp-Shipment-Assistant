@@ -27,7 +27,7 @@ def linked_config(monkeypatch, tmp_path):
     monkeypatch.setattr(api_module, "_line_addition_lock", asyncio.Lock())
 
 
-def request(method, path, *, payload=None, token="s" * 48, role="admin", content=None):
+def request(method, path, *, payload=None, token="s" * 48, role="supervisor", content=None):
     async def run():
         app = FastAPI()
         app.include_router(router)
@@ -291,7 +291,7 @@ def test_linked_mutation_callback_waits_for_original_and_preserves_event(linked_
     assert request("POST", "/api/whatsapp/linked-device/events", payload=event).json() == {"status": "applied"}
 
 
-def test_linked_status_is_manager_only_and_filters_accounts(linked_config, monkeypatch):
+def test_linked_status_filters_accounts_and_restricts_qr_to_super_admin(linked_config, monkeypatch):
     calls = []
 
     async def status():
@@ -305,7 +305,10 @@ def test_linked_status_is_manager_only_and_filters_accounts(linked_config, monke
     path = "/api/support/whatsapp-linked-device/status"
     assert request("GET", path, role="driver").status_code == 403
     assert calls == []
-    assert request("GET", path, role="agent").status_code == 200  # every staff role can pair
+    for role in ("agent", "admin"):
+        response = request("GET", path, role=role)
+        assert response.status_code == 200
+        assert "qr_data_url" not in response.text and "base64" not in response.text
     payload = request("GET", path).json()
     assert len(payload["lines"]) == 1 and payload["lines"][0]["line_id"] == "90001"
     assert payload["lines"][0]["active_transport"] == "linked_device"
@@ -443,10 +446,14 @@ def test_pairing_failure_preserves_registered_disabled_row_for_existing_pair(all
     assert state["lines"]["90001"] == "connected"
 
 
-def test_add_number_is_open_to_staff_only(allocation_bridge):
+def test_add_number_requires_super_admin(allocation_bridge):
     response = request("POST", "/api/support/whatsapp-linked-device/lines", payload={"request_id": str(uuid4())}, role="driver")
     assert response.status_code == 403 and allocation_bridge["calls"] == []
     response = request("POST", "/api/support/whatsapp-linked-device/lines", payload={"request_id": str(uuid4())}, role="agent")
+    assert response.status_code == 403 and allocation_bridge["calls"] == []
+    response = request("POST", "/api/support/whatsapp-linked-device/lines", payload={"request_id": str(uuid4())}, role="admin")
+    assert response.status_code == 403 and allocation_bridge["calls"] == []
+    response = request("POST", "/api/support/whatsapp-linked-device/lines", payload={"request_id": str(uuid4())}, role="supervisor")
     assert response.status_code == 200 and allocation_bridge["calls"]
 
 
@@ -462,7 +469,7 @@ def test_add_number_enforces_actual_csrf_dependency(allocation_bridge):
         app.include_router(router)
 
         async def agent():
-            return SupportAgent(id="7", name="Admin", role="admin", csrf_hash=hashlib.sha256(b"correct-csrf").hexdigest())
+            return SupportAgent(id="7", name="Admin", role="supervisor", csrf_hash=hashlib.sha256(b"correct-csrf").hexdigest())
 
         app.dependency_overrides[get_current_agent] = agent
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
@@ -507,7 +514,7 @@ def test_concurrent_additions_serialize_registry_snapshots_without_touching_exis
         app.include_router(router)
 
         async def agent():
-            return SupportAgent(id="7", name="Admin", role="admin")
+            return SupportAgent(id="7", name="Admin", role="supervisor")
 
         app.dependency_overrides[require_support_csrf] = agent
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
@@ -679,7 +686,7 @@ def test_remove_success_survives_followup_status_outage(removal_bridge):
     assert response.status_code == 200 and response.json()["unlinked"] and response.json()["status_unavailable"]
 
 
-@pytest.mark.parametrize("role", ["agent", "driver"])
+@pytest.mark.parametrize("role", ["agent", "admin", "driver"])
 def test_remove_is_manager_only(removal_bridge, role):
     assert request("DELETE", "/api/support/whatsapp-linked-device/lines/90001", payload={"close_active_tickets": True}, role=role).status_code == 403
     assert removal_bridge["calls"] == []
@@ -698,7 +705,7 @@ def test_remove_enforces_actual_csrf_dependency(removal_bridge):
         app.include_router(router)
 
         async def agent():
-            return SupportAgent(id="7", name="Admin", role="admin", csrf_hash=hashlib.sha256(b"correct-csrf").hexdigest())
+            return SupportAgent(id="7", name="Admin", role="supervisor", csrf_hash=hashlib.sha256(b"correct-csrf").hexdigest())
 
         app.dependency_overrides[get_current_agent] = agent
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:

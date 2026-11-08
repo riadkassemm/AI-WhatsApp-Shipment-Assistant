@@ -387,6 +387,11 @@ function handleGlobalKeydown(event) {
       closeAiSettingsModal();
       return;
     }
+    if (state.activeModal === 'bridgeManagementModal') {
+      event.preventDefault();
+      closeBridgeManagement();
+      return;
+    }
     if (state.activeModal === 'whatsappModal') {
       event.preventDefault();
       closeWhatsAppModal();

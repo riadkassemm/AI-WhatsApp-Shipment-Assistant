@@ -386,8 +386,10 @@ async def support_login(payload: LoginRequest, response: Response) -> dict:
         "role": login.agent.role,
         "can_manage_staff": login.agent.is_supervisor,
         "can_manage_ai": login.agent.is_supervisor,
-        "can_manage_whatsapp": login.agent.is_supervisor,
-        "can_link_whatsapp": login.agent.is_staff,
+        "can_manage_whatsapp": login.agent.can_manage_whatsapp_connections,
+        "can_link_whatsapp": login.agent.can_manage_whatsapp_connections,
+        "can_view_whatsapp_management": login.agent.can_view_whatsapp_management,
+        "can_assess_whatsapp_authentication": login.agent.can_assess_whatsapp_authentication,
         "linked_device_available": len(settings.whatsapp_linked_device_secret) >= 32,
         "expires_at": login.expires_at.isoformat(),
     }
@@ -414,8 +416,10 @@ async def support_me(agent: SupportAgent = Depends(get_current_agent)) -> dict:
         "role": agent.role,
         "can_manage_staff": agent.is_supervisor,
         "can_manage_ai": agent.is_supervisor,
-        "can_manage_whatsapp": agent.is_supervisor,
-        "can_link_whatsapp": agent.is_staff,
+        "can_manage_whatsapp": agent.can_manage_whatsapp_connections,
+        "can_link_whatsapp": agent.can_manage_whatsapp_connections,
+        "can_view_whatsapp_management": agent.can_view_whatsapp_management,
+        "can_assess_whatsapp_authentication": agent.can_assess_whatsapp_authentication,
         "linked_device_available": len(settings.whatsapp_linked_device_secret) >= 32,
     }
 

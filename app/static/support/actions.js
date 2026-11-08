@@ -1395,19 +1395,19 @@ function renderLineHealth(payload) {
       : first.recovery_action === 'automatic' ? ' Automatic reconnection is in progress. Check saved message statuses before retrying.'
       : ' Contact your administrator. Saved sessions and messages are retained; relinking is not the default recovery action.';
     text($('lineAlertText'), first.name + more + problem + lineOfflineSince(first) + '.' + next);
-    $('lineAlertActionBtn').classList.toggle('hidden', !canLinkWhatsApp());
+    $('lineAlertActionBtn').classList.toggle('hidden', !canViewBridgeManagement());
   }
   // Sound once per outage, for the people who can fix it (every staff role).
   const fresh = alerts.filter(line => !state.lineAlertsSeen.has(line.line_id + ':' + line.since));
   for (const line of alerts) state.lineAlertsSeen.add(line.line_id + ':' + line.since);
-  if (fresh.length && canLinkWhatsApp()) notifyNewCustomerActivity(fresh[0].name + ' needs attention: ' +
+  if (fresh.length && canViewBridgeManagement()) notifyNewCustomerActivity(fresh[0].name + ' needs attention: ' +
     (fresh[0].status === 'connected' ? 'sending is paused.' : 'its WhatsApp line is offline.'));
   const storageKey = storageAlert ? 'storage:' + storage.level + ':' + (storage.issues || [])
     .map(issue => [issue.line_id || 'shared', issue.code, issue.kind || '', issue.level].join(':')).sort().join(',') : null;
   for (const key of state.lineAlertsSeen) if (key.startsWith('storage:') && key !== storageKey) state.lineAlertsSeen.delete(key);
   if (storageKey && !state.lineAlertsSeen.has(storageKey)) {
     state.lineAlertsSeen.add(storageKey);
-    if (canLinkWhatsApp()) notifyNewCustomerActivity(recovery.title + '. ' + recovery.detail + ' Saved sessions are retained.');
+    if (canViewBridgeManagement()) notifyNewCustomerActivity(recovery.title + '. ' + recovery.detail + ' Saved sessions are retained.');
   }
   const ticket = state.currentTicketData?.ticket;
   if (ticket && state.currentTicketData?.permissions?.can_reply) renderComposerLineNotice(ticket);
@@ -1533,7 +1533,7 @@ async function removeLinkedDeviceNumber(lineId) {
 }
 
 async function changeLinkedDeviceConnection(lineId, action) {
-  // Anyone may pair; unlinking a device stays with managers.
+  // Existing pairing/logout workflows require the explicit Super Admin capability.
   if (!(action === 'connect' ? canLinkWhatsApp() : canManageWhatsApp()) || state.linkedDeviceBusy) return;
   if (action === 'disconnect' && !(await confirmDialog({title: 'Unlink device?', message: 'Unlink this WhatsApp device? You will need to pair it again to use this connection.', confirmLabel: 'Unlink device', tone: 'danger'}))) return;
   state.linkedDeviceBusy = true;
@@ -2576,8 +2576,8 @@ $('startChatBtn').addEventListener('click', () => openStartChatModal());
 $('messagePreferencesBtn').addEventListener('click', openMessagePreferencesModal);
 $('aiHeaderBtn').addEventListener('click', openAiSettingsModal);
 $('manageStaffBtn').addEventListener('click', openStaffModal);
-$('manageWhatsAppBtn').addEventListener('click', openWhatsAppModal);
-$('lineAlertActionBtn').addEventListener('click', openWhatsAppModal);
+$('manageWhatsAppBtn').addEventListener('click', openBridgeManagement);
+$('lineAlertActionBtn').addEventListener('click', openBridgeManagement);
 $('googleContactsConnectBtn').addEventListener('click', connectGoogleContacts);
 $('importVcfContactsBtn').addEventListener('click', chooseVcfContactsFile);
 $('vcfContactsInput').addEventListener('change', importSelectedVcfContacts);

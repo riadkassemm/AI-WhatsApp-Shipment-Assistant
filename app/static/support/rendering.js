@@ -113,6 +113,8 @@ function showLogin() {
   state.contactEditTarget = null;
   closeDialog('aiSettingsModal', false);
   closeDialog('whatsappModal', false);
+  closeDialog('bridgeManagementModal', false);
+  resetBridgeManagement();
   closeDialog('staffModal', false);
   closeDialog('transferModal', false);
   closeDialog('startChatModal', false);
