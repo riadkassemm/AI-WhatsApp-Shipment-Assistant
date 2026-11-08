@@ -39,6 +39,13 @@ class FakeRepository:
         self.created_tickets = 0
         self.insert_args: list[dict] = []
         self.reactions: list[dict] = []
+        self.media_references: dict[int, str] = {}
+
+    async def has_durable_media_reference(self, message_id, *, ticket_id, provider_media_id):
+        return any(row['id'] == message_id and row['ticket_id'] == ticket_id
+                   and self.media_references.get(message_id) == provider_media_id
+                   and row.get('send_status') in {'SENT', 'RECEIVED'}
+                   and not row.get('deleted_for_everyone_at') for row in self.messages.values())
 
     async def find_active_ticket_by_phone(self, phone, line):
         assert phone == "96171111111" and line == "90001"
@@ -365,6 +372,76 @@ def test_phone_origin_media_keeps_voice_note_and_retries_capture(monkeypatch):
     assert len(repo.insert_args) == 1
     assert repo.messages[voice.message_id]["body"] == "Voice note"
     assert len(captures) == 2 and captures[1]["media_id"] == voice.media_id
+
+
+@pytest.mark.parametrize('reference', ['durable', 'missing', 'different', 'database_unavailable'])
+def test_transcript_callback_ack_requires_durable_attachment_reference(monkeypatch, tmp_path, caplog, reference):
+    """A broken optional download must neither lose recovery nor duplicate sends."""
+    import httpx
+    from fastapi import FastAPI
+    from app import linked_device_api
+    from app.config import settings
+
+    repo, service = FakeRepository(), SupportService()
+    captures, emitted = [], []
+    media_id = 'ldmedia:90001:123e4567-e89b-12d3-a456-426614174000'
+
+    async def publish(kind, **kwargs):
+        emitted.append(kind)
+
+    async def enabled(**kwargs):
+        return True
+
+    async def capture(**kwargs):
+        captures.append(kwargs)
+        if reference == 'durable':
+            repo.media_references[kwargs['message']['id']] = media_id
+        elif reference == 'different':
+            repo.media_references[kwargs['message']['id']] = 'different-reference'
+        # Models the bridge's retryable 500 for incomplete native metadata.
+        raise SupportMediaError('PRIVATE_PROVIDER_DIAGNOSTICS', retryable=True)
+
+    async def unavailable(*args, **kwargs):
+        raise RuntimeError('database unavailable')
+
+    monkeypatch.setattr(settings, 'whatsapp_linked_device_enabled', True)
+    monkeypatch.setattr(settings, 'whatsapp_linked_device_lines', {'90001': ''})
+    monkeypatch.setattr(settings, 'whatsapp_linked_device_data_directory', str(tmp_path))
+    monkeypatch.setattr(settings, 'whatsapp_linked_device_secret', 's' * 48)
+    monkeypatch.setattr(service_module, 'support_repository', repo)
+    monkeypatch.setattr(service_module, 'get_transport', lambda line: 'linked_device')
+    monkeypatch.setattr(service_module, 'publish_support_event', publish)
+    monkeypatch.setattr(service, 'capture_inbound_media', capture)
+    monkeypatch.setattr(linked_device_api, 'support_service', service)
+    monkeypatch.setattr(linked_device_api.whatsapp_registry_service, 'observe_inbound', enabled)
+    if reference == 'database_unavailable':
+        monkeypatch.setattr(repo, 'has_durable_media_reference', unavailable)
+    event = {
+        'event_id': 'synthetic-document-event', 'type': 'outgoing_message', 'line_id': '90001',
+        'from_me': True, 'message_id': 'ld:90001:DOCUMENT', 'sender_phone': '96171111111',
+        'timestamp': 1700000000000,
+        'payload': {'entry': [{'changes': [{'value': {
+            'metadata': {'phone_number_id': '90001'}, 'messages': [{
+                'id': 'ld:90001:DOCUMENT', 'from': '96171111111', 'timestamp': '1700000000',
+                'type': 'document', 'document': {'id': media_id},
+            }],
+        }}]}]},
+    }
+
+    async def run():
+        app = FastAPI(); app.include_router(linked_device_api.router)
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app, raise_app_exceptions=False), base_url='http://isolated') as client:
+            for _ in range(2):
+                response = await client.post('/api/whatsapp/linked-device/events', json=event,
+                                             headers={'Authorization': 'Bearer ' + 's' * 48})
+                assert response.status_code == (200 if reference == 'durable' else 500 if reference == 'database_unavailable' else 503)
+                assert 'PRIVATE_PROVIDER_DIAGNOSTICS' not in response.text
+    asyncio.run(run())
+    assert len(repo.messages) == len(repo.insert_args) == 1
+    assert repo.messages['ld:90001:DOCUMENT']['send_status'] == 'SENT'
+    assert emitted == ['outbound_message']
+    assert len(captures) == 2
+    assert 'PRIVATE_PROVIDER_DIAGNOSTICS' not in caplog.text
 
 
 def test_phone_origin_reaction_updates_existing_message_without_new_bubble(monkeypatch):

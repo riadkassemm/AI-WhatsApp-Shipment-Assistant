@@ -1,0 +1,85 @@
+Linked-device callback acknowledgment fix — 8 November 2026
+==========================================================
+Scope: API-only. No migration, bridge code activation, callback replay, queue
+reset, credential change, identity operation or production write during diagnosis.
+
+Confirmed production finding
+----------------------------
+Identity 90015; outgoing_message/document event
+b1a9423fbcdda7606faec11ddca64758900feeba968cff6696b6d6810f20353a.
+Observed attempts: 8773 at investigation (the normal worker continues retrying).
+Created 2026-11-02 08:12:28.966 UTC. Seven-day retry deadline:
+2026-11-09 08:12:28.966 UTC (10:12:28.966 Asia/Beirut).
+Expiry moves evidence to a dead letter; it is not permission to replay it.
+
+The message already exists exactly once: internal message 51518, ticket 6585,
+OUTBOUND/document/SENT. Its database media reference matches the event, and
+its protected local remote reference exists. No cached attachment exists.
+The retained native document has fileLength/pageCount/context/caption but no
+download URL, directPath or mediaKey. No customer contents or key values were
+printed, copied into tests, or included here.
+
+Path: durable bridge outbox -> authenticated POST linked-device/events ->
+enabled registry line -> sync_linked_device_outbound -> existing message ->
+capture_inbound_media -> private bridge media GET -> Baileys rejects incomplete
+document metadata with status 500 -> bridge BRIDGE_ERROR/500 -> retryable
+WhatsAppMediaError -> SupportMediaError -> callback HTTP 503. The response body
+is discarded by the existing bridge, so it stores attempts/next_try rather than
+the detailed last error. Existing bridge logs corroborate this path. Synthetic
+metadata reproduces the provider 500 without any network/provider operation.
+
+Authentication, registry mapping, storage readiness and other callbacks are
+healthy. The mirror is persisted; only its attachment cache is incomplete.
+One retry does not block later callbacks on this or other lines: next_try skips
+it until due. Existing uncertain deliveries are unrelated and remain unchanged.
+
+Change and integrity boundary
+-----------------------------
+For transcript mirroring only (which does not dispatch a customer reply), a
+retryable attachment-cache failure can be acknowledged after SELECT verifies
+the same message, ticket and provider media reference are committed and the row
+is SENT/RECEIVED and not revoked. Missing/different references, database errors
+and undurable messages remain unacknowledged. Existing media recovery and
+conversation authorization continue unchanged. Inbound AI processing is not
+changed. The unavailable attachment is not claimed recovered; its references
+and bridge-native evidence remain retained. No uncertain row is released.
+
+Focused verification
+--------------------
+67 isolated Python checks: linked-device outgoing transcript sync and API
+authorization/callback regressions, including four new HTTP acknowledgment
+cases, repeated callbacks, database failure, reference mismatch and log privacy.
+One synthetic reproduction through the pinned Baileys media decoder: status
+500, zero provider operations. Whitespace checks pass. Full CI remains a
+separate result; the prior release's exception does not automatically cover this PR.
+
+Deployment after separate explicit approval
+------------------------------------------
+Review/merge this PR normally; pin its reviewed SHA. Follow the API-only gates
+in docs/bridge-management-production.txt, using the CURRENT API release
+20261108-management-e5fffc77dd71 as rollback (not the global bridge symlink).
+Back up its 80-management-release.conf and app configuration. Preserve the
+same-server backup scope. Archive committed source only and recreate the
+current pinned Python environment in an inactive release with the existing
+credential/database-isolated installation sandbox.
+
+Recheck six IPv4 identities, bridge PID/start, 90035 evidence, fresh monitoring,
+callback age, readiness and SQL/Redis integrity. Close public ingress; drain
+API work/reservations; use the temporary Restart=no, TimeoutStopSec=infinity,
+SendSIGKILL=no guard. Require a completed graceful shutdown and empty ownership
+before changing ONLY the API systemd release pin. Keep the global symlink,
+bridge service, sessions, journals, media and Redis values unchanged.
+
+Start the API; verify health, approved asset/source, roles, conversations/media,
+same bridge PID and exact six IPv4 identities. Let the NORMAL callback worker
+retry; never post the captured event manually. Verify target pending callback
+disappears with no new dead letter, the existing message remains singular/SENT,
+matching recovery references remain, and uncertainty does not increase. Check
+no callback 503 recurrence for this event across two retry intervals. Preserve
+the missing-attachment limitation. Reopen only after acceptance and observe
+30 minutes. If a gate fails, stop and retain evidence; API-only rollback must
+use the same graceful ownership gates and must not restore data snapshots.
+
+Urgency: review and deploy the small API fix before the stated deadline if
+approved. Keep Phase B in a separate PR because activating new Node lifecycle
+code requires its own reviewed bridge transition and cannot be an API-only rollout.
