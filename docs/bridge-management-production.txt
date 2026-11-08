@@ -1,0 +1,209 @@
+Phase A — direct production release assessment (2026-11-08)
+=========================================================
+Status: NO-GO for deploying the uncorrected PR #88 artifact. The follow-up fixes
+and this plan require PR review, disposition of existing CI failures, and explicit
+production approval. Nothing in this document authorizes activation or rollback.
+No DEV. No automatic merge. No production writes, service restarts, relinking,
+provider operations, SQL mutations or storage transformations were performed
+during this review. Production inspection used source reads, sanitized bridge
+GET /v1/status, systemd properties and the read-only monitoring console.
+
+Review findings and corrections
+------------------------------
+PR #88 was already merged by the time of review, as 7ac29f337642130c5b98f3bd2df184aea0483d11.
+Its source commit was c7583d1e105b3a1a16e7afa35a627493d9ddc712.
+- Incomplete/unknown storage issues could become green after sanitization.
+  Management now reports unknown with STORAGE_TELEMETRY_INCOMPLETE, keeping
+  connection state separate. A valid issue on another identity remains scoped.
+- Four new CI fixture failures: two outage fixtures omitted the management
+  capability helper; two send/edit fixtures extracted unrelated new management
+  event listeners. Fix the fixtures to load the intended source modules.
+- Keep the management authorization dependency asynchronous; it performs no
+  blocking work and needs no thread dispatch on each polling request.
+- Add real cookie/CSRF authorization tests, mutation traps, repeated-read state
+  fingerprints, full dashboard browser checks and actual auth-store snapshots.
+
+Focused local verification (no .env, no customer data, no provider connections)
+-----------------------------------------------------------------------------
+Python 3.10 / Node 26 local runtime; GitHub uses Python 3.11 / Node 22. Production
+dependency versions are to remain pinned to its current environment. Runtime
+version differences are a limitation; focused tests do not replace activation
+preflight. Browser and local HTTP/Unix-socket tests require ordinary local IPC.
+
+PASS 32 management API/service/release tests, including all four new endpoints,
+        disabled/quarantined inventory, sanitized errors/evidence, cache bounds,
+        missing bridge, unknown storage, and every future action disabled.
+PASS 49 legacy linked-device API tests (including authorized pairing/removal,
+        denied Admin/Staff mutations and QR exclusion, and existing CSRF checks).
+PASS 22 registry tests (enable/disable, rename, sync, removal, history retention).
+PASS 16 existing conversation/media privacy tests; no new content access.
+PASS  4 previously failing outage/send/edit JavaScript fixtures.
+PASS  3 inbound reservation/shutdown tests and 1 real Uvicorn SIGTERM rehearsal.
+PASS  6 Chromium cases: Staff/Admin/Super Admin at desktop and narrow widths.
+        Actual shipped markup and script ordering, mocked API, zero mutations,
+        focus/DOM continuity, stale telemetry, permission-gated existing workflows.
+PASS  3 focused management DOM/race checks.
+PASS 28 Node auth evidence/decommission/HTTP lifecycle tests. Repeated live
+        assessments preserve every active/fenced auth file, mode, mtime and
+        journal sequence, with renewal, saveCreds and flush trapped.
+PASS shipped JavaScript syntax/combined scope, changed Python syntax and diff checks.
+Screenshots: images/bridge-management-1440.png and bridge-management-390.png.
+All screenshot identities and numbers are synthetic.
+
+Example isolated local command (paths from this checkout, no local .env loaded):
+  task_repo=$(git rev-parse --show-toplevel)
+  task_test_dir=$(mktemp -d /tmp/support-management-check.XXXXXX)
+  (cd "$task_test_dir" && env -i PATH="$PATH" PYTHONPATH="$task_repo" \
+    PYTHONDONTWRITEBYTECODE=1 OPENAI_API_KEY=unused-test WHATSAPP_TOKEN=unused-test \
+    "$task_repo/venv/bin/python" -m pytest -q -p no:cacheprovider \
+    "$task_repo/tests/test_bridge_management.py" "$task_repo/tests/test_bridge_management_release.py")
+Run the other modules separately with the same isolation. The browser fixture
+uses local files and mocked API responses; select SUPPORT_TEST_BROWSER explicitly.
+
+New release tests run production get_current_agent / CSRF dependencies with
+synthetic session lookup; they do not override those authorization dependencies.
+Unauthenticated reads/mutations return 401; Staff management reads return 403;
+Admin detailed auth returns 403; both roles are denied all legacy mutations even
+with valid CSRF. Super Admin mutations without CSRF return 403. Legacy status
+returns QR only to Super Admin. SELECT-only metadata methods are exercised while
+registry seeding/execute/provider mutations are trapped. Existing staff-session
+last_seen touches are permitted; this is not a claim that authentication makes
+zero database writes. WhatsApp state, credentials, callbacks, journals and media
+fixtures remain byte-for-byte unchanged. No fences become eligible for sends.
+
+CI disposition — do not mislabel the full workflow green
+-------------------------------------------------------
+PR #88 run 42459534644: 12 failed, 945 passed, 3 skipped. Four added failures are
+fixed and pass locally. The other eight match prior PR #87 run 42382986789
+(8 failed, 925 passed, 3 skipped), including matching failure descriptions:
+  test_ai_control_routing: test_two_quick_off_messages_create_one_handoff_assignment
+  test_dashboard_connection: test_dashboard_connection_regressions
+  test_multi_item_chat_ui: test_multi_item_queue_forwarding_and_image_quick_replies
+  test_reply_navigation_ui: test_reply_navigation_browser
+  test_support_session_recovery: test_browser_back_navigation_restarts_cancelled_initial_session_check
+  test_support_ui_interactions: test_session_check_prevents_login_flash_and_has_retry_or_login_fallback
+  test_ticket_history_actions_ui: test_history_selection_forwarding_and_deleted_reply_targets
+  test_ticket_history_actions_ui: test_live_history_events_refresh_actions_and_drop_deleted_selections
+The integration and bridge stages were skipped after Python failure in both
+runs. Do not suppress tests or change CI gates. These are baseline failures,
+not proof of release correctness; resolve them or obtain an explicit reviewed
+disposition before release. No unrelated full suite was run locally.
+
+Read-only production observations (a point in time, recheck before activation)
+---------------------------------------------------------------------------
+Production host: 194.5.152.173. Recorded deployed revision:
+98583dc97e92e347f5c472de8c66a08cdd991458, at
+/opt/whatsapp-support/releases/20261107-decommission-2ceee4950770.
+145 deployed application/bridge/dependency/migration files matched that commit.
+Six eligible identities were connected and paired, using IPv4 with TLS verified;
+one further identity was decommissioned. Bridge ready=true. Aggregate storage
+retains a critical STORE_UNAVAILABLE report; scope it to the retained identity
+and require eligible_storage_critical=false, rather than ignoring all critical
+storage reports. Existing monitoring reported healthy=true with warnings for
+BridgeCallbackBacklog and BridgeIdentityDecommissioned. One callback was pending
+in the sampled snapshot. Bridge uncertainty evidence was already nonzero; never
+clear or resend it to satisfy a deployment gate.
+
+Both services were active with empty PartOf/BindsTo dependencies. The bridge
+uses /usr/bin/node and current/whatsapp_bridge/src/index.js; its actual cwd is
+the recorded release. It has TimeoutStopSec=infinity and SendSIGKILL=no. The API
+uses current/venv/bin/python, one Uvicorn worker and a 10-second HTTP graceful
+timeout, but systemd currently permits SIGKILL after four minutes. Both services
+have Restart=always. Persistent bridge and media paths are absolute.
+
+Preparation after explicit approval — API-only activation
+--------------------------------------------------------
+1. Pin TASK_APPROVED_REV to the full reviewed follow-up SHA, not a moving branch.
+   Require a clean tracked tree and archive only that commit with git archive.
+   Save REVISION and SHA256SUMS. After approval, transfer to a new root-only
+   production deployment record; verify archive checksum and every staged source
+   byte. Never stage local .env, session data, media, node_modules or uncommitted
+   files. Keep the prior source and effective systemd/drop-in configurations.
+2. Create a fresh inactive release. Recreate only its Python venv from the
+   current pinned pip freeze, using the dependency-install sandbox described in
+   bridge-ipv4-deployment.txt: no access to production credentials, DB/Redis
+   sockets or /var/lib/whatsapp-support during installation. Verify all pins and
+   source hashes. No schema migration, npm install, bridge code activation,
+   collector upgrade or app.env change is needed. Two monitoring-script changes
+   exist between the deployed SHA and PR #88's base; keep installed collectors
+   and the global current link unchanged so this release does not activate them.
+3. Recheck actual service cwd/revisions and source hashes. Require the same six
+   eligible identities, retained quarantine, fresh heartbeats and ready=true.
+   Record only sanitized inventory, counts and codes in the private record.
+   Verify fresh database/Redis/media backup evidence and the established backup
+   scope; do not call a live copy of auth journals a consistent backup. There is
+   no offline auth validation or restore in this API-only plan because its owner
+   remains running. If backup/integrity policy requires stopping that owner,
+   stop preparation and obtain a separately reviewed bridge transition plan.
+4. Close only public Customer Support ingress using the reviewed nginx helper
+   from bridge-ipv4-deployment.txt, after verifying its vhost layout/backup.
+   Return retryable 503, never a success response for undelivered webhooks. Stop
+   ngrok gracefully if it is another public API ingress. Do not change the
+   bridge's private callback route, secret, or destination. The running bridge
+   journals callbacks while the API is unavailable; retry backoff reaches 60s,
+   and its existing retention is seven days. Check oldest backlog age first.
+5. Install a deployment-specific runtime drop-in for shipment-bot.service:
+     [Service]
+     Restart=no
+     TimeoutStopSec=infinity
+     SendSIGKILL=no
+   daemon-reload and verify effective values BEFORE any stop. Do not change or
+   stop whatsapp-bridge. Verify Node PID/start identity throughout the window.
+6. Require no dispatching sends (support_ticket_messages.send_status='DISPATCHING')
+   or pending message-change operations (support_message_change_operations.status='PENDING'). Inspect unresolved
+   operations using metadata only. Retain UNCERTAIN rows, held sends, dedup keys
+   and reservations. No resets or forced expiry. Run the existing Redis gate:
+     "$task_previous/venv/bin/python" -B "$task_previous/scripts/check_inbound_drain.py" --socket /run/redis/redis-server.sock --stable-seconds 10
+   Use the verified actual Redis address. If the gate fails, diagnose the pending
+   work; do not wait for TTL expiry and call that a drain.
+7. Stop only shipment-bot with systemctl stop --no-block and poll. Never kill.
+   Require MainPID=0, empty cgroup, no unfinished work and shutdown-complete logs.
+   Accept exit 0, or the documented Uvicorn SIGTERM re-raise only with those
+   proofs (ExecMainCode=2, ExecMainStatus=15); require Result=success. Run the Redis
+   gate again and recheck outbound/change-operation ownership. Existing SSE
+   cancellation is acceptable only with durable worker completion; it is not a
+   substitute for proof. If old ownership remains, do not start a replacement.
+8. Leave /opt/whatsapp-support/current pointing to the old bridge release.
+   Install a reviewed API-only drop-in at
+   /etc/systemd/system/shipment-bot.service.d/80-management-release.conf:
+     [Service]
+     WorkingDirectory=<absolute approved new release>
+     ExecStartPre=
+     ExecStartPre=<new release>/venv/bin/python scripts/check_runtime.py --wait 60 --schema
+     ExecStart=
+     ExecStart=<new release>/venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1 --proxy-headers --forwarded-allow-ips 127.0.0.1 --timeout-graceful-shutdown 10
+   Resolve placeholders from the verified release and match all existing API
+   arguments. Preserve EnvironmentFile, security options and absolute data paths.
+   Record API and bridge revisions separately: global current is now explicitly
+   the bridge release. This prevents any automatic Node restart from accidentally
+   selecting an API-only release without its Node dependency installation.
+9. daemon-reload, verify effective API configuration, then start only the API.
+   Require read-only startup/schema check success, /health=200, new UI asset hash,
+   correct API cwd/revision, same Node PID/start time and the exact identity set.
+   Verify all four diagnostic routes and three roles using approved existing
+   sessions; no test pairing, connect, remove, decommission or customer sends.
+   Preserve role names and conversation/media permissions. Check representative
+   existing history/media through authorized staff access. Observe callback drain
+   past retry backoff, no new dead letters, fresh collectors, no auth/checkpoint
+   errors or new uncertain deliveries attributable to the change. Existing
+   uncertainty need not be zero; bridge counts differ from database UNCERTAIN.
+10. Only after all gates pass, restore the saved public ingress and ngrok, verify
+   the original /support URL, and monitor for at least 30 minutes. Remove only
+   this deployment's temporary runtime shutdown override after acceptance;
+   retain the API release pin and prior release. Keep permanent bridge stop
+   protections. Consider a separate review for permanent API no-SIGKILL policy.
+
+Rollback (approval and graceful gates still apply)
+------------------------------------------------
+If startup or verification fails, keep public ingress closed. Do not force a
+shutdown or restart the bridge. Gracefully drain/stop the new API using the same
+proofs; restore only the API drop-in backup (or remove the newly added drop-in if
+none existed), daemon-reload, and start the previously verified API release.
+The global current link, bridge owner, app.env, database, Redis, media, manifest,
+auth journals and retained evidence never roll back. Recheck readiness and
+callback processing before restoring ingress. Do not restore snapshots over
+new writes. The previous API has broader legacy WhatsApp privileges; keep ingress
+closed until that security regression has an explicit reviewed disposition.
+If any ownership/integrity gate fails, preserve evidence and escalate without
+forced recovery. A bridge restart or offline journal intervention needs separate
+approval and the existing quarantine-aware transition/validation safeguards.
