@@ -373,6 +373,18 @@ class LinkedDeviceWhatsAppClient:
             raise _send_error("The linked-device bridge returned an invalid line status.")
         return {**data, "lines": allowed_lines}
 
+    async def get_management_status(self) -> dict:
+        """Private inventory read, including quarantine; never used for routing."""
+        data = await self._json_request("GET", "/v1/status", timeout_seconds=5.0)
+        if not isinstance(data.get("lines"), list):
+            raise _send_error("Bridge diagnostics are unavailable.")
+        return data
+
+    async def get_auth_recovery(self, line_id: str) -> dict:
+        if not re.fullmatch(r"[0-9]{5,32}", line_id):
+            raise _send_error("Invalid identity.")
+        return await self._json_request("GET", f"/v1/lines/{line_id}/auth-recovery", timeout_seconds=3.0)
+
     async def add_line(
         self, request_id: str, expected_phone: str = "", *, reserved_line_ids: list[str] | None = None,
     ) -> dict:

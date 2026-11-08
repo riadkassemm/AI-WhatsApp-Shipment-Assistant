@@ -86,14 +86,14 @@ class LinkedDeviceEvent(BaseModel):
 
 
 def _require_manager(agent: SupportAgent) -> None:
-    if not agent.is_supervisor:
-        raise HTTPException(403, "Only Super Admins and Admins can manage WhatsApp connections.")
+    if not agent.can_manage_whatsapp_connections:
+        raise HTTPException(403, "Only Super Admins can change WhatsApp connections.")
 
 
 def _require_staff(agent: SupportAgent) -> None:
-    # Any staff role may view, link and (re-)pair numbers; unlinking and removal stay with managers.
+    # Ordinary operational status contains no pairing credentials.
     if not agent.is_staff:
-        raise HTTPException(403, "Only staff members can link WhatsApp numbers.")
+        raise HTTPException(403, "Only staff members can view WhatsApp connection status.")
 
 
 def _require_line(line_id: str) -> None:
@@ -116,6 +116,7 @@ async def linked_device_status(agent: SupportAgent = Depends(get_current_agent))
     # The bridge may have sessions that were removed from this server's config.
     # Never expose their QR codes or allow actions on those accounts.
     allowed = configured_linked_device_lines()
+    from app.bridge_management_service import REASONS
     from app.whatsapp_line_health import summarize_storage
 
     storage = summarize_storage(payload.get("storage"), [{"phone_number_id": line_id} for line_id in allowed])
@@ -131,8 +132,8 @@ async def linked_device_status(agent: SupportAgent = Depends(get_current_agent))
             "display_phone_number": item.get("display_phone_number") or allowed[line_id],
             "status": item.get("status") or "disconnected",
             "is_paired": item.get("is_paired") is True,
-            "qr_data_url": item.get("qr_data_url"),
-            "error": item.get("error"),
+            **({"qr_data_url": item.get("qr_data_url")} if agent.can_manage_whatsapp_connections else {}),
+            "error": REASONS.get(item.get("recovery_category")) if isinstance(item.get("recovery_category"), str) else None,
             "recovery_category": (item.get("recovery_category") if isinstance(item.get("recovery_category"), str)
                                   and item["recovery_category"] in recovery_categories else None),
             "storage_issues": [issue for issue in (storage or {}).get("issues", [])
@@ -156,7 +157,7 @@ async def add_linked_device_line(
     agent: SupportAgent = Depends(require_support_csrf),
 ) -> dict:
     """Allocate durably at the bridge, then prepare its QR without enabling sends."""
-    _require_staff(agent)
+    _require_manager(agent)
     if len(settings.whatsapp_linked_device_secret) < 32:
         raise HTTPException(503, "WhatsApp linked device connections are not configured.")
     from app.whatsapp_registry import WhatsAppRegistryError, whatsapp_registry_service
@@ -200,7 +201,7 @@ async def add_linked_device_line(
 async def connect_linked_device(
     line_id: str, agent: SupportAgent = Depends(require_support_csrf),
 ) -> dict:
-    _require_staff(agent)
+    _require_manager(agent)
     _require_line(line_id)
     try:
         await linked_device_client.connect(line_id)

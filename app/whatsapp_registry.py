@@ -417,15 +417,14 @@ class WhatsAppRegistryService:
 
     @staticmethod
     def _require_manager(agent: SupportAgent) -> None:
-        if not agent.is_supervisor:
+        if not agent.can_manage_whatsapp_connections:
             raise WhatsAppRegistryForbiddenError(
-                "Only Super Admins and Admins can manage WhatsApp numbers."
+                "Only Super Admins can change WhatsApp numbers."
             )
 
     @staticmethod
     def _require_staff(agent: SupportAgent) -> None:
-        # Viewing, linking, pairing and renaming numbers is open to every staff
-        # role; disabling, removing and Meta sync stay with managers.
+        # Read access only; every registry mutation requires the explicit capability.
         if not agent.is_staff:
             raise WhatsAppRegistryForbiddenError("Only staff members can view and link WhatsApp numbers.")
 
@@ -678,7 +677,7 @@ class WhatsAppRegistryService:
         phone_number_id: str,
         display_name: str | None,
     ) -> dict[str, Any]:
-        self._require_staff(agent)
+        self._require_manager(agent)
         phone_number_id = _clean_id(phone_number_id, label="phone-number ID")
         name = str(display_name or "").strip() or None
         if name is not None and (len(name) > 80 or any(ord(char) < 32 or ord(char) == 127 for char in name)):
@@ -853,11 +852,7 @@ class WhatsAppRegistryService:
         phone_number_id: str,
         enabled: bool,
     ) -> dict[str, Any]:
-        # Adding a paired number to the app completes linking; taking one out stays with managers.
-        if enabled:
-            self._require_staff(agent)
-        else:
-            self._require_manager(agent)
+        self._require_manager(agent)
         phone_number_id = _clean_id(phone_number_id, label="phone-number ID")
         await self._ensure_schema()
         row = await self.repository.fetch_one(
