@@ -86,12 +86,15 @@ async function run(directory, config) {
         if (!auth.creds.me?.id) fail('SOAK_UNPAIRED_SESSION');
         socketCount++;
         const ws = new EventEmitter(); ws.isOpen = true;
+        // Shutdown requires proof that the transport closed; prove it on end().
+        let transportClosed;
+        const bridgeTransportClosed = new Promise(resolve => { transportClosed = resolve; });
         const logger = pino({level: 'silent'}), ev = makeEventBuffer(logger);
         const keys = addTransactionCapability(auth.keys, logger, {maxCommitRetries: 3, delayBetweenTriesMs: 1});
-        return {ws, authState: {creds: auth.creds, keys}, user: {id: auth.creds.me.id}, ev,
+        return {ws, authState: {creds: auth.creds, keys}, user: {id: auth.creds.me.id}, ev, bridgeTransportClosed,
           soakProviderTask: bridgeTask(operation => operation()),
           messageMutex: makeMutex(), notificationMutex: makeMutex(), receiptMutex: makeMutex(), appStatePatchMutex: makeMutex(),
-          end: () => {ws.isOpen = false; ev.destroy();}, sendMessage: sendForbidden, relayMessage: sendForbidden,
+          end: () => {ws.isOpen = false; ev.destroy(); transportClosed();}, sendMessage: sendForbidden, relayMessage: sendForbidden,
           query: providerForbidden, logout: providerForbidden, onWhatsApp: providerForbidden,
           fetchMessageHistory: providerForbidden, requestPlaceholderResend: providerForbidden};
       },

@@ -1649,7 +1649,8 @@ const text = (node, value) => {node.textContent = value};
 const window = {setTimeout(callback) {callback()}};
 const state = {pageLeaving: false, authenticated: false, imageEditor: null,
   mediaRecorder: null, queueRequest: 0, ticketRequest: 0,
-  globalSearchRequest: 0, linkedDeviceRequest: 0, dashboardReadBoundaries:new Map(),chatNotificationIds:new Set()};
+  globalSearchRequest: 0, linkedDeviceRequest: 0, dashboardReadBoundaries:new Map(),chatNotificationIds:new Set(),
+  sendSessionEpoch: 0, localMessages: new Map(), realtimeMessages: new Map(), hiddenSupportMessages: new Set()};
 const resetQueueFilters = () => {};
 let clearedSelections = 0;
 const clearSupportSelections = () => {clearedSelections++};
@@ -1687,7 +1688,7 @@ const api = () => {
   }
   throw new Error('Unexpected test mode');
 };
-""" + views + bootstrap + r"""
+""" + _ASSETS["delivery-state.js"] + views + bootstrap + r"""
 (async () => {
   const pending = bootstrap();
   assert.equal($('sessionLoading').classList.contains('hidden'), false);
