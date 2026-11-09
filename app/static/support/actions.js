@@ -1167,14 +1167,16 @@ function openWhatsAppNumberNameEditor(item, row, button) {
   const hint = document.createElement('span');
   hint.className = 'field-hint';
   hint.textContent = 'Leave blank to show the phone number.';
-  field.append(caption, input, hint);
+  field.append(caption, input);
   const save = document.createElement('button');
   save.type = 'submit'; save.className = 'btn small primary'; save.textContent = 'Save name';
   const cancel = document.createElement('button');
   cancel.type = 'button'; cancel.className = 'btn small'; cancel.textContent = 'Cancel';
   cancel.onclick = () => { editor.remove(); button.disabled = false; button.focus(); };
   editor.onsubmit = event => { event.preventDefault(); renameWhatsAppNumber(item.phone_number_id, input.value, save); };
-  editor.append(field, save, cancel);
+  // The hint sits on its own line below, so the buttons align with the input
+  // box itself rather than with the bottom of the hint text.
+  editor.append(field, save, cancel, hint);
   row.append(editor);
   button.disabled = true;
   input.focus();
