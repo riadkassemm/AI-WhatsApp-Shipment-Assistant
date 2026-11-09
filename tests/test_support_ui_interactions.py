@@ -185,6 +185,7 @@ const elements = {linkedDeviceSection: element(), linkedDeviceLines: element(),
   addLinkedDeviceBtn: element(), linkedDeviceStatus: element()};
 const $ = key => elements[key];
 const text = (element, value) => {element.textContent = value};
+const notify = () => {};
 const state = {linkedDeviceBusy: false, whatsappBusy: false, whatsappRegistry: {numbers: [
   {phone_number_id: '90001', is_enabled: true}, {phone_number_id: '90002', is_enabled: false}]}};
 const pendingLinkedDeviceAddition = () => null;
@@ -1572,6 +1573,9 @@ const retryButton = {visible: false, classList: {
   remove(name) {if (name === 'hidden') retryButton.visible = true}
 }};
 const sessionStatus = {textContent: ''};
+// Page-level errors are toasts now; record them.
+const toasts = [];
+const notify = (message, type) => toasts.push({message, type});
 const $ = name => name === 'error' ? banner : name === 'sessionRetryBtn' ? retryButton :
   name === 'sessionLoadingStatus' ? sessionStatus : errorText;
 const text = (element, value) => {element.textContent = value};
@@ -1590,7 +1594,7 @@ const fetch = async () => {
   assert.equal(state.ticketRequest, 1);
   assert.equal(state.queueRequest, 1);
   showError('NetworkError when attempting to fetch resource');
-  assert.equal(banner.visible, false);
+  assert.equal(toasts.length, 0, 'no error toast while the page is leaving');
   assert.equal(errorText.textContent, '');
   await bootstrap();
   assert.equal(loginCalls, 0, 'a cancelled /me fetch must preserve the saved workspace');
@@ -1600,7 +1604,7 @@ const fetch = async () => {
 
   state.pageLeaving = false;
   showError('NetworkError when attempting to fetch resource');
-  assert.equal(banner.visible, true, 'a real network error remains visible while the page is active');
+  assert.equal(toasts.at(-1)?.type, 'error', 'a real network error is shown while the page is active');
   responseMode = 'network';
   await bootstrap();
   assert.equal(loginCalls, 0, 'a transient /me failure must not sign out or clear the saved selection');

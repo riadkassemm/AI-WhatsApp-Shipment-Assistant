@@ -117,9 +117,8 @@ function reconcilePendingTextMessages() {
 }
 
 function showMessagePreferencesError(message) {
-  const element = $('messagePreferencesError');
-  element.textContent = message || '';
-  element.style.display = message ? 'block' : 'none';
+  $('messagePreferencesError').style.display = 'none';
+  if (message) notify(message, 'error');
 }
 
 function updateMessagePreferenceCounts() {
@@ -854,9 +853,8 @@ const AI_REASON_LABELS = {
 };
 
 function showAiSettingsError(message) {
-  const element = $('aiSettingsError');
-  element.textContent = message || '';
-  element.style.display = message ? 'block' : 'none';
+  $('aiSettingsError').style.display = 'none';
+  if (message) notify(message, 'error');
 }
 
 function selectedAiControlMode() {
@@ -1041,10 +1039,10 @@ async function saveAiSettings(event) {
   }
 }
 
+// Settings feedback appears as a brief, self-hiding toast (bottom right).
 function showWhatsAppFeedback(id, message) {
-  const element = $(id);
-  element.textContent = message || '';
-  element.style.display = message ? 'block' : 'none';
+  $(id).style.display = 'none';
+  if (message) notify(message, id === 'whatsappError' ? 'error' : 'success');
 }
 
 function clearWhatsAppFeedback() {
@@ -1243,6 +1241,7 @@ function renderLinkedDeviceStatus(payload) {
   $('addLinkedDeviceBtn').disabled = state.linkedDeviceBusy || state.whatsappBusy;
   $('addLinkedDeviceBtn').textContent = pendingLinkedDeviceAddition() ? 'Retry linking' : 'Link another number';
   if (!payload?.configured) return;
+  alertLinkedDeviceProblems(payload.lines || []);
   for (const line of payload.lines || []) {
     const row = document.createElement('div');
     row.className = 'linked-device-line';
@@ -1294,6 +1293,28 @@ function renderLinkedDeviceStatus(payload) {
     container.append(row);
   }
   text($('linkedDeviceStatus'), 'Only paired lines added to the app can send or receive messages here.');
+}
+
+// A number that needs attention gets one brief toast when the problem first
+// appears in this page. The page forgets on refresh, so the toast shows again
+// after a refresh while the problem lasts, then hides itself.
+function alertLinkedDeviceProblems(lines) {
+  state.alertedLinkedDeviceProblems ??= new Set();
+  const current = new Set();
+  for (const line of lines) {
+    const problem = line.recovery_category === 'storage_failure' ? 'needs storage recovery'
+      : line.status === 'error' ? 'connection failed'
+      : line.status === 'logged_out' ? 'was logged out by WhatsApp' : null;
+    if (!problem) continue;
+    const key = line.line_id + ':' + problem;
+    current.add(key);
+    if (state.alertedLinkedDeviceProblems.has(key)) continue;
+    const registryNumber = (state.whatsappRegistry?.numbers || []).find(item => String(item.phone_number_id) === String(line.line_id));
+    const name = registryNumber?.display_name || line.display_phone_number || registryNumber?.display_phone_number || line.line_id;
+    notify(name + ': ' + problem + '.', 'error');
+  }
+  // A resolved problem may alert again if it comes back later.
+  state.alertedLinkedDeviceProblems = current;
 }
 
 async function loadLinkedDeviceStatus() {
@@ -1640,9 +1661,8 @@ async function refreshWhatsAppRegistry() {
 }
 
 function showStaffFeedback(id, message) {
-  const element = $(id);
-  element.textContent = message || '';
-  element.style.display = message ? 'block' : 'none';
+  $(id).style.display = 'none';
+  if (message) notify(message, id === 'staffError' ? 'error' : 'success');
 }
 
 function setFieldError(inputId, errorId, message) {
