@@ -376,11 +376,12 @@ function showLoginError(message) {
   element.style.display = message ? 'block' : 'none';
 }
 
+// Page-level errors are brief toasts in the bottom-right corner that hide
+// themselves. A repeated error (for example from background polling) is shown
+// at most once a minute; a page refresh shows a still-failing load again.
 function showError(message) {
-  if (state.pageLeaving) return;
-  const banner = $('error');
-  text($('errorText'), message || '');
-  banner.classList.toggle('visible', Boolean(message));
+  if (state.pageLeaving || !message) return;
+  notify(message, 'error', null, {dedupeMs: 60_000});
 }
 
 function markPageLeaving() {
@@ -391,18 +392,35 @@ function markPageLeaving() {
   state.ticketRequest += 1;
 }
 
-function notify(message, type = 'success', onOpen = null) {
+const TOAST_DURATION_MS = {success: 4000, error: 6500};
+const recentToasts = new Map();
+
+// Alerts stay brief: the first sentence, capped. The full text remains
+// available on hover and to screen readers.
+function briefMessage(message) {
+  const full = String(message || '').replace(/\s+/g, ' ').trim();
+  const sentence = full.match(/^.*?[.!?](?=\s|$)/)?.[0] || full;
+  return sentence.length > 110 ? sentence.slice(0, 107).trimEnd() + '…' : sentence;
+}
+
+function notify(message, type = 'success', onOpen = null, {dedupeMs = 0} = {}) {
   if (!message || state.pageLeaving) return;
+  const full = String(message).replace(/\s+/g, ' ').trim();
+  const key = type + ':' + full, now = Date.now();
+  if (dedupeMs && now - (recentToasts.get(key) ?? 0) < dedupeMs) return;
+  recentToasts.set(key, now);
+  const brief = briefMessage(full);
   const toast = document.createElement('div');
+  if (brief !== full) { toast.title = full; toast.setAttribute('aria-label', full); }
   toast.className = 'toast ' + type;
   toast.setAttribute('role', type === 'error' ? 'alert' : 'status');
   toast.append(createIcon(type === 'error' ? 'alert' : 'check-circle'));
   const copy = document.createElement('div');
   copy.className = 'toast-copy';
-  copy.textContent = message;
+  copy.textContent = brief;
   if (onOpen) {
     const button = document.createElement('button');
-    button.type = 'button'; button.className = 'toast-open'; button.textContent = message;
+    button.type = 'button'; button.className = 'toast-open'; button.textContent = brief;
     button.onclick = () => { toast.remove(); onOpen(); };
     copy.replaceChildren(button);
   }
@@ -415,7 +433,11 @@ function notify(message, type = 'success', onOpen = null) {
   toast.append(copy, close);
   positionToastRegion();
   $('toastRegion').append(toast);
-  window.setTimeout(() => toast.remove(), 5200);
+  // Hide after a few seconds; hovering keeps it open long enough to read.
+  const duration = TOAST_DURATION_MS[type] ?? TOAST_DURATION_MS.success;
+  let timer = window.setTimeout(() => toast.remove(), duration);
+  toast.addEventListener?.('mouseenter', () => window.clearTimeout(timer));
+  toast.addEventListener?.('mouseleave', () => { timer = window.setTimeout(() => toast.remove(), 2000); });
 }
 
 // Keep notifications above the reply composer so they never cover Send or
