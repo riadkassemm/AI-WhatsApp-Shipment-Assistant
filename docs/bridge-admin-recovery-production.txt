@@ -127,21 +127,26 @@ Reviewed deployment sequence — execute only after exact-SHA approval
 -------------------------------------------------------------------
 Inventory snapshot (used by every gate below). Taken read-only from:
   - MariaDB whatsapp_phone_numbers (source='LINKED_DEVICE', removed_at IS NULL):
-    the ENABLED rows are the active set; disabled rows are visible, not active;
-  - the bridge manifest lines.json: lines, quarantined_lines, removed_line_ids,
-    pending pairing requests;
+    the ENABLED rows are the active set; disabled rows (e.g. a newly linked
+    number not yet added to the app, such as 90039 on 2026-11-09) are visible,
+    not active, but still paired bridge lines that reconnect after a restart;
+  - the bridge manifest lines.json: lines, quarantined_lines, removed_line_ids
+    (its "requests" are registration idempotency records, not live pairings);
   - authenticated bridge /v1/status: per identity lifecycle, eligible, status,
     is_paired, qr, generation/generation_started_at/disconnects_total,
     transport family/TLS, isolation.safe, auth store state, callbacks,
     uncertain sends; runtime ready / eligible_storage_critical.
   Record IDs only in the root-only deployment record (no phone numbers).
   Consistency required: every enabled registry identity is a manifest line
-  that is eligible, connected, paired, IPv4/TLS-verified, no QR; every
-  quarantined/decommissioned identity has isolation.safe=true and no retry;
-  no removed_line_id appears in the registry or as a live bridge identity;
-  no bridge identity lacks a registry row (BridgeRegistryMismatch); no pairing
-  request is in progress. Freeze identity changes (no add/remove/pair/rename
-  by Super Admins) for the whole window.
+  that is eligible, connected, paired, IPv4/TLS-verified, no QR; every other
+  manifest line (disabled in the app) has a registry row and its own recorded
+  bridge state; every quarantined/decommissioned identity has
+  isolation.safe=true and no retry; no removed_line_id appears in the registry
+  or as a live bridge identity; no bridge identity lacks a registry row
+  (BridgeRegistryMismatch); no identity is pairing (no line with a QR or
+  status "qr"); no registry row is in an unconfirmed removal (latest audit
+  LINKED_DEVICE_REMOVAL_STARTED). Freeze identity changes (no add, enable,
+  disable, remove, pair or rename by Super Admins) for the whole window.
 
 1. Finish PR review and CI disposition for THIS release. CI's MariaDB/Redis
    integration and bridge steps are skipped whenever the unit step fails (the
@@ -180,7 +185,11 @@ Inventory snapshot (used by every gate below). Taken read-only from:
      GRANT SELECT, INSERT ON <db>.whatsapp_bridge_operation_audit TO <app user>;
      GRANT SELECT, INSERT, UPDATE ON <db>.whatsapp_paused_bot_replies TO <app user>;
    (<app user> from SHOW GRANTS of the configured DB_USER; today
-   wa_support_app@127.0.0.1. No DELETE, DDL or global privilege.) Verify with
+   wa_support_app@127.0.0.1. No DELETE, DDL or global privilege.) Validated
+   on MariaDB 10.11.14 with a user holding only these grants (plus the
+   existing per-table grants): every statement Phase B issues succeeds,
+   including SELECT ... FOR UPDATE, the schema guard sees all four tables'
+   unique keys, and DELETE on the audit table is denied. Verify with
    SHOW GRANTS and check_runtime.py --schema run with the flag ENABLED in a
    transient unit. Also require TABLE_COLLATION = utf8mb4_unicode_ci for the
    four new tables (the server default on production is utf8mb4_general_ci;
@@ -205,9 +214,10 @@ Inventory snapshot (used by every gate below). Taken read-only from:
      API: start with the flag OFF first; enable it in step 9 (API-only restart).
 8. Start the new API (flag off), require schema/readiness, then the bridge.
    Take snapshot S1 after reconnection (bounded wait, e.g. 120 s) and require:
-   the same enabled/decommissioned/removed membership as S0; exactly one bridge
-   directory owner; every S0-active identity eligible, connected, paired,
-   IPv4/TLS, reused credentials (no QR, logout, relink or auth reset); each
+   the same enabled/disabled/decommissioned/removed membership as S0; exactly
+   one bridge directory owner; every S0 manifest line that was connected
+   (enabled AND disabled-in-app) eligible, connected, paired, IPv4/TLS,
+   reused credentials (no QR, logout, relink or auth reset); each
    decommissioned identity's retained evidence hash unchanged; generation
    advanced exactly by the restart (no flapping beyond one reconnect); no
    administration.paused on any identity (none existed before); storage and
@@ -265,6 +275,21 @@ Manual acceptance (attended, approved internal identity/conversation only)
 
 Rollback limitations
 --------------------
+Releases older than Phase B do NOT understand administrative pause state, held
+staff replies (admin_hold), retained bot replies or management operations: an
+older API would send held work out of order or ignore a pause, and an older
+bridge would ignore a durable pause and reconnect a paused identity.
+Downgrade gate (read-only checks; ALL must be zero, on both sides):
+  SELECT COUNT(*) FROM whatsapp_bridge_operations WHERE state IN ('queued','running','unconfirmed');
+  SELECT COUNT(*) FROM whatsapp_bridge_controls WHERE paused=1 OR active_operation_id IS NOT NULL;
+  SELECT COUNT(*) FROM whatsapp_paused_bot_replies WHERE state IN ('queued','dispatching','uncertain');
+  SELECT COUNT(*) FROM support_ticket_messages WHERE admin_hold=1
+    AND (send_status IN ('PENDING','DISPATCHING') OR (send_status='FAILED' AND delivery_retry_safe=1));
+  bridge /v1/status: no identity with administration.paused=true or an
+    active_operation_id.
+Never delete, update or "resolve" those records to satisfy the gate. Resume
+paused identities through the dashboard and let retained work drain or reach a
+terminal state under the new release first.
 Do not restore old database/Redis/media/auth/journal snapshots over new writes.
 Keep the additive schema. API-only rollback may retain the new paused-aware
 bridge, but an older API does not understand held bot replies or operations.
