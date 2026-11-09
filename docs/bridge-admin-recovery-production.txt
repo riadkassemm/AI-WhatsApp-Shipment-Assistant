@@ -182,7 +182,10 @@ Inventory snapshot (used by every gate below). Taken read-only from:
    (<app user> from SHOW GRANTS of the configured DB_USER; today
    wa_support_app@127.0.0.1. No DELETE, DDL or global privilege.) Verify with
    SHOW GRANTS and check_runtime.py --schema run with the flag ENABLED in a
-   transient unit. No migration rollback/drop is used.
+   transient unit. Also require TABLE_COLLATION = utf8mb4_unicode_ci for the
+   four new tables (the server default on production is utf8mb4_general_ci;
+   MariaDB 10.11 rejects mixed-collation comparisons). No migration
+   rollback/drop is used.
 6. Follow the ownership/shutdown/integrity steps in bridge-ipv4-deployment.txt:
    stop the bridge gracefully while the previous API accepts final callbacks;
    require stopped PID/cgroup, clean closure and no live transport/writer owner.

@@ -35,7 +35,8 @@ class DeliveryRepositoryMixin:
                     JOIN support_tickets t ON t.id=cur.ticket_id
                     JOIN whatsapp_paused_bot_replies b ON b.line_id=%s AND b.state IN ('queued','dispatching')
                       AND b.created_at<=cur.created_at
-                      AND REGEXP_REPLACE(b.recipient,'[^0-9]','')=REGEXP_REPLACE(t.whatsapp_phone,'[^0-9]','')
+                      AND CAST(REGEXP_REPLACE(b.recipient,'[^0-9]','') AS BINARY)
+                        = CAST(REGEXP_REPLACE(t.whatsapp_phone,'[^0-9]','') AS BINARY)
                     WHERE cur.id=%s LIMIT 1""", (line_id,message_id,line_id,message_id))
                 return bool(await cur.fetchone())
 

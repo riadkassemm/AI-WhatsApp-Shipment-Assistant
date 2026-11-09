@@ -1,11 +1,14 @@
 -- Additive Phase B schema. Apply only in the approved maintenance window.
 -- No existing message, delivery claim, authentication or registry state is reset.
+-- Explicit table collation matches the existing schema: new tables must not
+-- inherit a different server/database default (MariaDB 10.11 rejects mixed
+-- utf8mb4 collations in comparisons).
 CREATE TABLE IF NOT EXISTS whatsapp_bridge_controls (
     line_id VARCHAR(32) CHARACTER SET ascii COLLATE ascii_bin PRIMARY KEY,
     paused TINYINT(1) NOT NULL DEFAULT 0,
     active_operation_id CHAR(36) CHARACTER SET ascii COLLATE ascii_bin NULL,
     updated_at DATETIME(6) NOT NULL
-) ENGINE=InnoDB;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS whatsapp_bridge_operations (
     id CHAR(36) CHARACTER SET ascii COLLATE ascii_bin PRIMARY KEY,
@@ -24,7 +27,7 @@ CREATE TABLE IF NOT EXISTS whatsapp_bridge_operations (
     INDEX idx_bridge_operation_work (state, updated_at),
     INDEX idx_bridge_operation_line (line_id, created_at),
     INDEX idx_bridge_operation_operator (operator_id, created_at)
-) ENGINE=InnoDB;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS whatsapp_bridge_operation_audit (
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
@@ -35,7 +38,7 @@ CREATE TABLE IF NOT EXISTS whatsapp_bridge_operation_audit (
     reason_code VARCHAR(64) NOT NULL,
     created_at DATETIME(6) NOT NULL,
     INDEX idx_bridge_operation_audit (operation_id, id)
-) ENGINE=InnoDB;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 ALTER TABLE support_ticket_messages
     ADD COLUMN IF NOT EXISTS admin_hold TINYINT(1) NOT NULL DEFAULT 0,
@@ -58,4 +61,4 @@ CREATE TABLE IF NOT EXISTS whatsapp_paused_bot_replies (
     UNIQUE KEY uq_paused_bot_source (line_id, source_message_id),
     UNIQUE KEY uq_paused_bot_transport (transport_id),
     INDEX idx_paused_bot_line (line_id, state, id)
-) ENGINE=InnoDB;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
