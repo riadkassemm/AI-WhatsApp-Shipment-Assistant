@@ -711,3 +711,18 @@ def test_delivery_lookup_rejects_invalid_evidence(bridge, payload):
     with pytest.raises(WhatsAppSendError):
         asyncio.run(LinkedDeviceWhatsAppClient().get_delivery_status(
             phone='96171111111', client_message_id='transport-key', phone_number_id='10001'))
+
+
+def test_bridge_guidance_on_409_reaches_staff_instead_of_a_generic_http_error(bridge):
+    guidance = "This number's saved session is blocked. Use Resume session (no phone needed) or Reset session (pair with the phone)."
+    def respond(request):
+        if request.url.path.endswith("/resume-session"):
+            return httpx.Response(200, json={"line_id": "10002", "status": "connecting"})
+        return httpx.Response(409, json={"error": {"code": "SESSION_BLOCKED", "message": guidance}})
+    requests = bridge(respond)
+    client = LinkedDeviceWhatsAppClient()
+    with pytest.raises(WhatsAppSendError) as blocked:
+        asyncio.run(client.connect("10002"))
+    assert str(blocked.value) == guidance and blocked.value.http_status == 409
+    assert asyncio.run(client.resume_session("10002"))["status"] == "connecting"
+    assert requests[-1].method == "POST" and requests[-1].url.path == "/v1/lines/10002/resume-session"

@@ -153,8 +153,14 @@ class LinkedDeviceWhatsAppClient:
                             failure = None
                         if isinstance(failure, dict) and isinstance(failure.get("delivery_uncertain"), bool):
                             uncertain = mutating and failure["delivery_uncertain"]
+                        message = f"The linked-device bridge rejected the request with HTTP {response.status_code}."
+                        # 409/422 carry the bridge's own guidance (for example "This
+                        # number's saved session is blocked. Use Resume session ...").
+                        detail = failure.get("error") if isinstance(failure, dict) else None
+                        if response.status_code in (409, 422) and isinstance(detail, dict) and isinstance(detail.get("message"), str):
+                            message = detail["message"][:300]
                         error = _send_error(
-                            f"The linked-device bridge rejected the request with HTTP {response.status_code}.",
+                            message,
                             uncertain=uncertain,
                             retryable=response.status_code >= 500 or response.status_code == 429,
                             http_status=response.status_code,
@@ -413,6 +419,10 @@ class LinkedDeviceWhatsAppClient:
     async def reconnect(self, phone_number_id: str) -> dict:
         line = self._phone_number_id(phone_number_id)
         return await self._json_request("POST", f"/v1/lines/{line}/reconnect")
+
+    async def resume_session(self, phone_number_id: str) -> dict:
+        line = self._phone_number_id(phone_number_id)
+        return await self._json_request("POST", f"/v1/lines/{line}/resume-session")
 
     async def reset_session(self, phone_number_id: str) -> dict:
         line = self._phone_number_id(phone_number_id)

@@ -1,4 +1,5 @@
 import { JournalStore } from './journal-store.js';
+import { errorLabel, isDiskFailureCode, isStorageFailure } from './journal-maintenance.js';
 import { mkdir, readFile, open, rename, chmod, unlink, access } from 'node:fs/promises';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import fs from 'node:fs/promises';
@@ -164,6 +165,9 @@ function authFacade(store, owner) {
     }
   };
   const fail = (error, evidence) => {
+    // Label before marking: the mark below would make every error look like storage.
+    const errorCode = errorLabel(error);
+    if (evidence && typeof evidence === 'object' && !Object.hasOwn(evidence, 'error_code')) evidence.error_code = errorCode;
     error.bridgePersistenceFailure = true;
     store.failed = true;
     if (context.getStore()) context.getStore().failureRecorded = true;
@@ -240,7 +244,8 @@ function authFacade(store, owner) {
           }
           return await operation(...args);
         } catch (error) {
-          if ((inherited.mutations.length > mutationsBefore || credsDigest() !== credsBefore) && !inherited.failureRecorded) {
+          if ((inherited.mutations.length > mutationsBefore || credsDigest() !== credsBefore) && !inherited.failureRecorded &&
+              !(owner.resume && !store.failed && !isStorageFailure(error))) {
             fail(error, { operation: 'nested_' + method, mutations: inherited.mutations, creds: cloneAuth(creds) });
           }
           throw error;
@@ -298,6 +303,20 @@ function authFacade(store, owner) {
             cleared = true;
           } catch (cleanupError) { error = cleanupError; }
           if (cleared) throw error;
+        }
+        // Resume mode: a transaction cut off by the provider or the network (for
+        // example "Connection Closed" while a message was being sent) never
+        // committed its buffered key changes; the journal still holds the last
+        // committed state. Discard them and keep the session usable, as after
+        // a crash. Only a real storage failure blocks the session.
+        if (owner.resume && !store.failed && !isStorageFailure(error) && !token.failureRecorded) {
+          if (token.hasIntent) {
+            try { await changeIntent(intents => intents.delete(token.id)); token.hasIntent = false; }
+            catch (cleanupError) { fail(cleanupError, { operation: method, intent_id: token.id, mutations: token.mutations }); throw cleanupError; }
+          }
+          owner.onRecovery?.({ event: 'auth_transaction_discarded', operation: method, reason: errorLabel(error),
+            mutation_batches: token.mutations.length });
+          throw error;
         }
         // The provider can send a stanza before committing its buffered keys.
         // A failed transaction with mutations is unsafe even if no raw set()
@@ -539,6 +558,26 @@ const markerExists = async filename => {
 // never deleted, so the evidence stays auditable. A failure caused by a real
 // write error still fences the line. createAuth() itself stays strict.
 const RESUMABLE_FAILURE_ORIGINS = new Set(['drain_timeout']);
+async function failureOrigin(filename) {
+  try {
+    // Read in-process only; recovery evidence is never logged.
+    const first = JSON.parse(await fs.readFile(filename, 'utf8'))?.failures?.[0];
+    // Older evidence has no error_code: only its operation is known.
+    return { operation: first?.operation ?? null, code: typeof first?.error_code === 'string' ? first.error_code : null };
+  } catch (_) { return { operation: null, code: null }; }
+}
+// Resumable at startup: a failure that began with a drain timeout, or with a
+// recorded error that is not a disk or journal failure (since 2026-11-09).
+function resumableOrigin({ operation, code }) {
+  return RESUMABLE_FAILURE_ORIGINS.has(operation) || (code !== null && !isDiskFailureCode(code) && !/^STORAGE_/.test(code));
+}
+// For the admin "Resume session": the recorded disk/integrity failure code, if any.
+export async function authFailureDiskCode(directory) {
+  const filename = path.join(directory, 'auth.json.auth-failure');
+  if (!await markerExists(filename)) return null;
+  const { code } = await failureOrigin(filename);
+  return isDiskFailureCode(code) ? code : null;
+}
 export async function resumeAfterUncleanExit(store) {
   if (store.failed) return { resumed: false, reason: 'store_failed' };
   const markers = {};
@@ -546,14 +585,8 @@ export async function resumeAfterUncleanExit(store) {
   if (!markers['.auth-active'] && !markers['.auth-intent'] && !markers['.auth-failure']) {
     return { resumed: false, reason: 'no_marker' };
   }
-  if (markers['.auth-failure']) {
-    let origin = null;
-    try {
-      // Read in-process only; recovery evidence is never logged.
-      const evidence = JSON.parse(await fs.readFile(store.filename + '.auth-failure', 'utf8'));
-      origin = evidence?.failures?.[0]?.operation ?? null;
-    } catch (_) { origin = null; }
-    if (!RESUMABLE_FAILURE_ORIGINS.has(origin)) return { resumed: false, reason: 'auth_failure_present' };
+  if (markers['.auth-failure'] && !resumableOrigin(await failureOrigin(store.filename + '.auth-failure'))) {
+    return { resumed: false, reason: 'auth_failure_present' };
   }
   const stamp = Date.now(), retained = [];
   for (const [suffix, present] of Object.entries(markers)) {
@@ -564,7 +597,7 @@ export async function resumeAfterUncleanExit(store) {
   }
   const directory = await fs.open(path.dirname(store.filename), 'r');
   try { await directory.sync(); } finally { await directory.close(); }
-  const reason = markers['.auth-failure'] ? 'drain_timeout_failure' : markers['.auth-intent'] ? 'in_flight_change_discarded'
+  const reason = markers['.auth-failure'] ? 'non_storage_failure' : markers['.auth-intent'] ? 'in_flight_change_discarded'
     : store.incompleteTailBytes ? 'journal_tail_quarantined' : 'active_marker_only';
   return { resumed: true, reason, retained };
 }

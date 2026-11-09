@@ -1,7 +1,7 @@
 import http from 'node:http';
 import crypto from 'node:crypto';
 import { BridgeError } from './config.js';
-import { safeStorageCode } from './journal-maintenance.js';
+import { safeStorageCode, errorLabel } from './journal-maintenance.js';
 
 function authorize(request, secret) {
   const expected = Buffer.from(`Bearer ${secret}`);
@@ -91,6 +91,7 @@ export function createServer(bridge, config) {
       if (parts.length === 4 && parts[3] === 'disconnect') return send(response, 200, await bridge.disconnect(id));
       if (parts.length === 4 && parts[3] === 'reconnect') return send(response, 200, await bridge.reconnectLine(id));
       if (parts.length === 4 && parts[3] === 'reset-session') return send(response, 200, await bridge.resetSession(id));
+      if (parts.length === 4 && parts[3] === 'resume-session') return send(response, 200, await bridge.resumeSession(id));
       if (parts.length === 4 && parts[3] === 'force-remove') return send(response, 200, await bridge.forceRemoveLine(id));
       if (parts.length === 4 && parts[3] === 'media') return send(response, 200, await bridge.uploadMedia(id, payload));
       if (parts.length === 4 && parts[3] === 'messages') return send(response, 200, await bridge.send(id, payload));
@@ -107,7 +108,7 @@ export function createServer(bridge, config) {
         console.warn(JSON.stringify({ component: 'whatsapp_bridge', event: 'request_failed',
           route: `${request.method} ${String(request.url ?? '').split('?')[0].replace(/\/(messages|media)\/[^/]+/, '/$1/:id')}`,
           http_status: status, error_code: isKnown ? error.code : 'BRIDGE_ERROR',
-          cause_code: safeStorageCode(error), persistence_failure: error?.bridgePersistenceFailure === true,
+          cause_code: errorLabel(error), persistence_failure: error?.bridgePersistenceFailure === true,
           provider_status: Number.isInteger(providerStatus) ? providerStatus : null }));
       }
       const uncertainCodes = ['CONFIRMATION_UNKNOWN', 'DISCONNECTED', 'SEND_FAILED', 'INVALID_PROVIDER_RESPONSE'];

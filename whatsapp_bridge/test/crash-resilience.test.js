@@ -278,3 +278,73 @@ test('admin reconnect replaces only that number connection', async t => {
   assert.equal(bridge.getLine(LINES[1]).socket, second, 'the other number is untouched');
   await assert.rejects(bridge.resetSession(LINES[1]), { code: 'LINE_CONNECTED' }, 'a connected number is never reset');
 });
+
+// ---- Resume a blocked session from the dashboard (2026-11-10) -------------
+async function blockedWith(t, failure, { savedLogin = true } = {}) {
+  const dataDir = await tempDir(t, 'bridge-live-');
+  const { bridge } = await start(t, dataDir);
+  await connectAll(bridge);
+  const line = bridge.getLine(LINES[1]);
+  if (savedLogin) { line.auth.state.creds.me = { id: '96170000999:1@s.whatsapp.net' }; await line.auth.saveCreds(); }
+  await line.auth.state.keys.set({ session: { committed: Buffer.from([1]) } });
+  const crashed = await crashSnapshot(t, bridge, dataDir);
+  await writeFile(path.join(crashed, LINES[1], 'auth.json.auth-failure'), JSON.stringify({ version: 1, failures: [failure] }), { mode: 0o600 });
+  await writeFile(path.join(crashed, LINES[1], 'auth.json.auth-intent'), JSON.stringify({ version: 1, operations: [] }), { mode: 0o600 });
+  t.after(() => rm(path.join(path.dirname(crashed), 'linked-device-archive'), { recursive: true, force: true }));
+  const started = await start(t, crashed);
+  return { crashed, ...started };
+}
+
+test('after a restart, a recorded provider error resumes; a recorded disk error and legacy evidence stay blocked', async t => {
+  const provider = await blockedWith(t, { operation: 'transaction', error_code: 'PROVIDER_428', mutations: [] });
+  assert.notEqual(provider.bridge.getLine(LINES[1]).status, 'error');
+  assert.ok(provider.logs.some(entry => entry.event === 'auth_session_resumed_after_unclean_exit' && entry.reason === 'non_storage_failure'));
+  const disk = await blockedWith(t, { operation: 'keys', error_code: 'EIO', mutations: [] });
+  assert.equal(disk.bridge.getLine(LINES[1]).status, 'error');
+  const legacy = await blockedWith(t, { operation: 'transaction', mutations: [] });
+  assert.equal(legacy.bridge.lineStatus(legacy.bridge.getLine(LINES[1])).session_blocked, true, 'evidence without a code stays blocked');
+});
+
+test('admin resume brings back a blocked number from its saved session without the phone and touches no other number', async t => {
+  // The Turkey case: legacy evidence from a transaction (no error code).
+  const { crashed, bridge, logs } = await blockedWith(t, { operation: 'transaction', mutations: [] });
+  const blocked = bridge.lineStatus(bridge.getLine(LINES[1]));
+  assert.equal(blocked.session_blocked, true);
+  assert.equal(blocked.saved_login, true);
+  await assert.rejects(bridge.connect(LINES[1]), { code: 'SESSION_BLOCKED', status: 409 }, 'Pair is refused with guidance, not a 500');
+  await assert.rejects(bridge.reconnectLine(LINES[1]), { code: 'SESSION_BLOCKED' });
+  await bridge.connect(LINES[0]);
+  const other = bridge.getLine(LINES[0]).socket;
+  const status = await bridge.resumeSession(LINES[1]);
+  assert.equal(status.session_blocked, false);
+  assert.equal(status.status, 'connecting', 'only this number reconnects');
+  const line = bridge.getLine(LINES[1]);
+  assert.deepEqual(line.auth.store.data.keys.session.committed, Buffer.from([1]), 'the saved keys are kept');
+  assert.equal(line.auth.store.data.creds.me.id, '96170000999:1@s.whatsapp.net', 'the saved login is kept');
+  assert.equal((await readdir(path.join(crashed, LINES[1]))).some(name => /^auth\.json\.auth-(failure|intent|active)$/.test(name) && name !== 'auth.json.auth-active'), false);
+  const [archive] = (await readdir(path.join(path.dirname(crashed), 'linked-device-archive'))).filter(name => name.includes(`-resume-${LINES[1]}`));
+  assert.ok((await readdir(path.join(path.dirname(crashed), 'linked-device-archive', archive))).includes('auth.json.auth-failure'), 'evidence archived');
+  assert.equal(bridge.getLine(LINES[0]).socket, other, 'the other number is untouched');
+  assert.ok(logs.some(entry => entry.event === 'auth_session_resumed_by_admin' && entry.line_id === LINES[1]));
+});
+
+test('admin resume refuses a connected, healthy, disk-failed or login-less session', async t => {
+  const disk = await blockedWith(t, { operation: 'keys', error_code: 'EIO', mutations: [] });
+  await assert.rejects(disk.bridge.resumeSession(LINES[1]), { code: 'STORAGE_FAILURE' });
+  const empty = await blockedWith(t, { operation: 'transaction', mutations: [] }, { savedLogin: false });
+  await assert.rejects(empty.bridge.resumeSession(LINES[1]), { code: 'NO_SAVED_LOGIN' });
+  await assert.rejects(empty.bridge.resumeSession(LINES[0]), { code: 'SESSION_NOT_BLOCKED' });
+  const dataDir = await tempDir(t, 'bridge-live-');
+  const { bridge } = await start(t, dataDir);
+  await connectAll(bridge);
+  await assert.rejects(bridge.resumeSession(LINES[0]), { code: 'LINE_CONNECTED' });
+});
+
+test('error labels separate provider errors from storage failures', async () => {
+  const { errorLabel, isStorageFailure } = await import('../src/journal-maintenance.js');
+  assert.equal(errorLabel(Object.assign(new Error('Connection Closed'), { output: { statusCode: 428 } })), 'PROVIDER_428');
+  assert.equal(errorLabel(Object.assign(new Error('x'), { code: 'EIO' })), 'EIO');
+  assert.equal(errorLabel(Object.assign(new Error('STORAGE_RESTART_REQUIRED'), { bridgePersistenceFailure: true })), 'STORAGE_RESTART_REQUIRED');
+  assert.equal(errorLabel(new Error('something odd')), 'PROVIDER_ERROR', 'never mislabelled as a storage error');
+  assert.equal(isStorageFailure(Object.assign(new Error('Connection Closed'), { output: { statusCode: 428 } })), false);
+});
