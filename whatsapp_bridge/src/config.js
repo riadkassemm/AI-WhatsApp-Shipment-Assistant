@@ -121,9 +121,14 @@ export function readAuthConfig(env = process.env) {
   if (drainTimeoutMs !== undefined && (!Number.isSafeInteger(drainTimeoutMs) || drainTimeoutMs < 30_000)) {
     throw new Error(`${prefix}DRAIN_TIMEOUT_MS must be an integer of at least 30000.`);
   }
+  const rawReconnect = env[prefix + 'RECONNECT_DRAIN_TIMEOUT_MS'];
+  const reconnectDrainTimeoutMs = rawReconnect === undefined ? undefined : Number(rawReconnect);
+  if (reconnectDrainTimeoutMs !== undefined && (!Number.isSafeInteger(reconnectDrainTimeoutMs) || reconnectDrainTimeoutMs < 5_000)) {
+    throw new Error(`${prefix}RECONNECT_DRAIN_TIMEOUT_MS must be an integer of at least 5000.`);
+  }
   const resume = env[prefix + 'RESUME_AFTER_UNCLEAN_EXIT'] ?? 'true';
   if (!['true', 'false'].includes(resume)) throw new Error(`${prefix}RESUME_AFTER_UNCLEAN_EXIT must be true or false.`);
-  return { drainTimeoutMs, resumeAfterUncleanExit: resume === 'true' };
+  return { drainTimeoutMs, reconnectDrainTimeoutMs, resumeAfterUncleanExit: resume === 'true' };
 }
 
 export function readConfig(env = process.env) {

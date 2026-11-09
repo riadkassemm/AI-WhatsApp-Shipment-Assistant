@@ -76,6 +76,7 @@ const RECOVERY_SYNC_TYPES = [proto.HistorySync.HistorySyncType.INITIAL_BOOTSTRAP
 const knownPhone = value => { try { return phoneDigits(value, true); } catch { return ''; } };
 // A missing ACK or a timed-out/closed query usually means the WhatsApp
 // connection died without notice. Reconnecting lets the next send work.
+const DEAD_TRANSPORT_REASONS = new Set(['stale_transport', 'connection_closed', 'transport_closed']);
 const staleConnectionError = error => error?.code === 'CONFIRMATION_UNKNOWN' ||
   [408, 428].includes(error?.output?.statusCode) || /timed out|connection closed/i.test(String(error?.message ?? ''));
 const transientConnectionError = error => ['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'ENETUNREACH', 'EHOSTUNREACH', 'EAI_AGAIN', 'ENOTFOUND']
@@ -861,7 +862,13 @@ export class Bridge {
         // its admitted operations finish. Failed auth stores still refuse it.
         line.auth = await line.auth.reset();
         await line.store.update(data => { delete data.auth_reset_required; });
-      } else line.auth = await line.auth.renew();
+      } else {
+        // After a dead transport, stuck provider work cannot finish: renew with
+        // a short drain (resume mode) instead of the full retirement deadline.
+        const renewal = line.transportLost ? { drainTimeoutMs: this.config.auth?.reconnectDrainTimeoutMs ?? 15_000 } : undefined;
+        line.auth = await line.auth.renew(renewal);
+      }
+      line.transportLost = false;
       await line.store.update(data => { data.enabled = true; });
       if (this.stopping || generation !== line.generation) {
         line.auth.retire(); await line.auth.drain(); return this.lineStatus(line);
@@ -1423,6 +1430,9 @@ export class Bridge {
     if (line.session.readyAt && Date.now() - line.session.readyAt >= 60_000) line.reconnectAttempts = 0;
     line.session.closed = true;
     line.session.ready = false;
+    // Work still running on a dead transport cannot finish normally; the next
+    // reconnect waits a short deadline for it instead of the full one.
+    if (DEAD_TRANSPORT_REASONS.has(reason)) line.transportLost = true;
     line.ack?.interrupt();
     if (!line.removing && line.status !== 'error') line.status = 'disconnected';
     this.trace(line, 'connection_transition', { state: 'blocked', reason });
@@ -1442,14 +1452,21 @@ export class Bridge {
     }
     return socket;
   }
-  async awaitSubmission(task, waiter) {
+  // Text sends and edit/delete relays are normally acknowledged within ~2 s;
+  // silence for 30 s means the transport is dead, so reconnect early instead
+  // of waiting the 120 s that a media upload to WhatsApp may legitimately need.
+  submissionTimeout(media = false) {
+    const general = this.config.submissionTimeoutMs ?? 120_000;
+    return media ? general : Math.min(general, this.config.textSubmissionTimeoutMs ?? 30_000);
+  }
+  async awaitSubmission(task, waiter, { media = false } = {}) {
     let timer;
     // ACKs may precede sendMessage's return; only rejection interrupts that call.
     const interrupted = waiter.promise.then(() => new Promise(() => {}));
     try {
       return await Promise.race([task, interrupted, new Promise((_, reject) => {
         timer = setTimeout(() => reject(new BridgeError(504, 'CONFIRMATION_UNKNOWN', 'Message submission did not finish in time.')),
-          this.config.submissionTimeoutMs ?? 120_000);
+          this.submissionTimeout(media));
       })]);
     } finally { clearTimeout(timer); }
   }
@@ -2128,7 +2145,8 @@ export class Bridge {
         const sendStarted = Date.now();
         this.trace(line, 'send_attempt', { native_id: nativeId, content_type: payload.type });
         submitted = true;
-        const message = await this.awaitSubmission(socket.sendMessage(jid, content, { ...options, messageId: nativeId }), waiter);
+        const message = await this.awaitSubmission(socket.sendMessage(jid, content, { ...options, messageId: nativeId }), waiter,
+          { media: MEDIA_TYPES.includes(payload.type) });
         waiter.startTimer();
         if (!message?.key?.id || message.key.id !== nativeId) throw new BridgeError(502, 'INVALID_PROVIDER_RESPONSE', 'WhatsApp did not return the expected message ID.');
         // Keep retry keys even if ACK is lost; no success is returned until confirmed.

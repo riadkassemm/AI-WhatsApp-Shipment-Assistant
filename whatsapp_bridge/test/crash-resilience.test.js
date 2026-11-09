@@ -64,7 +64,9 @@ async function crashSnapshot(t, bridge, dataDir) {
 
 test('auth drain deadline outlasts provider query timeouts and is configurable but never short', () => {
   assert.ok(DEFAULT_AUTH_DRAIN_TIMEOUT_MS >= 60_000);
-  assert.deepEqual(readAuthConfig({}), { drainTimeoutMs: undefined, resumeAfterUncleanExit: true });
+  assert.deepEqual(readAuthConfig({}), { drainTimeoutMs: undefined, reconnectDrainTimeoutMs: undefined, resumeAfterUncleanExit: true });
+  assert.equal(readAuthConfig({ WHATSAPP_LINKED_DEVICE_AUTH_RECONNECT_DRAIN_TIMEOUT_MS: '20000' }).reconnectDrainTimeoutMs, 20_000);
+  assert.throws(() => readAuthConfig({ WHATSAPP_LINKED_DEVICE_AUTH_RECONNECT_DRAIN_TIMEOUT_MS: '1000' }), /at least 5000/);
   assert.equal(readAuthConfig({ WHATSAPP_LINKED_DEVICE_AUTH_DRAIN_TIMEOUT_MS: '90000' }).drainTimeoutMs, 90_000);
   assert.throws(() => readAuthConfig({ WHATSAPP_LINKED_DEVICE_AUTH_DRAIN_TIMEOUT_MS: '20000' }), /at least 30000/);
   assert.equal(readAuthConfig({ WHATSAPP_LINKED_DEVICE_AUTH_RESUME_AFTER_UNCLEAN_EXIT: 'false' }).resumeAfterUncleanExit, false);
@@ -179,4 +181,40 @@ test('a failed auth store stays isolated: other lines keep committing and a grac
   const { bridge: restarted } = await start(t, dataDir);
   assert.notEqual(restarted.getLine(healthyId).status, 'error');
   assert.equal(restarted.getLine(failedId).status, 'error');
+});
+
+test('text sends give up after 30 s, media keeps 120 s, and test overrides still shorten both', async t => {
+  const dataDir = await tempDir(t, 'bridge-live-');
+  const { bridge } = await start(t, dataDir);
+  assert.equal(bridge.submissionTimeout(false), 30_000);
+  assert.equal(bridge.submissionTimeout(true), 120_000);
+  bridge.config.submissionTimeoutMs = 100;
+  assert.equal(bridge.submissionTimeout(false), 100);
+  assert.equal(bridge.submissionTimeout(true), 100);
+});
+
+test('after a dead transport, the reconnect abandons stuck work at a short deadline instead of the full one', async t => {
+  const dataDir = await tempDir(t, 'bridge-live-');
+  const { bridge, logs } = await start(t, dataDir, { auth: { reconnectDrainTimeoutMs: 100 } });
+  await connectAll(bridge);
+  const line = bridge.getLine(LINES[0]);
+  const auth = line.auth, never = new Promise(() => {});
+  // Work stuck on the dead socket while holding an uncommitted change.
+  const stuck = auth.trackProviderTask(async () => {
+    await auth.state.keys.set({ session: { in_flight: Buffer.from([1]) } });
+    await never;
+  });
+  stuck.catch(() => {});
+  await new Promise(resolve => setTimeout(resolve, 50));
+  bridge.restartStaleSocket(line, line.socket);
+  assert.equal(line.transportLost, true);
+  const started = performance.now();
+  await bridge.connect(LINES[0]);
+  assert.ok(performance.now() - started < 3_000, 'reconnect did not wait the full 60 s deadline');
+  assert.notEqual(line.auth, auth, 'a new auth owner took over');
+  assert.equal(line.auth.store.failed, false);
+  assert.equal(line.transportLost, false);
+  assert.ok(logs.some(entry => entry.event === 'auth_work_abandoned' && entry.line_id === LINES[0] && entry.reason === 'drain_timeout'));
+  await line.auth.state.keys.set({ session: { after: Buffer.from([2]) } });
+  assert.deepEqual(line.auth.store.data.keys.session.after, Buffer.from([2]));
 });
