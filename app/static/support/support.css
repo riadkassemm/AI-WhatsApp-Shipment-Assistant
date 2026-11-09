@@ -1283,7 +1283,10 @@ body.column-resizing * { cursor: col-resize !important; }
 .ai-schedule-grid .wide { grid-column: 1 / -1; }
 .ai-next-change { margin-top: -4px; margin-bottom: 16px; color: var(--text-muted); font-size: var(--text-sm); }
 .staff-view-heading, .section-title { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.section-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+/* Equal-width action buttons: side by side on wide screens, stacked on phones.
+   Hidden buttons take no column, so a lone button keeps its natural size. */
+.section-actions { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; gap: 8px; flex-shrink: 0; }
+.section-actions > .btn { justify-content: center; white-space: nowrap; }
 .staff-view-heading { margin-bottom: 18px; padding-bottom: 14px; border-bottom: 1px solid var(--border); }
 .staff-view-heading strong, .section-title strong { color: var(--text-strong); font-size: var(--text-base); font-weight: 650; }
 .staff-view-heading .muted, .section-title .muted { margin-top: 2px; font-size: var(--text-sm); }
@@ -1486,6 +1489,8 @@ body.column-resizing * { cursor: col-resize !important; }
   .whatsapp-sync-form { grid-template-columns: 1fr; }
   .whatsapp-sync-form > .btn { margin-top: 0; }
   .whatsapp-number-actions { grid-column: 1 / -1; justify-content: flex-start; }
+  .section-title:has(> .section-actions) { flex-direction: column; align-items: stretch; }
+  .section-actions { grid-auto-flow: row; }
   .linked-device-line { grid-template-columns: repeat(2, minmax(0, 1fr)); row-gap: 6px; }
   .linked-device-line > strong, .linked-device-line > .muted, .linked-device-line > .linked-device-qr { grid-column: 1 / -1; }
   .linked-device-line > .btn { grid-row: auto; }
