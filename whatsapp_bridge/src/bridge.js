@@ -5,7 +5,7 @@ import makeWASocket, { Browsers, DisconnectReason, downloadMediaMessage, normali
 import pino from 'pino';
 import QRCode from 'qrcode';
 import { BridgeError, phoneDigits, wrapId, unwrapId, validateLineManifest, UUID_PATTERN, MANIFEST_MAX_BYTES } from './config.js';
-import { FileStore, createAuth } from './storage.js';
+import { FileStore, createAuth, resumeAfterUncleanExit, resumableAuthFence } from './storage.js';
 import { assessAuthRecovery } from './auth-recovery.js';
 import { JournalStore, encode } from './journal-store.js';
 import { safeStorageCode } from './journal-maintenance.js';
@@ -253,7 +253,19 @@ export class Bridge {
   }
   async loadAuth(line) {
     const store = await this.loadStore(path.join(line.directory, 'auth.json'), () => ({creds: initAuthCreds(), keys: {}}), 'auth', line);
-    const auth = await createAuth(line.directory, {store});
+    // The directory lock guarantees no other process owns this line, and
+    // ownedStores guarantees this process loads it once. A marker found here
+    // was left by a process that exited without retiring the session.
+    const resume = this.config.auth?.resumeAfterUncleanExit !== false;
+    if (resume) {
+      const outcome = await resumeAfterUncleanExit(store);
+      if (outcome.reason !== 'no_marker') {
+        this.log({component: 'whatsapp_bridge', event: outcome.resumed ? 'auth_session_resumed_after_unclean_exit' : 'auth_session_fenced_after_unclean_exit',
+          line_id: line.line_id, reason: outcome.reason});
+      }
+    }
+    const auth = await createAuth(line.directory, {store, drainTimeoutMs: this.config.auth?.drainTimeoutMs, resume,
+      onRecovery: event => this.log({component: 'whatsapp_bridge', line_id: line.line_id, ...event})});
     if (this.stopping) { auth.retire(); await auth.drain(); this.assertRunning(); }
     return auth;
   }
@@ -286,8 +298,18 @@ export class Bridge {
       // Inspect BEFORE JournalStore.load: normal replay can repair a partial
       // tail or remove checkpoint temporaries, which a fenced owner must retain.
       if (!line.auth && await hasAuthFence(line.directory)) {
-        await this.isolateFencedLine(line);
-        return;
+        // Resume mode (default): markers that only describe work in progress
+        // (a crash, an uncommitted change, or a failure that began with a
+        // drain timeout) resume from the committed journal in loadAuth().
+        // Only a real write failure keeps the fenced isolation path.
+        if (this.config.auth?.resumeAfterUncleanExit === false || !await resumableAuthFence(line.directory)) {
+          if (this.config.auth?.resumeAfterUncleanExit !== false) {
+            this.log({component: 'whatsapp_bridge', event: 'auth_session_fenced_after_unclean_exit',
+              line_id: line.line_id, reason: 'auth_failure_present'});
+          }
+          await this.isolateFencedLine(line);
+          return;
+        }
       }
       await mkdir(path.join(line.directory, 'media'), { recursive: true, mode: 0o700 });
       this.assertRunning();
