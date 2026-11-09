@@ -86,7 +86,10 @@ export function createRuntime({prepare, process: processOwner = process, logger 
       const dependencies = await prepare();
       if (stopping) return;
       const {config, acquireDataDirectory, createBridge, createServer} = dependencies;
-      release = await acquireDataDirectory(config.dataDir);
+      release = await acquireDataDirectory(config.dataDir, {
+        // A crashed bridge's lock is taken over at once instead of after 30 s.
+        onReclaimed: () => report('data_directory_lock_reclaimed'),
+      });
       if (stopping) return;
       bridge = createBridge(config);
       if (stopping) return;
