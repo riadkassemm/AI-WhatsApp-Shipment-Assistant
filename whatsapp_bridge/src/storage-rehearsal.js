@@ -175,9 +175,13 @@ async function reconnectCopy(directory, expectedLines) {
       if (!auth.creds.me?.id || !(auth.creds.registered || auth.creds.me.id)) fail('REHEARSAL_UNPAIRED_SESSION');
       const ws = new EventEmitter();
       ws.isOpen = true;
+      // Shutdown requires proof that the transport closed (the patched provider
+      // exposes bridgeTransportClosed). This mock proves it only once ended.
+      let transportClosed;
+      const bridgeTransportClosed = new Promise(resolve => { transportClosed = resolve; });
       return {
-        ws, user: { id: auth.creds.me.id }, ev: { process: () => () => {} },
-        end: () => { ws.isOpen = false; },
+        ws, user: { id: auth.creds.me.id }, ev: { process: () => () => {} }, bridgeTransportClosed,
+        end: () => { ws.isOpen = false; transportClosed(); },
         sendMessage: sendForbidden, relayMessage: sendForbidden, query: providerForbidden,
         logout: providerForbidden, onWhatsApp: providerForbidden,
         fetchMessageHistory: providerForbidden, requestPlaceholderResend: providerForbidden,
