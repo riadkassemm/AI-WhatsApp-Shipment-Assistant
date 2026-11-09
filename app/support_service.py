@@ -1142,8 +1142,20 @@ class SupportService:
                 )
             except SupportMediaError as exc:
                 if exc.retryable:
-                    raise
-                logger.warning("WhatsApp app media could not be cached: message_id=%s", provider_id)
+                    # A transcript mirror has already been sent/received; it
+                    # does not run AI or dispatch another customer message.
+                    # Once BOTH the transcript and its exact recovery locator
+                    # are durable, optional attachment caching must not keep
+                    # its callback retrying until the bridge retention expires.
+                    # Do not rely on the local remote.json fallback alone.
+                    if not await support_repository.has_durable_media_reference(
+                        int(message['id']), ticket_id=int(ticket['id']),
+                        provider_media_id=str(incoming.media_id),
+                    ):
+                        raise
+                    logger.warning("Transcript media recovery deferred: message_id=%s code=MEDIA_RECOVERY_DEFERRED", message['id'])
+                else:
+                    logger.warning("WhatsApp app media could not be cached: message_id=%s", message['id'])
         return True
 
     async def sync_linked_device_tombstone(self, event: dict[str, Any]) -> bool:

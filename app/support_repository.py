@@ -2131,6 +2131,24 @@ class SupportRepository(DashboardRepositoryMixin, DeliveryRepositoryMixin, ReadS
                     (provider_media_id, provider_media_mime_type, provider_media_filename, message_id),
                 )
 
+    async def has_durable_media_reference(
+        self, message_id: int, *, ticket_id: int, provider_media_id: str,
+    ) -> bool:
+        """Prove transcript attachment recovery survives an API restart."""
+        if self._pool is None:
+            await self.connect()
+        assert self._pool is not None
+        async with self._pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """SELECT 1 FROM support_ticket_messages
+                       WHERE id=%s AND ticket_id=%s AND provider_media_id=%s
+                         AND deleted_for_everyone_at IS NULL
+                         AND send_status IN ('SENT', 'RECEIVED') LIMIT 1""",
+                    (message_id, ticket_id, provider_media_id),
+                )
+                return bool(await cur.fetchone())
+
     async def get_message_by_whatsapp_id(self, message_id: str) -> dict[str, Any] | None:
         if self._pool is None:
             await self.connect()
