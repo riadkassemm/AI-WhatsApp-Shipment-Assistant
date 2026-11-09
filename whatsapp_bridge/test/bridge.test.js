@@ -85,7 +85,8 @@ test('configuration rejects weak secrets, nonnumeric lines, and public binds', (
   const config = readConfig(valid);
   assert.equal(config.host, '127.0.0.1');
   assert.equal(config.port, 3001);
-  assert.equal(config.maxMediaBytes, 192 * 1024 * 1024);
+  assert.equal(config.maxMediaBytes, 192 * 1024 * 1024, 'incoming customer media keep the larger download limit');
+  assert.equal(config.maxUploadBytes, 32 * 1024 * 1024, 'every outgoing upload is capped at 32 MiB');
   assert.equal(config.lines[0].expected_phone, '');
   assert.throws(() => readConfig({ ...valid, WHATSAPP_LINKED_DEVICE_SECRET: 'short' }), /at least 32/);
   assert.throws(() => readConfig({ ...valid, WHATSAPP_LINKED_DEVICE_BIND_HOST: '0.0.0.0' }), /loopback/);
@@ -1901,15 +1902,17 @@ test('multi-megabyte PDF uploads dispatch exact bytes once and enforce canonical
   assert.equal(socket.calls.length, 2);
 });
 
-test('192 MiB video uploads pass the HTTP envelope and dispatch once; larger videos are rejected', async t => {
+test('32 MiB video uploads pass the HTTP envelope and dispatch once; larger uploads are rejected', async t => {
   const { bridge, config, socket } = await fixture(t);
-  config.maxMediaBytes = readConfig({ WHATSAPP_LINKED_DEVICE_SECRET: SECRET }).maxMediaBytes;
+  const defaults = readConfig({ WHATSAPP_LINKED_DEVICE_SECRET: SECRET });
+  config.maxMediaBytes = defaults.maxMediaBytes;
+  config.maxUploadBytes = defaults.maxUploadBytes;
   const server = createServer(bridge, config);
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   t.after(() => new Promise(resolve => { server.close(resolve); server.closeAllConnections(); }));
   const base = `http://127.0.0.1:${server.address().port}/v1/lines/${LINE}`;
   const headers = { Authorization: `Bearer ${SECRET}`, 'Content-Type': 'application/json' };
-  const content = Buffer.alloc(192 * 1024 * 1024, 37);
+  const content = Buffer.alloc(32 * 1024 * 1024, 37);
   const uploaded = await fetch(`${base}/media`, { method: 'POST', headers,
     body: JSON.stringify({ content_base64: content.toString('base64'), mime_type: 'video/mp4', filename: 'large.mp4' }) });
   assert.equal(uploaded.status, 200);

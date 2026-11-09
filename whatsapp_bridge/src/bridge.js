@@ -1897,12 +1897,13 @@ export class Bridge {
     if (typeof encoded !== 'string' || encoded.length % 4 !== 0) throw new BridgeError(400, 'INVALID_MEDIA', 'Provide valid base64 media content.');
     // Bound allocation first. Repeated regex groups overflow V8's stack on
     // normal multi-megabyte attachments; Buffer's decoder alone is permissive.
-    if (encoded.length > Math.ceil(this.config.maxMediaBytes / 3) * 4) throw new BridgeError(413, 'MEDIA_TOO_LARGE', 'Media exceeds the upload limit.');
+    const uploadLimit = this.config.maxUploadBytes ?? this.config.maxMediaBytes;
+    if (encoded.length > Math.ceil(uploadLimit / 3) * 4) throw new BridgeError(413, 'MEDIA_TOO_LARGE', 'Media exceeds the upload limit.');
     const releaseCapacity = this.storageMonitor.reserveOptionalWrite(id, encoded.length / 4 * 3);
     try {
       const bytes = Buffer.from(encoded, 'base64');
       if (bytes.toString('base64') !== encoded) throw new BridgeError(400, 'INVALID_MEDIA', 'Provide valid base64 media content.');
-      if (!bytes.length || bytes.length > this.config.maxMediaBytes) throw new BridgeError(413, 'MEDIA_TOO_LARGE', `Media must be nonempty and no larger than ${this.config.maxMediaBytes / (1024 * 1024)} MiB.`);
+      if (!bytes.length || bytes.length > uploadLimit) throw new BridgeError(413, 'MEDIA_TOO_LARGE', `Media must be nonempty and no larger than ${uploadLimit / (1024 * 1024)} MiB.`);
       const rawMime = String(payload.mime_type ?? '').trim().toLowerCase();
       const baseMime = rawMime.split(';')[0].trim();
       const mime = baseMime === 'audio/ogg' && /codecs\s*=\s*opus/.test(rawMime) ? 'audio/ogg; codecs=opus' : baseMime;
