@@ -1,10 +1,10 @@
 Phase B — guarded administrative recovery
 =========================================
-Status: local implementation for PR review; NOT approved for production.
+Status: PR #91 for review; NOT approved for production.
 No DEV access. No production mutation, callback replay, service restart,
 credential operation or deployment was performed while implementing this change.
-The urgent callback-media fix is a separate PR (#90) and must remain in the
-reviewed ancestry of any Phase B release. Do not deploy an older API over it.
+PR #90 (callback-media fix, 0a85f5ae) is merged into main and deployed as the
+current API release; it must remain in the ancestry of any Phase B release.
 
 Activation boundary
 -------------------
@@ -17,12 +17,14 @@ missing. Management GETs only read cached monitoring and bounded SQL metadata;
 they do not call registry seeding, provider operations or storage maintenance.
 
 This release contains Node changes and an additive SQL migration. Activating
-it requires an expressly approved graceful bridge transition. It cannot preserve
-six continuously open sockets across replacement of their owning process.
+it requires an expressly approved graceful bridge transition. It cannot keep the
+eligible identities' sockets open across replacement of their owning process.
 No logout, relink, credential reset, journal rewrite or duplicate owner is needed.
-The expected outcome is reconnection of the same six paired IPv4 identities.
-If uninterrupted sockets are mandatory for the window, Phase B is NO-GO; deploy
-only PR #90 using docs/callback-media-ack-production.txt after its own approval.
+The expected outcome is reconnection of exactly the identities that were eligible
+and connected in the fresh preflight snapshot, with reused credentials over IPv4.
+The identity set is NOT fixed: Super Admins add and remove numbers. Every gate
+compares against a snapshot taken in the same window, never a remembered list.
+PR #90 (callback fix) is merged and deployed; it is in this branch's ancestry.
 
 Behavior and ownership
 ----------------------
@@ -123,65 +125,117 @@ Incomplete/corrupt administrative state also blocks activation.
 
 Reviewed deployment sequence — execute only after exact-SHA approval
 -------------------------------------------------------------------
-1. Finish PR review and CI disposition for THIS release. The previous Phase A
-   eight-fixture exception does not approve Phase B or a new callback-fix SHA.
-   Do not mark failing CI green, disable checks or bypass branch protections.
-   Record the reviewed full release SHA and verify the callback fix is included.
-   Package only that clean committed tree; preserve source archive/checksums,
-   previous API/bridge release paths and effective service/drop-in configuration.
+Inventory snapshot (used by every gate below). Taken read-only from:
+  - MariaDB whatsapp_phone_numbers (source='LINKED_DEVICE', removed_at IS NULL):
+    the ENABLED rows are the active set; disabled rows are visible, not active;
+  - the bridge manifest lines.json: lines, quarantined_lines, removed_line_ids,
+    pending pairing requests;
+  - authenticated bridge /v1/status: per identity lifecycle, eligible, status,
+    is_paired, qr, generation/generation_started_at/disconnects_total,
+    transport family/TLS, isolation.safe, auth store state, callbacks,
+    uncertain sends; runtime ready / eligible_storage_critical.
+  Record IDs only in the root-only deployment record (no phone numbers).
+  Consistency required: every enabled registry identity is a manifest line
+  that is eligible, connected, paired, IPv4/TLS-verified, no QR; every
+  quarantined/decommissioned identity has isolation.safe=true and no retry;
+  no removed_line_id appears in the registry or as a live bridge identity;
+  no bridge identity lacks a registry row (BridgeRegistryMismatch); no pairing
+  request is in progress. Freeze identity changes (no add/remove/pair/rename
+  by Super Admins) for the whole window.
+
+1. Finish PR review and CI disposition for THIS release. CI's MariaDB/Redis
+   integration and bridge steps are skipped whenever the unit step fails (the
+   eight baseline fixtures), so CI alone is not database evidence: record the
+   isolated MariaDB 10.11.14 integration results for the exact SHA. Do not mark
+   failing CI green, disable checks or bypass protections. Record the reviewed
+   full release SHA and verify 0a85f5ae (PR #90) is an ancestor.
 2. Stage an inactive release and pinned Python/Node dependencies in the existing
    installation sandbox. Verify the pinned Baileys lifecycle patch with
    whatsapp_bridge/scripts/patch-baileys-lifecycle.js --verify. Keep credentials,
    data directories, Redis and media inaccessible during dependency installation.
-3. Repeat the production preflight on 194.5.152.173. Require six eligible paired
-   IPv4/TLS identities 90012,90013,90015,90017,90024,90026; preserve retained 90035,
-   its sealed evidence and remote-unlink distinction. Record sanitized baseline
-   PID/start times, heartbeat/collector freshness, callback age/count, journal
-   health, SQL and bridge uncertainty counts, API errors and delivery ownership.
-   A critical eligible-identity fault, a NEW pending callback near/after its
-   deadline, missing durable evidence or ownership uncertainty is an abort.
-   Scope existing 90035 warnings. Scope the known 90015 document-mirror event
-   b1a9423f… (transcript message durably SENT once; deadline 2026-11-09 08:12:28Z):
-   if it has dead-lettered as RETRY_PERIOD_EXPIRED, record it as retained
-   evidence (never replay it); it is not by itself an abort.
-   Honor the previously accepted backup scope; no off-server backup condition is
-   added. Never treat a live auth-file copy as a consistent snapshot.
-4. Close public Customer Support ingress using the reviewed nginx/ngrok procedure
-   in bridge-management-production.txt. Keep the private callback API available.
-   Verify no staff sends or competing deployment/restart can start. Install and
-   verify runtime guards for BOTH services: Restart=no, TimeoutStopSec=infinity,
-   SendSIGKILL=no. Retain the permanent bridge protections. Never force-kill.
-5. Apply only migrations/20261108_whatsapp_admin_recovery.sql using the approved
-   DB procedure. It creates new tables and admin_hold/index; it does not rewrite
-   existing delivery claims or customer data. Check available disk/DDL locking,
-   complete schema and required unique keys. No migration rollback/drop is used.
+   The running bridge (98583dc) and main have identical bridge sources: the only
+   Node changes activated are Phase B's (management.js, bridge.js, server.js,
+   storage.js, config.js).
+3. Preflight on 194.5.152.173: take the inventory snapshot (S0) and require its
+   consistency. Record sanitized baseline PID/start times, heartbeat/collector
+   freshness, callback ages/counts and dead letters, journal health, SQL and
+   bridge uncertainty counts, API errors and delivery ownership. Require no
+   firing critical alert other than ones explained and scoped in writing before
+   the window (e.g. LocalBackupRestoreOverdue until restore verification ships).
+   Any pending callback within 2 h of its 7-day retention is an abort.
+   Never treat a live auth-file copy as a consistent snapshot.
+4. Close public Customer Support ingress using the reviewed nginx/ngrok
+   procedure. Allow for nginx reload propagation: poll (bounded, <= 15 s) for the
+   expected 503/200 rather than a single immediate check. Keep the private
+   callback API available. Install and verify runtime guards for BOTH services:
+   Restart=no, TimeoutStopSec=infinity, SendSIGKILL=no. Never force-kill.
+5. Schema (additive; may precede code because the running API/bridge ignore it):
+   apply only migrations/20261108_whatsapp_admin_recovery.sql as MariaDB root
+   over the unix socket. It is idempotent (CREATE TABLE / ADD COLUMN /
+   ADD INDEX ... IF NOT EXISTS); support_ticket_messages gains admin_hold
+   (instant add on 10.11) and an online secondary index. Production uses
+   PER-TABLE grants, so in the same step grant the application user exactly:
+     GRANT SELECT, INSERT, UPDATE ON <db>.whatsapp_bridge_controls TO <app user>;
+     GRANT SELECT, INSERT, UPDATE ON <db>.whatsapp_bridge_operations TO <app user>;
+     GRANT SELECT, INSERT ON <db>.whatsapp_bridge_operation_audit TO <app user>;
+     GRANT SELECT, INSERT, UPDATE ON <db>.whatsapp_paused_bot_replies TO <app user>;
+   (<app user> from SHOW GRANTS of the configured DB_USER; today
+   wa_support_app@127.0.0.1. No DELETE, DDL or global privilege.) Verify with
+   SHOW GRANTS and check_runtime.py --schema run with the flag ENABLED in a
+   transient unit. No migration rollback/drop is used.
 6. Follow the ownership/shutdown/integrity steps in bridge-ipv4-deployment.txt:
    stop the bridge gracefully while the previous API accepts final callbacks;
    require stopped PID/cgroup, clean closure and no live transport/writer owner.
-   Drain pending API work, support DISPATCHING/message-change operations and
-   Redis inbound reservations. Run scripts/check_inbound_drain.py with the
-   verified actual Redis socket and --stable-seconds 10, before AND after the
-   API stop. Preserve uncertainty; a timeout/lease expiry is not a successful gate.
-   Use the existing quarantine-aware private snapshot/validation procedure for
-   stopped journals. Never repair live files or reactivate 90035 during validation.
+   Drain pending API work, DISPATCHING/message-change operations and Redis
+   inbound reservations (check_inbound_drain.py --stable-seconds 10, before AND
+   after the API stop). Preserve uncertainty; a lease expiry is not a drain.
+   Use the quarantine-aware private snapshot/validation for stopped journals.
+   Never repair live files or reactivate decommissioned identities.
 7. Pin API and bridge to the approved release with dedicated reviewed systemd
    release overrides; keep /opt/whatsapp-support/current unchanged. Preserve all
-   existing arguments, absolute data paths, IPv4 policy, environment files and
-   hardening. Save existing API 80-management-release.conf. Use later, specific
-   overrides for this release rather than overwriting unrelated configuration.
-   Add the feature flag via a reviewed per-service environment file loaded after
-   existing files, then verify the effective flag without printing credentials.
-   Startup must use the reviewed API/Node source and complete schema.
-8. Start the new API, require schema/readiness success, then the bridge. Verify
-   exactly one bridge directory owner and six eligible identities reconnecting
-   with reused credentials over IPv4. No QR/logouts/relinks should occur. Require
-   fresh storage/heartbeat telemetry, callback drain and unchanged 90035 evidence.
-   Any mandatory failure keeps ingress closed; retain authoritative new writes.
-9. Perform the acceptance below, reopen ingress only after success and observe
-   for at least 30 minutes. Watch API/bridge auth errors, operation age, callbacks,
-   staff errors, retained queues, uncertainty deltas and monitoring freshness.
-   Preserve the old releases/configuration. Remove only this window's temporary
-   guards after acceptance; never relax permanent bridge shutdown safeguards.
+   arguments, absolute data paths, IPv4 policy, environment files and
+   hardening. Save the existing API 80-management-release.conf. Feature flag via
+   a reviewed per-service environment file loaded after existing files:
+     bridge: WHATSAPP_ADMIN_RECOVERY_ENABLED=true at THIS restart (read only at
+       bridge start; avoids a second bridge restart). With the API flag off no
+       command can reach it; durable pause state is honored either way.
+     API: start with the flag OFF first; enable it in step 9 (API-only restart).
+8. Start the new API (flag off), require schema/readiness, then the bridge.
+   Take snapshot S1 after reconnection (bounded wait, e.g. 120 s) and require:
+   the same enabled/decommissioned/removed membership as S0; exactly one bridge
+   directory owner; every S0-active identity eligible, connected, paired,
+   IPv4/TLS, reused credentials (no QR, logout, relink or auth reset); each
+   decommissioned identity's retained evidence hash unchanged; generation
+   advanced exactly by the restart (no flapping beyond one reconnect); no
+   administration.paused on any identity (none existed before); storage and
+   heartbeat telemetry fresh; callback backlog draining; no new dead letters;
+   uncertainty not increased. Any failure keeps ingress closed.
+9. Enable the API flag (API-only graceful restart through the same drain gates).
+   Require the recovery worker started, management GET returns administration
+   blocks for every S0-active identity with epoch/generation/version, actions
+   correctly enabled/blocked, and no operation rows created by startup.
+10. Perform the acceptance below, reopen ingress only after success (poll for
+   200), observe at least 30 minutes, then remove only this window's guards.
+
+GO / NO-GO gates
+----------------
+GO only if ALL hold; any NO-GO keeps ingress closed and the previous API serving
+(the migration may stay: it is additive and ignored by older code).
+  G1 PR reviewed; exact SHA approved; PR #90 ancestor; isolated 10.11 integration
+     and bridge suites pass for that SHA (baseline UI fixtures documented).
+  G2 Inventory S0 consistent (see above); identity changes frozen.
+  G3 Fresh verified backup of DB/Redis/media + retained evidence in the record.
+  G4 Migration applied; grants present; schema check passes with flag enabled.
+  G5 API and bridge drained and stopped gracefully (no kill, no owner left).
+  G6 S1 == S0 membership; all S0-active identities reconnected with reused
+     credentials; decommissioned evidence unchanged; no QR/logout/relink.
+  G7 No new dead letters, uncertain sends, auth/storage criticals or API 5xx.
+  G8 Flag-on API healthy; management view correct; acceptance passed.
+NO-GO examples: an S0-active identity fails to reconnect within the bound; any
+identity shows QR/logout; a removed ID reappears; registry/bridge mismatch;
+storage critical on an active identity; schema/grant check fails; drain cannot
+be proven. Never relink, reset credentials, clear pause/hold records or replay
+callbacks to pass a gate.
 
 Manual acceptance (attended, approved internal identity/conversation only)
 ------------------------------------------------------------------------
@@ -200,7 +254,7 @@ Manual acceptance (attended, approved internal identity/conversation only)
   replies preserve order, uncertain replies do not resend. Verify original media,
   receipts and conversation/assignee permissions. Avoid customer test messages.
 - Safe reconnect: prefer an already disconnected eligible test identity. Do not
-  manufacture an outage on the six healthy production lines. Verify refusal for
+  manufacture an outage on healthy production identities. Verify refusal for
   connected/paused/fenced/disabled/decommissioned identities. Exercise successful
   reconnect in isolated mocks unless a production test outage is separately
   approved. Repeat UUID, stale version, timeout and concurrent-command tests in
