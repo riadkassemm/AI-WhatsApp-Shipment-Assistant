@@ -91,7 +91,6 @@ const openTicket = async (id, options) => opened.push({id, options});
 
 
 def test_history_selection_forwarding_and_deleted_reply_targets() -> None:
-    # Sliced functions call shipped delivery-state.js helpers (loaded after state.js).
     rendering = _ASSETS["rendering.js"]
     actions = _ASSETS["actions.js"]
     selection = actions[actions.index("function showForwardError("):actions.index("function showTransferError(")]
@@ -111,8 +110,7 @@ const recent = {id: 8, whatsapp_message_id: 'new-id', body: 'Second question', c
 const thread = {ticket: {id: 9}, messages: [old]};
 const state = {ticketId: 42, composerEnabled: true, busy: false, forwardBusy: false,
   selectedMessages: new Map(), selectingMessages: false, previousTicketHistory: [thread],
-  currentTicketData: {messages: [recent]}, cachedCurrentMessages: [recent],
-  localMessages: new Map(), hiddenSupportMessages: new Set(), realtimeMessages: new Map()};
+  currentTicketData: {messages: [recent]}, cachedCurrentMessages: [recent]};
 const calls = [], dialogs = [];
 const text = (element, value) => element.textContent = value;
 const showError = message => {throw Error(message)};
@@ -132,7 +130,7 @@ const api = async (path, options) => {
   calls.push({path, body: JSON.parse(options.body)});
   return {message: {id: 100 + calls.length, send_status: 'SENT'}};
 };
-""" + _ASSETS["delivery-state.js"] + ticket_id + selection + cache + reply + r"""
+""" + ticket_id + selection + cache + reply + r"""
 (async () => {
   startReplyToMessage(old);
   assert.deepEqual(state.replyTarget, {id: 4, ticketId: 9, actor: 'Customer', preview: 'First question'});
@@ -220,7 +218,7 @@ const assert = require('node:assert/strict');
 const source = {};
 const state = {supportEventSource: source, authenticated: true, ticketId: 42, view: 'mine',
   previousTicketHistory: [{ticket: {id: 9}}], realtimeMessages: new Map(),
-  selectedMessages: new Map(), mediaSource: null, localMessages: new Map(), hiddenSupportMessages: new Set()};
+  selectedMessages: new Map(), mediaSource: null};
 const scopes = [], refreshes = [], changes = [], searches = [], notifications = [];
 let selectionUpdates = 0;
 const requestDashboardRefresh = (...args) => scopes.push(...args);
@@ -232,7 +230,7 @@ const clearReplyTarget = () => {state.replyTarget = null};
 const notifyNewCustomerActivity = message => notifications.push(message);
 const upsertTimelineMessage = () => {throw Error('History event must not enter the current ticket timeline')};
 const dispatch = payload => source.onmessage({data: JSON.stringify(payload)});
-""" + _ASSETS["delivery-state.js"] + handler + r"""
+""" + handler + r"""
 dispatch({type: 'message_reaction', authorized: true, ticket_id: 9, message_id: 4});
 assert.deepEqual(refreshes, [[9, 4]], 'refresh the older source ticket row');
 dispatch({type: 'message_reaction', authorized: false, ticket_id: 9, message_id: 4});

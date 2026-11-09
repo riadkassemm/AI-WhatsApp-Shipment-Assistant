@@ -77,12 +77,8 @@ def summarize(registry: list[dict[str, Any]], bridge_lines: list[dict[str, Any]]
             connection_state, recovery_action = "reconnecting", "automatic"
         else:
             connection_state, recovery_action = "temporarily_unavailable", "administrator"
-        administration = (bridge or {}).get('administration')
-        administration = administration if isinstance(administration, dict) else {}
-        paused = administration.get('paused') if type(administration.get('paused')) is bool else None
         lines.append({
             "line_id": line_id, "name": row.get("name") or line_id, "status": state, "since": _iso(since),
-            **({'administratively_paused':paused} if settings.whatsapp_admin_recovery_enabled or paused is True else {}),
             "logout_reason": reason if isinstance(reason, str) else None,
             "connection_state": connection_state, "recovery_action": recovery_action,
             "alert": connection_state in {"relink_required", "storage_recovery_required"} or
@@ -104,14 +100,9 @@ def summarize_storage(value: Any, registry: list[dict[str, Any]]) -> dict[str, A
         line_id = issue.get("line_id")
         if line_id is not None and str(line_id) not in by_id:
             continue
-        safe = {"code": issue["code"], "level": issue["level"],
-                "line_id": str(line_id) if line_id is not None else None,
-                "name": by_id.get(str(line_id)) if line_id is not None else None}
-        # Store failure is not evidence of exhausted disk space. Retain only
-        # the fixed store kind so the dashboard can explain session recovery.
-        if isinstance(issue.get("kind"), str) and issue["kind"] in {"auth", "state", "outbox"}:
-            safe["kind"] = issue["kind"]
-        issues.append(safe)
+        issues.append({"code": issue["code"], "level": issue["level"],
+                       "line_id": str(line_id) if line_id is not None else None,
+                       "name": by_id.get(str(line_id)) if line_id is not None else None})
     level = "critical" if any(issue["level"] == "critical" for issue in issues) else "warning" if issues else "ok"
     return {"level": level, "issues": issues}
 
@@ -174,15 +165,6 @@ async def line_health() -> dict[str, Any]:
         completed_at = time.time()
         payload = {"available": not registry or bridge_lines is not None,
                    "lines": summarize(registry, bridge_lines, completed_at, storage), "storage": storage, "checked_at": _iso(completed_at)}
-        if settings.whatsapp_admin_recovery_enabled:
-            from app.bridge_recovery_repository import bridge_recovery_repository
-            try:
-                controls = {row['line_id']:row for row in await bridge_recovery_repository.controls()}
-                for line in payload['lines']:
-                    if controls.get(line['line_id'], {}).get('paused'): line['administratively_paused'] = True
-            except Exception:
-                for line in payload['lines']:
-                    if not line['administratively_paused']: line['administratively_paused'] = None
         # Cache from completion: a slow failed probe must not let every queued
         # staff poll launch another full timeout immediately. Use monotonic time
         # so clock corrections cannot prolong or repeatedly invalidate health.

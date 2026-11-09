@@ -21,7 +21,7 @@ PREFIX = "WHATSAPP_LINKED_DEVICE_STORAGE_"
 DEFAULT_REPORT = "/run/whatsapp-storage-watchdog/status.json"
 ISSUE_CODES = {"MONITOR_UNAVAILABLE", "DISK_SPACE_LOW", "INODES_LOW", "STORE_UNAVAILABLE",
                "JOURNAL_LIMIT", "SNAPSHOT_LIMIT", "COMPACTION_FAILED", "RECOVERY_ATTENTION",
-               "STORAGE_HEALTH_UNAVAILABLE", "IDENTITY_DECOMMISSIONED"}
+               "STORAGE_HEALTH_UNAVAILABLE"}
 RANK = {"ok": 0, "warning": 1, "critical": 2}
 
 
@@ -41,37 +41,6 @@ def thresholds(env: dict[str, str]) -> dict[str, int]:
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, *_args, **_kwargs):
         raise ValueError("WATCHDOG_REDIRECT_REJECTED")
-
-
-def quarantine_storage_status(snapshot: dict) -> dict:
-    """Keep abandoned auth visible without treating it as an active-store outage."""
-    value = snapshot.get("storage")
-    lines = snapshot.get("lines")
-    if (not isinstance(value, dict) or value.get("level") not in RANK
-            or not isinstance(value.get("issues"), list) or not isinstance(lines, list)):
-        raise ValueError("INVALID_BRIDGE_HEALTH")
-    retained = set()
-    for line in lines:
-        if not isinstance(line, dict):
-            raise ValueError("INVALID_BRIDGE_HEALTH")
-        isolation, removal = line.get("isolation") or {}, line.get("local_removal") or {}
-        if (line.get("lifecycle") == "decommissioned" and line.get("eligible") is False
-                and isolation.get("safe") is True and isolation.get("recovery_allowed") is False
-                and removal.get("line_id") == line.get("line_id") and removal.get("removed") is True
-                and removal.get("quarantined") is True and removal.get("reuse_allowed") is False):
-            retained.add(line["line_id"])
-    issues = []
-    for item in value["issues"]:
-        if not isinstance(item, dict) or item.get("level") not in RANK or item.get("code") not in ISSUE_CODES:
-            raise ValueError("INVALID_BRIDGE_HEALTH")
-        if item.get("code") == "STORE_UNAVAILABLE" and item.get("kind") == "auth" and item.get("line_id") in retained:
-            issues.append({**item, "code": "IDENTITY_DECOMMISSIONED", "level": "warning"})
-        else:
-            issues.append(item)
-    # A missing/unknown critical reason cannot be downgraded by a retained line.
-    if max((RANK[item["level"]] for item in value["issues"]), default=0) != RANK[value["level"]]:
-        raise ValueError("UNACCOUNTED_STORAGE_HEALTH")
-    return {**value, "issues": issues, "level": max((item["level"] for item in issues), key=RANK.get, default="ok")}
 
 
 def bridge_probe(env: dict[str, str]) -> dict:
@@ -110,10 +79,6 @@ def bridge_probe(env: dict[str, str]) -> dict:
         return {"level": "warning", "issues": [{"code": "MONITOR_UNAVAILABLE", "level": "warning"}]}
     if not isinstance(value, dict) or value.get("level") not in RANK or not isinstance(value.get("issues"), list):
         raise ValueError("INVALID_BRIDGE_HEALTH")
-    if any(isinstance(item, dict) and item.get("code") == "STORE_UNAVAILABLE" and item.get("kind") == "auth" for item in value["issues"]):
-        # Use one fresh authenticated snapshot for both the issue and cessation
-        # proof. Old releases without quarantine retain their critical status.
-        value = quarantine_storage_status(read("/v1/status"))
     return value
 
 

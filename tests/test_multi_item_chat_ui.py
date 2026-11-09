@@ -10,8 +10,6 @@ from app.support_ui import _ASSETS, _TEMPLATE, _configure
 def test_multi_item_queue_forwarding_and_image_quick_replies(tmp_path):
     browser = shutil.which(os.environ.get('SUPPORT_TEST_BROWSER', 'chromium'))
     assert browser, 'Install Chromium for UI regressions'
-    # Shipped send-queue/persistence helpers (loaded after state.js in production).
-    delivery = _ASSETS['delivery-state.js']
     media = _ASSETS['media.js']
     rendering = _ASSETS['rendering.js']
     message_render = rendering[rendering.index('function addMessage('):rendering.index('// Compact message toolbar:')]
@@ -22,8 +20,7 @@ def test_multi_item_queue_forwarding_and_image_quick_replies(tmp_path):
 const $=id=>document.getElementById(id);
 const state={authenticated:true,agent:{id:'7',role:'agent'},ticketId:42,composerEnabled:true,busy:false,
  pendingMedia:null,pendingMediaItems:[],selectedMessages:new Map(),selectingMessages:false,
- quickReplies:[],quickRepliesLoaded:true,quickRepliesBusy:false,quickRepliesRequest:0,
- localMessages:new Map(),hiddenSupportMessages:new Set()};
+ quickReplies:[],quickRepliesLoaded:true,quickRepliesBusy:false,quickRepliesRequest:0};
 const errors=[],calls=[],notifications=[];
 const text=(e,t)=>e.textContent=t,showError=t=>errors.push(t),notify=t=>notifications.push(t),setAppStatus=()=>{};
 const setIcon=()=>{},formatBytes=n=>n+' bytes',setButtonBusy=()=>{},setWorkspaceBusy=()=>{},updateReply=()=>{};
@@ -115,7 +112,7 @@ document.body.dataset.multiItemTest='passed';
 })().catch(error=>{document.body.dataset.multiItemTest='FAILED: '+error.message});
 '''
     html = _configure(_TEMPLATE.replace('__SUPPORT_THEME__', '').replace('__SUPPORT_STYLE__', '<style>'+_ASSETS['support.css']+'</style>')
-                      .replace('__SUPPORT_SCRIPTS__', '<script>'+setup+delivery+media+quick+selection+message_render+assertions+'</script>'))
+                      .replace('__SUPPORT_SCRIPTS__', '<script>'+setup+media+quick+selection+message_render+assertions+'</script>'))
     if os.environ.get('SUPPORT_MULTI_SCREENSHOT_VIEW') == 'images': html=html.replace('<html ', '<html data-capture="images" ',1)
     page = tmp_path/'multi-items.html'; page.write_text(html)
     command = [browser, '--headless', '--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage', '--disable-background-networking',

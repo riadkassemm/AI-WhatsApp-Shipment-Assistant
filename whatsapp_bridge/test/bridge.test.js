@@ -37,7 +37,6 @@ function mockSocket(mode = 'ack') {
   ws.isOpen = true;
   const socket = {
     ws, user: { id: '96170111111:1@s.whatsapp.net' }, calls: [],
-    bridgeTransportClosed: Promise.resolve(), // No physical transport in this mock.
     queries: [],
     ev: { process: handler => { socket.eventHandler = handler; return () => { socket.unsubscribeCount = (socket.unsubscribeCount || 0) + 1; }; } },
     end: () => {}, logout: async () => {},
@@ -96,97 +95,6 @@ test('configuration rejects weak secrets, nonnumeric lines, and public binds', (
   assert.deepEqual(readConfig({ WHATSAPP_LINKED_DEVICE_SECRET: SECRET }).lines, []);
   assert.throws(() => validateLineManifest({ version: 2, lines: {} }), /Invalid/);
   assert.throws(() => validateLineManifest({ version: 1, lines: { '../unsafe': '' } }), /Invalid/);
-});
-
-test('IPv4 policy covers eight identities and reconnect without duplicate ownership or uncertain replay', {timeout: 15000}, async t => {
-  const dataDir = await mkdtemp(path.join(os.tmpdir(), 'bridge-ipv4-ownership-'));
-  const ids = Array.from({length: 8}, (_, i) => String(91000 + i));
-  const sockets = [], optionsSeen = [], release = [], diagnostics = [];
-  let firstEnd;
-  const firstEnding = new Promise(resolve => { firstEnd = resolve; });
-  let holdFirst = false;
-  const config = {secret: SECRET, wsIpFamily: 4, lines: ids.map(line_id => ({line_id, expected_phone: ''})),
-    dataDir, callbackUrl: 'http://127.0.0.1/callback', maxMediaBytes: 1024, ackTimeoutMs: 100};
-  const bridge = new Bridge(config, {storageFilesystem: healthyStorage, log: x => diagnostics.push(x), onError: () => {},
-    fetch: () => { throw new Error('No callback dispatch expected'); },
-    makeSocket: options => {
-      const index = sockets.length, socket = mockSocket();
-      options.auth.creds.me ??= {id: `${96170110000 + index}:1@s.whatsapp.net`};
-      socket.user = options.auth.creds.me;
-      socket.bridgeTransportClosed = new Promise(resolve => { release[index] = resolve; });
-      socket.end = () => {
-        socket.ws.isOpen = false;
-        if (index === 0) firstEnd();
-        if (index !== 0 || !holdFirst) release[index]();
-      };
-      socket.bridgeConnectionDiagnosticsVersion = 2;
-      sockets.push(socket); optionsSeen.push(options); return socket;
-    }});
-  t.after(async () => {
-    for (const done of release) done();
-    await bridge.close(); await rm(dataDir, {recursive: true, force: true});
-  });
-  await bridge.initialize({autoConnect: false});
-  for (const id of ids) {
-    await Promise.all([bridge.connect(id), bridge.connect(id)]);
-    const line = bridge.getLine(id);
-    await line.auth.saveCreds();
-    await bridge.connectionUpdate(line, line.socket, {connection: 'open'});
-  }
-  assert.equal(sockets.length, 8); assert.equal(bridge.status().lines.filter(x => x.status === 'connected').length, 8);
-  for (const options of optionsSeen) {
-    assert.equal(options.agent, bridge.wsAgent); assert.equal(options.agent.options.family, 4);
-    assert.equal(options.fetchAgent, undefined, 'media transport is not changed');
-  }
-  const line = bridge.getLine(ids[0]);
-  await line.store.update(data => { data.messages.HELD_UNCERTAIN = {
-    message: original('HELD_UNCERTAIN'), phone: PHONE, timestamp: Date.now(), delivery_uncertain: true,
-  }; });
-  const saved = structuredClone(line.store.data.messages.HELD_UNCERTAIN);
-  const outbox = structuredClone(bridge.outbox.data);
-  holdFirst = true;
-  bridge.blockConnection(line, sockets[0], 'test_transport_failure');
-  const renewal = bridge.connect(ids[0]), duplicate = bridge.connect(ids[0]);
-  await firstEnding;
-  assert.equal(sockets.length, 8, 'a close request does not authorize a replacement');
-  assert.ok(ids.slice(1).every(id => bridge.getLine(id).session.ready));
-  release[0](); await Promise.all([renewal, duplicate]);
-  assert.equal(sockets.length, 9);
-  await bridge.connectionUpdate(line, line.socket, {connection: 'open'});
-  assert.equal(optionsSeen[8].agent, bridge.wsAgent);
-  assert.equal(bridge.lineStatus(line).diagnostics.configured_ip_family, 4);
-  optionsSeen[0].bridgeConnectionDiagnostics({event: 'socket_error', error_code: 'EPIPE',
-    transport: {remote_ip: '2001:db8::1', family: 'IPv6'}});
-  assert.equal(line.diagnostics.socket_error_code, null, 'retired diagnostics cannot overwrite current health');
-  assert.ok(diagnostics.some(x => x.event === 'socket_error' && x.generation === 1 && x.retiring_generation && x.socket_error_code === 'EPIPE'));
-  assert.deepEqual(line.store.data.messages.HELD_UNCERTAIN, saved);
-  assert.deepEqual(bridge.outbox.data, outbox);
-  assert.ok(sockets.every(socket => socket.calls.length === 0), 'no sends or uncertainty replays');
-});
-
-test('retiring diagnostics survive failed auth renewal without claiming replacement health', async t => {
-  let options;
-  const log = [];
-  const {bridge, line} = await fixture(t, 'ack', {log: x => log.push(x),
-    makeSocket: value => {options = value; return mockSocket();}});
-  const socket = line.socket;
-  options.bridgeConnectionDiagnostics({event: 'heartbeat_request', query_sequence: 1});
-  const previousGeneration = line.generation;
-  const drain = line.auth.drain;
-  line.auth.drain = async () => {throw Object.assign(new Error('synthetic drain timeout'), {code: 'AUTH_TRANSACTION_DRAIN_TIMEOUT'});};
-  bridge.blockConnection(line, socket, 'test_receive_failure');
-  try { await assert.rejects(bridge.connect(line.line_id), /synthetic drain timeout/); }
-  finally {line.auth.drain = drain;}
-  const before = structuredClone(line.diagnostics);
-  options.bridgeConnectionDiagnostics({event: 'heartbeat_query_timeout', query_sequence: 1, query_elapsed_ms: 20000});
-  options.bridgeConnectionDiagnostics({event: 'transport_closed', close_code: 1006,
-    transport: {remote_ip: '2001:db8::1', family: 'IPv6'}});
-  assert.deepEqual(line.diagnostics, before);
-  assert.ok(log.some(x => x.event === 'heartbeat_query_timeout' && x.generation === previousGeneration && x.retiring_generation));
-  assert.ok(log.some(x => x.event === 'transport_closed' && x.generation === previousGeneration && x.close_code === 1006));
-  assert.equal(line.session.ready, false);
-  assert.equal(line.socket, null);
-  assert.equal(socket.calls.length, 0);
 });
 
 test('dynamic line registrations allocate IDs atomically, avoid reserved IDs, and replay across restarts without touching connected sockets', async t => {
@@ -417,47 +325,6 @@ test('a disconnected saved session reconnects only to confirm unlink while the e
   assert.equal(line.status, 'connected');
   assert.equal(healthyEnded, 0);
   assert.equal(bridge.lines.has(added.line_id), false);
-});
-
-test('removal preserves a fenced authentication failure instead of recommending another unlink attempt', async t => {
-  const {bridge, line, socket} = await fixture(t);
-  const added = await bridge.addLine({request_id: randomUUID()});
-  const target = bridge.getLine(added.line_id);
-  target.auth.state.creds.registered = true;
-  target.auth.state.creds.me = {id: '96170222222:2@s.whatsapp.net'};
-  await target.auth.saveCreds();
-  const credentials = createHash('sha256').update(JSON.stringify(target.auth.store.data.creds)).digest('hex');
-  target.status = 'error';
-  target.auth.store.failed = true;
-  bridge.makeSocket = () => {throw new Error('A fenced session must not create another transport');};
-  try {
-    await assert.rejects(bridge.removeLine(added.line_id), error =>
-      error.code === 'AUTH_RECOVERY_REQUIRED' && error.bridgePersistenceFailure === true);
-    assert.equal(target.status, 'error');
-    assert.equal(target.recoveryCategory, 'storage_failure');
-    assert.equal(target.retryBlocked, true);
-    assert.match(target.error, /administrator recovery review/i);
-    assert.doesNotMatch(target.error, /retry removal/i);
-    assert.equal(target.auth.store.failed, true);
-    assert.equal(createHash('sha256').update(JSON.stringify(target.auth.store.data.creds)).digest('hex'), credentials);
-    assert.equal(bridge.lines.has(added.line_id), true);
-    assert.ok(!(bridge.manifest.data.removed_line_ids ?? []).includes(added.line_id));
-    assert.equal(target.removalRemoteConfirmed, undefined);
-    assert.equal(line.socket, socket);
-    assert.equal(line.status, 'connected');
-    assert.equal(line.session.ready, true);
-    assert.equal(socket.queries.length, 0);
-    await assert.rejects(bridge.close(), /DIRECTORY_OWNERSHIP_UNPROVEN/);
-    assert.equal(bridge.stopping, false, 'missing ownership proof must abort before healthy shutdown');
-    assert.equal(line.socket, socket);
-    assert.equal(line.session.ready, true);
-  } finally {
-    // Undo only this test's synthetic failed flag to dispose mock handles.
-    // Production evidence is never cleared by the failed shutdown path.
-    target.auth.store.failed = false;
-    target.isolating = false;
-    await bridge.close();
-  }
 });
 
 test('an unlink timeout cannot pretend complete removal or erase saved credentials, and an explicit retry can finish', async t => {
@@ -1276,7 +1143,8 @@ test('first pairing pins the phone and later wrong-account reconnect cannot send
 });
 
 test('a failed scheduled reconnect retries transient network errors with backoff and resumes its saved session', async t => {
-  const { bridge, line, socket } = await fixture(t, 'ack', {random: () => 0});
+  // Fix the equal-jitter draw so the mocked timer ticks match the backoff.
+  const { bridge, line, socket } = await fixture(t, 'ack', { random: () => 0 });
   const resumedSocket = mockSocket();
   let attempts = 0;
   bridge.makeSocket = options => {
@@ -1302,7 +1170,8 @@ test('a failed scheduled reconnect retries transient network errors with backoff
 });
 
 test('scheduled reconnect halts on persistence failure and never logs out or discards saved credentials', async t => {
-  const { bridge, line, socket } = await fixture(t, 'ack', {random: () => 0});
+  // Fix the equal-jitter draw so the mocked timer ticks match the backoff.
+  const { bridge, line, socket } = await fixture(t, 'ack', { random: () => 0 });
   const previousAuth = line.auth;
   const update = line.store.update.bind(line.store);
   let createSocketCalls = 0;
@@ -1316,8 +1185,7 @@ test('scheduled reconnect halts on persistence failure and never logs out or dis
   assert.equal(line.status, 'error');
   assert.match(line.error, /storage/);
   assert.equal(line.reconnectTimer, null);
-  assert.equal(line.auth.store, previousAuth.store, 'renewal retains the same durable authentication journal');
-  assert.deepEqual(line.auth.store.data.creds, previousAuth.store.data.creds);
+  assert.equal(line.auth, previousAuth);
   assert.equal(line.store.data.enabled, true);
   t.mock.timers.tick(60_000);
   assert.equal(createSocketCalls, 0);
@@ -2384,140 +2252,6 @@ test('messages recovered after an outage become staff-only snapshots', () => {
   assert.equal(recovered.payload.entry[0].changes[0].value.messages[0].type, 'text');
 });
 
-test('provider logout never drains its own accepted pipeline or resets credentials inside the event handler', async t => {
-  const { bridge, line, socket } = await fixture(t);
-  const auth = line.auth;
-  auth.state.creds.registered = true;
-  auth.state.creds.me = socket.user;
-  await auth.saveCreds();
-  const identity = Buffer.from(auth.store.data.creds.signedIdentityKey.public);
-  // A real accepted provider task can await a queued connection event. A
-  // reset from that event waits for this same task and poisons intact auth.
-  const drain = auth.drain;
-  auth.drain = () => drain({timeoutMs: 30});
-  await auth.trackProviderTask(() => socket.eventHandler({'connection.update': {
-    connection: 'close', lastDisconnect: {error: {output: {statusCode: DisconnectReason.loggedOut}}},
-  }}));
-  assert.equal(auth.store.failed, false);
-  assert.equal(line.auth, auth);
-  assert.deepEqual(auth.store.data.creds.signedIdentityKey.public, identity);
-  assert.equal(bridge.lineStatus(line).status, 'logged_out');
-  assert.equal(bridge.lineStatus(line).is_paired, false);
-  assert.equal(line.reconnectTimer, null);
-  assert.equal(line.store.data.auth_reset_required, true);
-  await assert.rejects(stat(auth.store.filename + '.auth-failure'), {code: 'ENOENT'});
-});
-
-test('logged-out history finishes before explicit re-pair without blocking another identity or replaying uncertain sends', async t => {
-  const { bridge, line, socket } = await fixture(t);
-  const other = await bridge.addLine({request_id: randomUUID()});
-  const healthySocket = mockSocket();
-  healthySocket.user.id = '96170222222:1@s.whatsapp.net';
-  bridge.makeSocket = () => healthySocket;
-  await bridge.connect(other.line_id);
-  const healthy = bridge.getLine(other.line_id);
-  await bridge.connectionUpdate(healthy, healthySocket, {connection: 'open'});
-  const auth = line.auth;
-  let entered, release;
-  const started = new Promise(resolve => {entered = resolve;});
-  const gate = new Promise(resolve => {release = resolve;});
-  const work = auth.trackProviderTask(async () => {
-    entered(); await gate;
-    auth.state.creds.myAppStateKeyId = 'mock-final-update';
-    await socket.eventHandler({'creds.update': {}, 'messages.upsert': {type: 'notify', messages: [original('ACCEPTED-LOGOUT', false)]}});
-  });
-  await started;
-  await line.store.update(data => {data.messages.UNCERTAIN = {
-    message: original('UNCERTAIN'), client_message_id: 'stable-client', delivery_uncertain: true,
-    phone: PHONE, timestamp: Date.now(),
-  };});
-  const retained = structuredClone(line.store.data.messages.UNCERTAIN);
-  try {
-    await socket.eventHandler({'connection.update': {connection: 'close',
-      lastDisconnect: {error: {output: {statusCode: DisconnectReason.loggedOut}}}}});
-    const generation = line.generation;
-    await assert.rejects(bridge.connect(LINE), {code: 'AUTH_WORK_PENDING'});
-    await assert.rejects(bridge.removeLine(LINE), {code: 'AUTH_WORK_PENDING'});
-    assert.equal(line.generation, generation);
-    assert.equal(auth.store.failed, false);
-    assert.equal(line.store.data.enabled, false);
-    assert.equal(healthy.socket, healthySocket);
-    assert.equal(healthy.session.ready, true);
-  } finally { release(); }
-  await work;
-  assert.equal(auth.store.data.creds.myAppStateKeyId, 'mock-final-update');
-  assert.ok(line.store.data.messages['ACCEPTED-LOGOUT']);
-  const repaired = mockSocket();
-  let creations = 0;
-  bridge.makeSocket = () => {creations++; return repaired;};
-  await Promise.all([bridge.connect(LINE), bridge.connect(LINE)]);
-  assert.equal(creations, 1);
-  assert.equal(line.store.data.auth_reset_required, undefined);
-  assert.equal(line.auth.store.data.creds.myAppStateKeyId, undefined);
-  assert.deepEqual(line.store.data.messages.UNCERTAIN, retained);
-  assert.equal(repaired.calls.length, 0);
-  assert.equal(healthy.session.ready, true);
-});
-
-test('a re-pair click waits for the queued logout marker before choosing reset rather than renewal', async t => {
-  const { bridge, line, socket } = await fixture(t);
-  line.auth.state.creds.registered = true;
-  await line.auth.saveCreds();
-  const blocked = gate();
-  line.eventTail = blocked.promise;
-  const logout = socket.eventHandler({'connection.update': {connection: 'close',
-    lastDisconnect: {error: {output: {statusCode: DisconnectReason.loggedOut}}}}});
-  assert.equal(line.recoveryCategory, 'logged_out');
-  assert.equal(line.store.data.auth_reset_required, undefined);
-  let creations = 0;
-  bridge.makeSocket = options => {
-    creations++;
-    assert.equal(options.auth.creds.registered, false, 'never reconnect the revoked credentials');
-    return mockSocket();
-  };
-  const reconnect = bridge.connect(LINE);
-  assert.equal(creations, 0);
-  blocked.resolve();
-  await Promise.all([logout, reconnect]);
-  assert.equal(creations, 1);
-});
-
-test('confirmed logout does not authorize re-pairing or removal across an authentication recovery fence', async t => {
-  const { bridge, line, socket } = await fixture(t);
-  await socket.eventHandler({'connection.update': {connection: 'close',
-    lastDisconnect: {error: {output: {statusCode: DisconnectReason.loggedOut}}}}});
-  const retained = Buffer.from(line.auth.store.data.creds.signedIdentityKey.public);
-  const sequence = line.auth.store.seq;
-  line.auth.store.failed = true;
-  bridge.makeSocket = () => {throw new Error('Must not connect a fenced session');};
-  await assert.rejects(bridge.connect(LINE), {code: 'AUTH_RECOVERY_REQUIRED'});
-  await assert.rejects(bridge.removeLine(LINE), {code: 'AUTH_RECOVERY_REQUIRED'});
-  assert.deepEqual(line.auth.store.data.creds.signedIdentityKey.public, retained);
-  assert.equal(line.auth.store.seq, sequence);
-  assert.ok(line.store.data.messages.ORIGINAL);
-  assert.ok(!(bridge.manifest.data.removed_line_ids ?? []).includes(LINE));
-  await assert.rejects(bridge.close());
-  // Test-only restoration so teardown can retire the synthetic owner.
-  line.auth.store.failed = false; line.isolating = false;
-});
-
-test('confirmed logout survives restart and allows removal without reconnecting revoked credentials', async t => {
-  const { bridge, config, line, socket } = await fixture(t);
-  line.auth.state.creds.registered = true;
-  line.auth.state.creds.me = socket.user;
-  await line.auth.saveCreds();
-  await socket.eventHandler({'connection.update': {connection: 'close',
-    lastDisconnect: {error: {output: {statusCode: DisconnectReason.loggedOut}}}}});
-  await bridge.close();
-  const restarted = new Bridge(config, {storageFilesystem: healthyStorage, log: () => {}, onError: () => {},
-    makeSocket: () => {throw new Error('Revoked session must not reconnect');}});
-  t.after(() => restarted.close());
-  await restarted.initialize({autoConnect: false});
-  assert.equal(restarted.lineStatus(restarted.getLine(LINE)).status, 'logged_out');
-  assert.equal(restarted.lineStatus(restarted.getLine(LINE)).is_paired, false);
-  assert.deepEqual(await restarted.removeLine(LINE), {line_id: LINE, removed: true, unlinked: true});
-});
-
 test('a WhatsApp logout records why and when, and re-pairing recovers the gap', async t => {
   const { bridge, line, socket } = await fixture(t);
   const before = Date.now();
@@ -2724,22 +2458,21 @@ test('failed registration drains prepared checkpoint owners before reusing the l
   assert.equal([...bridge.storageMonitor.stores.values()].some(entry => entry.store === prepared.store), false);
 });
 
-test('shutdown leaves healthy stores open when a failed auth owner cannot be proven retired', async t => {
+test('shutdown closes every store and maintenance owner even when one auth store has failed', async t => {
   const { bridge, line } = await fixture(t);
   const added = await bridge.addLine({ request_id: randomUUID(), expected_phone: '' });
   const other = bridge.getLine(added.line_id);
   const auth = line.auth;
   auth.store.failed = true;
   try {
-    await assert.rejects(bridge.close(), /DIRECTORY_OWNERSHIP_UNPROVEN/);
-    assert.equal(bridge.stopping, false);
-    assert.equal(auth.store.closed, false);
-    assert.equal(line.store.closed, false);
-    assert.equal(other.auth.store.closed, false);
-    assert.equal(other.store.closed, false);
-    assert.equal(bridge.outbox.closed, false);
-    await other.auth.state.keys.set({ session: { still_healthy: Buffer.from([1]) } });
-  } finally { auth.store.failed = false; line.isolating = false; } // Restore disposable mock for teardown only.
+    await assert.rejects(bridge.close(), error => error instanceof AggregateError && error.message === 'BRIDGE_SHUTDOWN_FAILED');
+    assert.equal(auth.store.closed, true);
+    assert.equal(line.store.closed, true);
+    assert.equal(other.auth.store.closed, true);
+    assert.equal(other.store.closed, true);
+    assert.equal(bridge.outbox.closed, true);
+    await assert.rejects(other.auth.state.keys.set({ session: { late: Buffer.from([1]) } }), { code: 'AUTH_SESSION_RETIRED' });
+  } finally { auth.store.failed = false; }
 });
 
 test('credential events admitted behind slow message work survive a proactive socket replacement', async t => {
@@ -2793,7 +2526,7 @@ test('credential persistence failures halt the owning session before a blocked m
     assert.equal(line.reconnectTimer, null);
     let created = 0;
     bridge.makeSocket = () => { created++; return mockSocket(); };
-    await assert.rejects(bridge.connect(LINE), {code: 'AUTH_RECOVERY_REQUIRED'});
+    await assert.rejects(bridge.connect(LINE), /STORAGE_RESTART_REQUIRED/);
     assert.equal(created, 0);
   } finally {
     messages.resolve();
@@ -2823,7 +2556,7 @@ test('incoming messages and delivery evidence accepted before credential failure
     await reported.promise;
     assert.equal(line.socket, null);
     assert.equal(line.status, 'error');
-    await assert.rejects(bridge.connect(LINE), {code: 'AUTH_RECOVERY_REQUIRED'});
+    await assert.rejects(bridge.connect(LINE), /STORAGE_RESTART_REQUIRED/);
     await socket.eventHandler({ 'messages.upsert': { messages: [original('AFTER_RETIREMENT', false)] } });
     blocked.resolve();
     await Promise.all([incoming, delivery, failingBatch]);
@@ -2918,17 +2651,13 @@ test('a rejected real provider key commit immediately stops its owning socket an
     blocked.resolve();
     await Promise.all([incoming, rejected]);
     assert.equal(line.store.data.messages.BEFORE_KEY_FAILURE.text, 'Original body');
-    await assert.rejects(bridge.connect(LINE), {code: 'AUTH_RECOVERY_REQUIRED'});
+    await assert.rejects(bridge.connect(LINE), /STORAGE_RESTART_REQUIRED/);
     assert.equal(socket.calls.length, 0);
   } finally {
     blocked.resolve(); await Promise.all([incoming, rejected]);
     await auth.drain().catch(() => {});
-    await assert.rejects(bridge.close(), /DIRECTORY_OWNERSHIP_UNPROVEN/);
-    // Dispose the isolated test's handles without fabricating a clean drain or
-    // clearing its unresolved intents. The real runtime must remain blocked.
-    await bridge.storageMonitor.close();
-    await Promise.allSettled([...bridge.ownedStores].map(store => store.close()));
-    bridge.closed = true;
+    await assert.rejects(bridge.close(), /BRIDGE_SHUTDOWN_FAILED/);
+    auth.store.maxPending = 1000; auth.store.failed = false;
   }
 });
 
@@ -3165,7 +2894,7 @@ test('credential failure flushes incoming messages and receipts retained by the 
     const saved = (await readJournal(line.store.filename, () => ({}))).data;
     assert.equal(saved.messages.BUFFERED_BEFORE_FAILURE.text, 'Original body');
     assert.equal(saved.messages.ORIGINAL.receipt, 'read');
-    await assert.rejects(bridge.connect(LINE), {code: 'AUTH_RECOVERY_REQUIRED'});
+    await assert.rejects(bridge.connect(LINE), /STORAGE_RESTART_REQUIRED/);
     assert.equal(socket.endCount, 1);
     assert.equal(socket.calls.length, 0);
   } finally {
@@ -3193,194 +2922,4 @@ test('terminal disconnect classification cancels raw-close recovery before queue
     assert.equal(line.store.data.enabled, true, 'quarantine does not unlink the device');
     await bridge.close();
   }
-});
-
-// Phase B uses the real journal/auth owner with synthetic provider transports.
-async function recoveryFixture(t) {
-  const value = await fixture(t, 'ack', {random: () => 0, assertExclusiveOwnership: () => {}});
-  value.config.managementEnabled = true;
-  const creds = value.line.auth.state.creds;
-  creds.registered = true; creds.me = {id: value.socket.user.id};
-  await value.line.auth.saveCreds();
-  return value;
-}
-function recoveryRequest(bridge, line, action, id = randomUUID()) {
-  const view = bridge.management.availability(line);
-  return {id, action, operator:'7', role:'admin', reason:'OPERATOR_REQUEST',
-    expected_epoch:view.epoch, expected_version:view.version, expected_generation:view.generation};
-}
-
-test('administrative observations never write journals or expose credentials', async t => {
-  const {bridge,line} = await recoveryFixture(t);
-  const before = [line.store.seq,line.auth.store.seq];
-  for (let i=0;i<5;i++) {
-    const view = bridge.management.availability(line);
-    assert.equal(view.actions.pause.enabled,true);
-    assert.equal(view.actions.reconnect.enabled,false);
-    assert.equal(JSON.stringify(view).includes('advSecretKey'),false);
-  }
-  assert.deepEqual([line.store.seq,line.auth.store.seq],before);
-});
-
-test('pause retains transport and auth, idempotency and version checks prevent duplicate commands', async t => {
-  const {bridge,line,socket} = await recoveryFixture(t);
-  const auth = line.auth, request = recoveryRequest(bridge,line,'pause');
-  let logouts = 0; socket.logout = async () => {logouts++;};
-  const [a,b] = await Promise.all([bridge.management.submit(line,request),bridge.management.submit(line,request)]);
-  assert.equal(a.id,b.id); await bridge.management.drain();
-  assert.equal(bridge.management.get(line,request.id).state,'succeeded');
-  assert.equal(line.store.data.administration.version,1);
-  assert.equal(bridge.management.paused(line),true);
-  assert.equal(line.socket,socket); assert.equal(line.auth,auth); assert.equal(logouts,0);
-  await assert.rejects(bridge.send(LINE,{to:PHONE,type:'text',text:{body:'Held'}}), error => error.code==='ADMIN_PAUSED' && error.delivery_uncertain===false);
-  await assert.rejects(bridge.connect(LINE), error => error.code==='ADMIN_PAUSED');
-  await assert.rejects(bridge.disconnect(LINE), error => error.code==='ADMIN_PAUSED');
-  assert.throws(() => bridge.management.submit(line,{...request, action:'resume'}), error => error.code==='IDEMPOTENCY_CONFLICT');
-  assert.throws(() => bridge.management.submit(line,{...request,id:randomUUID(),action:'resume'}), error => error.code==='STALE_OBSERVATION');
-  const resume = recoveryRequest(bridge,line,'resume');
-  await bridge.management.submit(line,resume); await bridge.management.drain();
-  assert.equal(bridge.management.get(line,resume.id).state,'succeeded');
-  assert.equal(bridge.management.paused(line),false); assert.equal(line.socket,socket);
-});
-
-test('pause lets a dispatched send confirm but refuses queued new work', async t => {
-  const {bridge,line,socket} = await recoveryFixture(t);
-  let entered,release;
-  const dispatched = new Promise(resolve => {entered=resolve;});
-  const finish = new Promise(resolve => {release=resolve;});
-  const originalSend = socket.sendMessage;
-  socket.sendMessage = async (...args) => {entered(); await finish; return originalSend(...args);};
-  const sending = bridge.send(LINE,{to:PHONE,type:'text',text:{body:'In flight'},client_message_id:'before-pause'});
-  await dispatched;
-  await bridge.management.submit(line,recoveryRequest(bridge,line,'pause'));
-  await bridge.management.drain(); release();
-  assert.ok((await sending).messages[0].id);
-  assert.equal((await bridge.send(LINE,{to:PHONE,type:'text',text:{body:'In flight'},client_message_id:'before-pause'})).messages.length,1);
-  await assert.rejects(bridge.send(LINE,{to:PHONE,type:'text',text:{body:'New'},client_message_id:'after-pause'}), error => error.code==='ADMIN_PAUSED');
-  assert.equal(socket.calls.length,1);
-});
-
-test('reconnect waits for provider connection and never enters pairing or resets credentials', async t => {
-  const {bridge,line,socket} = await recoveryFixture(t);
-  await bridge.connectionUpdate(line,socket,{connection:'close'});
-  let made; const created = new Promise(resolve => {made=resolve;});
-  const replacement = mockSocket();
-  bridge.makeSocket = options => {assert.equal(options.auth.creds.registered,true); made(); return replacement;};
-  const oldReset = line.auth.reset;
-  line.auth.reset = async () => {throw new Error('UNEXPECTED_RESET');};
-  t.after(() => {line.auth.reset = oldReset;});
-  const request = recoveryRequest(bridge,line,'reconnect');
-  assert.equal(bridge.management.availability(line).actions.reconnect.enabled,true);
-  await bridge.management.submit(line,request); await created;
-  assert.equal(bridge.management.get(line,request.id).state,'running');
-  await bridge.connectionUpdate(line,replacement,{connection:'open'});
-  await bridge.management.drain();
-  assert.equal(bridge.management.get(line,request.id).state,'succeeded');
-  assert.equal(line.status,'connected'); assert.equal(line.qr,undefined);
-  assert.equal(line.store.data.administration.version,1);
-});
-
-test('reconnect QR challenge fails closed, without generating QR credentials', async t => {
-  const {bridge,line,socket} = await recoveryFixture(t);
-  await bridge.connectionUpdate(line,socket,{connection:'close'});
-  const replacement=mockSocket(); let made; const created=new Promise(resolve=>{made=resolve;});
-  bridge.makeSocket=()=>{made();return replacement;};
-  const request=recoveryRequest(bridge,line,'reconnect');
-  await bridge.management.submit(line,request); await created;
-  await bridge.connectionUpdate(line,replacement,{qr:'SYNTHETIC_SECRET'}); await bridge.management.drain();
-  assert.equal(bridge.management.get(line,request.id).state,'failed');
-  assert.equal(line.qr,undefined); assert.equal(line.qr_data_url,undefined);
-  assert.equal(line.auth.state.creds.registered,true); assert.equal(line.retryBlocked,true);
-});
-
-test('unsafe ownership, storage, authentication, transport and legacy operations block recovery', async t => {
-  const {bridge,line,socket} = await recoveryFixture(t);
-  await bridge.connectionUpdate(line,socket,{connection:'close'});
-  clearTimeout(line.reconnectTimer); line.reconnectTimer=null;
-  const evidence=line.auth.managementEvidence;
-  const cases=[['current_owner',false,'SESSION_OWNERSHIP_UNPROVEN'],['paired',false,'AUTHENTICATION_REVIEW_REQUIRED'],
-    ['healthy',false,'AUTHENTICATION_REVIEW_REQUIRED'],['settled',false,'WORK_NOT_SETTLED'],
-    ['transport_closed',false,'TRANSPORT_RELEASE_UNCONFIRMED'],['events_released',false,'EVENT_SUBSCRIPTION_NOT_RELEASED']];
-  for (const [key,value,reason] of cases) {
-    line.auth.managementEvidence=()=>({...evidence(),[key]:value});
-    assert.throws(()=>bridge.management.submit(line,recoveryRequest(bridge,line,'reconnect')),error=>error.code===reason);
-  }
-  line.auth.managementEvidence=evidence;
-  bridge.phoneReservations.set(line.store.data.bound_phone,'90002');
-  assert.throws(()=>bridge.management.submit(line,recoveryRequest(bridge,line,'reconnect')),error=>error.code==='CONFLICTING_SESSION_OWNER');
-  bridge.phoneReservations.clear();
-  for (const key of ['lifecycleBusy','quarantined','fencedAuth']) {
-    line[key]=true;
-    assert.equal(bridge.management.availability(line).actions.reconnect.enabled,false);
-    line[key]=false;
-  }
-  const status=bridge.storageMonitor.status;
-  bridge.storageMonitor.status=()=>({level:'ok',checked_at:Date.now()-61000});
-  assert.throws(()=>bridge.management.submit(line,recoveryRequest(bridge,line,'pause')),error=>error.code==='STORAGE_REVIEW_REQUIRED');
-  bridge.storageMonitor.status=status;
-  assert.equal(line.store.data.administration,undefined);
-});
-
-test('pause survives bridge restart and interrupted operations are retained without replay', async t => {
-  const {bridge,line,config}=await recoveryFixture(t);
-  const request=recoveryRequest(bridge,line,'pause');
-  await bridge.management.submit(line,request); await bridge.management.drain();
-  await line.store.update(data=>{data.administration.operations[request.id].state='running';});
-  await bridge.close(); let sockets=0;
-  const replacement=await new Bridge(config,{makeSocket:()=>{sockets++;return mockSocket();},
-    onError:()=>{},log:()=>{},storageFilesystem:healthyStorage,assertExclusiveOwnership:()=>{}}).initialize();
-  t.after(()=>replacement.close());
-  const restored=replacement.getLine(LINE);
-  assert.equal(sockets,0); assert.equal(replacement.management.paused(restored),true);
-  assert.equal(replacement.management.get(restored,request.id).state,'interrupted');
-  assert.equal(replacement.management.get(restored,request.id).reason_code,'BRIDGE_RESTARTED');
-  replacement.scheduleReconnect(restored); assert.equal(restored.reconnectTimer,null);
-});
-
-test('malformed administrative evidence stays paused and cannot silently reactivate', async t => {
-  const {bridge,line}=await recoveryFixture(t);
-  await line.store.update(data=>{data.administration={version:1,paused:'false',operations:{}};});
-  const seq=line.store.seq;
-  await assert.rejects(bridge.management.initialize(line),error=>error.code==='MANAGEMENT_STATE_INVALID');
-  assert.equal(bridge.management.paused(line),true);
-  assert.equal(line.store.seq,seq);
-  assert.equal(bridge.management.availability(line).actions.resume.enabled,false);
-  await assert.rejects(bridge.send(LINE,{to:PHONE,type:'text',text:{body:'Blocked'}}),error=>error.code==='ADMIN_PAUSED');
-});
-
-test('resume revalidates after persistence and retains pause if authentication changes', async t => {
-  const {bridge,line}=await recoveryFixture(t);
-  await bridge.management.submit(line,recoveryRequest(bridge,line,'pause')); await bridge.management.drain();
-  const update=line.store.update.bind(line.store), evidence=line.auth.managementEvidence;
-  line.store.update=async fn=>{
-    const result=await update(fn);
-    if(line.store.data.administration.paused===false) line.auth.managementEvidence=()=>({...evidence(),healthy:false});
-    return result;
-  };
-  const request=recoveryRequest(bridge,line,'resume');
-  await bridge.management.submit(line,request); await bridge.management.drain();
-  assert.equal(bridge.management.get(line,request.id).state,'failed');
-  assert.equal(bridge.management.paused(line),true);
-  line.store.update=update; line.auth.managementEvidence=evidence;
-});
-
-test('a resume interrupted after saving paused=false restarts paused and is not replayed', async t => {
-  const {bridge,line,config}=await recoveryFixture(t);
-  await bridge.management.submit(line,recoveryRequest(bridge,line,'pause')); await bridge.management.drain();
-  const id=randomUUID();
-  // Crash window: admission and paused=false are durable, revalidation is not.
-  await line.store.update(data=>{
-    data.administration.version++; data.administration.paused=false;
-    data.administration.operations[id]={id,action:'resume',operator:'7',role:'admin',reason:'OPERATOR_REQUEST',
-      fingerprint:'a'.repeat(64),state:'running',reason_code:'PROCESSING',created_at:Date.now(),completed_at:null};
-  });
-  await bridge.close(); let sockets=0;
-  const replacement=await new Bridge(config,{makeSocket:()=>{sockets++;return mockSocket();},
-    onError:()=>{},log:()=>{},storageFilesystem:healthyStorage,assertExclusiveOwnership:()=>{}}).initialize();
-  t.after(()=>replacement.close());
-  const restored=replacement.getLine(LINE);
-  assert.equal(replacement.management.paused(restored),true);
-  assert.equal(replacement.management.get(restored,id).state,'interrupted');
-  assert.equal(sockets,0);
-  await assert.rejects(replacement.send(LINE,{to:PHONE,type:'text',text:{body:'Blocked'}}),error=>error.code==='ADMIN_PAUSED');
 });

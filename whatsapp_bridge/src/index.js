@@ -18,7 +18,7 @@ const runtime = createRuntime({prepare: async () => {
   const { acquireDataDirectory } = await import('./storage.js');
   const { Bridge } = await import('./bridge.js');
   const { createServer } = await import('./server.js');
-  return {config: readConfig(), acquireDataDirectory, createBridge: (config, ownership) => new Bridge(config, ownership), createServer};
+  return {config: readConfig(), acquireDataDirectory, createBridge: config => new Bridge(config), createServer};
 }});
 void runtime.start().catch(() => {});
 void runtime.done.then(({exitCode}) => process.exit(exitCode));

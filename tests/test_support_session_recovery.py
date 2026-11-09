@@ -133,10 +133,7 @@ await assert.rejects(pending,{name:'AbortError'});assert.equal(logins,0);assert.
 def test_browser_back_navigation_restarts_cancelled_initial_session_check():
     actions = Path('app/static/support/actions.js').read_text()
     handler = actions[actions.index("window.addEventListener('pageshow'"):actions.index('restoreLayoutPreferences();')]
-    # The handler resumes the shipped send queue (delivery-state.js, loaded
-    # right after state.js in production).
-    delivery = Path('app/static/support/delivery-state.js').read_text()
-    run(delivery + r'''
+    run(r'''
 let pageshow;
 const window={addEventListener:(event,callback)=>{assert.equal(event,'pageshow');pageshow=callback}};
 const openTicket=()=>{throw Error('Unexpected ticket refresh')},loadQueue=openTicket;
@@ -146,9 +143,7 @@ let finish;
 respond=()=>new Promise(resolve=>{finish=resolve});
 const leaving=bootstrap();await settle();state.pageLeaving=true;state.sessionCheckController.abort();
 respond=async()=>({id:'8'});
-supportSendQueue.pause();
 pageshow({persisted:true});assert.equal(requests,1,'restoration waits for cancellation');
-assert.equal(supportSendQueue.paused,false,'restoration resumes the send queue');
 finish({id:'7'});await leaving;await settle();
 assert.equal(requests,2);assert.equal(dashboards,1);assert.equal(state.agent.id,'8');assert.equal(timers.size,0);
 ''')

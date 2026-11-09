@@ -1,4 +1,4 @@
-import { monitorEventLoopDelay, performance } from 'node:perf_hooks';
+import { monitorEventLoopDelay } from 'node:perf_hooks';
 
 // Fixed labels only. Never retain provider errors, stanzas, addresses or keys.
 export function classifyDisconnect(error) {
@@ -19,95 +19,25 @@ export function reconnectDelay(attempt, restartRequired = false, random = Math.r
 }
 
 export function newConnectionDiagnostics() {
-  return { supported: false, version: 2, disconnects: {}, disconnects_total: 0, reconnect_attempts: 0,
+  return { supported: false, disconnects: {}, disconnects_total: 0, reconnect_attempts: 0,
     recovery_count: 0, recovery_seconds_sum: 0, recovery_seconds_last: 0,
-    heartbeat_requests: 0, heartbeat_successes: 0, heartbeat_query_timeouts: 0,
-    heartbeat_failures: 0, heartbeat_timeouts: 0, raw_frames: 0, decoded_frames: 0,
-    last_category: null, ...generationDiagnostics() };
-}
-
-function generationDiagnostics() {
-  return { last_frame_at: null, last_raw_frame_at: null, heartbeat_observed_at: null,
-    heartbeat_request_at: null, heartbeat_success_at: null, heartbeat_query_completed_at: null,
-    heartbeat_rtt_ms: null, heartbeat_query_elapsed_ms: null, heartbeat_query_sequence: 0,
-    heartbeat_outcome: 'unknown', heartbeat_frame_age_ms: 0, heartbeat_timer_delay_ms: 0,
-    transport: null, transport_error_code: null, transport_close_code: null,
-    socket_error_code: null, socket_end_at: null, socket_closed_at: null, socket_close_had_error: null };
-}
-
-export function resetConnectionDiagnostics(diagnostics, generation) {
-  Object.assign(diagnostics, generationDiagnostics(), { generation, generation_started_at: Date.now() });
-}
-
-export function beginInterruption(diagnostics, now = Date.now(), monotonic = performance.now()) {
-  diagnostics.recovery_started_at ??= now;
-  diagnostics.recovery_started_monotonic ??= monotonic;
-}
-
-export function finishInterruption(diagnostics, monotonic = performance.now()) {
-  if (diagnostics.recovery_started_monotonic == null) return null;
-  const seconds = Math.max(0, monotonic - diagnostics.recovery_started_monotonic) / 1000;
-  diagnostics.recovery_count++;
-  diagnostics.recovery_seconds_sum += seconds;
-  diagnostics.recovery_seconds_last = seconds;
-  delete diagnostics.recovery_started_at;
-  delete diagnostics.recovery_started_monotonic;
-  return seconds;
+    last_frame_at: null, heartbeat_observed_at: null, heartbeat_rtt_ms: null,
+    heartbeat_frame_age_ms: 0, heartbeat_timer_delay_ms: 0,
+    heartbeat_failures: 0, heartbeat_timeouts: 0, last_category: null };
 }
 
 export function observeHeartbeat(diagnostics, sample, now = Date.now()) {
-  if (sample.event === 'raw_frame') {
-    diagnostics.last_raw_frame_at = now; diagnostics.raw_frames++; return false;
-  }
-  if (sample.event === 'decoded_frame') {
-    diagnostics.last_frame_at = now; diagnostics.decoded_frames++; return false;
-  }
-  if (!['heartbeat_tick', 'heartbeat_request', 'heartbeat_result', 'heartbeat_query_timeout',
-    'heartbeat_error', 'heartbeat_timeout'].includes(sample.event)) return false;
-  const bounded = value => Number.isFinite(value) ? Math.max(0, Math.min(value, 86400000)) : null;
-  const queryEvent = ['heartbeat_request', 'heartbeat_result', 'heartbeat_query_timeout', 'heartbeat_error'].includes(sample.event);
-  if (queryEvent) {
-    if (!Number.isSafeInteger(sample.query_sequence) || sample.query_sequence < 1 ||
-        sample.query_sequence < diagnostics.heartbeat_query_sequence) return false;
-    if (sample.event === 'heartbeat_request' && sample.query_sequence === diagnostics.heartbeat_query_sequence) return false;
-    if (sample.event !== 'heartbeat_request' && (sample.query_sequence !== diagnostics.heartbeat_query_sequence ||
-        diagnostics.heartbeat_outcome !== 'pending')) return false;
-  }
+  if (sample.event === 'decoded_frame') { diagnostics.last_frame_at = now; return false; }
+  if (!['heartbeat_tick', 'heartbeat_result', 'heartbeat_error', 'heartbeat_timeout'].includes(sample.event)) return false;
   diagnostics.heartbeat_observed_at = now;
+  const bounded = value => Number.isFinite(value) ? Math.max(0, Math.min(value, 86400000)) : null;
   if (sample.event === 'heartbeat_tick') {
     diagnostics.heartbeat_frame_age_ms = bounded(sample.frame_age_ms) ?? 0;
     diagnostics.heartbeat_timer_delay_ms = bounded(sample.timer_delay_ms) ?? 0;
   }
-  if (sample.event === 'heartbeat_request') {
-    diagnostics.heartbeat_requests++;
-    diagnostics.heartbeat_query_sequence = sample.query_sequence;
-    diagnostics.heartbeat_request_at = now;
-    diagnostics.heartbeat_outcome = 'pending';
-    diagnostics.heartbeat_rtt_ms = null;
-    diagnostics.heartbeat_query_elapsed_ms = null;
-  }
-  if (['heartbeat_result', 'heartbeat_query_timeout', 'heartbeat_error'].includes(sample.event)) {
-    diagnostics.heartbeat_query_completed_at = now;
-    diagnostics.heartbeat_query_elapsed_ms = bounded(sample.query_elapsed_ms);
-    diagnostics.heartbeat_rtt_ms = null;
-    if (sample.event === 'heartbeat_result' && bounded(sample.rtt_ms) != null) {
-      diagnostics.heartbeat_outcome = 'success';
-      diagnostics.heartbeat_successes++;
-      diagnostics.heartbeat_success_at = now;
-      diagnostics.heartbeat_rtt_ms = bounded(sample.rtt_ms);
-    } else {
-      diagnostics.heartbeat_outcome = sample.event === 'heartbeat_query_timeout' ? 'timeout' : 'error';
-      if (sample.event === 'heartbeat_query_timeout') diagnostics.heartbeat_query_timeouts++;
-      else diagnostics.heartbeat_failures++;
-      beginInterruption(diagnostics, now);
-    }
-  }
-  if (sample.event === 'heartbeat_timeout') {
-    diagnostics.heartbeat_timeouts++;
-    diagnostics.heartbeat_rtt_ms = null;
-    diagnostics.heartbeat_outcome = 'timeout';
-    beginInterruption(diagnostics, now);
-  }
+  if (sample.event === 'heartbeat_result') diagnostics.heartbeat_rtt_ms = bounded(sample.rtt_ms);
+  if (sample.event === 'heartbeat_error') diagnostics.heartbeat_failures++;
+  if (sample.event === 'heartbeat_timeout') diagnostics.heartbeat_timeouts++;
   return true;
 }
 
@@ -125,9 +55,6 @@ export class EventLoopDiagnostics {
     }, 10000);
     this.timer.unref();
   }
-  snapshot() {
-    return { ...(this.last ?? { sampled_at: null, p99_ms: null, max_ms: null }),
-      current_max_ms: this.histogram ? this.histogram.max / 1e6 : null };
-  }
+  snapshot() { return this.last ?? { sampled_at: null, p99_ms: null, max_ms: null }; }
   close() { clearInterval(this.timer); this.histogram?.disable(); }
 }

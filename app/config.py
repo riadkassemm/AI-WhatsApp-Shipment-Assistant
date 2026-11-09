@@ -47,8 +47,6 @@ class Settings(BaseSettings):
     # Cloud remains the default; additional linked-device routes are opt-in.
     whatsapp_transport: Literal["cloud", "linked_device"] = "cloud"
     whatsapp_linked_device_enabled: bool = False
-    # Enable only after the Phase B schema and owning bridge are verified.
-    whatsapp_admin_recovery_enabled: bool = False
     whatsapp_linked_device_default_line_id: str = ""
     whatsapp_linked_device_url: str = "http://127.0.0.1:3001"
     whatsapp_linked_device_secret: str = ""
@@ -204,13 +202,13 @@ def linked_device_data_directory() -> Path:
     return directory
 
 
-def _manifest_linked_device_routing() -> tuple[dict[str, str], set[str], set[str]]:
+def _manifest_linked_device_routing() -> tuple[dict[str, str], set[str]]:
     manifest_path = linked_device_data_directory() / "lines.json"
     try:
         with manifest_path.open("rb") as manifest_file:
             raw = manifest_file.read(128 * 1024 + 1)
     except FileNotFoundError:
-        return {}, set(), set()
+        return {}, set()
     except OSError as exc:
         raise ValueError("The linked-device line manifest could not be read.") from exc
     if len(raw) > 128 * 1024:
@@ -221,14 +219,13 @@ def _manifest_linked_device_routing() -> tuple[dict[str, str], set[str], set[str
         raise ValueError("The linked-device line manifest is invalid.") from exc
     if (
         not isinstance(manifest, dict)
-        or set(manifest) - {"version", "lines", "requests", "removed_line_ids", "removed_request_ids", "quarantined_lines"}
+        or set(manifest) - {"version", "lines", "requests", "removed_line_ids", "removed_request_ids"}
         or type(manifest.get("version", 1)) is not int
         or manifest.get("version", 1) != 1
         or not isinstance(manifest.get("lines"), dict)
         or ("requests" in manifest and not isinstance(manifest["requests"], dict))
         or not isinstance(manifest.get("removed_line_ids", []), list)
         or not isinstance(manifest.get("removed_request_ids", []), list)
-        or not isinstance(manifest.get("quarantined_lines", {}), dict)
     ):
         raise ValueError("The linked-device line manifest has an unsupported structure.")
     lines = manifest["lines"]
@@ -239,25 +236,14 @@ def _manifest_linked_device_routing() -> tuple[dict[str, str], set[str], set[str
         raise ValueError("The linked-device line manifest has invalid removed IDs.")
     if any(not isinstance(request_id, str) or not re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", request_id) for request_id in manifest.get("removed_request_ids", [])):
         raise ValueError("The linked-device line manifest has invalid removed request IDs.")
-    quarantined = manifest.get("quarantined_lines", {})
-    for line_id, record in quarantined.items():
-        if (not re.fullmatch(r"[0-9]{5,32}", line_id) or not isinstance(record, dict)
-                or record.get("line_id") != line_id or record.get("state") != "permanently_decommissioned"
-                or record.get("reuse_allowed") is not False or type(record.get("remote_unlinked")) is not bool
-                or line_id in lines or line_id in removed):
-            raise ValueError("The linked-device quarantine ledger is invalid.")
-    return Settings.validate_linked_device_lines(lines), set(removed) | set(quarantined), set(quarantined)
-
-
-def quarantined_linked_device_line_ids() -> set[str]:
-    return _manifest_linked_device_routing()[2]
+    return Settings.validate_linked_device_lines(lines), set(removed)
 
 
 def linked_device_routing_configuration() -> tuple[dict[str, str], set[str]]:
     """Read active routes and deletion tombstones from one manifest snapshot."""
     # Node atomically publishes the manifest after registration. Read each time
     # so every Python worker observes newly added/removed routes without restart.
-    manifest_lines, removed, _quarantined = _manifest_linked_device_routing()
+    manifest_lines, removed = _manifest_linked_device_routing()
     lines = {line_id: phone for line_id, phone in manifest_lines.items() if line_id not in removed}
     environment_lines = Settings.validate_linked_device_lines(dict(settings.whatsapp_linked_device_lines))
     for line_id, phone in environment_lines.items():

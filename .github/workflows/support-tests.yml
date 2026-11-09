@@ -58,17 +58,6 @@ jobs:
           sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y --no-install-recommends ffmpeg
           ffmpeg -version
           ffprobe -version
-      - name: Install a Redis server binary for isolated crash-recovery tests
-        run: |
-          # tests/integration/test_inbound_queue_durability.py starts its own
-          # redis-server (--port 0, private socket) to simulate client loss. Only
-          # the binary is needed: block the package's service so it cannot compete
-          # with the Redis service container on 127.0.0.1:6379.
-          printf '#!/bin/sh\nexit 101\n' | sudo tee /usr/sbin/policy-rc.d >/dev/null
-          sudo chmod +x /usr/sbin/policy-rc.d
-          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y --no-install-recommends redis-server
-          sudo rm -f /usr/sbin/policy-rc.d
-          redis-server --version
       - run: python -m pip install -r requirements-dev.txt
       - run: npm ci --prefix whatsapp_bridge
       - name: Verify browser dependency
@@ -82,12 +71,8 @@ jobs:
       - name: Unit regressions
         run: python -m pytest --ignore=tests/integration
       - name: Real MariaDB and Redis integration (fresh schema per test)
-        # Run even when an earlier suite fails: known UI fixture failures must
-        # not hide database and bridge results. The job still fails overall.
-        if: ${{ !cancelled() }}
         env:
           SUPPORT_INTEGRATION: '1'
         run: python -m pytest tests/integration
       - name: Bridge regressions (mock WhatsApp)
-        if: ${{ !cancelled() }}
         run: npm test --prefix whatsapp_bridge

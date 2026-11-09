@@ -59,8 +59,6 @@ from app.support_service import sanitize_support_text, support_service
 from app.support_contacts import format_shared_contacts
 from app.support_ui import SUPPORT_UI_VERSION, router as support_ui_router
 from app.linked_device_api import router as linked_device_api_router
-from app.bridge_management_api import router as bridge_management_api_router
-from app.bridge_recovery_api import router as bridge_recovery_api_router
 from app.whatsapp_line_health import router as whatsapp_line_health_router
 from app.whatsapp_registry import WhatsAppRegistryError, whatsapp_registry_service
 from app.whatsapp_client import (
@@ -130,22 +128,13 @@ async def _stop_idle_ticket_sweeper() -> None:
 async def _lifespan(_app: FastAPI):
     global _inbound_stopping
     _inbound_stopping = False
-    if settings.whatsapp_admin_recovery_enabled:
-        from app.support_repository import support_repository
-        await support_repository.connect()  # Fail startup on an incomplete recovery migration.
     from app.support_delivery_reconciliation import reconcile_deliveries_forever
     reconciliation = asyncio.create_task(reconcile_deliveries_forever(support_service)) if settings.support_ui_enabled else None
-    recovery_stop = asyncio.Event()
-    from app.bridge_recovery_service import bridge_recovery_service
-    recovery = asyncio.create_task(bridge_recovery_service.run(recovery_stop)) if settings.whatsapp_admin_recovery_enabled else None
     await _start_idle_ticket_sweeper()
     try:
         yield
     finally:
         _inbound_stopping = True
-        recovery_stop.set()
-        if recovery is not None:
-            await recovery  # Finish admitted commands/dispatches; never cancel ownership.
         # Uvicorn may already have cancelled request handlers. Their shielded
         # workers still own durable reservations and must finish before exit.
         try:
@@ -164,8 +153,6 @@ app = FastAPI(title="AI Shipment Assistant - WhatsApp Backend", lifespan=_lifesp
 app.include_router(support_api_router)
 app.include_router(support_ui_router)
 app.include_router(linked_device_api_router)
-app.include_router(bridge_management_api_router)
-app.include_router(bridge_recovery_api_router)
 app.include_router(whatsapp_line_health_router)
 
 
@@ -696,7 +683,7 @@ async def _send_text_once(
     phone_number_id: str | None = None,
 ) -> dict:
     """Attempt at most one primary customer reply per inbound WhatsApp ID."""
-    async def _direct_send() -> dict:
+    async def _provider_send() -> dict:
         if phone_number_id:
             return await whatsapp_client.send_text(
                 to=to,
@@ -704,15 +691,6 @@ async def _send_text_once(
                 phone_number_id=phone_number_id,
             )
         return await whatsapp_client.send_text(to=to, body=body)
-
-    async def _provider_send() -> dict:
-        if settings.whatsapp_admin_recovery_enabled and get_transport(phone_number_id) == 'linked_device':
-            from app.bridge_paused_replies import paused_replies
-            from app.whatsapp_client import linked_device_client
-            line_id = linked_device_client._phone_number_id(phone_number_id)
-            return await paused_replies.send_or_queue(_direct_send, line_id=line_id,
-                source_id=source_message_id, recipient=to, body=body)
-        return await _direct_send()
 
     if not source_message_id:
         return await _provider_send()

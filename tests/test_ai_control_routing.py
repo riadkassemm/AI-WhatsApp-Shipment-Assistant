@@ -776,24 +776,18 @@ def test_two_quick_off_messages_create_one_handoff_assignment(monkeypatch) -> No
         monkeypatch.setattr(main.ai_availability_service, "get_effective_ai_availability", fake_availability)
         monkeypatch.setattr(main, "_send_text_once", fake_send)
 
+        items = []
         now = int(time.time())
         for index, text in enumerate(("First", "Second"), start=1):
             incoming = IncomingWhatsAppMessage(phone, f"wamid.quick-{index}", "text", text, str(now + index))
             claim = await store.claim_incoming_message(incoming.message_id or "")
             assert claim is not None
-            # Production bursts come from the durable queue: each popped item
-            # carries the reservation receipt that is acknowledged afterwards.
-            await store.enqueue_incoming_work(phone, main._queued_inbound_item(incoming, claim))
-        items = []
-        while (item := await store.pop_incoming_work(phone)) is not None:
-            items.append(item)
-        assert len(items) == 2
+            items.append(main._queued_inbound_item(incoming, claim))
 
         response = await main._process_inbound_burst(phone, items)
         assert response.status_code == 200
         assert finalize_calls == 1
         assert human_routes == 1  # second message follows existing human-owned path
-        assert await store.inflight_incoming_work_count(phone) == 0  # every reservation acknowledged
 
     asyncio.run(run())
 
