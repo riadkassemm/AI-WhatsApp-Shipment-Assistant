@@ -1,6 +1,14 @@
 from scripts.export_runtime_metrics import bridge_metrics, collect
 
 
+def eight_enabled():
+    return {str(90000 + index): True for index in range(8)}
+
+
+def no_removals():
+    return set()
+
+
 class EmptyRedis:
     def scan_iter(self, **_kwargs):
         return iter(())
@@ -21,7 +29,8 @@ def snapshot():
 
 
 def test_runtime_checks_emit_health_and_pseudonymous_diagnostics():
-    output = collect(EmptyRedis(), probe=lambda: True, bridge=snapshot, database=lambda: {'UNCERTAIN': 1}, now=lambda: 123)
+    output = collect(EmptyRedis(), probe=lambda: True, bridge=snapshot, database=lambda: {'UNCERTAIN': 1}, now=lambda: 123,
+                     registry=eight_enabled, manifest=no_removals)
     assert 'support_api_up 1' in output
     assert 'support_bridge_connected_lines 8' in output
     assert 'support_inbound_inflight 0' in output
@@ -35,34 +44,99 @@ def test_runtime_checks_emit_health_and_pseudonymous_diagnostics():
 def test_unreachable_services_report_failure_without_exception_details():
     def fail():
         raise RuntimeError('private credential or payload')
-    output = collect(EmptyRedis(), probe=fail, bridge=fail, database=fail)
+    output = collect(EmptyRedis(), probe=fail, bridge=fail, database=fail, registry=fail, manifest=fail)
     assert 'support_api_up 0' in output and 'support_bridge_ready 0' in output
     assert 'support_bridge_diagnostics_up 0' in output and 'support_delivery_database_check_up 0' in output
     assert 'private' not in output
 
 
-def test_expected_identity_count_is_independent_of_live_connections(monkeypatch):
-    monkeypatch.setenv('WHATSAPP_EXPECTED_IDENTITIES', '6')
-    data = snapshot()
-    data['lines'] = data['lines'][:5]
-    output = collect(EmptyRedis(), probe=lambda: True, bridge=lambda: data, database=lambda: {})
-    assert 'support_bridge_expected_lines 6\n' in output
-    assert 'support_bridge_connected_lines 5\n' in output
-    for invalid in ('0', '-1', '129', 'private-invalid-value'):
-        monkeypatch.setenv('WHATSAPP_EXPECTED_IDENTITIES', invalid)
-        output = collect(EmptyRedis(), probe=lambda: True, bridge=lambda: data, database=lambda: {})
-        assert 'support_bridge_expected_lines 0\n' in output
-        assert 'private-invalid-value' not in output
-    monkeypatch.delenv('WHATSAPP_EXPECTED_IDENTITIES')
-    output = collect(EmptyRedis(), probe=lambda: True, bridge=lambda: data, database=lambda: {})
-    assert 'support_bridge_expected_lines 8\n' in output
+def metric(output, name):
+    return [line for line in output.splitlines() if line.startswith(name + ' ')]
+
+
+def run(data, registry, removed=frozenset()):
+    return collect(EmptyRedis(), probe=lambda: True, bridge=lambda: data, database=lambda: {},
+                   registry=lambda: dict(registry), manifest=lambda: set(removed))
+
+
+def test_expected_identities_follow_the_registry_not_a_static_count_or_live_sockets(monkeypatch):
+    monkeypatch.setenv('WHATSAPP_EXPECTED_IDENTITIES', '6')  # Ignored: no static count.
+    data = snapshot(); data['lines'] = data['lines'][:4]
+    output = run(data, {line['line_id']: True for line in data['lines']})
+    assert metric(output, 'support_bridge_expected_lines') == ['support_bridge_expected_lines 4']
+    assert metric(output, 'support_bridge_expected_healthy_lines') == ['support_bridge_expected_healthy_lines 4']
+    assert metric(output, 'support_bridge_expected_unhealthy_lines') == ['support_bridge_expected_unhealthy_lines 0']
+    assert 'support_bridge_registry_up 1' in output and 'support_bridge_manifest_up 1' in output
+    # Five enabled and one disconnects: the expected set does not shrink.
+    data = snapshot(); data['lines'] = data['lines'][:5]; data['lines'][2]['status'] = 'disconnected'
+    output = run(data, {line['line_id']: True for line in data['lines']})
+    assert 'support_bridge_expected_lines 5\n' in output and 'support_bridge_expected_unhealthy_lines 1\n' in output
+    assert output.count('state="disconnected"} 1') == 1
+    # The socket disappearing entirely is still an expected identity: "missing".
+    del data['lines'][2]
+    output = run(data, {**{line['line_id']: True for line in data['lines']}, '90002': True})
+    assert 'support_bridge_expected_lines 5\n' in output and output.count('state="missing"} 1') == 1
+    assert '90002' not in output  # Identities are pseudonymous.
+
+
+def test_added_disabled_removed_and_retained_identities():
+    data = snapshot(); data['lines'] = data['lines'][:5]
+    registry = {line['line_id']: True for line in data['lines'][:4]}
+    # Newly paired number: registered disabled and pairing/connected -> not expected.
+    registry['90004'] = False
+    data['lines'][4]['qr'] = 'private-qr'
+    output = run(data, registry)
+    assert 'support_bridge_expected_lines 4\n' in output and 'support_bridge_expected_unhealthy_lines 0\n' in output
+    assert 'support_bridge_disabled_lines 1\n' in output and 'support_bridge_pairing_lines 1\n' in output
+    assert 'private-qr' not in output
+    # Super Admin enables it: tracked from the next collection.
+    data['lines'][4]['qr'] = None
+    output = run(data, {**registry, '90004': True})
+    assert 'support_bridge_expected_lines 5\n' in output and 'support_bridge_expected_healthy_lines 5\n' in output
+    # Durable removal: registry row deleted and tombstoned -> no longer expected.
+    removed_data = snapshot(); removed_data['lines'] = removed_data['lines'][:3]
+    output = run(removed_data, {line['line_id']: True for line in removed_data['lines']}, {'90003'})
+    assert 'support_bridge_expected_lines 3\n' in output and 'support_bridge_removed_reactivated_lines 0\n' in output
+    # A tombstoned ID reappearing (registry or live bridge) is reported.
+    output = run(snapshot(), {line['line_id']: True for line in snapshot()['lines']}, {'90003'})
+    assert 'support_bridge_removed_reactivated_lines 1\n' in output
+    # Decommissioned identities stay visible but are neither expected nor live.
+    retained = snapshot(); retained['lines'] = retained['lines'][:3]
+    retained['lines'][2].update(lifecycle='decommissioned', eligible=False, status='decommissioned', is_paired=False,
+                                isolation={'safe': True})
+    output = run(retained, {'90000': True, '90001': True}, {'90002'})
+    assert 'support_bridge_expected_lines 2\n' in output and 'support_bridge_expected_unhealthy_lines 0\n' in output
+    assert 'support_bridge_removed_reactivated_lines 0\n' in output and 'support_bridge_decommissioned_lines 1\n' in output
+    # Enabled in the app but retained on the bridge is a disagreement, never health.
+    output = run(retained, {'90000': True, '90001': True, '90002': True})
+    assert output.count('state="retained"} 1') == 1 and 'support_bridge_expected_unhealthy_lines 1\n' in output
+    # A bridge identity with no registry row is a mismatch, not an expected identity.
+    output = run(snapshot(), {'90000': True})
+    assert 'support_bridge_unregistered_lines 7\n' in output and 'support_bridge_expected_lines 1\n' in output
+
+
+def test_unavailable_registry_manifest_or_bridge_never_reports_health():
+    def fail():
+        raise RuntimeError('private database detail')
+    registry = {line['line_id']: True for line in snapshot()['lines']}
+    output = collect(EmptyRedis(), probe=lambda: True, bridge=snapshot, database=lambda: {}, registry=fail, manifest=no_removals)
+    assert 'support_bridge_registry_up 0' in output and 'support_bridge_expected_' not in output
+    output = collect(EmptyRedis(), probe=lambda: True, bridge=snapshot, database=lambda: {}, registry=lambda: registry, manifest=fail)
+    assert 'support_bridge_manifest_up 0' in output and 'support_bridge_expected_' not in output
+    output = collect(EmptyRedis(), probe=lambda: True, bridge=fail, database=lambda: {}, registry=lambda: registry, manifest=no_removals)
+    assert 'support_bridge_ready 0' in output and 'support_bridge_expected_unhealthy_lines 8\n' in output
+    assert output.count('state="unknown"} 1') == 8 and 'private' not in output
+    output = collect(EmptyRedis(), probe=lambda: True, bridge=snapshot, database=lambda: {},
+                     registry=lambda: {'not-an-id': True}, manifest=no_removals)
+    assert 'support_bridge_registry_up 0' in output and 'support_bridge_expected_' not in output
 
 
 def test_missing_or_nonfinite_diagnostics_do_not_masquerade_as_health():
     for bad in [None, float('nan')]:
         data = snapshot()
         data['lines'][0]['diagnostics']['heartbeat_timer_delay_ms'] = bad
-        output = collect(EmptyRedis(), probe=lambda: True, bridge=lambda: data, database=lambda: {})
+        output = collect(EmptyRedis(), probe=lambda: True, bridge=lambda: data, database=lambda: {},
+                         registry=eight_enabled, manifest=no_removals)
         assert 'support_bridge_connected_lines 8' in output
         assert 'support_bridge_diagnostics_up 0' in output
         assert 'nan' not in output

@@ -19,10 +19,12 @@ CHECKS = {
     # 30s scrape, plus timer/probe jitter. A live sample can legitimately be
     # 60–75s old here. Sustained-staleness Prometheus alerts remain unchanged.
     'event_loop_observer_fresh': 'time() - support_bridge_event_loop_sample_timestamp_seconds < 90',
-    'expected_identity_count_valid': 'support_bridge_expected_lines > 0',
-    'expected_identity_count_present': 'support_bridge_eligible_lines == on(job, instance) support_bridge_expected_lines',
-    'all_expected_lines_connected': 'support_bridge_connected_lines == on(job, instance) support_bridge_expected_lines',
-    'all_expected_lines_paired': 'support_bridge_eligible_paired_lines == on(job, instance) support_bridge_expected_lines',
+    # Expected identities come from the registry each collection (no static
+    # count). Unreadable registry/manifest data is a failure, not health.
+    'identity_registry_available': 'support_bridge_registry_up == 1',
+    'identity_manifest_available': 'support_bridge_manifest_up == 1',
+    'all_expected_identities_healthy': 'support_bridge_expected_unhealthy_lines == 0 and on(job, instance) (support_bridge_expected_healthy_lines == on(job, instance) support_bridge_expected_lines)',
+    'no_removed_identity_reactivated': 'support_bridge_removed_reactivated_lines == 0',
     'fenced_retirement_proven': 'support_bridge_fenced_unresolved_lines == 0',
     'no_pairing_required': 'support_bridge_qr_codes == 0',
     'storage_safe': 'support_bridge_eligible_storage_critical == 0',
@@ -60,7 +62,8 @@ def collect(read=query):
         for alert in read('ALERTS{alertstate="firing",severity="warning"}'):
             name = alert.get('metric', {}).get('alertname', '')
             if name in {'BridgeRepeatedDisconnects', 'BridgeHeartbeatDelayed', 'BridgeEventLoopStalls',
-                        'BridgeCallbackBacklog', 'BridgeCallbackDeadLetters', 'SupportDeliveryUncertaintyIncreased', 'BridgeIdentityFenced', 'BridgeIdentityDecommissioned'}:
+                        'BridgeCallbackBacklog', 'BridgeCallbackDeadLetters', 'SupportDeliveryUncertaintyIncreased', 'BridgeIdentityFenced', 'BridgeIdentityDecommissioned',
+                        'BridgeRegistryMismatch', 'BridgePairingStalled', 'BridgeRetainedIdentityStorageIssue'}:
                 attention.append(name)
     except Exception:
         checks['warning_alerts_readable'] = False

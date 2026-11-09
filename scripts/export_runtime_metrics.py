@@ -81,6 +81,108 @@ def database_probe():
         connection.close()
 
 
+def registry_probe():
+    """Authoritative application routing: linked-device numbers not removed.
+
+    ``is_enabled`` is the Super Admin "Add to app" decision. A newly paired
+    number is registered disabled, so it is tracked only after it is enabled.
+    """
+    import pymysql
+    host = os.environ.get('DB_HOST', '127.0.0.1')
+    if host not in {'127.0.0.1', 'localhost', '::1'}:
+        raise ValueError('EXPECTED_LOCAL_SUPPORT_DATABASE')
+    connection = pymysql.connect(host=host, port=int(os.environ.get('DB_PORT', '3306')),
+        user=os.environ['DB_USER'], password=os.environ['DB_PASSWORD'], database=os.environ['DB_NAME'],
+        connect_timeout=2, read_timeout=3, write_timeout=2, autocommit=True)
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("""SELECT phone_number_id, is_enabled FROM whatsapp_phone_numbers
+                WHERE source = 'LINKED_DEVICE' AND removed_at IS NULL""")
+            return {str(line_id): bool(enabled) for line_id, enabled in cursor.fetchall()}
+    finally:
+        connection.close()
+
+
+def manifest_probe():
+    """Durable bridge removal tombstones (the bridge is the only manifest writer)."""
+    directory = Path(os.environ.get('WHATSAPP_LINKED_DEVICE_DATA_DIRECTORY', ''))
+    if not directory.is_absolute():
+        raise ValueError('INVALID_LINKED_DEVICE_DATA_DIRECTORY')
+    with (directory / 'lines.json').open('rb') as handle:
+        body = handle.read(1024 * 1024 + 1)
+    if len(body) > 1024 * 1024:
+        raise ValueError('INVALID_LINKED_DEVICE_MANIFEST')
+    removed = json.loads(body).get('removed_line_ids') or []
+    if not isinstance(removed, list):
+        raise ValueError('INVALID_LINKED_DEVICE_MANIFEST')
+    return {str(line_id) for line_id in removed}
+
+
+IDENTITY_STATES = ('healthy', 'unknown', 'missing', 'retained', 'ineligible', 'pairing', 'disconnected', 'unpaired')
+
+
+def _identity_state(line):
+    if line is None:
+        return 'missing'
+    lifecycle = str(line.get('lifecycle') or '')
+    if lifecycle == 'decommissioned' or lifecycle.startswith('fenced_'):
+        return 'retained'
+    if line.get('eligible', True) is not True:
+        return 'ineligible'
+    if line.get('qr'):
+        return 'pairing'
+    if line.get('status') != 'connected':
+        return 'disconnected'
+    if not line.get('is_paired'):
+        return 'unpaired'
+    return 'healthy'
+
+
+def identity_inventory(registry, removed, lines):
+    """Compare every authoritatively expected identity with its own bridge state.
+
+    The expected set never comes from live sockets: a disconnected identity
+    stays expected until a Super Admin disables or removes it. ``lines`` is
+    None when the bridge snapshot is unavailable; every expected identity is
+    then ``unknown`` (unhealthy), never assumed healthy.
+    """
+    by_id = {}
+    for line in lines or []:
+        raw_id = line.get('line_id')
+        if not isinstance(raw_id, str) or not raw_id.isdigit() or not 5 <= len(raw_id) <= 32 or raw_id in by_id:
+            raise ValueError('INVALID_BRIDGE_IDENTITY')
+        by_id[raw_id] = line
+    for line_id in registry:
+        if not line_id.isdigit() or not 5 <= len(line_id) <= 32:
+            raise ValueError('INVALID_REGISTRY_IDENTITY')
+    expected = sorted(line_id for line_id, enabled in registry.items() if enabled)
+    values, healthy = {}, 0
+    for line_id in expected:
+        state = 'unknown' if lines is None else _identity_state(by_id.get(line_id))
+        healthy += state == 'healthy'
+        labels = 'identity="' + hashlib.sha256(line_id.encode()).hexdigest()[:16] + '"'
+        values['support_bridge_identity_expected{' + labels + '}'] = 1
+        values['support_bridge_identity_expected_healthy{' + labels + '}'] = int(state == 'healthy')
+        for name in IDENTITY_STATES:
+            values['support_bridge_identity_expected_state{' + labels + ',state="' + name + '"}'] = int(state == name)
+    live = {line_id for line_id, line in by_id.items() if line.get('lifecycle') != 'decommissioned'}
+    values.update(
+        support_bridge_expected_lines=len(expected),
+        support_bridge_expected_healthy_lines=healthy,
+        support_bridge_expected_unhealthy_lines=len(expected) - healthy,
+        # Visible in diagnostics, never expected: disabled in the app.
+        support_bridge_disabled_lines=sum(not enabled for enabled in registry.values()),
+        # Bridge serves a number the application has no registry row for.
+        support_bridge_unregistered_lines=sum(line_id not in registry and line.get('eligible', True) is True
+                                              and line.get('lifecycle') != 'decommissioned' for line_id, line in by_id.items()),
+        # Pairing of a not-yet-enabled number is a transition, not a disconnect.
+        support_bridge_pairing_lines=sum(bool(line.get('qr')) for line_id, line in by_id.items() if line_id not in expected),
+        # A durably removed number must not reappear as routable or live.
+        support_bridge_removed_reactivated_lines=len((set(registry) | live) & removed),
+    )
+    return values
+
+
 def number(value):
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
         raise ValueError('INVALID_DIAGNOSTIC_VALUE')
@@ -200,19 +302,28 @@ def bridge_metrics(snapshot, tcp=None):
     return values
 
 
-def collect(client, *, probe=api_probe, bridge=bridge_probe, database=database_probe, now=time.time, tcp=tcp_samples):
+def collect(client, *, probe=api_probe, bridge=bridge_probe, database=database_probe, now=time.time, tcp=tcp_samples,
+            registry=registry_probe, manifest=manifest_probe):
     values = {'support_runtime_check_timestamp_seconds': now()}
+    # Expected identities come from the registry on every run (no static count).
+    # An unreadable registry or manifest alarms; it never yields "all healthy".
     try:
-        expected = int(os.environ.get('WHATSAPP_EXPECTED_IDENTITIES', '8'))
-        if not 1 <= expected <= 128:
-            raise ValueError('INVALID_EXPECTED_IDENTITIES')
-    except ValueError:
-        expected = 0  # Invalid configuration must alarm, not match an empty bridge.
-    values['support_bridge_expected_lines'] = expected
+        configured = registry()
+        values['support_bridge_registry_up'] = 1
+    except Exception:
+        configured = None
+        values['support_bridge_registry_up'] = 0
+    try:
+        removed = manifest()
+        values['support_bridge_manifest_up'] = 1
+    except Exception:
+        removed = None
+        values['support_bridge_manifest_up'] = 0
     try:
         values['support_api_up'] = int(probe())
     except Exception:
         values['support_api_up'] = 0
+    snapshot = None
     try:
         snapshot = bridge()
         # Retain operational health even if optional diagnostics are malformed.
@@ -230,7 +341,15 @@ def collect(client, *, probe=api_probe, bridge=bridge_probe, database=database_p
         except Exception:
             values['support_bridge_diagnostics_up'] = 0
     except Exception:
+        snapshot = None
         values.update(support_bridge_ready=0, support_bridge_diagnostics_up=0)
+    if configured is not None and removed is not None:
+        try:
+            lines = snapshot.get('lines') if isinstance(snapshot, dict) else None
+            values.update(identity_inventory(configured, removed, lines if isinstance(lines, list) else None))
+        except Exception:
+            # Inconsistent identifiers: report the inventory as unavailable.
+            values['support_bridge_registry_up'] = 0
     try:
         counts = database()
         values['support_delivery_database_check_up'] = 1
