@@ -117,9 +117,8 @@ function reconcilePendingTextMessages() {
 }
 
 function showMessagePreferencesError(message) {
-  const element = $('messagePreferencesError');
-  element.textContent = message || '';
-  element.style.display = message ? 'block' : 'none';
+  $('messagePreferencesError').style.display = 'none';
+  if (message) notify(message, 'error');
 }
 
 function updateMessagePreferenceCounts() {
@@ -854,9 +853,8 @@ const AI_REASON_LABELS = {
 };
 
 function showAiSettingsError(message) {
-  const element = $('aiSettingsError');
-  element.textContent = message || '';
-  element.style.display = message ? 'block' : 'none';
+  $('aiSettingsError').style.display = 'none';
+  if (message) notify(message, 'error');
 }
 
 function selectedAiControlMode() {
@@ -1041,10 +1039,10 @@ async function saveAiSettings(event) {
   }
 }
 
+// Settings feedback appears as a brief, self-hiding toast (bottom right).
 function showWhatsAppFeedback(id, message) {
-  const element = $(id);
-  element.textContent = message || '';
-  element.style.display = message ? 'block' : 'none';
+  $(id).style.display = 'none';
+  if (message) notify(message, id === 'whatsappError' ? 'error' : 'success');
 }
 
 function clearWhatsAppFeedback() {
@@ -1244,6 +1242,7 @@ function renderLinkedDeviceStatus(payload) {
   $('addLinkedDeviceBtn').textContent = pendingLinkedDeviceAddition() ? 'Retry linking' : 'Link another number';
   syncBridgeRestartButton();
   if (!payload?.configured) return;
+  alertLinkedDeviceProblems(payload.lines || []);
   for (const line of payload.lines || []) {
     const row = document.createElement('div');
     row.className = 'linked-device-line';
@@ -1295,6 +1294,28 @@ function renderLinkedDeviceStatus(payload) {
     container.append(row);
   }
   text($('linkedDeviceStatus'), 'Only paired lines added to the app can send or receive messages here.');
+}
+
+// A number that needs attention gets one brief toast when the problem first
+// appears in this page. The page forgets on refresh, so the toast shows again
+// after a refresh while the problem lasts, then hides itself.
+function alertLinkedDeviceProblems(lines) {
+  state.alertedLinkedDeviceProblems ??= new Set();
+  const current = new Set();
+  for (const line of lines) {
+    const problem = line.recovery_category === 'storage_failure' ? 'needs storage recovery'
+      : line.status === 'error' ? 'connection failed'
+      : line.status === 'logged_out' ? 'was logged out by WhatsApp' : null;
+    if (!problem) continue;
+    const key = line.line_id + ':' + problem;
+    current.add(key);
+    if (state.alertedLinkedDeviceProblems.has(key)) continue;
+    const registryNumber = (state.whatsappRegistry?.numbers || []).find(item => String(item.phone_number_id) === String(line.line_id));
+    const name = registryNumber?.display_name || line.display_phone_number || registryNumber?.display_phone_number || line.line_id;
+    notify(name + ': ' + problem + '.', 'error');
+  }
+  // A resolved problem may alert again if it comes back later.
+  state.alertedLinkedDeviceProblems = current;
 }
 
 // "Restart WhatsApp service" (Admins and Super Admins). The request never
@@ -1393,35 +1414,34 @@ function renderLineHealth(payload) {
   const storageAlert = ['warning', 'critical'].includes(storage?.level);
   const unavailableOnly = storageAlert && storage.issues?.length && storage.issues.every(issue =>
     ['BRIDGE_UNAVAILABLE', 'MONITOR_UNAVAILABLE'].includes(issue.code));
-  $('lineAlertBanner').classList.toggle('hidden', !alerts.length && !storageAlert);
+  // Line problems are brief, self-hiding toasts (bottom right), shown once per
+  // problem and again after a page refresh while it lasts. The old persistent
+  // banner stays hidden.
+  $('lineAlertBanner').classList.toggle('hidden', true);
+  let message = '', canAct = false;
   if (unavailableOnly) {
-    text($('lineAlertText'), 'WhatsApp connection status is unavailable. Contact your administrator to check the bridge and monitoring. Saved sessions are retained; this does not establish a storage failure or require relinking.');
-    $('lineAlertActionBtn').classList.toggle('hidden', true);
+    message = 'WhatsApp status is unavailable.';
   } else if (storageAlert) {
     const affected = [...new Set((storage.issues || []).map(issue => issue.name).filter(Boolean))];
     const scope = affected.length && !(storage.issues || []).some(issue => !issue.line_id) ? ' for ' + affected.join(', ') : '';
-    const pause = storage.level === 'critical' ? ' New sends on affected lines are paused.' : '';
-    text($('lineAlertText'), 'WhatsApp storage needs attention' + scope + '.' + pause +
-      ' Contact your server administrator to check disk space and automatic session maintenance. Saved sessions are retained.' +
-      (alerts.length ? ' ' + alerts.length + ' WhatsApp line' + (alerts.length > 1 ? 's are' : ' is') + ' also offline.' : ''));
-    $('lineAlertActionBtn').classList.toggle('hidden', true);
+    message = 'WhatsApp storage needs attention' + scope + '.' + (storage.level === 'critical' ? ' New sends are paused.' : '');
   } else if (alerts.length) {
     const first = alerts[0];
     const more = alerts.length > 1 ? ' and ' + (alerts.length - 1) + ' more' : '';
     const relink = first.connection_state === 'relink_required' || first.status === 'logged_out';
     const problem = relink ? ' needs relinking' : first.connection_state === 'storage_recovery_required' ? ' needs storage recovery' : ' is temporarily unavailable';
-    const next = relink ? ' Ask an authorized staff member to relink the same phone; conversation history stays.'
-      : first.recovery_action === 'automatic' ? ' Automatic reconnection is in progress. Check saved message statuses before retrying.'
-      : ' Contact your administrator. Saved sessions and messages are retained; relinking is not the default recovery action.';
-    text($('lineAlertText'), first.name + more + problem + lineOfflineSince(first) + '.' + next);
-    $('lineAlertActionBtn').classList.toggle('hidden', !canLinkWhatsApp());
+    message = first.name + more + problem + lineOfflineSince(first) + '.';
+    canAct = canLinkWhatsApp();
   }
+  const storageKey = storageAlert ? 'storage:' + storage.level + ':' + (storage.issues || [])
+    .map(issue => [issue.line_id || 'shared', issue.code, issue.level].join(':')).sort().join(',') : null;
+  const freshKeys = [...alerts.map(line => line.line_id + ':' + line.since), storageKey]
+    .filter(key => key && !state.lineAlertsSeen.has(key));
+  if (freshKeys.length && message) notify(message, 'error', canAct ? () => openWhatsAppModal() : null);
   // Sound once per outage, for the people who can fix it (every staff role).
   const fresh = alerts.filter(line => !state.lineAlertsSeen.has(line.line_id + ':' + line.since));
   for (const line of alerts) state.lineAlertsSeen.add(line.line_id + ':' + line.since);
   if (fresh.length && canLinkWhatsApp()) notifyNewCustomerActivity(fresh[0].name + ' needs attention: its WhatsApp line is offline.');
-  const storageKey = storageAlert ? 'storage:' + storage.level + ':' + (storage.issues || [])
-    .map(issue => [issue.line_id || 'shared', issue.code, issue.level].join(':')).sort().join(',') : null;
   for (const key of state.lineAlertsSeen) if (key.startsWith('storage:') && key !== storageKey) state.lineAlertsSeen.delete(key);
   if (storageKey && !state.lineAlertsSeen.has(storageKey)) {
     state.lineAlertsSeen.add(storageKey);
@@ -1685,9 +1705,8 @@ async function refreshWhatsAppRegistry() {
 }
 
 function showStaffFeedback(id, message) {
-  const element = $(id);
-  element.textContent = message || '';
-  element.style.display = message ? 'block' : 'none';
+  $(id).style.display = 'none';
+  if (message) notify(message, id === 'staffError' ? 'error' : 'success');
 }
 
 function setFieldError(inputId, errorId, message) {
