@@ -26,17 +26,11 @@ export const patchManifest = Object.freeze({
     sha256: 'ff8b19ff02491fa080ee371f066d49c94acb903207dd0d9fdb5548e5a594fb4a',
     edits: [
       hook('makeSocket'),
-      // No extra pings, heartbeat deadline changes or payload logging.
+      // Passive, bounded diagnostics only: no extra pings, deadline changes,
+      // payload logging or dependency on a successful observer callback.
       edit('    const bridgeDetachedTask = config.bridgeDetachedTask ?? bridgeTask;',
         `    const bridgeDetachedTask = config.bridgeDetachedTask ?? bridgeTask;
-    const bridgeDiagnostic = sample => { try { config.bridgeConnectionDiagnostics?.(sample); } catch {} };
-    let bridgeResolveTransportClosed;
-    const bridgeTransportClosed = new Promise(resolve => { bridgeResolveTransportClosed = resolve; });
-    let bridgeHeartbeatSequence = 0;`),
-      edit('    ws.connect();',
-        "    ws.connect();\n    ws.socket?.once('close', () => bridgeResolveTransportClosed());"),
-      edit('    const onMessageReceived = async (data) => {',
-        "    const onMessageReceived = async (data) => {\n        bridgeDiagnostic({event: 'raw_frame', bytes: data.byteLength});"),
+    const bridgeDiagnostic = sample => { try { config.bridgeConnectionDiagnostics?.(sample); } catch {} };`),
       edit('            lastDateRecv = new Date();\n            let anyTriggered = false;',
         "            lastDateRecv = new Date();\n            bridgeDiagnostic({event: 'decoded_frame'});\n            let anyTriggered = false;"),
       edit('    const startKeepAliveRequest = () => (keepAliveReq = setInterval(() => {',
@@ -50,36 +44,9 @@ export const patchManifest = Object.freeze({
         "        const diff = Date.now() - lastDateRecv.getTime();\n        bridgeDiagnostic({event: 'heartbeat_tick', frame_age_ms: diff, timer_delay_ms: bridgeTimerDelay});"),
       edit('        if (diff > keepAliveIntervalMs + 5000) {',
         "        if (diff > keepAliveIntervalMs + 5000) {\n            bridgeDiagnostic({event: 'heartbeat_timeout'});"),
-      edit('            // if its all good, send a keep alive request\n            query({',
-        "            // if its all good, send a keep alive request\n            const bridgeQuerySequence = ++bridgeHeartbeatSequence;\n            const bridgePingId = generateMessageTag();\n            bridgeDiagnostic({event: 'heartbeat_request', query_sequence: bridgeQuerySequence});\n            query({"),
-      edit("                    id: generateMessageTag(),\n                    to: S_WHATSAPP_NET,\n                    type: 'get',\n                    xmlns: 'w:p'",
-        "                    id: bridgePingId,\n                    to: S_WHATSAPP_NET,\n                    type: 'get',\n                    xmlns: 'w:p'"),
       edit("                content: [{ tag: 'ping', attrs: {} }]\n            }).catch(err => {",
-        `                content: [{ tag: 'ping', attrs: {} }]
-            }).then(result => {
-                const elapsed = performance.now() - bridgeTick;
-                const valid = result?.tag === 'iq' && result.attrs?.type === 'result' && result.attrs?.id === bridgePingId;
-                bridgeDiagnostic({event: result === undefined ? 'heartbeat_query_timeout' : valid ? 'heartbeat_result' : 'heartbeat_error',
-                    query_sequence: bridgeQuerySequence, query_elapsed_ms: elapsed, ...(valid ? {rtt_ms: elapsed} : {})});
-            }).catch(err => {
-                bridgeDiagnostic({event: 'heartbeat_error', query_sequence: bridgeQuerySequence, query_elapsed_ms: performance.now() - bridgeTick});`),
+        "                content: [{ tag: 'ping', attrs: {} }]\n            }).then(() => {\n                bridgeDiagnostic({event: 'heartbeat_result', rtt_ms: performance.now() - bridgeTick});\n            }).catch(err => {\n                bridgeDiagnostic({event: 'heartbeat_error'});"),
       edit('    }, keepAliveIntervalMs));', '    }, keepAliveIntervalMs));\n    };'),
-      edit('        closed = true;\n        logger.info',
-        "        closed = true;\n        try { config.bridgeTransportClosing?.(error); } catch {}\n        logger.info"),
-      edit(`        if (!ws.isClosed && !ws.isClosing) {
-            try {
-                await ws.close();
-            }
-            catch { }
-        }
-        for (const handler of socketEndHandlers) {`,
-        `        try {
-            if (config.bridgeCloseTransport) await config.bridgeCloseTransport(ws, error);
-            else if (!ws.isClosed && !ws.isClosing) await ws.close();
-        } catch { }
-        // Resolve only on physical closure, never on an elapsed timeout.
-        if (ws.isClosed) bridgeResolveTransportClosed();
-        for (const handler of socketEndHandlers) {`),
       ...named('    const rotateSignedPreKey = async () => {', '    };\n    const executeUSyncQuery = async (usyncQuery) => {'),
       ...named('    const requestPairingCode = async (phoneNumber, customPairingCode) => {', '    };\n    async function generatePairingKey() {'),
       // Track the actual upload/retry operation, even if its timeout race wins.
@@ -97,7 +64,7 @@ export const patchManifest = Object.freeze({
       // callback without delaying native query-response/TAG event handlers.
       edit("    ws.on('CB:ib,,edge_routing', (node) => {", "    ws.on('CB:ib,,edge_routing', bridgeTask((node) => {"),
       edit('    });\n    let didStartBuffer = false;', '    }));\n    let didStartBuffer = false;'),
-      edit("        type: 'md',\n        ws,", "        type: 'md',\n        bridgeTaskVersion: 1,\n        bridgeConnectionDiagnosticsVersion: 2,\n        bridgeTransportClosed,\n        ws,"),
+      edit("        type: 'md',\n        ws,", "        type: 'md',\n        bridgeTaskVersion: 1,\n        bridgeConnectionDiagnosticsVersion: 1,\n        ws,"),
     ],
   },
   'lib/Socket/chats.js': {

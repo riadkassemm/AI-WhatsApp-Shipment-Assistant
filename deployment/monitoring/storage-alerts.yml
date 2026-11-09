@@ -30,7 +30,7 @@ groups:
         for: 5m
         labels: {severity: critical}
       - alert: BridgeStorageUnavailable
-        expr: ((bridge_storage_health_level == 2 and on(job, instance) support_bridge_eligible_storage_critical == 1) or absent(support_bridge_eligible_storage_critical) or time() - bridge_watchdog_timestamp_seconds > 180 or absent(bridge_watchdog_timestamp_seconds) or absent(bridge_storage_health_level)) and on() (support_monitoring_expected == 1)
+        expr: (bridge_storage_health_level == 2 or time() - bridge_watchdog_timestamp_seconds > 180 or absent(bridge_watchdog_timestamp_seconds) or absent(bridge_storage_health_level)) and on() (support_monitoring_expected == 1)
         for: 2m
         labels: {severity: critical}
       - alert: LocalBackupRestoreOverdue
@@ -57,61 +57,10 @@ groups:
         expr: (support_api_up == 0 or absent(support_api_up) or support_redis_up == 0 or absent(support_redis_up)) and on() (support_monitoring_expected == 1)
         for: 2m
         labels: {severity: critical}
-      # Expected identities = registry numbers a Super Admin enabled and did not
-      # remove, compared one by one with the bridge (never derived from live
-      # sockets). Missing registry/manifest/bridge data alarms, never passes.
       - alert: BridgeDisconnected
-        expr: (support_bridge_ready == 0 or absent(support_bridge_ready) or support_bridge_registry_up == 0 or absent(support_bridge_registry_up) or support_bridge_manifest_up == 0 or absent(support_bridge_manifest_up) or support_bridge_expected_unhealthy_lines > 0 or absent(support_bridge_expected_unhealthy_lines) or absent(support_bridge_expected_lines) or support_bridge_expected_healthy_lines != on(job, instance) support_bridge_expected_lines or absent(support_bridge_expected_healthy_lines)) and on() (support_monitoring_expected == 1)
+        expr: (support_bridge_ready == 0 or absent(support_bridge_ready) or support_bridge_connected_lines < support_bridge_lines or support_bridge_lines != 8 or absent(support_bridge_connected_lines) or support_bridge_paired_lines != 8 or absent(support_bridge_paired_lines) or support_bridge_qr_codes != 0 or absent(support_bridge_qr_codes)) and on() (support_monitoring_expected == 1)
         for: 2m
         labels: {severity: critical}
-      - alert: BridgeRemovedIdentityReactivated
-        expr: (support_bridge_removed_reactivated_lines > 0 or (absent(support_bridge_removed_reactivated_lines) and on() support_bridge_manifest_up == 1 and on() support_bridge_registry_up == 1)) and on() (support_monitoring_expected == 1)
-        for: 2m
-        labels: {severity: critical}
-        annotations:
-          summary: "A durably removed WhatsApp identity is routable or live again"
-          description: "Removal tombstones must not be reused. Investigate before any further change; preserve all evidence."
-      - alert: BridgeRegistryMismatch
-        expr: (support_bridge_unregistered_lines > 0) and on() (support_monitoring_expected == 1)
-        for: 10m
-        labels: {severity: warning}
-        annotations:
-          summary: "The bridge serves an identity the application registry does not list"
-          description: "Compare the WhatsApp number registry with bridge diagnostics. A number appears in monitoring only after it is enabled in the app."
-      - alert: BridgePairingStalled
-        expr: (support_bridge_pairing_lines > 0) and on() (support_monitoring_expected == 1)
-        for: 30m
-        labels: {severity: warning}
-        annotations:
-          summary: "A new WhatsApp identity has been waiting for pairing for 30 minutes"
-          description: "Pairing of a not-yet-enabled number is not a disconnect. Finish or cancel pairing from Customer Support."
-      - alert: BridgeRetainedIdentityStorageIssue
-        expr: (bridge_storage_health_level == 2 and on(job, instance) support_bridge_eligible_storage_critical == 0) and on() (support_monitoring_expected == 1)
-        for: 10m
-        labels: {severity: warning}
-        annotations:
-          summary: "Storage issues are limited to safely retained or decommissioned identities"
-          description: "Active identities are unaffected; BridgeStorageUnavailable covers them. Retained evidence must not be repaired or reused."
-      - alert: BridgeIdentityFenced
-        expr: (support_bridge_fenced_lines > 0) and on() (support_monitoring_expected == 1)
-        for: 0m
-        labels: {severity: warning}
-        annotations:
-          summary: "WhatsApp identity retained offline for authentication review"
-          description: "Healthy eligible lines may operate. Retention never authorizes recovery, relinking, fence removal or uncertain resends."
-      - alert: BridgeIdentityIsolationUnproven
-        expr: (support_bridge_fenced_unresolved_lines > 0 or absent(support_bridge_fenced_unresolved_lines)) and on() (support_monitoring_expected == 1)
-        for: 0m
-        labels: {severity: critical}
-        annotations:
-          summary: "Fenced identity lacks safe retirement evidence; do not restart"
-      - alert: BridgeIdentityDecommissioned
-        expr: (support_bridge_decommissioned_lines > 0) and on() (support_monitoring_expected == 1)
-        for: 0m
-        labels: {severity: warning}
-        annotations:
-          summary: "WhatsApp session permanently decommissioned; evidence retained"
-          description: "Remote unlink may require action on the selected number's primary phone. Never reuse abandoned credentials or replay uncertain deliveries."
       - alert: InboundWorkUnresolved
         expr: (support_inbound_pending > 0 or support_inbound_inflight > 0 or support_inbound_invalid > 0) and on() (support_monitoring_expected == 1)
         for: 5m
@@ -147,27 +96,6 @@ groups:
         annotations:
           summary: "Heartbeat observation is delayed for {{ $labels.identity }}"
           description: "Compare provider heartbeat diagnostics with event-loop and host/network telemetry; no customer payload logging is required."
-      - alert: BridgeHeartbeatUnanswered
-        expr: ((time() - support_bridge_heartbeat_success_timestamp_seconds > 90) and (time() - support_bridge_generation_start_timestamp_seconds > 90)) and on (job, instance, identity) (support_bridge_identity_connected == 1)
-        for: 0m
-        labels: {severity: warning}
-        annotations:
-          summary: "No confirmed heartbeat reply for {{ $labels.identity }}"
-          description: "Timer execution is not a successful heartbeat. Compare query timeouts, raw/decoded receive timestamps, address family and TCP evidence."
-      - alert: BridgeHeartbeatQueryTimeouts
-        expr: increase(support_bridge_heartbeat_query_timeouts_total[10m]) > 0
-        for: 0m
-        labels: {severity: warning}
-        annotations:
-          summary: "A WhatsApp heartbeat query timed out for {{ $labels.identity }}"
-          description: "An undefined provider query result is a timeout, never a successful RTT. Correlate with recovery duration and receive-path diagnostics."
-      - alert: BridgeTcpDiagnosticsMissing
-        expr: (support_bridge_tcp_sample_up == 0) and on (job, instance, identity) (support_bridge_identity_connected == 1)
-        for: 2m
-        labels: {severity: warning}
-        annotations:
-          summary: "TCP evidence is unavailable for {{ $labels.identity }}"
-          description: "Check ss availability and collector permissions. Missing evidence does not mean zero retransmissions. No network probes or session restart are needed."
       - alert: BridgeEventLoopStalls
         expr: increase(support_bridge_event_loop_lag_spikes_total[10m]) > 0
         for: 0m

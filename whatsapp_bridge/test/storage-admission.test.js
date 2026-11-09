@@ -27,7 +27,6 @@ async function fixture(t, {prepareMedia} = {}) {
   const ws = new EventEmitter();
   ws.isOpen = true;
   const socket = {
-    bridgeTransportClosed: Promise.resolve(), // This fixture has no physical transport.
     ws, calls: [], user: { id: '96170111111:1@s.whatsapp.net' }, end: () => {},
     ev: { process: handler => { socket.eventHandler = handler; return () => {}; } },
     sendMessage: async (jid, content, options) => {

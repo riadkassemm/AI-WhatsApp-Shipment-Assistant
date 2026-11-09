@@ -14,10 +14,8 @@ import urllib.parse
 
 try:
     from scripts.check_inbound_drain import inspect
-    from scripts.bridge_tcp_diagnostics import tcp_samples
 except ModuleNotFoundError:
     from check_inbound_drain import inspect
-    from bridge_tcp_diagnostics import tcp_samples
 
 CATEGORIES = ('temporary_transport', 'restart_required', 'logged_out', 'authentication_failure',
               'session_conflict', 'protocol_failure', 'storage_failure')
@@ -81,133 +79,13 @@ def database_probe():
         connection.close()
 
 
-def registry_probe():
-    """Authoritative application routing: linked-device numbers not removed.
-
-    ``is_enabled`` is the Super Admin "Add to app" decision. A newly paired
-    number is registered disabled, so it is tracked only after it is enabled.
-    Removal disables the row first (LINKED_DEVICE_REMOVAL_STARTED) and deletes
-    it only when the removal is durably confirmed (LINKED_DEVICE_LINE_REMOVED):
-    until then the identity stays expected ("removal_pending").
-    """
-    import pymysql
-    host = os.environ.get('DB_HOST', '127.0.0.1')
-    if host not in {'127.0.0.1', 'localhost', '::1'}:
-        raise ValueError('EXPECTED_LOCAL_SUPPORT_DATABASE')
-    connection = pymysql.connect(host=host, port=int(os.environ.get('DB_PORT', '3306')),
-        user=os.environ['DB_USER'], password=os.environ['DB_PASSWORD'], database=os.environ['DB_NAME'],
-        connect_timeout=2, read_timeout=3, write_timeout=2, autocommit=True)
-    try:
-        with connection.cursor() as cursor:
-            cursor.execute("""SELECT p.phone_number_id, p.is_enabled,
-                    (SELECT a.action FROM whatsapp_integration_audit a
-                      WHERE BINARY a.phone_number_id = BINARY p.phone_number_id
-                        AND a.action IN ('LINKED_DEVICE_REMOVAL_STARTED', 'LINKED_DEVICE_LINE_REMOVED',
-                                         'WHATSAPP_NUMBER_ENABLED', 'WHATSAPP_NUMBER_DISABLED')
-                      ORDER BY a.id DESC LIMIT 1)
-                FROM whatsapp_phone_numbers p WHERE p.source = 'LINKED_DEVICE' AND p.removed_at IS NULL""")
-            return {str(line_id): 'enabled' if enabled else
-                    'removal_pending' if last_action == 'LINKED_DEVICE_REMOVAL_STARTED' else 'disabled'
-                    for line_id, enabled, last_action in cursor.fetchall()}
-    finally:
-        connection.close()
-
-
-def manifest_probe():
-    """Durable bridge removal tombstones (the bridge is the only manifest writer)."""
-    directory = Path(os.environ.get('WHATSAPP_LINKED_DEVICE_DATA_DIRECTORY', ''))
-    if not directory.is_absolute():
-        raise ValueError('INVALID_LINKED_DEVICE_DATA_DIRECTORY')
-    with (directory / 'lines.json').open('rb') as handle:
-        body = handle.read(1024 * 1024 + 1)
-    if len(body) > 1024 * 1024:
-        raise ValueError('INVALID_LINKED_DEVICE_MANIFEST')
-    removed = json.loads(body).get('removed_line_ids') or []
-    if not isinstance(removed, list):
-        raise ValueError('INVALID_LINKED_DEVICE_MANIFEST')
-    return {str(line_id) for line_id in removed}
-
-
-IDENTITY_STATES = ('healthy', 'unknown', 'missing', 'retained', 'ineligible', 'pairing', 'disconnected', 'unpaired')
-
-
-def _identity_state(line):
-    if line is None:
-        return 'missing'
-    lifecycle = str(line.get('lifecycle') or '')
-    if lifecycle == 'decommissioned' or lifecycle.startswith('fenced_'):
-        return 'retained'
-    if line.get('eligible', True) is not True:
-        return 'ineligible'
-    if line.get('qr'):
-        return 'pairing'
-    if line.get('status') != 'connected':
-        return 'disconnected'
-    if not line.get('is_paired'):
-        return 'unpaired'
-    return 'healthy'
-
-
-def identity_inventory(registry, removed, lines):
-    """Compare every authoritatively expected identity with its own bridge state.
-
-    The expected set never comes from live sockets: a disconnected identity
-    stays expected until a Super Admin disables or removes it. ``lines`` is
-    None when the bridge snapshot is unavailable; every expected identity is
-    then ``unknown`` (unhealthy), never assumed healthy.
-    """
-    by_id = {}
-    for line in lines or []:
-        raw_id = line.get('line_id')
-        if not isinstance(raw_id, str) or not raw_id.isdigit() or not 5 <= len(raw_id) <= 32 or raw_id in by_id:
-            raise ValueError('INVALID_BRIDGE_IDENTITY')
-        by_id[raw_id] = line
-    for line_id in registry:
-        if not line_id.isdigit() or not 5 <= len(line_id) <= 32:
-            raise ValueError('INVALID_REGISTRY_IDENTITY')
-    # True/False are accepted as enabled/disabled for compatibility.
-    lifecycle = {line_id: ('enabled' if value is True else 'disabled' if value is False else value)
-                 for line_id, value in registry.items()}
-    if any(value not in {'enabled', 'removal_pending', 'disabled'} for value in lifecycle.values()):
-        raise ValueError('INVALID_REGISTRY_STATE')
-    expected = sorted(line_id for line_id, value in lifecycle.items() if value != 'disabled')
-    values, healthy = {}, 0
-    for line_id in expected:
-        state = 'unknown' if lines is None else _identity_state(by_id.get(line_id))
-        healthy += state == 'healthy'
-        labels = 'identity="' + hashlib.sha256(line_id.encode()).hexdigest()[:16] + '"'
-        values['support_bridge_identity_expected{' + labels + '}'] = 1
-        values['support_bridge_identity_expected_healthy{' + labels + '}'] = int(state == 'healthy')
-        for name in IDENTITY_STATES:
-            values['support_bridge_identity_expected_state{' + labels + ',state="' + name + '"}'] = int(state == name)
-    live = {line_id for line_id, line in by_id.items() if line.get('lifecycle') != 'decommissioned'}
-    values.update(
-        support_bridge_expected_lines=len(expected),
-        support_bridge_expected_healthy_lines=healthy,
-        support_bridge_expected_unhealthy_lines=len(expected) - healthy,
-        # Visible in diagnostics, never expected: disabled in the app.
-        support_bridge_disabled_lines=sum(value == 'disabled' for value in lifecycle.values()),
-        # Removal started but not durably confirmed: still expected (alerts if stuck).
-        support_bridge_removal_pending_lines=sum(value == 'removal_pending' for value in lifecycle.values()),
-        # Bridge serves a number the application has no registry row for.
-        support_bridge_unregistered_lines=sum(line_id not in registry and line.get('eligible', True) is True
-                                              and line.get('lifecycle') != 'decommissioned' for line_id, line in by_id.items()),
-        # Pairing of a not-yet-enabled number is a transition, not a disconnect.
-        support_bridge_pairing_lines=sum(bool(line.get('qr')) for line_id, line in by_id.items() if line_id not in expected),
-        # A durably removed number must not reappear as routable or live.
-        support_bridge_removed_reactivated_lines=len((set(registry) | live) & removed),
-    )
-    return values
-
-
 def number(value):
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
         raise ValueError('INVALID_DIAGNOSTIC_VALUE')
     return value
 
 
-def bridge_metrics(snapshot, tcp=None):
-    tcp = tcp or {}
+def bridge_metrics(snapshot):
     lines = snapshot['lines']
     if not isinstance(lines, list) or not 0 <= len(lines) <= 128:
         raise ValueError('INVALID_BRIDGE_LINES')
@@ -215,13 +93,6 @@ def bridge_metrics(snapshot, tcp=None):
         'support_bridge_connected_lines': sum(line.get('status') == 'connected' for line in lines),
         'support_bridge_paired_lines': sum(bool(line.get('is_paired')) for line in lines),
         'support_bridge_qr_codes': sum(bool(line.get('qr')) for line in lines)}
-    eligible = [line for line in lines if line.get('eligible', True) is True]
-    values.update(support_bridge_eligible_lines=len(eligible),
-        support_bridge_eligible_paired_lines=sum(bool(line.get('is_paired')) for line in eligible),
-        support_bridge_fenced_lines=sum(str(line.get('lifecycle', '')).startswith('fenced_') for line in lines),
-        support_bridge_fenced_unresolved_lines=sum(line.get('lifecycle') == 'fenced_unresolved' for line in lines),
-        support_bridge_decommissioned_lines=sum(line.get('lifecycle') == 'decommissioned' for line in lines),
-        support_bridge_eligible_storage_critical=int(snapshot.get('runtime', {}).get('eligible_storage_critical') is not False))
     diagnostics_ok = bool(lines)
     identities = set()
     for line in lines:
@@ -232,19 +103,9 @@ def bridge_metrics(snapshot, tcp=None):
         identity = hashlib.sha256(raw_id.encode()).hexdigest()[:16]
         labels = 'identity="' + identity + '"'
         values['support_bridge_identity_connected{' + labels + '}'] = int(line.get('status') == 'connected')
-        retained = line.get('lifecycle') in {'fenced_retained', 'decommissioned'} and line.get('isolation', {}).get('safe') is True
-        values['support_bridge_identity_decommissioned{' + labels + '}'] = int(line.get('lifecycle') == 'decommissioned')
-        values['support_bridge_identity_fenced{' + labels + '}'] = int(str(line.get('lifecycle', '')).startswith('fenced_'))
-        values['support_bridge_identity_retained{' + labels + '}'] = int(retained)
-        # Fenced identities still expose callback and uncertainty backlogs even
-        # though starting a transport to obtain heartbeat metrics is forbidden.
-        for metric, field in [('callback_pending', 'pending_callbacks'), ('callback_oldest_age_seconds', 'oldest_callback_age_seconds'),
-                ('callback_waiting_history', 'waiting_history_reactions'), ('callback_dead_letters', 'failed_callbacks'),
-                ('uncertain_sends', 'uncertain_sends')]:
-            values['support_bridge_' + metric + '{' + labels + '}'] = number(line[field])
         diagnostic = line.get('diagnostics') or {}
-        supported = diagnostic.get('supported') is True and diagnostic.get('version') == 2
-        diagnostics_ok = diagnostics_ok and (supported or retained)
+        supported = diagnostic.get('supported') is True
+        diagnostics_ok = diagnostics_ok and supported
         values['support_bridge_identity_diagnostics_up{' + labels + '}'] = int(supported)
         if not supported:
             continue
@@ -254,18 +115,6 @@ def bridge_metrics(snapshot, tcp=None):
             'recovery_seconds_sum': diagnostic['recovery_seconds_sum'],
             'recovery_count': diagnostic['recovery_count'],
             'recovery_seconds_last': diagnostic['recovery_seconds_last'],
-            'generation': diagnostic['generation'],
-            'generation_start_timestamp_seconds': diagnostic['generation_started_at'] / 1000,
-            'heartbeat_requests_total': diagnostic['heartbeat_requests'],
-            'heartbeat_successes_total': diagnostic['heartbeat_successes'],
-            'heartbeat_query_timeouts_total': diagnostic['heartbeat_query_timeouts'],
-            'heartbeat_request_timestamp_seconds': (diagnostic['heartbeat_request_at'] or 0) / 1000,
-            'heartbeat_query_completed_timestamp_seconds': (diagnostic['heartbeat_query_completed_at'] or 0) / 1000,
-            'heartbeat_success_timestamp_seconds': (diagnostic['heartbeat_success_at'] or 0) / 1000,
-            'raw_frames_total': diagnostic['raw_frames'],
-            'decoded_frames_total': diagnostic['decoded_frames'],
-            'raw_frame_timestamp_seconds': (diagnostic['last_raw_frame_at'] or 0) / 1000,
-            'decoded_frame_timestamp_seconds': (diagnostic['last_frame_at'] or 0) / 1000,
             'heartbeat_errors_total': diagnostic['heartbeat_failures'],
             'heartbeat_timeouts_total': diagnostic['heartbeat_timeouts'],
             'heartbeat_frame_age_seconds': diagnostic['heartbeat_frame_age_ms'] / 1000,
@@ -277,29 +126,6 @@ def bridge_metrics(snapshot, tcp=None):
             'callback_dead_letters': line['failed_callbacks'],
             'uncertain_sends': line['uncertain_sends'],
         }
-        transport = diagnostic.get('transport') or {}
-        family = transport.get('family')
-        if family in {'IPv4', 'IPv6', 'unknown'}:
-            values['support_bridge_transport_family{' + labels + ',family="' + family + '"}'] = 1
-        configured_family = diagnostic.get('configured_ip_family')
-        if type(configured_family) is int and configured_family in (0, 4):
-            fields['configured_ip_family'] = configured_family
-        if type(transport.get('tls_authorized')) is bool:
-            fields['transport_tls_authorized'] = int(transport['tls_authorized'])
-        sample = tcp.get(raw_id)
-        fields['tcp_sample_up'] = int(sample is not None)
-        if sample is not None:
-            # These are per-socket gauges: use the generation metric when
-            # comparing samples. A replacement connection resets TCP counters.
-            for name in ('receive_queue_bytes', 'send_queue_bytes', 'retransmitted_segments',
-                         'retransmitted_bytes', 'rtt_ms', 'rto_ms', 'bytes_received', 'bytes_acked',
-                         'bytes_sent', 'segments_in', 'data_segments_in', 'unacked_segments',
-                         'last_receive_ms', 'last_ack_receive_ms', 'send_window_bytes',
-                         'sample_started_timestamp_seconds', 'sample_timestamp_seconds'):
-                if name in sample:
-                    fields['tcp_' + name] = sample[name]
-        if diagnostic.get('heartbeat_query_elapsed_ms') is not None:
-            fields['heartbeat_query_elapsed_seconds'] = diagnostic['heartbeat_query_elapsed_ms'] / 1000
         if diagnostic.get('heartbeat_rtt_ms') is not None:
             fields['heartbeat_rtt_seconds'] = diagnostic['heartbeat_rtt_ms'] / 1000
         for name, value in fields.items():
@@ -319,28 +145,12 @@ def bridge_metrics(snapshot, tcp=None):
     return values
 
 
-def collect(client, *, probe=api_probe, bridge=bridge_probe, database=database_probe, now=time.time, tcp=tcp_samples,
-            registry=registry_probe, manifest=manifest_probe):
+def collect(client, *, probe=api_probe, bridge=bridge_probe, database=database_probe, now=time.time):
     values = {'support_runtime_check_timestamp_seconds': now()}
-    # Expected identities come from the registry on every run (no static count).
-    # An unreadable registry or manifest alarms; it never yields "all healthy".
-    try:
-        configured = registry()
-        values['support_bridge_registry_up'] = 1
-    except Exception:
-        configured = None
-        values['support_bridge_registry_up'] = 0
-    try:
-        removed = manifest()
-        values['support_bridge_manifest_up'] = 1
-    except Exception:
-        removed = None
-        values['support_bridge_manifest_up'] = 0
     try:
         values['support_api_up'] = int(probe())
     except Exception:
         values['support_api_up'] = 0
-    snapshot = None
     try:
         snapshot = bridge()
         # Retain operational health even if optional diagnostics are malformed.
@@ -350,23 +160,11 @@ def collect(client, *, probe=api_probe, bridge=bridge_probe, database=database_p
             support_bridge_paired_lines=sum(bool(line.get('is_paired')) for line in lines),
             support_bridge_qr_codes=sum(bool(line.get('qr')) for line in lines))
         try:
-            try:
-                samples = tcp(lines)
-            except Exception:
-                samples = {}
-            values.update(bridge_metrics(snapshot, samples))
+            values.update(bridge_metrics(snapshot))
         except Exception:
             values['support_bridge_diagnostics_up'] = 0
     except Exception:
-        snapshot = None
         values.update(support_bridge_ready=0, support_bridge_diagnostics_up=0)
-    if configured is not None and removed is not None:
-        try:
-            lines = snapshot.get('lines') if isinstance(snapshot, dict) else None
-            values.update(identity_inventory(configured, removed, lines if isinstance(lines, list) else None))
-        except Exception:
-            # Inconsistent identifiers: report the inventory as unavailable.
-            values['support_bridge_registry_up'] = 0
     try:
         counts = database()
         values['support_delivery_database_check_up'] = 1

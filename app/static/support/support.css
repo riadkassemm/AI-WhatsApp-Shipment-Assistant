@@ -1628,31 +1628,3 @@ button.message-quote.reply-loading { opacity: .65; cursor: progress; }
 .line-alert-banner > .icon { flex: none; color: var(--danger); }
 .line-alert-banner .btn { flex: none; }
 .send-state.held { color: var(--warning); }
-
-.bridge-management-card { width: min(1180px, calc(100vw - 32px)); max-width: 1180px; }
-.bridge-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 16px; }
-.bridge-toolbar > span { flex: 1 1 260px; color: var(--text-muted); font-size: var(--text-sm); }
-.bridge-layout { display: grid; grid-template-columns: minmax(220px, 290px) minmax(0, 1fr); gap: 22px; margin-block: 18px; }
-.bridge-identities { display: flex; flex-direction: column; gap: 8px; }
-.bridge-identity { display: flex; flex-direction: column; gap: 5px; text-align: start; font: inherit; cursor: pointer; padding: 12px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--surface); color: var(--text-strong); overflow-wrap: anywhere; }
-.bridge-identity span, .bridge-identity small { color: var(--text-muted); font-size: var(--text-sm); }
-.bridge-identity[aria-pressed="true"] { border-color: var(--primary); background: var(--bg-subtle); box-shadow: inset 3px 0 var(--primary); }
-.bridge-identity:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
-.bridge-detail { min-width: 0; }
-.bridge-detail h3 { margin-top: 0; }
-.bridge-facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
-.bridge-facts section { border: 1px solid var(--border); border-radius: var(--radius-md); padding: 12px; background: var(--bg-subtle); }
-.bridge-facts h4 { margin: 0 0 10px; }
-.bridge-facts dl { margin: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 7px 12px; font-size: var(--text-sm); }
-.bridge-facts dt { color: var(--text-muted); }
-.bridge-facts dd { margin: 0; overflow-wrap: anywhere; }
-.bridge-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-block: 18px; }
-.bridge-actions small { display: block; color: var(--text-muted); margin-top: 6px; overflow-wrap: anywhere; }
-.bridge-history { padding-inline-start: 20px; font-size: var(--text-sm); }
-.bridge-history li { margin-block: 8px; overflow-wrap: anywhere; }
-#bridgeAssessment { white-space: pre-wrap; overflow-wrap: anywhere; }
-#bridgeBlockers { overflow-wrap: anywhere; }
-@media (max-width: 760px) {
-  .bridge-layout, .bridge-facts, .bridge-actions { grid-template-columns: 1fr; }
-  .bridge-identities { max-height: 230px; overflow-y: auto; }
-}

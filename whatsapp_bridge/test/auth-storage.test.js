@@ -281,41 +281,6 @@ test('concurrent rejected provider transactions retain distinct recovery evidenc
   assert.deepEqual(new Set(keysSaved), new Set(['peer0', 'peer1']));
 });
 
-test('a burst of auth failures coalesces durable snapshots without dropping or aliasing evidence', async t => {
-  const { auth } = await fixture(t);
-  const entered = gate(), release = gate();
-  const open = fs.open;
-  let writes = 0;
-  t.mock.method(fs, 'open', async (filename, ...args) => {
-    if (String(filename).includes('.auth-failure.') && args[0] === 'wx') {
-      writes++;
-      if (writes === 1) { entered.resolve(); await release.promise; }
-    }
-    return open(filename, ...args);
-  });
-  // Simulate a previously failed journal. Retain the active-session fence and
-  // all subsequent rejected credential values; no recovery is authorized.
-  await auth.armSession();
-  auth.store.failed = true;
-  await assert.rejects(auth.saveCreds(), /STORAGE_RESTART_REQUIRED/);
-  await entered.promise;
-  try {
-    for (let index = 0; index < 300; index++) {
-      auth.state.creds.myAppStateKeyId = `mock-rejected-${index}`;
-      await assert.rejects(auth.saveCreds(), /STORAGE_RESTART_REQUIRED/);
-    }
-    assert.equal(writes, 1);
-  } finally { release.resolve(); }
-  await assert.rejects(auth.drain(), /STORAGE_RESTART_REQUIRED/);
-  const evidence = JSON.parse(await readFile(auth.store.filename + '.auth-failure', 'utf8'), BufferJSON.reviver);
-  assert.equal(evidence.failures.length, 301);
-  assert.equal(writes, 2, 'one initial write plus one snapshot of the entire admitted burst');
-  for (let index = 0; index < 300; index++) {
-    assert.equal(evidence.failures[index + 1].creds.myAppStateKeyId, `mock-rejected-${index}`);
-  }
-  assert.equal((await stat(auth.store.filename + '.auth-failure')).mode & 0o777, 0o600);
-});
-
 test('failure to persist the auth recovery fence remains fail closed and emits a distinct actionable error', async t => {
   const { auth } = await fixture(t);
   const errors = [];
@@ -721,6 +686,40 @@ test('already admitted callbacks retain later rejected keys and credentials afte
     assert.ok(retained.failures.some(failure => failure.creds?.myAppStateKeyId === 'known-after-earlier-failure'));
     await assert.rejects(auth.renew(), /STORAGE_RESTART_REQUIRED/);
   } finally { release.resolve(); auth.store.append = append; }
+});
+
+test('a backlog of rejected writes after an auth failure stays cheap, bounded and keeps the latest value per key', async t => {
+  const { directory, auth } = await fixture(t);
+  const errors = [];
+  auth.onFailure = error => errors.push(error);
+  auth.store.maxPending = 0;
+  await assert.rejects(auth.state.keys.set({ session: { first: Buffer.alloc(16, 1) } }), error => error.bridgePersistenceFailure);
+  // Production evidence: an offline backlog kept calling set() on a failed
+  // store; every call deep-cloned and rewrote all earlier evidence (MBs).
+  const peers = 20, rounds = 400, value = round => Buffer.alloc(20_000, round % 251);
+  const started = performance.now();
+  let maxBlockedMs = 0;
+  for (let round = 0; round < rounds; round++) {
+    const before = performance.now();
+    await assert.rejects(auth.state.keys.set({ session: { ['peer' + (round % peers)]: value(round) } }), /STORAGE_RESTART_REQUIRED/);
+    auth.state.creds.myAppStateKeyId = 'round-' + round;
+    await assert.rejects(auth.saveCreds(), /STORAGE_RESTART_REQUIRED/);
+    maxBlockedMs = Math.max(maxBlockedMs, performance.now() - before);
+  }
+  await auth.drain().catch(() => {});
+  const elapsed = performance.now() - started;
+  assert.ok(elapsed < 5_000, `rejected backlog took ${Math.round(elapsed)} ms`);
+  assert.ok(maxBlockedMs < 250, `one rejected write blocked ${Math.round(maxBlockedMs)} ms`);
+  const file = auth.store.filename + '.auth-failure';
+  assert.ok((await stat(file)).size < peers * 20_000 * 3, 'evidence keeps one value per rejected key');
+  const evidence = JSON.parse(await readFile(file, 'utf8'), BufferJSON.reviver);
+  assert.deepEqual(evidence.failures[0].mutations[0].session.first, Buffer.alloc(16, 1));
+  const merged = evidence.failures.find(failure => failure.operation === 'rejected_after_failure');
+  assert.equal(merged.rejections, rounds * 2);
+  assert.deepEqual(merged.mutations[0].session['peer' + ((rounds - 1) % peers)], value(rounds - 1));
+  assert.equal(merged.creds.myAppStateKeyId, 'round-' + (rounds - 1));
+  assert.equal(errors.filter(error => error.code === 'AUTH_FAILURE_FENCE_UNWRITABLE').length, 0);
+  await assert.rejects(createAuth(directory), /AUTH_RECOVERY_REQUIRED/);
 });
 
 test('a burst of queued provider pipelines shares durable intent writes instead of rewriting every intent per job', async t => {

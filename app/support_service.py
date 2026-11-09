@@ -1143,20 +1143,8 @@ class SupportService:
                 )
             except SupportMediaError as exc:
                 if exc.retryable:
-                    # A transcript mirror has already been sent/received; it
-                    # does not run AI or dispatch another customer message.
-                    # Once BOTH the transcript and its exact recovery locator
-                    # are durable, optional attachment caching must not keep
-                    # its callback retrying until the bridge retention expires.
-                    # Do not rely on the local remote.json fallback alone.
-                    if not await support_repository.has_durable_media_reference(
-                        int(message['id']), ticket_id=int(ticket['id']),
-                        provider_media_id=str(incoming.media_id),
-                    ):
-                        raise
-                    logger.warning("Transcript media recovery deferred: message_id=%s code=MEDIA_RECOVERY_DEFERRED", message['id'])
-                else:
-                    logger.warning("WhatsApp app media could not be cached: message_id=%s", message['id'])
+                    raise
+                logger.warning("WhatsApp app media could not be cached: message_id=%s", provider_id)
         return True
 
     async def sync_linked_device_tombstone(self, event: dict[str, Any]) -> bool:
@@ -1399,25 +1387,16 @@ class SupportService:
         """
         for ticket_id in await support_repository.expire_held_replies():
             await publish_support_event("ticket_updated", ticket_id=ticket_id)
-        administrative = settings.whatsapp_admin_recovery_enabled
-        if administrative:
-            for ticket_id in await support_repository.release_unclaimable_admin_holds():
-                await publish_support_event("ticket_updated", ticket_id=ticket_id)
         held = await support_repository.list_held_replies()
         if not held:
             return 0
         connected = {str(line.get("line_id")) for line in (await linked_device_client.get_status()).get("lines", [])
-                     if isinstance(line, dict) and line.get("status") == "connected"
-                     and not (line.get("administration") or {}).get("paused")}
+                     if isinstance(line, dict) and line.get("status") == "connected"}
         sent, stalled = 0, set()
         for message in held:
             ticket = await support_repository.get_ticket(int(message["ticket_id"]))
             line_id = str((ticket or {}).get("business_phone_number_id") or "")
-            # Administrative retention keeps order per conversation; one stuck
-            # conversation must not hold every other customer on the line.
-            stall_key = ("ticket", int(message["ticket_id"])) if administrative else line_id
-            if (not ticket or line_id not in connected or stall_key in stalled
-                    or (ticket.get("active_key") is None and not (administrative and message.get("sender_type") == "SYSTEM"))):
+            if not ticket or ticket.get("active_key") is None or line_id not in connected or line_id in stalled:
                 continue
             kind = str(message.get("message_type") or "text")
             if kind in SUPPORT_MEDIA_MESSAGE_TYPES and support_media_store.get(int(ticket["id"]), int(message["id"])) is None:
@@ -1428,13 +1407,13 @@ class SupportService:
                 raise
             except Exception:
                 logger.warning("Held reply could not be resent: message_id=%s", message["id"])
-                stalled.add(stall_key)
+                stalled.add(line_id)
                 continue
             if updated.get("send_status") == "SENT":
                 sent += 1
             else:
-                # Keep order: later replies wait for the next pass.
-                stalled.add(stall_key)
+                # Keep order: later replies on this line wait for the next pass.
+                stalled.add(line_id)
         if sent:
             logger.info("Held replies sent after reconnect: count=%s", sent)
         return sent

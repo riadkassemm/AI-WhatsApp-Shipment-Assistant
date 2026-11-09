@@ -38,12 +38,11 @@ class DashboardRefreshCoordinator {
 const dashboardRefresh = new DashboardRefreshCoordinator({
   visible: () => !document.hidden,
   enabled: () => state.authenticated && !state.pageLeaving,
-  interval: () => state.activeModal === 'whatsappModal' ? 2000 : state.activeModal === 'bridgeManagementModal' ? 5000 : Math.max(5000, __POLL_MS__),
+  interval: () => state.activeModal === 'whatsappModal' ? 2000 : Math.max(5000, __POLL_MS__),
   retryDelay: interval => backgroundRetryDelay(interval),
   run: async scopes => {
     if (state.busy) return;
     if (state.activeModal) {
-      if (state.activeModal === 'bridgeManagementModal') await loadBridgeManagement();
       if (state.activeModal === 'whatsappModal' && !state.whatsappBusy && !state.linkedDeviceBusy) await loadLinkedDeviceStatus();
       return;
     }

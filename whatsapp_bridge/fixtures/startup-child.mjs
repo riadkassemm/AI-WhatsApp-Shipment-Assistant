@@ -57,7 +57,7 @@ const healthyStorage = async () => ({ bsize: 4096, blocks: 10_000_000,
 let bridge;
 function mockSocket(options) {
   counts.sockets++;
-  const socket = { bridgeTransportClosed: Promise.resolve(), ws: new EventEmitter(), user: { id: '96170111111:1@s.whatsapp.net' },
+  const socket = { ws: new EventEmitter(), user: { id: '96170111111:1@s.whatsapp.net' },
     ev: { process(handler) { socket.eventHandler = handler; return () => {}; } },
     end() { counts.ended++; }, logout: async () => {},
     query: async () => { throw new Error('UNEXPECTED_PROVIDER_QUERY'); },

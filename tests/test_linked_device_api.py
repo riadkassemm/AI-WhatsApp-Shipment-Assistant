@@ -27,7 +27,7 @@ def linked_config(monkeypatch, tmp_path):
     monkeypatch.setattr(api_module, "_line_addition_lock", asyncio.Lock())
 
 
-def request(method, path, *, payload=None, token="s" * 48, role="supervisor", content=None):
+def request(method, path, *, payload=None, token="s" * 48, role="admin", content=None):
     async def run():
         app = FastAPI()
         app.include_router(router)
@@ -56,36 +56,6 @@ def message_event():
             "messages": [{"id": "ld:90001:MESSAGE1", "from": "96171111111", "timestamp": "123", "type": "text", "text": {"body": "hello"}}],
         }}]}]},
     }
-
-
-def test_status_exposes_safe_recovery_reasons_for_configured_lines_only(linked_config, monkeypatch):
-    async def status():
-        return {"lines": [
-            {"line_id": "90001", "status": "error", "is_paired": True, "recovery_category": "storage_failure",
-             "creds": "private credentials"},
-            {"line_id": "90099", "status": "error", "recovery_category": "storage_failure"},
-        ], "storage": {"level": "critical", "issues": [
-            {"line_id": "90001", "code": "STORE_UNAVAILABLE", "kind": "auth", "level": "critical", "path": "private path"},
-            {"line_id": "90099", "code": "STORE_UNAVAILABLE", "kind": "auth", "level": "critical"},
-            {"code": "DISK_SPACE_LOW", "level": "warning"},
-        ]}}
-
-    monkeypatch.setattr(api_module.linked_device_client, "get_status", status)
-    response = request("GET", "/api/support/whatsapp-linked-device/status", role="agent")
-    assert response.status_code == 200
-    lines = response.json()["lines"]
-    assert len(lines) == 1
-    assert lines[0]["recovery_category"] == "storage_failure"
-    assert [issue["code"] for issue in lines[0]["storage_issues"]] == ["STORE_UNAVAILABLE", "DISK_SPACE_LOW"]
-    assert lines[0]["storage_issues"][0]["kind"] == "auth"
-    assert "private" not in response.text and "90099" not in response.text
-
-    async def invalid_category():
-        return {"lines": [{"line_id": "90001", "status": "error", "recovery_category": {"private": "value"}}]}
-
-    monkeypatch.setattr(api_module.linked_device_client, "get_status", invalid_category)
-    line = request("GET", "/api/support/whatsapp-linked-device/status").json()["lines"][0]
-    assert line["recovery_category"] is None and line["storage_issues"] == []
 
 
 def test_linked_callback_authentication_and_route_validation(linked_config, monkeypatch):
@@ -291,7 +261,7 @@ def test_linked_mutation_callback_waits_for_original_and_preserves_event(linked_
     assert request("POST", "/api/whatsapp/linked-device/events", payload=event).json() == {"status": "applied"}
 
 
-def test_linked_status_filters_accounts_and_restricts_qr_to_whatsapp_managers(linked_config, monkeypatch):
+def test_linked_status_is_manager_only_and_filters_accounts(linked_config, monkeypatch):
     calls = []
 
     async def status():
@@ -305,14 +275,7 @@ def test_linked_status_filters_accounts_and_restricts_qr_to_whatsapp_managers(li
     path = "/api/support/whatsapp-linked-device/status"
     assert request("GET", path, role="driver").status_code == 403
     assert calls == []
-    response = request("GET", path, role="agent")
-    assert response.status_code == 200
-    assert "qr_data_url" not in response.text and "base64" not in response.text
-    # Admin and Super Admin pair numbers, so both see this account's QR only.
-    for role in ("admin", "supervisor"):
-        managed = request("GET", path, role=role)
-        assert managed.status_code == 200 and "data:image/png;base64,test" in managed.text
-        assert "private-other-account" not in managed.text
+    assert request("GET", path, role="agent").status_code == 200  # every staff role can pair
     payload = request("GET", path).json()
     assert len(payload["lines"]) == 1 and payload["lines"][0]["line_id"] == "90001"
     assert payload["lines"][0]["active_transport"] == "linked_device"
@@ -333,18 +296,6 @@ def test_linked_disconnect_requires_line_removed_from_app(linked_config, monkeyp
     monkeypatch.setattr(whatsapp_registry_service, "is_number_enabled", enabled)
     monkeypatch.setattr(api_module.linked_device_client, "disconnect", must_not_disconnect)
     assert request("POST", "/api/support/whatsapp-linked-device/lines/90001/disconnect").status_code == 409
-
-
-def test_linked_repair_waits_for_logout_updates_without_claiming_bridge_outage(linked_config, monkeypatch):
-    async def pending(_line):
-        error = api_module.WhatsAppSendError("Bridge HTTP 409", delivery_uncertain=False)
-        error.bridge_code = "AUTH_WORK_PENDING"
-        raise error
-
-    monkeypatch.setattr(api_module.linked_device_client, "connect", pending)
-    response = request("POST", "/api/support/whatsapp-linked-device/lines/90001/connect")
-    assert response.status_code == 409
-    assert "still finishing accepted updates" in response.json()["detail"]
 
 
 @pytest.fixture
@@ -450,14 +401,11 @@ def test_pairing_failure_preserves_registered_disabled_row_for_existing_pair(all
     assert state["lines"]["90001"] == "connected"
 
 
-def test_add_number_requires_whatsapp_manager(allocation_bridge):
+def test_add_number_is_open_to_staff_only(allocation_bridge):
     response = request("POST", "/api/support/whatsapp-linked-device/lines", payload={"request_id": str(uuid4())}, role="driver")
     assert response.status_code == 403 and allocation_bridge["calls"] == []
     response = request("POST", "/api/support/whatsapp-linked-device/lines", payload={"request_id": str(uuid4())}, role="agent")
-    assert response.status_code == 403 and allocation_bridge["calls"] == []
-    for count, role in enumerate(("admin", "supervisor"), 1):
-        response = request("POST", "/api/support/whatsapp-linked-device/lines", payload={"request_id": str(uuid4())}, role=role)
-        assert response.status_code == 200 and len([c for c in allocation_bridge["calls"] if c[0] == "add"]) == count
+    assert response.status_code == 200 and allocation_bridge["calls"]
 
 
 @pytest.mark.parametrize("body", [{}, {"request_id": "invalid"}, {"request_id": str(uuid4()), "expected_phone": "not-a-phone"}, {"request_id": str(uuid4()), "expected_phone": "123"}, {"request_id": str(uuid4()), "line_id": "90003"}])
@@ -472,7 +420,7 @@ def test_add_number_enforces_actual_csrf_dependency(allocation_bridge):
         app.include_router(router)
 
         async def agent():
-            return SupportAgent(id="7", name="Admin", role="supervisor", csrf_hash=hashlib.sha256(b"correct-csrf").hexdigest())
+            return SupportAgent(id="7", name="Admin", role="admin", csrf_hash=hashlib.sha256(b"correct-csrf").hexdigest())
 
         app.dependency_overrides[get_current_agent] = agent
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
@@ -517,7 +465,7 @@ def test_concurrent_additions_serialize_registry_snapshots_without_touching_exis
         app.include_router(router)
 
         async def agent():
-            return SupportAgent(id="7", name="Admin", role="supervisor")
+            return SupportAgent(id="7", name="Admin", role="admin")
 
         app.dependency_overrides[require_support_csrf] = agent
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
@@ -563,40 +511,19 @@ def removal_bridge(linked_config, monkeypatch):
         state["enabled"] = False
         return len(state["tickets"])
 
-    async def remove(line_id, *, decommission=False, actor="administrator"):
+    async def remove(line_id):
         state["calls"].append(("remove", line_id))
-        if decommission:
-            assert actor == "7"
-            if state["fail"] == "writer_active":
-                error = api_module.WhatsAppSendError("Writer active", delivery_uncertain=False)
-                error.bridge_code = "DECOMMISSION_BLOCKED"
-                raise error
-            manifest = Path(settings.whatsapp_linked_device_data_directory) / "lines.json"
-            manifest.write_text(json.dumps({"version": 1, "lines": {}, "quarantined_lines": {line_id: {
-                "line_id": line_id, "state": "permanently_decommissioned", "reuse_allowed": False, "remote_unlinked": False}}}))
-            return {"line_id": line_id, "removed": True, "unlinked": False, "quarantined": True, "reuse_allowed": False,
-                    "message": "Removed from this application; WhatsApp device unlinking requires action.",
-                    "unlink_instruction": "On this number's primary phone, log out only this application's linked device."}
-        if state["fail"] == "pending_logout":
-            error = api_module.WhatsAppSendError("Bridge HTTP 409", delivery_uncertain=False)
-            error.bridge_code = "AUTH_WORK_PENDING"
-            raise error
         if state["fail"] == "native":
             raise api_module.WhatsAppSendError("Unlink confirmation unavailable", delivery_uncertain=True)
-        if state["fail"] == "auth_recovery":
-            error = api_module.WhatsAppSendError("Bridge HTTP 503", delivery_uncertain=False)
-            error.bridge_code = "AUTH_RECOVERY_REQUIRED"
-            raise error
         if state["fail"] == "unconfirmed":
             return {"line_id": line_id, "removed": True, "unlinked": False}
         manifest = Path(settings.whatsapp_linked_device_data_directory) / "lines.json"
         manifest.write_text(json.dumps({"version": 1, "lines": {}, "requests": {}, "removed_line_ids": [line_id]}))
         return {"line_id": line_id, "removed": True, "unlinked": True}
 
-    async def finish(agent, line_id, *, close_active_tickets, remote_unlinked=True):
+    async def finish(agent, line_id, *, close_active_tickets):
         from app.whatsapp_registry import WhatsAppRegistryError
         state["calls"].append(("finish", line_id, agent.id))
-        state["remote_unlinked"] = remote_unlinked
         if state["fail"] == "database":
             raise WhatsAppRegistryError("Database archive unavailable; retry removal.")
         closed = len(state["tickets"])
@@ -647,26 +574,6 @@ def test_remove_does_not_close_conversations_when_whatsapp_unlink_is_unconfirmed
     assert not any(call[0] == "finish" for call in removal_bridge["calls"])
 
 
-def test_remove_waits_for_logout_updates_without_closing_conversations(removal_bridge):
-    removal_bridge["fail"] = "pending_logout"
-    response = request("DELETE", "/api/support/whatsapp-linked-device/lines/90001", payload={"close_active_tickets": True})
-    assert response.status_code == 409
-    assert "logout finishes accepted updates" in response.json()["detail"]
-    assert removal_bridge["tickets"] == [23]
-    assert not any(call[0] == "finish" for call in removal_bridge["calls"])
-
-
-def test_remove_reports_authentication_recovery_without_recommending_retry_or_closing_history(removal_bridge):
-    removal_bridge["fail"] = "auth_recovery"
-    response = request("DELETE", "/api/support/whatsapp-linked-device/lines/90001", payload={"close_active_tickets": True})
-    assert response.status_code == 409
-    assert "permanent local removal" in response.json()["detail"]
-    assert "retry" not in response.json()["detail"].lower()
-    assert not removal_bridge["enabled"]
-    assert removal_bridge["tickets"] == [23]
-    assert not any(call[0] == "finish" for call in removal_bridge["calls"])
-
-
 def test_remove_retries_archiving_after_database_failure_without_repairing(removal_bridge):
     removal_bridge["fail"] = "database"
     path = "/api/support/whatsapp-linked-device/lines/90001"
@@ -708,7 +615,7 @@ def test_remove_enforces_actual_csrf_dependency(removal_bridge):
         app.include_router(router)
 
         async def agent():
-            return SupportAgent(id="7", name="Admin", role="supervisor", csrf_hash=hashlib.sha256(b"correct-csrf").hexdigest())
+            return SupportAgent(id="7", name="Admin", role="admin", csrf_hash=hashlib.sha256(b"correct-csrf").hexdigest())
 
         app.dependency_overrides[get_current_agent] = agent
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
@@ -845,42 +752,3 @@ def test_missing_phone_reaction_retries_for_target_recovery_then_acknowledges_ab
     sync.return_value = True
     response = request('POST', '/api/whatsapp/linked-device/events', payload=event)
     assert response.status_code == 200 and response.json()['status'] == 'applied'
-
-
-def test_decommission_preserves_history_and_reports_remote_action(removal_bridge):
-    path = "/api/support/whatsapp-linked-device/lines/90001"
-    result = request("DELETE", path, payload={"close_active_tickets": True, "mode": "decommission"})
-    assert result.status_code == 200
-    assert result.json()["quarantined"] is True and result.json()["unlinked"] is False
-    assert "requires action" in result.json()["message"]
-    assert removal_bridge["remote_unlinked"] is False
-    assert removal_bridge["tickets"] == []
-    assert api_module.get_transport("90001") == "removed"
-    assert request("DELETE", path, payload={"close_active_tickets": True, "mode": "decommission"}).status_code == 200
-    callback = request("POST", "/api/whatsapp/linked-device/events", payload=message_event())
-    assert callback.status_code == 409, "quarantine callbacks cannot be silently acknowledged and dropped"
-
-
-def test_decommission_active_writer_blocks_archival(removal_bridge):
-    removal_bridge["fail"] = "writer_active"
-    result = request("DELETE", "/api/support/whatsapp-linked-device/lines/90001", payload={"close_active_tickets": True, "mode": "decommission"})
-    assert result.status_code == 409
-    assert removal_bridge["tickets"] == [23]
-    assert not any(c[0] == "finish" for c in removal_bridge["calls"])
-
-
-def test_paused_bot_confirmation_uses_durable_delivery_namespace(linked_config, monkeypatch):
-    from app.bridge_paused_replies import paused_replies
-    calls = []
-    applied = False
-    async def confirm(event): calls.append(event); return applied
-    monkeypatch.setattr(paused_replies, 'confirm', confirm)
-    event = {'event_id':'paused-confirmation','type':'outgoing_confirmation','line_id':'90001',
-        'from_me':True,'client_message_id':'paused-bot:' + 'a'*64,'message_id':'ld:90001:confirmed',
-        'sender_phone':'155500001','timestamp':1794120000000}
-    assert request('POST','/api/whatsapp/linked-device/events',payload=event,token='wrong').status_code == 403
-    assert not calls
-    assert request('POST','/api/whatsapp/linked-device/events',payload=event).status_code == 503
-    applied = True
-    assert request('POST','/api/whatsapp/linked-device/events',payload=event).status_code == 200
-    assert len(calls) == 2

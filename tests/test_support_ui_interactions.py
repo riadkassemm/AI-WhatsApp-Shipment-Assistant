@@ -275,7 +275,7 @@ const api = async (path, options) => {
   assert.equal(state.linkedDeviceStatus.lines.length, 2);
   assert.equal(state.whatsappRegistry.numbers.length, 2);
   assert.equal(feedback.length, 0); // No success or optimistic disappearance.
-  assert.deepEqual(requests, [{path: '/api/support/whatsapp-linked-device/lines/90002', method: 'DELETE', body: {close_active_tickets: true, mode: 'unlink'}}]);
+  assert.deepEqual(requests, [{path: '/api/support/whatsapp-linked-device/lines/90002', method: 'DELETE', body: {close_active_tickets: true}}]);
   await removeLinkedDeviceNumber('90002');
   assert.equal(requests.length, 1); // No duplicate request while waiting.
   finish({configured: true, lines: [{line_id: '90001', status: 'connected'}],
@@ -609,9 +609,7 @@ def test_image_editor_asset_is_served_with_upload_limit(monkeypatch: pytest.Monk
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is unavailable")
 def test_text_send_clears_composer_before_provider_response() -> None:
-    media = _ASSETS['media.js']
-    actions = _ASSETS['actions.js']
-    send = media[media.index("async function sendMessage()"):] + actions[:actions.index("function showMessagePreferencesError(")]
+    send = _HTML[_HTML.index("async function sendMessage()"): _HTML.index("function showMessagePreferencesError(")]
     timeline = _HTML[_HTML.index("function upsertTimelineMessage("): _HTML.index("function renderConversation(")]
     script = r"""
 const assert = require('node:assert/strict');
@@ -803,9 +801,7 @@ def test_remote_edit_keeps_draft_on_rejection_and_checks_message_owner() -> None
     cache_change = _HTML[_HTML.index("function changeCachedMessage("): _HTML.index("function upsertTimelineMessage(")]
     controls = _HTML[_HTML.index("function canChangeWhatsAppMessage("): _HTML.index("async function sendMessageReaction(")]
     add_message = _HTML[_HTML.index("function addMessage("): _HTML.index("function addEvent(")]
-    media = _ASSETS['media.js']
-    actions = _ASSETS['actions.js']
-    sending = media[media.index("async function sendMessage()"):] + actions[:actions.index("function showMessagePreferencesError(")]
+    sending = _HTML[_HTML.index("async function sendMessage()"): _HTML.index("function showMessagePreferencesError(")]
     script = r"""
 const assert = require('node:assert/strict');
 class Element {
@@ -1845,31 +1841,3 @@ def test_ticket_details_load_only_after_selection_not_pointer_hover() -> None:
     assert "takeTicketPrefetch" not in _HTML
     assert "const data = await api(detailPath);" in _HTML
     assert "requestId !== state.ticketRequest || String(state.ticketId) !== String(id)" in _HTML
-
-
-@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is unavailable")
-def test_failed_auth_removal_reports_local_abandonment_without_claiming_remote_unlink() -> None:
-    function = _HTML[_HTML.index("async function removeLinkedDeviceNumber("): _HTML.index("async function changeLinkedDeviceConnection(")]
-    script = r"""
-const assert = require('node:assert/strict');
-const state = {linkedDeviceBusy:false, whatsappBusy:false, linkedDeviceRequest:0,
-  linkedDeviceStatus:{lines:[{line_id:'99035',status:'error',lifecycle:'fenced_unresolved'}]}};
-const canManageWhatsApp=()=>true, clearWhatsAppFeedback=()=>{}, renderWhatsAppRegistry=()=>{},
-  renderLinkedDeviceStatus=()=>{}, saveLinkedDeviceAddition=()=>{}, loadWhatsAppRegistry=async()=>{};
-const feedback=[];
-const showWhatsAppFeedback=(kind,message)=>feedback.push({kind,message});
-const promptDialog=async p=>{assert.match(p.message,/credentials will never be reused/);assert.match(p.confirmLabel,/locally/);return 'REMOVE';};
-const api=async (url,options)=>{
-  assert.equal(JSON.parse(options.body).mode,'decommission');
-  return {quarantined:true,unlinked:false,message:'Removed from this application; WhatsApp device unlinking requires action.',
-    unlink_instruction:'Select only this application’s device on this number’s primary phone.'};
-};
-""" + function + r"""
-(async()=>{
-  await removeLinkedDeviceNumber('99035');
-  assert.equal(feedback.length,1);assert.match(feedback[0].message,/requires action/);
-  assert.match(feedback[0].message,/only this application/);assert.doesNotMatch(feedback[0].message,/removed and unlinked/);
-  assert.equal(state.linkedDeviceBusy,false);
-})().catch(error=>{console.error(error);process.exitCode=1});
-"""
-    subprocess.run(["node", "-e", script], check=True, timeout=10)

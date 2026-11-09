@@ -264,15 +264,6 @@ _SUPPORT_SCHEMA_MIGRATIONS: tuple[tuple[str, dict[str, set[str]]], ...] = (
         "support_deletion_audit": {"ticket_id", "ticket_reference", "conversation_origin", "status", "business_phone_number_id",
                                    "message_count", "deleted_by_staff_id", "deleted_by_name", "deleted_at"},
     }),
-    ("migrations/20261108_whatsapp_admin_recovery.sql", {
-        "support_ticket_messages": {"admin_hold"},
-        "whatsapp_bridge_controls": {"line_id", "paused", "active_operation_id", "updated_at"},
-        "whatsapp_bridge_operations": {"id", "line_id", "operator_id", "operator_role", "action", "fingerprint",
-            "parameters_json", "previous_paused", "state", "reason_code", "created_at", "updated_at", "completed_at"},
-        "whatsapp_bridge_operation_audit": {"id", "operation_id", "actor_id", "actor_role", "state", "reason_code", "created_at"},
-        "whatsapp_paused_bot_replies": {"id", "line_id", "source_message_id", "transport_id", "recipient", "body",
-            "state", "provider_message_id", "dispatch_at", "created_at", "updated_at"},
-    }),
 )
 
 MAX_QUICK_REPLIES_PER_STAFF = 200
@@ -286,8 +277,6 @@ def _missing_support_schema_migrations(
 ) -> list[str]:
     missing: list[str] = []
     for migration, requirements in _SUPPORT_SCHEMA_MIGRATIONS:
-        if migration.endswith('20261108_whatsapp_admin_recovery.sql') and not settings.whatsapp_admin_recovery_enabled:
-            continue
         if any(
             not required_columns.issubset(schema_columns.get(table_name, set()))
             for table_name, required_columns in requirements.items()
@@ -356,21 +345,6 @@ class SupportRepository(DashboardRepositoryMixin, DeliveryRepositoryMixin, ReadS
         missing = _missing_support_schema_migrations(schema_columns)
         if missing:
             raise SupportSchemaError(missing)
-        if settings.whatsapp_admin_recovery_enabled:
-            expected = {'whatsapp_bridge_controls': [('line_id',)], 'whatsapp_bridge_operations': [('id',)],
-                'whatsapp_bridge_operation_audit': [('id',)],
-                'whatsapp_paused_bot_replies': [('id',), ('line_id','source_message_id'), ('transport_id',)]}
-            async with pool.acquire() as conn:
-                async with conn.cursor(aiomysql.DictCursor) as cur:
-                    for table, keys in expected.items():
-                        await cur.execute("""SELECT INDEX_NAME AS name,COLUMN_NAME AS col FROM INFORMATION_SCHEMA.STATISTICS
-                            WHERE TABLE_SCHEMA=%s AND TABLE_NAME=%s AND NON_UNIQUE=0 ORDER BY INDEX_NAME,SEQ_IN_INDEX""",
-                            (settings.db_name,table))
-                        found = {}
-                        for entry in await cur.fetchall():
-                            found.setdefault(entry['name'], []).append(entry['col'])
-                        if not set(keys).issubset({tuple(cols) for cols in found.values()}):
-                            raise SupportSchemaError(['migrations/20261108_whatsapp_admin_recovery.sql'])
         # Columns alone are insufficient after a partially applied migration.
         # Refuse startup unless both idempotency boundaries are actually unique.
         async with pool.acquire() as conn:
@@ -2157,24 +2131,6 @@ class SupportRepository(DashboardRepositoryMixin, DeliveryRepositoryMixin, ReadS
                     (provider_media_id, provider_media_mime_type, provider_media_filename, message_id),
                 )
 
-    async def has_durable_media_reference(
-        self, message_id: int, *, ticket_id: int, provider_media_id: str,
-    ) -> bool:
-        """Prove transcript attachment recovery survives an API restart."""
-        if self._pool is None:
-            await self.connect()
-        assert self._pool is not None
-        async with self._pool.acquire() as conn:
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    """SELECT 1 FROM support_ticket_messages
-                       WHERE id=%s AND ticket_id=%s AND provider_media_id=%s
-                         AND deleted_for_everyone_at IS NULL
-                         AND send_status IN ('SENT', 'RECEIVED') LIMIT 1""",
-                    (message_id, ticket_id, provider_media_id),
-                )
-                return bool(await cur.fetchone())
-
     async def get_message_by_whatsapp_id(self, message_id: str) -> dict[str, Any] | None:
         if self._pool is None:
             await self.connect()
@@ -2258,8 +2214,6 @@ class SupportRepository(DashboardRepositoryMixin, DeliveryRepositoryMixin, ReadS
                             """,
                             (status, at, status, at, row["id"]),
                         )
-                    if settings.whatsapp_admin_recovery_enabled:
-                        await cur.execute("UPDATE support_ticket_messages SET admin_hold=0 WHERE id=%s AND send_status='SENT'", (row['id'],))
                     await cur.execute("SELECT * FROM support_ticket_messages WHERE id = %s", (row["id"],))
                     updated = await cur.fetchone()
                 await conn.commit()
@@ -2672,8 +2626,6 @@ class SupportRepository(DashboardRepositoryMixin, DeliveryRepositoryMixin, ReadS
                             """,
                             (whatsapp_message_id, whatsapp_timestamp, row["id"]),
                         )
-                    if settings.whatsapp_admin_recovery_enabled:
-                        await cur.execute("UPDATE support_ticket_messages SET admin_hold=0 WHERE id=%s AND send_status='SENT'", (row['id'],))
                     await cur.execute("SELECT * FROM support_ticket_messages WHERE id = %s", (row["id"],))
                     confirmed = await cur.fetchone()
                 await conn.commit()

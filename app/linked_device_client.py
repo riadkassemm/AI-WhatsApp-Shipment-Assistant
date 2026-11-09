@@ -323,12 +323,8 @@ class LinkedDeviceWhatsAppClient:
 
     async def download_media(self, media_id: str, *, phone_number_id: str | None = None) -> DownloadedWhatsAppMedia:
         from app.whatsapp_client import DownloadedWhatsAppMedia, WhatsAppMediaError, WhatsAppSendError
-        from app.config import quarantined_linked_device_line_ids
         try:
-            # Read-only retained media remains accessible; every sending API
-            # still requires an active route. The bridge cannot fetch new media
-            # or recreate a provider for an abandoned session.
-            line = str(phone_number_id) if str(phone_number_id) in quarantined_linked_device_line_ids() else self._phone_number_id(phone_number_id)
+            line = self._phone_number_id(phone_number_id)
             reference = self._media_reference(media_id, line)
             content, headers = await self._request("GET", f"/v1/lines/{line}/media/{reference}", max_bytes=self._media_limit())
             return DownloadedWhatsAppMedia(
@@ -373,18 +369,6 @@ class LinkedDeviceWhatsAppClient:
             raise _send_error("The linked-device bridge returned an invalid line status.")
         return {**data, "lines": allowed_lines}
 
-    async def get_management_status(self) -> dict:
-        """Private inventory read, including quarantine; never used for routing."""
-        data = await self._json_request("GET", "/v1/status", timeout_seconds=5.0)
-        if not isinstance(data.get("lines"), list):
-            raise _send_error("Bridge diagnostics are unavailable.")
-        return data
-
-    async def get_auth_recovery(self, line_id: str) -> dict:
-        if not re.fullmatch(r"[0-9]{5,32}", line_id):
-            raise _send_error("Invalid identity.")
-        return await self._json_request("GET", f"/v1/lines/{line_id}/auth-recovery", timeout_seconds=3.0)
-
     async def add_line(
         self, request_id: str, expected_phone: str = "", *, reserved_line_ids: list[str] | None = None,
     ) -> dict:
@@ -425,7 +409,7 @@ class LinkedDeviceWhatsAppClient:
         line = self._phone_number_id(phone_number_id)
         return await self._json_request("POST", f"/v1/lines/{line}/disconnect")
 
-    async def remove_line(self, phone_number_id: str, *, decommission: bool = False, actor: str = "administrator") -> dict:
+    async def remove_line(self, phone_number_id: str) -> dict:
         """Unlink and erase a bridge registration, with safe tombstone retries."""
         if not isinstance(phone_number_id, str) or not re.fullmatch(r"[0-9]{5,32}", phone_number_id):
             raise _send_error("A numeric WhatsApp line ID is required for removal.")
@@ -436,12 +420,7 @@ class LinkedDeviceWhatsAppClient:
             raise _send_error("The linked-device line configuration is invalid.") from exc
         if phone_number_id not in lines and phone_number_id not in removed:
             raise _send_error("This WhatsApp line is not configured for the linked-device bridge.")
-        if decommission:
-            data = await self._json_request("POST", f"/v1/lines/{phone_number_id}/decommission",
-                payload={"confirm_line_id": phone_number_id, "actor": actor}, mutating=True, timeout_seconds=75.0)
-        else:
-            data = await self._json_request("DELETE", f"/v1/lines/{phone_number_id}", mutating=True, timeout_seconds=75.0)
-        quarantined = data.get("quarantined") is True and data.get("reuse_allowed") is False and type(data.get("unlinked")) is bool
-        if data.get("line_id") != phone_number_id or data.get("removed") is not True or not (quarantined or data.get("unlinked") is True):
+        data = await self._json_request("DELETE", f"/v1/lines/{phone_number_id}", mutating=True, timeout_seconds=75.0)
+        if data.get("line_id") != phone_number_id or data.get("removed") is not True or data.get("unlinked") is not True:
             raise _send_error("The linked-device bridge has not confirmed complete line removal.", uncertain=True)
         return data

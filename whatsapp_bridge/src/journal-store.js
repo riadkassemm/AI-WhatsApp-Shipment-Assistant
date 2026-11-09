@@ -241,7 +241,7 @@ export class JournalStore {
     this.lastCompactionError = null; this.compactionPromise = null; this.totalWrittenBytes = 0;
     this.append = append ?? this.appendRecord.bind(this);
     this.workerFactory = workerFactory;
-    this.healthTail = Promise.resolve(); this.healthWrites = 0; this.healthPersistenceFailed = false; this.healthHistoryUnavailable = false;
+    this.healthTail = Promise.resolve(); this.healthPersistenceFailed = false; this.healthHistoryUnavailable = false;
   }
   report(event) { try { this.diagnostics(event); } catch (_) { /* Metrics never undo committed state. */ } }
   async loadHealth() {
@@ -268,7 +268,6 @@ export class JournalStore {
     }
   }
   persistHealth() {
-    this.healthWrites++;
     const task = this.healthTail.then(async () => {
       try {
         await atomicWrite(this.filename + '.health.json', {version: 1,
@@ -280,8 +279,8 @@ export class JournalStore {
         this.report({event: 'storage_health_persistence_failed', code: 'STORAGE_HEALTH_PERSISTENCE_FAILED'});
       }
     });
-    this.healthTail = task.finally(() => { this.healthWrites--; });
-    return this.healthTail;
+    this.healthTail = task;
+    return task;
   }
   async load({signal} = {}) {
     signal?.throwIfAborted();

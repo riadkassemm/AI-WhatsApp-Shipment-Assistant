@@ -164,7 +164,7 @@ class WhatsAppRegistryRepository(RegistryMutationMixin):
                 raise
 
     async def prepare_linked_device_removal(
-        self, line_id: str, *, actor_id: int | None, close_active_tickets: bool,
+        self, line_id: str, *, actor_id: int, close_active_tickets: bool,
     ) -> int:
         """Stop routing before native logout; retain conversations until it succeeds."""
         await self.connect()
@@ -218,9 +218,9 @@ class WhatsAppRegistryRepository(RegistryMutationMixin):
                 raise
 
     async def finish_linked_device_removal(
-        self, line_id: str, *, actor_id: int | None, actor_name: str, close_active_tickets: bool, remote_unlinked: bool = True,
+        self, line_id: str, *, actor_id: int, actor_name: str, close_active_tickets: bool,
     ) -> list[dict[str, Any]]:
-        """Archive after confirmed remote unlink OR durable permanent quarantine."""
+        """Archive remaining conversations only after WhatsApp confirms logout."""
         await self.connect()
         assert self._pool is not None
         async with self.mutation_connection() as conn:
@@ -258,17 +258,15 @@ class WhatsAppRegistryRepository(RegistryMutationMixin):
                         await cur.execute(
                             """
                             INSERT INTO support_ticket_events (ticket_id, event_type, actor_type, actor_id, actor_name, details_json, created_at)
-                            VALUES (%s, %s, %s, %s, %s, %s, UTC_TIMESTAMP(6))
-                            """, (ticket["id"], event_type, "AGENT" if actor_id is not None else "SYSTEM",
-                                   str(actor_id) if actor_id is not None else "production-operator", actor_name, details),
+                            VALUES (%s, %s, 'AGENT', %s, %s, %s, UTC_TIMESTAMP(6))
+                            """, (ticket["id"], event_type, str(actor_id), actor_name, details),
                         )
                     if not await removed_number(cur, line_id):
                         await cur.execute(
                             """
                             INSERT INTO whatsapp_integration_audit (action, actor_staff_id, phone_number_id, details_json)
                             VALUES ('LINKED_DEVICE_LINE_REMOVED', %s, %s, %s)
-                            """, (actor_id, line_id, json.dumps({"closed_conversations": len(tickets), "unlinked": remote_unlinked,
-                                "local_decommission": not remote_unlinked})),
+                            """, (actor_id, line_id, json.dumps({"closed_conversations": len(tickets), "unlinked": True})),
                         )
                     await delete_number_profile(cur, row)
                 await conn.commit()
@@ -417,14 +415,15 @@ class WhatsAppRegistryService:
 
     @staticmethod
     def _require_manager(agent: SupportAgent) -> None:
-        if not agent.can_manage_whatsapp_connections:
+        if not agent.is_supervisor:
             raise WhatsAppRegistryForbiddenError(
-                "Only Admins and Super Admins can change WhatsApp numbers."
+                "Only Super Admins and Admins can manage WhatsApp numbers."
             )
 
     @staticmethod
     def _require_staff(agent: SupportAgent) -> None:
-        # Read access only; every registry mutation requires the explicit capability.
+        # Viewing, linking, pairing and renaming numbers is open to every staff
+        # role; disabling, removing and Meta sync stay with managers.
         if not agent.is_staff:
             raise WhatsAppRegistryForbiddenError("Only staff members can view and link WhatsApp numbers.")
 
@@ -677,7 +676,7 @@ class WhatsAppRegistryService:
         phone_number_id: str,
         display_name: str | None,
     ) -> dict[str, Any]:
-        self._require_manager(agent)
+        self._require_staff(agent)
         phone_number_id = _clean_id(phone_number_id, label="phone-number ID")
         name = str(display_name or "").strip() or None
         if name is not None and (len(name) > 80 or any(ord(char) < 32 or ord(char) == 127 for char in name)):
@@ -747,14 +746,13 @@ class WhatsAppRegistryService:
             line_id, actor_id=int(agent.id), close_active_tickets=close_active_tickets,
         )
 
-    async def finish_linked_device_removal(self, agent: SupportAgent, line_id: str, *, close_active_tickets: bool, remote_unlinked: bool = True) -> int:
+    async def finish_linked_device_removal(self, agent: SupportAgent, line_id: str, *, close_active_tickets: bool) -> int:
         self._require_manager(agent)
         tickets = await self.repository.finish_linked_device_removal(
             line_id, actor_id=int(agent.id), actor_name=agent.name, close_active_tickets=close_active_tickets,
-            remote_unlinked=remote_unlinked,
         )
         # Do not use normal ticket resolution: it sends a customer notice, and
-        # the old session has been unlinked or permanently abandoned.
+        # this account has already been unlinked from WhatsApp.
         from app.conversation_store import conversation_store
         from app.support_events import publish_support_event
 
@@ -852,7 +850,11 @@ class WhatsAppRegistryService:
         phone_number_id: str,
         enabled: bool,
     ) -> dict[str, Any]:
-        self._require_manager(agent)
+        # Adding a paired number to the app completes linking; taking one out stays with managers.
+        if enabled:
+            self._require_staff(agent)
+        else:
+            self._require_manager(agent)
         phone_number_id = _clean_id(phone_number_id, label="phone-number ID")
         await self._ensure_schema()
         row = await self.repository.fetch_one(

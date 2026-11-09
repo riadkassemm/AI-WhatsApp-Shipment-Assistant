@@ -73,17 +73,6 @@ def test_storage_health_exposes_only_known_operational_issues_for_enabled_lines(
     assert health.summarize_storage({"level": "warning", "issues": "private payload"}, REGISTRY) == {"level": "ok", "issues": []}
 
 
-def test_storage_health_retains_only_allowlisted_store_kinds():
-    summary = health.summarize_storage({"level": "critical", "issues": [
-        {"code": "STORE_UNAVAILABLE", "level": "critical", "line_id": "90020", "kind": kind,
-         "creds": "private session", "error": "private path"}
-        for kind in ["auth", "state", "outbox", "private value", {"secret": "value"}]
-    ]}, REGISTRY)
-    assert [issue.get("kind") for issue in summary["issues"]] == ["auth", "state", "outbox", None, None]
-    assert "private" not in json.dumps(summary)
-    assert "secret" not in json.dumps(summary)
-
-
 def test_unreachable_bridge_uses_fresh_independent_storage_report_and_redacts_details(tmp_path, monkeypatch):
     filename = tmp_path / "status.json"
     filename.write_text(json.dumps({"version": 1, "checked_at": 1000, "level": "critical", "secret": "private",
@@ -198,14 +187,14 @@ def test_slow_health_probe_caches_from_completion_for_waiting_staff(monkeypatch)
 
 
 def test_storage_banner_warns_before_outage_without_suggesting_pairing():
-    source = (Path(__file__).resolve().parents[1] / "app/static/support/actions.js").read_text()
+    source = Path("app/static/support/actions.js").read_text()
     helpers = source[source.index("const LINE_HEALTH_INTERVAL_MS"):source.index("function linkedDeviceAdditionStorageKey(")]
     script = r"""
 const assert = require('node:assert/strict');
 function element() {return {dataset: {}, textContent: '', classList: {hidden: true, toggle(_, value) {this.hidden = value}}}}
 const elements = {lineAlertBanner: element(), lineAlertText: element(), lineAlertActionBtn: element(), composerHelp: element()};
 const $ = id => elements[id], text = (node, value) => {node.textContent = value};
-const canViewBridgeManagement = () => true, sounds = [], notifyNewCustomerActivity = value => sounds.push(value);
+const canLinkWhatsApp = () => true, sounds = [], notifyNewCustomerActivity = value => sounds.push(value);
 const state = {lineAlertsSeen: new Set(), currentTicketData: {ticket: {business_phone_number_id: '90020'}, permissions: {can_reply: true}}};
 """ + helpers + r"""
 const payload = {lines: [{line_id:'90020', name:'Saida Office', status:'connected', alert:false}],
@@ -280,7 +269,7 @@ def test_only_known_safe_bridge_outages_or_pressure_hold_a_reply():
 
 
 def test_banner_and_composer_explain_an_outage():
-    source = (Path(__file__).resolve().parents[1] / "app/static/support/actions.js").read_text()
+    source = Path("app/static/support/actions.js").read_text()
     helpers = source[source.index("const LINE_HEALTH_INTERVAL_MS"):source.index("function linkedDeviceAdditionStorageKey(")]
     script = r"""
 const assert = require('node:assert/strict');
@@ -289,7 +278,7 @@ const elements = {lineAlertBanner: element(), lineAlertText: element(), lineAler
 const $ = id => elements[id];
 const text = (node, value) => {node.textContent = value};
 let staff = false;
-const canViewBridgeManagement = () => staff;
+const canLinkWhatsApp = () => staff;
 const sounds = [];
 const notifyNewCustomerActivity = message => sounds.push(message);
 const state = {authenticated: true, lineHealthAt: 0, lineAlertsSeen: new Set(),

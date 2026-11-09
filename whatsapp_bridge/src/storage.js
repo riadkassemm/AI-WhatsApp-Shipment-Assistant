@@ -4,10 +4,8 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { isDeepStrictEqual } from 'node:util';
 import lockfile from 'proper-lockfile';
 import { BufferJSON, initAuthCreds, proto } from '@whiskeysockets/baileys';
-import { assessAuthRecovery } from './auth-recovery.js';
 
 export async function atomicWrite(filename, value) {
   const temporary = `${filename}.${crypto.randomUUID()}.tmp`;
@@ -65,12 +63,7 @@ export class FileStore {
 export async function acquireDataDirectory(directory) {
   await mkdir(directory, { recursive: true, mode: 0o700 });
   await chmod(directory, 0o700);
-  let held = true;
-  const unlock = await lockfile.lock(directory, { realpath: true, stale: 30_000, update: 10_000, retries: 0,
-    onCompromised: error => { held = false; throw error; } });
-  const release = async () => { await unlock(); held = false; };
-  release.assertHeld = () => { if (!held) throw new Error('DIRECTORY_OWNERSHIP_UNPROVEN'); };
-  return release;
+  return lockfile.lock(directory, { realpath: true, stale: 30_000, update: 10_000, retries: 0 });
 }
 
 const cloneAuth = value => value === undefined ? undefined : JSON.parse(JSON.stringify(value, BufferJSON.replacer), BufferJSON.reviver);
@@ -85,59 +78,11 @@ const authOwners = new WeakMap();
 function authFacade(store, owner) {
   const creds = cloneAuth(store.data.creds);
   const credsDigest = () => crypto.createHash('sha256').update(JSON.stringify(creds, BufferJSON.replacer)).digest('hex');
-  let retired = false, retiring = false, drained = false, retained = false;
+  let retired = false, retiring = false, drained = false;
   const context = new AsyncLocalStorage();
   const pending = new Set(), tokens = new Set(), attached = new WeakSet();
   const failureEvidence = [];
-  let failureTail = Promise.resolve(), reportedFailure = false, failureWriting = false;
-  const ownerId = crypto.randomUUID(), authGeneration = owner.generation, failedOperations = new Map();
-  let evidenceRevision = 0, persistedRevision = 0, evidenceWriteFailed = false, credentialWrites = 0;
-  let transportState = 'unknown', connectionGeneration = null, eventsReleased = false;
-  const operationEvidence = token => ({ id: token.id, source: token.source, operation: token.method,
-    started_at: token.started, sequence_at_start: token.sequence, sequence_at_end: token.endSequence ?? null,
-    provider_outcome: token.providerOutcome, wrapper_outcome: token.wrapperOutcome,
-    mutation_batches: token.mutations.length, credentials_changed: credsDigest() !== token.originalCreds });
-  const recoverySnapshot = () => ({ version: 1, owner_id: ownerId, auth_generation: authGeneration,
-    connection_generation: connectionGeneration, revision: evidenceRevision, captured_at: Date.now(),
-    retired, transport_state: transportState, events_released: eventsReleased,
-    pending_operations: pending.size, pending_credential_writes: credentialWrites,
-    pending_journal_writes: store.pending, sequence: store.seq,
-    settled: pending.size === 0 && tokens.size === 0 && credentialWrites === 0 && store.pending === 0,
-    evidence_write_failed: evidenceWriteFailed, intent_ids: [...owner.intents.keys()], operations: [...failedOperations.values()],
-    // Private, mode-0600 evidence only. Never returned by the operator endpoint.
-    credentials: cloneAuth(creds) });
-  const persistFailure = error => {
-    for (const token of tokens) failedOperations.set(token.id, operationEvidence(token));
-    evidenceRevision++;
-    if (failureWriting) return;
-    failureWriting = true;
-    failureTail = failureTail.then(async () => {
-      try {
-        let attemptedRevision = 0;
-        while (attemptedRevision !== evidenceRevision) {
-          const revision = evidenceRevision;
-          try {
-            // Entries are immutable at admission. Coalesce bursts without
-            // repeatedly cloning the entire history; include the latest final
-            // operation/credential/transport evidence, even with no new failure.
-            const saved = { version: 2, failures: failureEvidence.slice(), recovery: recoverySnapshot() };
-            await atomicWrite(store.filename + '.auth-failure', saved);
-            persistedRevision = revision;
-          } catch (fenceError) {
-            // A later successful snapshot must retain this durability warning.
-            evidenceWriteFailed = true;
-            if (error) error.authFencePersistenceFailed = true;
-            fenceError.bridgePersistenceFailure = true;
-            fenceError.code = 'AUTH_FAILURE_FENCE_UNWRITABLE';
-            auth.onFailure?.(fenceError);
-          }
-          // Do not spin retrying a failed write without new evidence.
-          attemptedRevision = revision;
-        }
-      } finally { failureWriting = false; }
-    });
-  };
-  const evidenceChanged = () => { if (reportedFailure && !retained) persistFailure(); };
+  let failureTail = Promise.resolve(), reportedFailure = false;
   let directSetTail = Promise.resolve(), activeArm, activeDisarm, activeArmed = false;
   let outsideProviderTransaction, inProviderTransaction;
   // Group commit. Each caller still resolves only after a durable write that
@@ -208,13 +153,7 @@ function authFacade(store, owner) {
     }
   };
   const active = evidence => {
-    if (retained) throw retiredAuth();
-    if (owner.current !== auth) throw retiredAuth();
-    const admitted = context.getStore();
-    // A timeout deactivates tokens, but their already admitted continuations
-    // still carry this context. Retain rejected late evidence before returning
-    // a failure; unrelated calls on a retired facade remain ordinary rejections.
-    if (retired && !admitted?.active && !admitted?.acceptedEvents && !(store.failed && admitted)) throw retiredAuth();
+    if (owner.current !== auth || (retired && !context.getStore()?.active && !context.getStore()?.acceptedEvents)) throw retiredAuth();
     if (store.failed) {
       const error = Object.assign(new Error('STORAGE_RESTART_REQUIRED'), { bridgePersistenceFailure: true });
       // A previously admitted callback can discover more server-relevant keys
@@ -231,15 +170,63 @@ function authFacade(store, owner) {
     // A known rejected mutation must not disappear on process restart. Retain
     // its private evidence and require explicit recovery before another socket
     // uses these credentials. Never automatically clear this fence.
-    // Snapshot only the new evidence at admission. Cloning the entire growing
-    // history on every rejection made an auth-failure burst quadratic and could
-    // starve heartbeat timers for every identity in this process. Coalesce
-    // writes while retaining every entry; drain still waits for the last one.
-    failureEvidence.push(cloneAuth({ ...evidence, creds: evidence?.creds ?? creds }));
+    recordEvidence(evidence);
     persistFailure(error);
     if (!reportedFailure) { reportedFailure = true; auth.onFailure?.(error); }
   };
-  const runProvider = (method, operation, args, independent = false, detached = false, source = method) => {
+  // Every evidence entry is already a private copy when it is admitted. Writes
+  // done after a failure are merged into one entry holding the latest value
+  // per key. Repeated rejections then cost O(1) and the file stays the size of
+  // the distinct keys. Previously each rejection deep-cloned and rewrote all
+  // earlier evidence: quadratic, and it starved every other line's event loop.
+  let rejectedAfterFailure = null;
+  const recordEvidence = evidence => {
+    const operation = evidence?.operation;
+    if (operation !== 'rejected_keys_after_failure' && operation !== 'rejected_creds_after_failure') {
+      failureEvidence.push(evidence);
+      return;
+    }
+    if (!rejectedAfterFailure) {
+      rejectedAfterFailure = { operation: 'rejected_after_failure', rejections: 0, first_at: Date.now(), mutations: [{}] };
+      failureEvidence.push(rejectedAfterFailure);
+    }
+    rejectedAfterFailure.rejections++;
+    rejectedAfterFailure.last_at = Date.now();
+    if (evidence.creds) rejectedAfterFailure.creds = evidence.creds;
+    const merged = rejectedAfterFailure.mutations[0];
+    for (const update of evidence.mutations ?? []) {
+      for (const [type, values] of Object.entries(update)) {
+        merged[type] ??= {};
+        Object.assign(merged[type], values);
+      }
+    }
+  };
+  // One writer. Failures that arrive while it writes are covered by the next
+  // pass, so a burst of rejections produces at most two snapshots.
+  let failureWriting = false, evidenceRevision = 0, latestFailureError = null;
+  const persistFailure = error => {
+    evidenceRevision++;
+    latestFailureError = error;
+    if (failureWriting) return;
+    failureWriting = true;
+    failureTail = failureTail.then(async () => {
+      try {
+        let written = 0;
+        while (written !== evidenceRevision) {
+          const revision = evidenceRevision, reported = latestFailureError;
+          try { await atomicWrite(store.filename + '.auth-failure', { version: 1, failures: failureEvidence }); }
+          catch (fenceError) {
+            reported.authFencePersistenceFailed = true;
+            fenceError.bridgePersistenceFailure = true;
+            fenceError.code = 'AUTH_FAILURE_FENCE_UNWRITABLE';
+            auth.onFailure?.(fenceError);
+          }
+          written = revision;
+        }
+      } finally { failureWriting = false; }
+    });
+  };
+  const runProvider = (method, operation, args, independent = false, detached = false) => {
     active(method === 'set' ? () => ({ operation: 'rejected_keys_after_failure', mutations: [cloneKeyUpdates(args[0])] }) : undefined);
     const inherited = context.getStore();
     if (inherited?.active && !independent) {
@@ -260,8 +247,7 @@ function authFacade(store, owner) {
         }
       })();
     }
-    const token = { active: true, hasTransaction: method === 'transaction' || method === 'pipeline', id: crypto.randomUUID(), method, source,
-      providerOutcome: 'not_started', wrapperOutcome: 'unresolved', started: Date.now(), sequence: store.seq,
+    const token = { active: true, hasTransaction: method === 'transaction' || method === 'pipeline', id: crypto.randomUUID(), method, started: Date.now(), sequence: store.seq,
       originalCreds: credsDigest(), mutations: method === 'set' ? [cloneKeyUpdates(args[0])] : [] };
     if (independent && !detached && inherited?.active && inProviderTransaction?.()) token.parent = inherited;
     let previousSet, releaseSet;
@@ -270,7 +256,7 @@ function authFacade(store, owner) {
       directSetTail = new Promise(resolve => { releaseSet = resolve; });
     }
     tokens.add(token);
-    const task = context.run(token, async () => {
+    const task = token.task = context.run(token, async () => {
       try {
         // Baileys' nontransactional PQueue can execute a queued callback in a
         // previous job's AsyncLocalStorage context. Keep top-level direct sets
@@ -279,12 +265,10 @@ function authFacade(store, owner) {
         // Strict mode: this fence precedes any provider work, including network
         // side effects. Resume mode: a provider pipeline writes its intent when
         // it first starts a key transaction or mutation (the nested path
-        // above). A pipeline that never touches keys needs no fence, and an
+        // below). A pipeline that never touches keys needs no fence, and an
         // initial sync starts thousands of them at once (14,032 on 2026-11-09).
         if (method !== 'get' && !(method === 'pipeline' && owner.resume)) await saveIntent(token);
-        token.providerOutcome = 'unresolved';
         const result = await operation(...args);
-        token.providerOutcome = 'completed';
         if (!token.hasIntent && token.hasTransaction && credsDigest() !== token.originalCreds) await auth.saveCreds();
         if (token.hasIntent) {
           if (token.hasTransaction && credsDigest() !== token.originalCreds) await auth.saveCreds();
@@ -292,14 +276,11 @@ function authFacade(store, owner) {
           await changeIntent(intents => intents.delete(token.id));
           token.hasIntent = false;
         }
-        token.wrapperOutcome = 'completed';
         return result;
       }
       catch (error) {
-        if (token.providerOutcome === 'unresolved') token.providerOutcome = 'rejected';
-        token.wrapperOutcome = 'rejected';
-        // Work abandoned at the retirement deadline was already given up: clear
-        // its intent and keep the store usable (resume mode only).
+        // Work abandoned at retirement was already given up: clear its intent
+        // and keep the store usable (resume mode only).
         if (token.abandoned) {
           if (token.hasIntent) await changeIntent(intents => intents.delete(token.id)).catch(() => {});
           throw error;
@@ -325,29 +306,25 @@ function authFacade(store, owner) {
           fail(error, { operation: method, intent_id: token.id, mutations: token.mutations });
         }
         throw error;
-      } finally {
-        token.active = false; token.endSequence = store.seq;
-        if (reportedFailure) failedOperations.set(token.id, operationEvidence(token));
-        tokens.delete(token); releaseSet?.();
-      }
+      } finally { token.active = false; tokens.delete(token); releaseSet?.(); }
     });
     pending.add(task);
     const finished = () => {
       pending.delete(task);
       if (retired && !pending.size) auth.onProviderIdle?.();
-      evidenceChanged();
     };
     task.then(finished, finished);
     return task;
   };
-  const transition = async reset => {
-    if (retained) throw retiredAuth();
+  const transition = async (reset, { drainTimeoutMs } = {}) => {
     if (owner.current !== auth) throw retiredAuth();
     auth.retire();
     const generation = ++owner.generation;
     // Include provider transactions still buffering mutations and retrying a
     // commit, not only raw writes already admitted to the journal queue.
-    await auth.drain();
+    // Resume mode: after a dead transport the caller may shorten the deadline;
+    // stuck work is then abandoned with evidence instead of awaited.
+    await auth.drain(owner.resume && drainTimeoutMs ? { timeoutMs: drainTimeoutMs } : {});
     if (reset) await store.update(data => { data.creds = initAuthCreds(); data.keys = {}; });
     else await store.flush();
     if (owner.generation !== generation) throw retiredAuth();
@@ -386,13 +363,11 @@ function authFacade(store, owner) {
     saveCreds: async () => {
       active(() => ({ operation: 'rejected_creds_after_failure', creds: cloneAuth(creds) }));
       const admitted = cloneAuth(creds);
-      credentialWrites++;
       try { return await store.update(data => { data.creds = admitted; }); }
       catch (error) {
         fail(error, { operation: 'creds', creds: admitted });
         throw error;
       }
-      finally { credentialWrites--; evidenceChanged(); }
     },
     trackProviderKeys: keys => {
       if (attached.has(keys)) return;
@@ -417,86 +392,26 @@ function authFacade(store, owner) {
         attached.add(mutex);
         const operation = mutex.mutex.bind(mutex);
         // Admit at enqueue (a retired or failed owner rejects immediately), but
-        // fence only when the job acquires the mutex: a queued job has done no
-        // provider work. Registering at enqueue made a backlog of N jobs hold N
-        // intents and rewrite them on every completion (O(N^2); a 3,000-job
-        // backlog took ~35 min on 2026-11-09). Jobs still queued at retirement
-        // reject with AUTH_SESSION_RETIRED; they never decrypted or acknowledged
-        // anything, so WhatsApp redelivers them to the next session.
+        // fence with a durable intent only when the job acquires the mutex.
+        // A queued job has done no provider work. Registering intents at
+        // enqueue made an offline backlog of N jobs hold N intents, and every
+        // completion rewrote all remaining ones (O(N^2) fsynced bytes; on
+        // 2026-11-09 a 3,000-job backlog took ~35 min at full CPU). Jobs still
+        // queued at retirement now reject with AUTH_SESSION_RETIRED; their
+        // messages were never decrypted or acknowledged, so WhatsApp
+        // redelivers them to the next session.
         mutex.mutex = async code => {
           active();
-          return operation(() => runProvider('pipeline', code, [], false, false, name));
+          return operation(() => runProvider('pipeline', code, []));
         };
       }
     },
-    trackProviderTask: operation => runProvider('pipeline', operation, [], true, false, 'bridgeTask'),
+    trackProviderTask: operation => runProvider('pipeline', operation, [], true),
     trackProviderDetachedTask: operation => {
       if (!outsideProviderTransaction) throw new Error('AUTH_PROVIDER_DETACH_REQUIRED');
       // Detached issuance must not inherit Baileys' completed transaction ALS:
       // its later set() would otherwise report success into a dead buffer.
-      return outsideProviderTransaction(() => runProvider('pipeline', operation, [], true, true, 'bridgeDetachedTask'));
-    },
-    trackRecoveryTransport: (closed, generation) => {
-      connectionGeneration = generation;
-      if (!closed || typeof closed.then !== 'function') return;
-      transportState = 'open';
-      Promise.resolve(closed).then(() => { transportState = 'closed'; evidenceChanged(); },
-        () => { transportState = 'unconfirmed'; evidenceChanged(); });
-    },
-    recoveryEventsReleased: () => { eventsReleased = true; evidenceChanged(); },
-    // Retention never establishes credential correctness. It only proves that
-    // the failed owner has stopped and that its final uncertain evidence exists.
-    // No disk reads/writes or promises may occur between this check and sealing.
-    retainedIdle: () => owner.current === auth && retired && transportState === 'closed' && eventsReleased &&
-      reportedFailure && store.failed && pending.size === 0 && tokens.size === 0 && credentialWrites === 0 &&
-      store.pending === 0 && store.healthWrites === 0 && !store.compactionPromise && !store.activeCheckpoint &&
-      !store.cleanupCheckpoint && !store.maintenanceCleanupFailed && !failureWriting && !evidenceWriteFailed &&
-      evidenceRevision === persistedRevision,
-    canRetain: recovery => {
-      if (!auth.retainedIdle() || !recovery) return false;
-      const current = recoverySnapshot();
-      // captured_at is observation time, not part of the durable owner state.
-      const {captured_at: _saved, ...saved} = recovery;
-      const {captured_at: _now, ...observed} = current;
-      return isDeepStrictEqual(saved, observed);
-    },
-    sealRetained: () => {
-      if (!auth.retainedIdle()) throw new Error('AUTH_ISOLATION_UNPROVEN');
-      retained = true;
-    },
-    // Permanent abandonment needs cessation, not proof that these credentials
-    // are reusable. Historical intents stay unresolved and are never applied.
-    quarantineIdle: () => owner.current === auth && retired && transportState === 'closed' && eventsReleased &&
-      store.failed && pending.size === 0 && tokens.size === 0 && credentialWrites === 0 &&
-      store.pending === 0 && store.healthWrites === 0 && !store.compactionPromise && !store.activeCheckpoint &&
-      !store.cleanupCheckpoint && !failureWriting,
-    sealQuarantine: () => {
-      if (!auth.quarantineIdle()) throw new Error('QUARANTINE_WRITER_ACTIVE');
-      retained = true;
-    },
-    // Observation only: no flush, marker changes, provider calls or journal replay.
-    assessRecovery: async ({timeoutMs = 1000} = {}) => {
-      // A closing transport or settling callback may append evidence while the
-      // previous write is awaited. Observe the latest tail, never an older proof.
-      let timer, observationTimedOut = false;
-      const deadline = Date.now() + timeoutMs;
-      try {
-        await Promise.race([(async () => {
-          let observed;
-          do { observed = failureTail; await observed; } while (observed !== failureTail && Date.now() < deadline);
-        })(), new Promise(resolve => {timer = setTimeout(() => {observationTimedOut = true; resolve();}, timeoutMs);})]);
-      } finally {clearTimeout(timer);}
-      const recovery = recoverySnapshot();
-      const result = assessAuthRecovery({failure: reportedFailure ? {version: 2, failures: failureEvidence, recovery} : null,
-        live: { evidence_persisted: persistedRevision === evidenceRevision && !evidenceWriteFailed,
-          current_owner: owner.current === auth,
-          credentials_match_committed: credsDigest() === crypto.createHash('sha256')
-            .update(JSON.stringify(store.data.creds, BufferJSON.replacer)).digest('hex') }});
-      if (observationTimedOut) {
-        result.blockers.push('EVIDENCE_OBSERVATION_TIMEOUT');
-        result.status = 'BLOCKED'; result.authentication_evidence_complete = false;
-      }
-      return result;
+      return outsideProviderTransaction(() => runProvider('pipeline', operation, [], true, true));
     },
     inProviderContext: () => owner.current === auth && Boolean(context.getStore()?.active || context.getStore()?.acceptedEvents),
     acceptBufferedEvents: callback => {
@@ -511,28 +426,15 @@ function authFacade(store, owner) {
       });
     },
     hasProviderWork: () => pending.size > 0,
-    // Fixed booleans only: used by the session owner for administrative admission.
-    managementEvidence: () => ({current_owner: owner.current === auth,
-      paired: creds.registered === true && Boolean(creds.me?.id) &&
-        creds.signedPreKey?.signature instanceof Uint8Array && creds.signedPreKey.signature.length >= 32 &&
-        Number.isInteger(creds.registrationId) && typeof creds.advSecretKey === 'string' && Boolean(creds.advSecretKey) &&
-        [creds.noiseKey, creds.signedIdentityKey, creds.signedPreKey?.keyPair].every(pair =>
-          pair?.public instanceof Uint8Array && pair.public.length >= 32 &&
-          pair?.private instanceof Uint8Array && pair.private.length >= 32),
-      healthy: !reportedFailure && !store.failed && !evidenceWriteFailed && owner.intents.size === 0 &&
-        credsDigest() === crypto.createHash('sha256').update(JSON.stringify(store.data.creds, BufferJSON.replacer)).digest('hex'),
-      settled: pending.size === 0 && tokens.size === 0 && credentialWrites === 0 && store.pending === 0,
-      transport_closed: transportState === 'closed', events_released: eventsReleased}),
     armSession: () => {
       active();
       activeArm ??= atomicWrite(store.filename + '.auth-active', { version: 1, started_at: Date.now(),
-        sequence_at_start: store.seq, id: ownerId }).then(() => { activeArmed = true; }).catch(error => {
+        sequence_at_start: store.seq, id: crypto.randomUUID() }).then(() => { activeArmed = true; }).catch(error => {
         fail(error, { operation: 'session_arm' }); throw error;
       });
       return activeArm;
     },
     drain: async ({ timeoutMs = owner.drainTimeoutMs } = {}) => {
-      if (retained) throw new Error('AUTH_RETAINED_OFFLINE');
       let timer;
       try {
         await activeArm;
@@ -603,19 +505,19 @@ function authFacade(store, owner) {
       retiring = true;
       try { auth.beforeRetire?.(); }
       catch (error) { fail(error, { operation: 'prepare_retirement' }); }
-      finally { retired = true; retiring = false; evidenceChanged(); }
+      finally { retired = true; retiring = false; }
     },
-    renew: () => transition(false),
+    renew: options => transition(false, options),
     reset: () => transition(true),
   };
   owner.current = auth;
   return auth;
 }
 
-// Retiring a socket waits for its admitted provider work. In strict mode,
-// missing this deadline permanently fails the line's auth store, so it must
-// exceed the provider's own query timeout (20 s) plus slow-disk fsync time
-// (production commits take ~200 ms each) by a wide margin.
+// Retiring a socket waits for its admitted provider work. Missing this
+// deadline permanently fails the line's auth store, so it must exceed the
+// provider's own query timeout (20 s) plus slow-disk fsync time (production
+// commits take ~200 ms each) by a wide margin.
 export const DEFAULT_AUTH_DRAIN_TIMEOUT_MS = 60_000;
 
 const markerExists = async filename => {
@@ -628,28 +530,15 @@ const markerExists = async filename => {
 // fsynced journal; the markers only describe work that was in progress:
 //   .auth-active   a session was running
 //   .auth-intent   a provider transaction was in flight (uncommitted)
-//   torn tail      the last journal write did not finish (quarantined on load)
+//   torn tail      the last journal write did not finish (already quarantined)
 //   .auth-failure  writes were rejected; resumable only when the failure began
 //                  with a drain timeout (not a disk or journal write error)
 // Resume from the committed state instead of forcing a full re-pair: the
 // in-flight change is discarded, and WhatsApp's retry receipts repair the few
 // chats it touched. Markers are renamed with an .abandoned/.resumed suffix,
 // never deleted, so the evidence stays auditable. A failure caused by a real
-// write error keeps the existing fenced/retained/quarantine handling.
+// write error still fences the line. createAuth() itself stays strict.
 const RESUMABLE_FAILURE_ORIGINS = new Set(['drain_timeout']);
-async function failureOrigin(filename) {
-  try {
-    // Read in-process only; recovery evidence is never logged.
-    const evidence = JSON.parse(await fs.readFile(filename, 'utf8'));
-    return evidence?.failures?.[0]?.operation ?? null;
-  } catch (_) { return null; }
-}
-// Pre-load decision (no journal replay, no writes): may this fenced line resume?
-export async function resumableAuthFence(directory) {
-  const filename = path.join(directory, 'auth.json');
-  if (!await markerExists(filename + '.auth-failure')) return true;
-  return RESUMABLE_FAILURE_ORIGINS.has(await failureOrigin(filename + '.auth-failure'));
-}
 export async function resumeAfterUncleanExit(store) {
   if (store.failed) return { resumed: false, reason: 'store_failed' };
   const markers = {};
@@ -657,8 +546,14 @@ export async function resumeAfterUncleanExit(store) {
   if (!markers['.auth-active'] && !markers['.auth-intent'] && !markers['.auth-failure']) {
     return { resumed: false, reason: 'no_marker' };
   }
-  if (markers['.auth-failure'] && !RESUMABLE_FAILURE_ORIGINS.has(await failureOrigin(store.filename + '.auth-failure'))) {
-    return { resumed: false, reason: 'auth_failure_present' };
+  if (markers['.auth-failure']) {
+    let origin = null;
+    try {
+      // Read in-process only; recovery evidence is never logged.
+      const evidence = JSON.parse(await fs.readFile(store.filename + '.auth-failure', 'utf8'));
+      origin = evidence?.failures?.[0]?.operation ?? null;
+    } catch (_) { origin = null; }
+    if (!RESUMABLE_FAILURE_ORIGINS.has(origin)) return { resumed: false, reason: 'auth_failure_present' };
   }
   const stamp = Date.now(), retained = [];
   for (const [suffix, present] of Object.entries(markers)) {
@@ -684,7 +579,6 @@ export async function assertAuthRecoveryClear(filename) {
 }
 
 export async function createAuth(directory, { store, drainTimeoutMs, resume = false, onRecovery, ...options } = {}) {
-  if (!store) await assertAuthRecoveryClear(path.join(directory, 'auth.json'));
   store ??= await new JournalStore(path.join(directory, 'auth.json'), () => ({ creds: initAuthCreds(), keys: {} }), options).load();
   try { await assertAuthRecoveryClear(store.filename); } catch (error) { store.failed = true; throw error; }
   if (authOwners.has(store)) return authOwners.get(store).current.renew();

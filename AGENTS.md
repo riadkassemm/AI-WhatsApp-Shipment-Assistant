@@ -46,12 +46,13 @@ Use short imperative subjects, matching history: “Fix …”, “Add …”, o
 
 Workflow:
 
-- Implement and perform focused verification locally using mocks and isolated test data. Never load production credentials or contact real WhatsApp services during verification.
-- Deployment workflow is production only: PROD is `root@194.5.152.173`. Do not access or deploy to DEV.
+- Developer PC: source editing, review, and Git only. Build, test, and run commands execute on DEV, not on the PC.
+- DEV is `root@158.220.113.93`; PROD is `root@194.5.152.173`.
 - Implement and review locally, commit to a dedicated feature branch, push it, and open a PR. Committing, pushing, and opening a PR require task-specific authorization.
-- Deploy reviewed, committed code directly to production only after explicit production approval. Never automatically merge or deploy a PR. Preserve graceful shutdown, integrity and rollback gates.
-- Never deploy from temporary investigation directories or deploy uncommitted code. Never reuse production WhatsApp credentials/sessions in tests or create duplicate owners of a linked identity.
-- Keep PROD unchanged during local development and verification. Preserve active identities, customer data, storage, checkpointing, deduplication, and message-recovery safeguards.
+- Deploy reviewed, committed code to DEV only after explicit DEV deployment approval. Use isolated/mock WhatsApp connections and disposable test services; preserve existing DEV databases, sessions, and persistent files.
+- After successful DEV verification, production deployment requires separate explicit approval. Never automatically merge a PR.
+- Never deploy from temporary investigation directories or deploy uncommitted code. Never reuse production WhatsApp credentials/sessions in DEV or create duplicate owners of a linked identity.
+- Keep PROD unchanged during local development and DEV verification. Preserve storage, checkpointing, deduplication, and message-recovery safeguards.
 - Read-only tasks stay read-only unless explicitly expanded.
 
 ## Security & Configuration

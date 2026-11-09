@@ -25,7 +25,6 @@ const createMetaChip = element;
 const createIcon = element;
 const calls = [];
 const removeSavedWhatsAppNumber = id => calls.push(id);
-const removeLinkedDeviceNumber = id => calls.push(['unlink', id]);
 let manager = true;
 const canManageWhatsApp = () => manager;
 """ + source + r"""
@@ -33,8 +32,7 @@ const entries = [
  {phone_number_id:'11111', source:'META_SYNC', is_enabled:false, provider_present:true},
  {phone_number_id:'22222', source:'WEBHOOK', is_enabled:false, provider_present:false},
  {phone_number_id:'33333', source:'META_SYNC', is_enabled:true, provider_present:true},
- {phone_number_id:'90005', source:'LINKED_DEVICE', is_enabled:false, provider_present:true},
- {phone_number_id:'90006', source:'LINKED_DEVICE', is_enabled:true, provider_present:true}
+ {phone_number_id:'90005', source:'LINKED_DEVICE', is_enabled:false, provider_present:true}
 ];
 renderWhatsAppRegistry({accounts:[], numbers:entries});
 let rows = elements.whatsappNumbers.children;
@@ -44,10 +42,6 @@ assert.equal(removal(rows[2]), undefined); assert.equal(removal(rows[3]), undefi
 removal(rows[1]).onclick();
 assert.deepEqual(calls, ['22222']);
 assert.ok(rows[3].children[1].children.some(node => node.textContent === 'Remove and unlink'));
-assert.deepEqual(rows[4].children[1].children.map(node => node.textContent), ['Rename', 'Remove and unlink'],
-  'active linked numbers use the history-preserving removal flow, not the conversation-blocked deactivation endpoint');
-rows[4].children[1].children[1].onclick();
-assert.deepEqual(calls, ['22222', ['unlink', '90006']]);
 state.whatsappBusy = true;
 renderWhatsAppRegistry({accounts:[], numbers:entries});
 assert.equal(removal(elements.whatsappNumbers.children[0]).disabled, true);
@@ -59,7 +53,6 @@ const labels = row => row.children[1].children.map(node => node.textContent);
 assert.deepEqual(labels(rows[0]), ['Rename', 'Add to app']);
 assert.deepEqual(labels(rows[2]), ['Rename'], 'no Remove from app for an active number');
 assert.deepEqual(labels(rows[3]), ['Rename', 'Add to app'], 'no Remove and unlink');
-assert.deepEqual(labels(rows[4]), ['Rename'], 'active linked number removal remains manager-only');
 """)
 
 
