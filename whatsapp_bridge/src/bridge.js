@@ -5,7 +5,7 @@ import makeWASocket, { Browsers, DisconnectReason, downloadMediaMessage, normali
 import pino from 'pino';
 import QRCode from 'qrcode';
 import { BridgeError, phoneDigits, wrapId, unwrapId, validateLineManifest, UUID_PATTERN, MANIFEST_MAX_BYTES } from './config.js';
-import { FileStore, createAuth } from './storage.js';
+import { FileStore, createAuth, resumeAfterUncleanExit } from './storage.js';
 import { JournalStore, encode } from './journal-store.js';
 import { safeStorageCode } from './journal-maintenance.js';
 import { StorageMonitor } from './storage-monitor.js';
@@ -227,7 +227,17 @@ export class Bridge {
   }
   async loadAuth(line) {
     const store = await this.loadStore(path.join(line.directory, 'auth.json'), () => ({creds: initAuthCreds(), keys: {}}), 'auth', line);
-    const auth = await createAuth(line.directory, {store});
+    // The directory lock guarantees no other process owns this line, and
+    // ownedStores guarantees this process loads it once. A marker found here
+    // was therefore left by a process that exited without retiring the session.
+    if (this.config.auth?.resumeAfterUncleanExit !== false) {
+      const outcome = await resumeAfterUncleanExit(store);
+      if (outcome.reason !== 'no_marker') {
+        this.log({component: 'whatsapp_bridge', event: outcome.resumed ? 'auth_session_resumed_after_unclean_exit' : 'auth_session_fenced_after_unclean_exit',
+          line_id: line.line_id, reason: outcome.reason});
+      }
+    }
+    const auth = await createAuth(line.directory, {store, drainTimeoutMs: this.config.auth?.drainTimeoutMs});
     if (this.stopping) { auth.retire(); await auth.drain(); this.assertRunning(); }
     return auth;
   }

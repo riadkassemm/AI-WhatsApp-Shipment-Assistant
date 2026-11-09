@@ -1142,7 +1142,8 @@ test('first pairing pins the phone and later wrong-account reconnect cannot send
 });
 
 test('a failed scheduled reconnect retries transient network errors with backoff and resumes its saved session', async t => {
-  const { bridge, line, socket } = await fixture(t);
+  // Fix the equal-jitter draw so the mocked timer ticks match the backoff.
+  const { bridge, line, socket } = await fixture(t, 'ack', { random: () => 0 });
   const resumedSocket = mockSocket();
   let attempts = 0;
   bridge.makeSocket = options => {
@@ -1168,7 +1169,8 @@ test('a failed scheduled reconnect retries transient network errors with backoff
 });
 
 test('scheduled reconnect halts on persistence failure and never logs out or discards saved credentials', async t => {
-  const { bridge, line, socket } = await fixture(t);
+  // Fix the equal-jitter draw so the mocked timer ticks match the backoff.
+  const { bridge, line, socket } = await fixture(t, 'ack', { random: () => 0 });
   const previousAuth = line.auth;
   const update = line.store.update.bind(line.store);
   let createSocketCalls = 0;
@@ -1198,13 +1200,16 @@ test('provider logout and bridge shutdown suppress scheduled reconnect attempts'
   assert.equal(line.store.data.enabled, false);
   t.mock.timers.tick(60_000);
   assert.equal(calls, 0);
-  await line.store.update(data => { data.enabled = true; });
-  line.status = 'disconnected';
+  // Start a new, explicitly requested session before testing normal transport
+  // recovery. Toggling enabled alone cannot un-revoke a logged-out session.
+  await bridge.connect(LINE);
+  assert.equal(calls, 1);
+  bridge.blockConnection(line, line.socket, 'synthetic_reconnect');
   bridge.scheduleReconnect(line);
   assert.ok(line.reconnectTimer);
   bridge.stopping = true;
-  t.mock.timers.tick(1000);
-  assert.equal(calls, 0);
+  t.mock.timers.tick(60_000); // Includes the reconnect backoff and jitter.
+  assert.equal(calls, 1);
   assert.equal(line.reconnectTimer, null);
 });
 

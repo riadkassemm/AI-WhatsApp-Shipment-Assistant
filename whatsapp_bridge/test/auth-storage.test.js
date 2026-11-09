@@ -687,3 +687,64 @@ test('already admitted callbacks retain later rejected keys and credentials afte
     await assert.rejects(auth.renew(), /STORAGE_RESTART_REQUIRED/);
   } finally { release.resolve(); auth.store.append = append; }
 });
+
+test('a backlog of rejected writes after an auth failure stays cheap, bounded and keeps the latest value per key', async t => {
+  const { directory, auth } = await fixture(t);
+  const errors = [];
+  auth.onFailure = error => errors.push(error);
+  auth.store.maxPending = 0;
+  await assert.rejects(auth.state.keys.set({ session: { first: Buffer.alloc(16, 1) } }), error => error.bridgePersistenceFailure);
+  // Production evidence: an offline backlog kept calling set() on a failed
+  // store; every call deep-cloned and rewrote all earlier evidence (MBs).
+  const peers = 20, rounds = 400, value = round => Buffer.alloc(20_000, round % 251);
+  const started = performance.now();
+  let maxBlockedMs = 0;
+  for (let round = 0; round < rounds; round++) {
+    const before = performance.now();
+    await assert.rejects(auth.state.keys.set({ session: { ['peer' + (round % peers)]: value(round) } }), /STORAGE_RESTART_REQUIRED/);
+    auth.state.creds.myAppStateKeyId = 'round-' + round;
+    await assert.rejects(auth.saveCreds(), /STORAGE_RESTART_REQUIRED/);
+    maxBlockedMs = Math.max(maxBlockedMs, performance.now() - before);
+  }
+  await auth.drain().catch(() => {});
+  const elapsed = performance.now() - started;
+  assert.ok(elapsed < 5_000, `rejected backlog took ${Math.round(elapsed)} ms`);
+  assert.ok(maxBlockedMs < 250, `one rejected write blocked ${Math.round(maxBlockedMs)} ms`);
+  const file = auth.store.filename + '.auth-failure';
+  assert.ok((await stat(file)).size < peers * 20_000 * 3, 'evidence keeps one value per rejected key');
+  const evidence = JSON.parse(await readFile(file, 'utf8'), BufferJSON.reviver);
+  assert.deepEqual(evidence.failures[0].mutations[0].session.first, Buffer.alloc(16, 1));
+  const merged = evidence.failures.find(failure => failure.operation === 'rejected_after_failure');
+  assert.equal(merged.rejections, rounds * 2);
+  assert.deepEqual(merged.mutations[0].session['peer' + ((rounds - 1) % peers)], value(rounds - 1));
+  assert.equal(merged.creds.myAppStateKeyId, 'round-' + (rounds - 1));
+  assert.equal(errors.filter(error => error.code === 'AUTH_FAILURE_FENCE_UNWRITABLE').length, 0);
+  await assert.rejects(createAuth(directory), /AUTH_RECOVERY_REQUIRED/);
+});
+
+test('a burst of queued provider pipelines shares durable intent writes instead of rewriting every intent per job', async t => {
+  const { auth } = await fixture(t);
+  const open = fs.open;
+  let intentWrites = 0;
+  t.mock.method(fs, 'open', async (filename, ...args) => {
+    if (String(filename).includes('.auth-intent.')) intentWrites++;
+    return open(filename, ...args);
+  });
+  const release = gate(), jobs = 300;
+  const started = [];
+  // Baileys enqueues every offline message into its mutex at once; each job's
+  // intent must be durable before it runs, but they need not be written alone.
+  const tasks = Array.from({ length: jobs }, (_, index) => auth.trackProviderTask(async () => {
+    started.push(index);
+    await release.promise;
+    return index;
+  }));
+  while (started.length < jobs) await new Promise(resolve => setImmediate(resolve));
+  const intents = JSON.parse(await readFile(auth.store.filename + '.auth-intent', 'utf8'), BufferJSON.reviver);
+  assert.equal(intents.operations.length, jobs, 'every running job is fenced by a durable intent');
+  release.resolve();
+  assert.deepEqual(await Promise.all(tasks), [...Array(jobs).keys()]);
+  await assert.rejects(readFile(auth.store.filename + '.auth-intent'), { code: 'ENOENT' });
+  assert.ok(intentWrites < 20, `${intentWrites} intent rewrites for ${jobs} queued jobs`);
+  assert.equal(auth.store.failed, false);
+});
