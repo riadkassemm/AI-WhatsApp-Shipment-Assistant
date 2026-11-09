@@ -1216,6 +1216,7 @@ body.column-resizing * { cursor: col-resize !important; }
 .whatsapp-name-editor { grid-column: 1 / -1; display: flex; align-items: flex-end; flex-wrap: wrap; gap: 8px; padding-top: 4px; }
 .whatsapp-name-editor .field { flex: 1 1 220px; min-width: 0; margin: 0; }
 .whatsapp-name-editor .btn { min-height: 38px; }
+.whatsapp-name-editor > .field-hint { flex: 1 0 100%; margin-top: -2px; }
 .whatsapp-sync-form { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: start; margin-top: 14px; }
 .whatsapp-sync-form .field { margin: 0; }
 .whatsapp-sync-form > .btn { margin-top: 24px; min-height: 38px; }
@@ -1488,7 +1489,8 @@ body.column-resizing * { cursor: col-resize !important; }
   .linked-device-line > strong, .linked-device-line > .muted, .linked-device-line > .linked-device-qr { grid-column: 1 / -1; }
   .linked-device-line > .btn { grid-row: auto; }
   .linked-device-line:not(:has(> .btn + .btn)) > .btn { grid-column: 1 / -1; justify-self: stretch; }
-  .whatsapp-name-editor .btn { flex: 1 1 auto; }
+  .whatsapp-name-editor .field { flex-basis: 100%; }
+  .whatsapp-name-editor .btn { flex: 1 1 0; }
 }
 
 @media (pointer: coarse) {
