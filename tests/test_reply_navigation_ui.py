@@ -19,7 +19,8 @@ def test_reply_navigation_browser(tmp_path):
 const $=id=>document.getElementById(id);
 const state={authenticated:true,ticketId:42,historySelectionEpoch:1,previousTicketHistory:[],
  cachedCurrentMessages:[],currentTicketData:{ticket:{id:42},permissions:{can_reply:false,can_forward:false}},
- selectedMessages:new Map(),previousHistoryExpanded:false,conversationSelectionPointer:null};
+ selectedMessages:new Map(),previousHistoryExpanded:false,conversationSelectionPointer:null,
+ localMessages:new Map(),hiddenSupportMessages:new Set(),realtimeMessages:new Map()};
 const notices=[],calls=[];
 const notify=t=>notices.push(t),updateScrollLatestButton=()=>{},updateSharedHistoryShortcut=()=>{};
 let investigationTicket=60,investigationRequest=1,investigationMessageBefore=850;
@@ -42,7 +43,7 @@ function renderConversation(data){
  for(const m of data.messages||[])addMessage(c,m);
 }
 function deferred(){let resolve;const promise=new Promise(r=>resolve=r);return {promise,resolve};}
-''' + merge + selection + navigation + add_message + history + r'''
+''' + _ASSETS['delivery-state.js'] + merge + selection + navigation + add_message + history + r'''
 (async()=>{
 const c=$('conversation');
 // Exercise the actual shared renderer for each supported original AND reply type.

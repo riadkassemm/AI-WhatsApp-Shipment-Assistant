@@ -207,8 +207,8 @@ assert.match(rows[1].children[1].textContent, /1 updates pending/);
 assert.match(rows[1].children[1].textContent, /1 failed updates need administrator attention/);
 assert.equal(rows[0].children[2].textContent, 'Remove and unlink');
 assert.equal(rows[0].children[2].disabled, false);
-assert.equal(rows[1].children[2].textContent, 'Pair WhatsApp');
-const unlink = rows[1].children[3];
+assert.equal(rows[1].children.some(node => node.textContent === 'Pair WhatsApp'), false, 'failed paired credentials must not be reused');
+const unlink = rows[1].children[2];
 assert.equal(unlink.textContent, 'Remove and unlink');
 assert.equal(unlink.disabled, false);
 unlink.onclick();
@@ -1645,7 +1645,8 @@ const text = (node, value) => {node.textContent = value};
 const window = {setTimeout(callback) {callback()}};
 const state = {pageLeaving: false, authenticated: false, imageEditor: null,
   mediaRecorder: null, queueRequest: 0, ticketRequest: 0,
-  globalSearchRequest: 0, linkedDeviceRequest: 0, dashboardReadBoundaries:new Map(),chatNotificationIds:new Set()};
+  globalSearchRequest: 0, linkedDeviceRequest: 0, dashboardReadBoundaries:new Map(),chatNotificationIds:new Set(),
+  sendSessionEpoch: 0, localMessages: new Map(), realtimeMessages: new Map(), hiddenSupportMessages: new Set()};
 const resetQueueFilters = () => {};
 let clearedSelections = 0;
 const clearSupportSelections = () => {clearedSelections++};
@@ -1683,7 +1684,7 @@ const api = () => {
   }
   throw new Error('Unexpected test mode');
 };
-""" + views + bootstrap + r"""
+""" + _ASSETS["delivery-state.js"] + views + bootstrap + r"""
 (async () => {
   const pending = bootstrap();
   assert.equal($('sessionLoading').classList.contains('hidden'), false);
