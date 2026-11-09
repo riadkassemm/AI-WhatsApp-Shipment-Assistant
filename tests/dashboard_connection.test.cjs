@@ -13,7 +13,7 @@ const microtasks = async () => { for (let i = 0; i < 30; i++) await Promise.reso
 function harness({random = 0} = {}) {
   let now = 1_000_000, nextId = 0;
   const timers = new Map(), listeners = {document: {}, window: {}}, elements = new Map();
-  const apiCalls = [], refreshes = [], sources = [], runs = [];
+  const apiCalls = [], refreshes = [], sources = [], runs = [], lineHealth = [];
   const element = id => {
     if (!elements.has(id)) {
       const classes = new Set(id === 'connectionBanner' ? ['hidden'] : []);
@@ -51,6 +51,9 @@ function harness({random = 0} = {}) {
     loadAiSettings: async () => {}, renderAiSettingsUnavailable: () => {},
     refreshAllQueueCounts: async () => {}, openTicket: async () => {},
     loadQueue: async () => { runs.push(now); },
+    // refresh.js also starts/stops the separate line-health poller (actions.js);
+    // record the calls so this harness stays focused on live-update recovery.
+    startLineHealthPolling: () => { lineHealth.push('start'); }, stopLineHealthPolling: () => { lineHealth.push('stop'); },
   });
   context.api = path => new Promise((resolve, reject) => apiCalls.push({path, resolve, reject}));
   context.showLogin = () => { context.state.authenticated = false; context.disconnectSupportEvents(); context.resetConnectionHealth(); };
