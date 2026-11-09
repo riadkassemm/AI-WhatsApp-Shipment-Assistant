@@ -1,0 +1,310 @@
+Phase B — guarded administrative recovery
+=========================================
+Status: PR #91 for review; NOT approved for production.
+No DEV access. No production mutation, callback replay, service restart,
+credential operation or deployment was performed while implementing this change.
+PR #90 (callback-media fix, 0a85f5ae) is merged into main and deployed as the
+current API release; it must remain in the ancestry of any Phase B release.
+
+Activation boundary
+-------------------
+WHATSAPP_ADMIN_RECOVERY_ENABLED defaults to false in BOTH API and bridge.
+With it false, new commands are unavailable and no recovery worker starts.
+An already durable bridge pause is still honored. Do not use the flag to clear
+holds or to downgrade a running Phase B installation with outstanding work.
+The API refuses enabled startup if required tables, columns or unique keys are
+missing. Management GETs only read cached monitoring and bounded SQL metadata;
+they do not call registry seeding, provider operations or storage maintenance.
+
+This release contains Node changes and an additive SQL migration. Activating
+it requires an expressly approved graceful bridge transition. It cannot keep the
+eligible identities' sockets open across replacement of their owning process.
+No logout, relink, credential reset, journal rewrite or duplicate owner is needed.
+The expected outcome is reconnection of exactly the identities that were eligible
+and connected in the fresh preflight snapshot, with reused credentials over IPv4.
+The identity set is NOT fixed: Admins and Super Admins add and remove numbers. Every gate
+compares against a snapshot taken in the same window, never a remembered list.
+PR #90 (callback fix) is merged and deployed; it is in this branch's ancestry.
+
+Behavior and ownership
+----------------------
+- Permissions: Admin (stored role admin) and Super Admin (supervisor) have
+  IDENTICAL WhatsApp management permissions (one role set in support_auth.py):
+  diagnostics and authentication assessment; register/link/pair and QR codes;
+  rename; enable/disable; connect/disconnect/remove/decommission; safe
+  reconnect, pause/resume, operation history and cancellation. Regular Staff
+  (agent) has none. Every mutation still requires the cookie session + CSRF and
+  all existing authentication, ownership, delivery and decommissioning safety
+  checks. No role obtains additional conversation or attachment access.
+- Public API prefix /api/support/whatsapp-linked-device:
+    POST /lines/{id}/operations        create a queued command (202)
+    GET  /operations/{uuid}            status and sanitized audit
+    GET  /lines/{id}/operations        latest 30 commands
+    POST /operations/{uuid}/cancel     queued-before-dispatch cancellation only
+  Mutations require the real cookie session and CSRF token. Creation requires a
+  UUID Idempotency-Key matching operation_id, confirm_line_id, action, and the
+  observed bridge epoch, connection generation and administrative state version.
+  Unknown parameters and force/reset actions are rejected. Role/operator values
+  are derived on the server; clients cannot supply them.
+- Private bridge POST/GET /v1/lines/{id}/management-operations[/{uuid}] use the
+  existing shared-secret, loopback boundary. They are never public staff routes.
+- SQL stores controls, commands, original operator/role/parameters/timestamps,
+  outcome/reason and append-only transitions including the cancellation actor.
+  One active command per identity is reserved transactionally. DB connection
+  mutexes coordinate API workers; they are NOT proof of transport ownership.
+  Limits: 10 new requests/operator/minute, 3/action/identity/minute, plus the
+  bridge's 6/identity/minute and 3/action/identity/minute admission limits.
+- The bridge's exclusive directory owner admits a command synchronously before
+  yielding; existing pairing/removal and auto-reconnect cannot overlap it.
+  State/journal persistence records admission before processing. UUIDs and
+  versions prevent duplicate execution; the latest 128 terminal records are
+  retained on the bridge and SQL retains the complete audit history.
+- Reconnect requires paired reusable credentials matching committed state,
+  no recovery fence, current auth/directory ownership, healthy/fresh storage,
+  settled provider work, and confirmed old transport closure/event release.
+  It uses paired-only socket creation, rejects QR challenges, never calls reset,
+  and reports success only after the provider reports a ready connection.
+- Pause does not close a healthy socket. SQL immediately stops API admission;
+  the bridge durably suppresses new sends and automatic reconnect. Already
+  dispatched work, receipts, callbacks and accepted auth writes can complete.
+  Stored credentials, deduplication and unknown-delivery records are retained.
+- Resume revalidates before and after persistence. Failed validation leaves the
+  number paused. A resume interrupted by a bridge restart (even after saving
+  paused=false) restarts PAUSED and is not replayed. Disconnected eligible
+  sessions use the existing reconnect scheduler after resume; a resume success
+  is not a claim of connection success.
+- A command the bridge rejects before admission (4xx: stale epoch/version,
+  ineligible, rate limited, unknown line) failed without effect; a rejected
+  pause therefore restores the previous API admission state. A pause that the
+  bridge admitted stays paused even if it later fails or is interrupted.
+- Safe reconnect waits at most 120 s for a provider result, then reports
+  CONNECTION_NOT_CONFIRMED and releases lifecycle admission.
+- Retained staff work uses admin_hold, preserving offline-expiry evidence and
+  existing delivery-token, assignee and conversation checks. Media is checked
+  again before dispatch. Order is kept PER CONVERSATION (same ticket; for bot
+  vs staff work, same customer digits on the same line), never across the whole
+  line: one stuck conversation never holds other customers.
+  Uncertain work (staff UNCERTAIN or bot 'uncertain') is never resent and never
+  blocks later replies; it is resolved only by positive bridge evidence or the
+  existing uncertain-delivery staff actions.
+  A retained reply leaves admin_hold on any outcome except a proven transient
+  non-send (offline/paused/storage): sent, uncertain, or an ordinary failure
+  that staff may resend manually. A retained reply its sender can no longer
+  send (conversation closed or transferred while paused; never handed to a
+  transport) is released as an ordinary "Not sent; retry is available" reply.
+  Bot replies refused by pause retain their exact text/source in a separate
+  protected SQL delivery table, with stable provider idempotency IDs. The worker
+  does not regenerate AI output. Revoked input is skipped. A transient non-send
+  is retried after a 15 s line cooldown; a reply-specific rejection is final
+  ('failed'). Unknown dispatches are only queried (at most once a minute) for
+  positive confirmation, never resent. Like ordinary bot replies, retained bot
+  replies are NOT mirrored into support conversations and never open tickets.
+  These customer delivery rows are absent from management APIs/logs.
+- If the administrative pause state cannot be read, bot replies on linked-device
+  lines are refused before any provider call as a proven non-send (fail closed).
+- Five-second UI refresh preserves identity/detail DOM nodes. Confirmation,
+  status, disabled reasons and audit history use backend decisions. Browser
+  timeouts lead to GET of the saved UUID, not another POST. Reload/new tabs can
+  use durable history. Missing telemetry/pause state remains unknown.
+
+Escalation and cancellation
+--------------------------
+Only a queued command whose worker mutex is free can be cancelled. Cancellation
+of an undispatched pause restores its previous API admission state and records
+who cancelled it. A running or unconfirmed command cannot be cancelled.
+A potentially dispatched command (lost HTTP response, API restart) keeps the
+identity's active-operation reservation and stays running. The worker queries
+its saved UUID; only when the owning bridge answers OPERATION_NOT_FOUND does it
+resubmit the byte-identical command under the SAME UUID. The bridge returns the
+existing record (durable or in-flight) for a known UUID and rejects a changed
+epoch (restart), connection generation or administrative version, so a
+resubmission can neither execute twice nor execute late. Never submit under a
+new UUID, force-close a transport, treat a Redis TTL as ownership proof, or
+reset auth. Rows already in 'unconfirmed' are resolved the same way.
+If a command stays non-terminal, escalate with operation UUID, line ID, reason
+code and sanitized observation time; do not clear the reservation by hand.
+The dashboard keeps a per-tab marker of its own submission; only a persistent
+404 for that UUID more than 60 s after submission (never saved) releases it.
+Incomplete/corrupt administrative state also blocks activation.
+
+Reviewed deployment sequence — execute only after exact-SHA approval
+-------------------------------------------------------------------
+Inventory snapshot (used by every gate below). Taken read-only from:
+  - MariaDB whatsapp_phone_numbers (source='LINKED_DEVICE', removed_at IS NULL):
+    the ENABLED rows are the active set; disabled rows (e.g. a newly linked
+    number not yet added to the app, such as 90039 on 2026-11-09) are visible,
+    not active, but still paired bridge lines that reconnect after a restart;
+  - the bridge manifest lines.json: lines, quarantined_lines, removed_line_ids
+    (its "requests" are registration idempotency records, not live pairings);
+  - authenticated bridge /v1/status: per identity lifecycle, eligible, status,
+    is_paired, qr, generation/generation_started_at/disconnects_total,
+    transport family/TLS, isolation.safe, auth store state, callbacks,
+    uncertain sends; runtime ready / eligible_storage_critical.
+  Record IDs only in the root-only deployment record (no phone numbers).
+  Consistency required: every enabled registry identity is a manifest line
+  that is eligible, connected, paired, IPv4/TLS-verified, no QR; every other
+  manifest line (disabled in the app) has a registry row and its own recorded
+  bridge state; every quarantined/decommissioned identity has
+  isolation.safe=true and no retry; no removed_line_id appears in the registry
+  or as a live bridge identity; no bridge identity lacks a registry row
+  (BridgeRegistryMismatch); no identity is pairing (no line with a QR or
+  status "qr"); no registry row is in an unconfirmed removal (latest audit
+  LINKED_DEVICE_REMOVAL_STARTED). Freeze identity changes (no add, enable,
+  disable, remove, pair or rename by Admins or Super Admins) for the whole window.
+
+1. Finish PR review and CI disposition for THIS release. CI's MariaDB/Redis
+   integration and bridge steps are skipped whenever the unit step fails (the
+   eight baseline fixtures), so CI alone is not database evidence: record the
+   isolated MariaDB 10.11.14 integration results for the exact SHA. Do not mark
+   failing CI green, disable checks or bypass protections. Record the reviewed
+   full release SHA and verify 0a85f5ae (PR #90) is an ancestor.
+2. Stage an inactive release and pinned Python/Node dependencies in the existing
+   installation sandbox. Verify the pinned Baileys lifecycle patch with
+   whatsapp_bridge/scripts/patch-baileys-lifecycle.js --verify. Keep credentials,
+   data directories, Redis and media inaccessible during dependency installation.
+   The running bridge (98583dc) and main have identical bridge sources: the only
+   Node changes activated are Phase B's (management.js, bridge.js, server.js,
+   storage.js, config.js).
+3. Preflight on 194.5.152.173: take the inventory snapshot (S0) and require its
+   consistency. Record sanitized baseline PID/start times, heartbeat/collector
+   freshness, callback ages/counts and dead letters, journal health, SQL and
+   bridge uncertainty counts, API errors and delivery ownership. Require no
+   firing critical alert other than ones explained and scoped in writing before
+   the window (e.g. LocalBackupRestoreOverdue until restore verification ships).
+   Any pending callback within 2 h of its 7-day retention is an abort.
+   Never treat a live auth-file copy as a consistent snapshot.
+4. Close public Customer Support ingress using the reviewed nginx/ngrok
+   procedure. Allow for nginx reload propagation: poll (bounded, <= 15 s) for the
+   expected 503/200 rather than a single immediate check. Keep the private
+   callback API available. Install and verify runtime guards for BOTH services:
+   Restart=no, TimeoutStopSec=infinity, SendSIGKILL=no. Never force-kill.
+5. Schema (additive; may precede code because the running API/bridge ignore it):
+   apply only migrations/20261108_whatsapp_admin_recovery.sql as MariaDB root
+   over the unix socket. It is idempotent (CREATE TABLE / ADD COLUMN /
+   ADD INDEX ... IF NOT EXISTS); support_ticket_messages gains admin_hold
+   (instant add on 10.11) and an online secondary index. Production uses
+   PER-TABLE grants, so in the same step grant the application user exactly:
+     GRANT SELECT, INSERT, UPDATE ON <db>.whatsapp_bridge_controls TO <app user>;
+     GRANT SELECT, INSERT, UPDATE ON <db>.whatsapp_bridge_operations TO <app user>;
+     GRANT SELECT, INSERT ON <db>.whatsapp_bridge_operation_audit TO <app user>;
+     GRANT SELECT, INSERT, UPDATE ON <db>.whatsapp_paused_bot_replies TO <app user>;
+   (<app user> from SHOW GRANTS of the configured DB_USER; today
+   wa_support_app@127.0.0.1. No DELETE, DDL or global privilege.) Validated
+   on MariaDB 10.11.14 with a user holding only these grants (plus the
+   existing per-table grants): every statement Phase B issues succeeds,
+   including SELECT ... FOR UPDATE, the schema guard sees all four tables'
+   unique keys, and DELETE on the audit table is denied. Verify with
+   SHOW GRANTS and check_runtime.py --schema run with the flag ENABLED in a
+   transient unit. Also require TABLE_COLLATION = utf8mb4_unicode_ci for the
+   four new tables (the server default on production is utf8mb4_general_ci;
+   MariaDB 10.11 rejects mixed-collation comparisons). No migration
+   rollback/drop is used.
+6. Follow the ownership/shutdown/integrity steps in bridge-ipv4-deployment.txt:
+   stop the bridge gracefully while the previous API accepts final callbacks;
+   require stopped PID/cgroup, clean closure and no live transport/writer owner.
+   Drain pending API work, DISPATCHING/message-change operations and Redis
+   inbound reservations (check_inbound_drain.py --stable-seconds 10, before AND
+   after the API stop). Preserve uncertainty; a lease expiry is not a drain.
+   Use the quarantine-aware private snapshot/validation for stopped journals.
+   Never repair live files or reactivate decommissioned identities.
+7. Pin API and bridge to the approved release with dedicated reviewed systemd
+   release overrides; keep /opt/whatsapp-support/current unchanged. Preserve all
+   arguments, absolute data paths, IPv4 policy, environment files and
+   hardening. Save the existing API 80-management-release.conf. Feature flag via
+   a reviewed per-service environment file loaded after existing files:
+     bridge: WHATSAPP_ADMIN_RECOVERY_ENABLED=true at THIS restart (read only at
+       bridge start; avoids a second bridge restart). With the API flag off no
+       command can reach it; durable pause state is honored either way.
+     API: start with the flag OFF first; enable it in step 9 (API-only restart).
+8. Start the new API (flag off), require schema/readiness, then the bridge.
+   Admin/Super Admin WhatsApp permission parity is NOT behind the flag: from
+   this start, Admins can also pair (QR), rename, enable/disable, connect,
+   disconnect and remove numbers. Inform Admins before the window; verify
+   with real Admin, Super Admin and Staff sessions in acceptance (step 10).
+   Take snapshot S1 after reconnection (bounded wait, e.g. 120 s) and require:
+   the same enabled/disabled/decommissioned/removed membership as S0; exactly
+   one bridge directory owner; every S0 manifest line that was connected
+   (enabled AND disabled-in-app) eligible, connected, paired, IPv4/TLS,
+   reused credentials (no QR, logout, relink or auth reset); each
+   decommissioned identity's retained evidence hash unchanged; generation
+   advanced exactly by the restart (no flapping beyond one reconnect); no
+   administration.paused on any identity (none existed before); storage and
+   heartbeat telemetry fresh; callback backlog draining; no new dead letters;
+   uncertainty not increased. Any failure keeps ingress closed.
+9. Enable the API flag (API-only graceful restart through the same drain gates).
+   Require the recovery worker started, management GET returns administration
+   blocks for every S0-active identity with epoch/generation/version, actions
+   correctly enabled/blocked, and no operation rows created by startup.
+10. Perform the acceptance below, reopen ingress only after success (poll for
+   200), observe at least 30 minutes, then remove only this window's guards.
+
+GO / NO-GO gates
+----------------
+GO only if ALL hold; any NO-GO keeps ingress closed and the previous API serving
+(the migration may stay: it is additive and ignored by older code).
+  G1 PR reviewed; exact SHA approved; PR #90 ancestor; isolated 10.11 integration
+     and bridge suites pass for that SHA (baseline UI fixtures documented).
+  G2 Inventory S0 consistent (see above); identity changes frozen.
+  G3 Fresh verified backup of DB/Redis/media + retained evidence in the record.
+  G4 Migration applied; grants present; schema check passes with flag enabled.
+  G5 API and bridge drained and stopped gracefully (no kill, no owner left).
+  G6 S1 == S0 membership; all S0-active identities reconnected with reused
+     credentials; decommissioned evidence unchanged; no QR/logout/relink.
+  G7 No new dead letters, uncertain sends, auth/storage criticals or API 5xx.
+  G8 Flag-on API healthy; management view correct; acceptance passed.
+NO-GO examples: an S0-active identity fails to reconnect within the bound; any
+identity shows QR/logout; a removed ID reappears; registry/bridge mismatch;
+storage critical on an active identity; schema/grant check fails; drain cannot
+be proven. Never relink, reset credentials, clear pause/hold records or replay
+callbacks to pass a gate.
+
+Manual acceptance (attended, approved internal identity/conversation only)
+------------------------------------------------------------------------
+- Admin AND Super Admin (verify both, same results): diagnostics, assessment,
+  legacy pairing/removal entry points visible, QR visible only for the number
+  being paired, safe commands available. Do not exercise destructive pairing/
+  removal against healthy production identities as an acceptance test.
+- Staff: ordinary permitted conversation access; no management view, commands,
+  assessment or QR (403 on direct new/legacy URLs). Missing CSRF is 403 for
+  every role.
+- Confirm connected, disabled, offline and quarantined views; stale/unavailable
+  telemetry must disable commands and display unknown rather than healthy.
+- On an approved internal test line, Pause: socket stays connected; new replies
+  are retained, an already dispatched reply confirms once, callbacks continue.
+  Refresh/reopen the UI; check saved UUID and audit. Resume: no QR, retained
+  replies preserve order, uncertain replies do not resend. Verify original media,
+  receipts and conversation/assignee permissions. Avoid customer test messages.
+- Safe reconnect: prefer an already disconnected eligible test identity. Do not
+  manufacture an outage on healthy production identities. Verify refusal for
+  connected/paused/fenced/disabled/decommissioned identities. Exercise successful
+  reconnect in isolated mocks unless a production test outage is separately
+  approved. Repeat UUID, stale version, timeout and concurrent-command tests in
+  mocks; do not create artificial production uncertainty.
+
+Rollback limitations
+--------------------
+Releases older than Phase B do NOT understand administrative pause state, held
+staff replies (admin_hold), retained bot replies or management operations: an
+older API would send held work out of order or ignore a pause, and an older
+bridge would ignore a durable pause and reconnect a paused identity.
+Downgrade gate (read-only checks; ALL must be zero, on both sides):
+  SELECT COUNT(*) FROM whatsapp_bridge_operations WHERE state IN ('queued','running','unconfirmed');
+  SELECT COUNT(*) FROM whatsapp_bridge_controls WHERE paused=1 OR active_operation_id IS NOT NULL;
+  SELECT COUNT(*) FROM whatsapp_paused_bot_replies WHERE state IN ('queued','dispatching','uncertain');
+  SELECT COUNT(*) FROM support_ticket_messages WHERE admin_hold=1
+    AND (send_status IN ('PENDING','DISPATCHING') OR (send_status='FAILED' AND delivery_retry_safe=1));
+  bridge /v1/status: no identity with administration.paused=true or an
+    active_operation_id.
+Never delete, update or "resolve" those records to satisfy the gate. Resume
+paused identities through the dashboard and let retained work drain or reach a
+terminal state under the new release first.
+Do not restore old database/Redis/media/auth/journal snapshots over new writes.
+Keep the additive schema. API-only rollback may retain the new paused-aware
+bridge, but an older API does not understand held bot replies or operations.
+Before any downgrade, require no queued/running/unconfirmed management commands,
+no administrative pause on either side, and no queued/dispatching/uncertain bot
+replies or active held staff work. Never clear those records to pass this gate.
+If the gate cannot be met safely, keep ingress closed and request a reviewed
+forward fix; do not downgrade to code that ignores durable pause state. Any Node
+rollback needs its own graceful ownership/integrity validation and explicit
+approval. An API rollback must retain PR #90 and the Phase A RBAC correction.

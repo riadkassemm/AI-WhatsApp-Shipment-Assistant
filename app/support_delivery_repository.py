@@ -12,6 +12,86 @@ HELD_REPLY_MINUTES = 30
 
 
 class DeliveryRepositoryMixin:
+    async def administrative_delivery_blocked(self, line_id: str, message_id: int) -> bool:
+        """A pause, or older retained work for the SAME customer, blocks admission.
+
+        Order is a per-conversation property: unrelated customers on the line
+        never wait for each other. Uncertain work is never resent, so it cannot
+        block later replies (it would otherwise block them forever)."""
+        if self._pool is None:
+            await self.connect()
+        async with self._pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute("""SELECT 1 FROM whatsapp_bridge_controls WHERE line_id=%s AND paused=1
+                    UNION ALL SELECT 1 FROM support_ticket_messages cur
+                    JOIN support_ticket_messages m ON m.ticket_id=cur.ticket_id AND m.id<cur.id
+                    JOIN support_tickets t ON t.id=m.ticket_id
+                    WHERE cur.id=%s AND m.admin_hold=1 AND m.direction='OUTBOUND'
+                      AND m.deleted_for_everyone_at IS NULL
+                      AND (m.send_status IN ('PENDING','DISPATCHING')
+                           OR (m.send_status='FAILED' AND m.delivery_retry_safe=1))
+                      AND (t.active_key IS NOT NULL OR m.sender_type='SYSTEM')
+                    UNION ALL SELECT 1 FROM support_ticket_messages cur
+                    JOIN support_tickets t ON t.id=cur.ticket_id
+                    JOIN whatsapp_paused_bot_replies b ON b.line_id=%s AND b.state IN ('queued','dispatching')
+                      AND b.created_at<=cur.created_at
+                      AND CAST(REGEXP_REPLACE(b.recipient,'[^0-9]','') AS BINARY)
+                        = CAST(REGEXP_REPLACE(t.whatsapp_phone,'[^0-9]','') AS BINARY)
+                    WHERE cur.id=%s LIMIT 1""", (line_id,message_id,line_id,message_id))
+                return bool(await cur.fetchone())
+
+    async def release_unclaimable_admin_holds(self) -> list[int]:
+        """Return retained staff replies the resume worker can never claim to staff.
+
+        A conversation closed or transferred while its line was paused leaves a
+        reply its original sender may no longer send. It was never handed to a
+        transport (PENDING without a live claim, or a proven non-send), so it
+        becomes an ordinary "Not sent" reply instead of blocking the
+        conversation forever. Returns the affected ticket IDs."""
+        if self._pool is None:
+            await self.connect()
+        unclaimable = """m.admin_hold=1 AND m.direction='OUTBOUND' AND m.sender_type='AGENT'
+              AND m.deleted_for_everyone_at IS NULL
+              AND ((m.send_status='FAILED' AND m.delivery_retry_safe=1)
+                   OR (m.send_status='PENDING' AND m.delivery_started_at IS NULL
+                       AND (m.delivery_token IS NULL OR m.delivery_claimed_at < UTC_TIMESTAMP(6) - INTERVAL %s MINUTE)))
+              AND NOT ((t.active_key IS NOT NULL AND m.sender_id <=> t.current_assignee_id
+                        AND t.status IN ('ASSIGNED','IN_PROGRESS','WAITING_CUSTOMER','WAITING_INTERNAL'))
+                    OR (t.active_key IS NOT NULL AND t.status IN ('NEW','ASSIGNED','IN_PROGRESS','WAITING_CUSTOMER','WAITING_INTERNAL')
+                        AND m.is_forwarded=1 AND m.forwarded_from_ticket_id>0 AND m.forwarded_from_message_id>0
+                        AND BINARY m.client_message_id LIKE CONCAT('contact-forward:', m.forwarded_from_ticket_id, ':',
+                                                                  m.forwarded_from_message_id, ':_%%')))"""
+        async with self._pool.acquire() as conn:
+            try:
+                async with conn.cursor(aiomysql.DictCursor) as cur:
+                    await conn.begin()
+                    await cur.execute("SELECT m.id,m.ticket_id FROM support_ticket_messages m JOIN support_tickets t ON t.id=m.ticket_id WHERE "
+                                      + unclaimable + " ORDER BY m.id LIMIT 200 FOR UPDATE", (DELIVERY_LEASE_MINUTES,))
+                    rows = list(await cur.fetchall())
+                    if rows:
+                        ids = [int(row['id']) for row in rows]
+                        await cur.execute("""UPDATE support_ticket_messages m JOIN support_tickets t ON t.id=m.ticket_id
+                            SET m.admin_hold=0, m.held_until=NULL, m.send_status='FAILED', m.delivery_retry_safe=1,
+                                m.error_message='Not sent; retry is available.', m.updated_at=UTC_TIMESTAMP(6)
+                            WHERE m.id IN (""" + ','.join(['%s'] * len(ids)) + ") AND " + unclaimable,
+                            (*ids, DELIVERY_LEASE_MINUTES))
+                await conn.commit()
+            except BaseException:
+                await conn.rollback()
+                raise
+        return sorted({int(row['ticket_id']) for row in rows})
+
+    async def hold_for_administration(self, message_id: int) -> None:
+        if self._pool is None:
+            await self.connect()
+        async with self._pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("""UPDATE support_ticket_messages SET admin_hold=1,
+                    error_message='Waiting for administrative resume; sends automatically.',updated_at=UTC_TIMESTAMP(6)
+                    WHERE id=%s AND direction='OUTBOUND' AND deleted_for_everyone_at IS NULL
+                      AND (send_status='PENDING' OR (send_status='FAILED' AND delivery_retry_safe=1))""", (message_id,))
+            await conn.commit()
+
     async def get_delivery_replacement(self, ticket_id: int, message_id: int):
         if self._pool is None:
             await self.connect()
@@ -39,14 +119,16 @@ class DeliveryRepositoryMixin:
         """End holds past their window; return the affected ticket IDs."""
         if self._pool is None:
             await self.connect()
+        from app.config import settings
+        protected = ' AND admin_hold=0' if settings.whatsapp_admin_recovery_enabled else ''
         async with self._pool.acquire() as conn:
             async with conn.cursor(aiomysql.DictCursor) as cur:
                 await cur.execute("""SELECT DISTINCT ticket_id FROM support_ticket_messages
-                    WHERE send_status='FAILED' AND held_until IS NOT NULL AND held_until <= UTC_TIMESTAMP(6)""")
+                    WHERE send_status='FAILED' AND held_until IS NOT NULL AND held_until <= UTC_TIMESTAMP(6)""" + protected)
                 tickets = [int(row['ticket_id']) for row in await cur.fetchall()]
                 if tickets:
                     await cur.execute("""UPDATE support_ticket_messages SET held_until=NULL, updated_at=UTC_TIMESTAMP(6)
-                        WHERE send_status='FAILED' AND held_until IS NOT NULL AND held_until <= UTC_TIMESTAMP(6)""")
+                        WHERE send_status='FAILED' AND held_until IS NOT NULL AND held_until <= UTC_TIMESTAMP(6)""" + protected)
             await conn.commit()
         return tickets
 
@@ -54,8 +136,20 @@ class DeliveryRepositoryMixin:
         """Staff replies held for an offline line, oldest first, on live conversations."""
         if self._pool is None:
             await self.connect()
+        from app.config import settings
         async with self._pool.acquire() as conn:
             async with conn.cursor(aiomysql.DictCursor) as cur:
+                if settings.whatsapp_admin_recovery_enabled:
+                    await cur.execute("""SELECT m.* FROM support_ticket_messages m JOIN support_tickets t ON t.id=m.ticket_id
+                        LEFT JOIN whatsapp_bridge_controls c ON c.line_id=t.business_phone_number_id
+                        WHERE COALESCE(c.paused,0)=0 AND m.direction='OUTBOUND'
+                          AND m.deleted_for_everyone_at IS NULL
+                          AND ((m.admin_hold=1 AND (m.send_status='PENDING' OR (m.send_status='FAILED' AND m.delivery_retry_safe=1))
+                                AND (m.sender_type='SYSTEM' OR (m.sender_type='AGENT' AND t.active_key IS NOT NULL)))
+                            OR (m.send_status='FAILED' AND m.delivery_retry_safe=1 AND m.held_until>UTC_TIMESTAMP(6)
+                                AND m.sender_type='AGENT' AND m.client_message_id IS NOT NULL AND t.active_key IS NOT NULL))
+                        ORDER BY m.id LIMIT %s""", (limit,))
+                    return list(await cur.fetchall())
                 await cur.execute("""SELECT m.* FROM support_ticket_messages m JOIN support_tickets t ON t.id=m.ticket_id
                     WHERE m.send_status='FAILED' AND m.delivery_retry_safe=1 AND m.held_until > UTC_TIMESTAMP(6)
                       AND m.direction='OUTBOUND' AND m.sender_type='AGENT' AND m.client_message_id IS NOT NULL
@@ -231,6 +325,16 @@ class DeliveryRepositoryMixin:
                                AND delivery_claimed_at >= UTC_TIMESTAMP(6) - INTERVAL %s MINUTE))
                 """, (status, provider_id, status, error, retry_safe, bool(held and retry_safe), HELD_REPLY_MINUTES,
                       message_id, token, status, status, DELIVERY_LEASE_MINUTES))
+                from app.config import settings
+                if settings.whatsapp_admin_recovery_enabled:
+                    # A retained reply leaves the administrative queue on any
+                    # outcome except a proven, transient non-send: it is sent,
+                    # uncertain (never resent) or an ordinary failure that staff
+                    # may resend manually. None of those may block later replies.
+                    await cur.execute("""UPDATE support_ticket_messages SET admin_hold=0
+                        WHERE id=%s AND admin_hold=1 AND (send_status='SENT' OR (%s AND send_status IN ('UNCERTAIN','FAILED')
+                          AND NOT (send_status='FAILED' AND delivery_retry_safe=1 AND held_until IS NOT NULL)))""",
+                        (message_id, cur.rowcount == 1))
             await conn.commit()
 
     async def interrupt_delivery(self, message_id: int, token: str) -> None:

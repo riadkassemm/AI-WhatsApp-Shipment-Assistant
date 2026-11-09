@@ -14,7 +14,12 @@ _media_upload_slot = asyncio.Semaphore(1)
 
 
 async def deliver(repository, transport, media_store, ticket, message, *, retry=False):
+    from app.config import settings
     message_id = int(message['id'])
+    line_id = str(ticket.get('business_phone_number_id') or '')
+    if settings.whatsapp_admin_recovery_enabled and await repository.administrative_delivery_blocked(line_id, message_id):
+        await repository.hold_for_administration(message_id)
+        return await repository.get_message(message_id)
     token = await repository.claim_delivery(message_id, retry=retry, expected_token=message.get("delivery_token"))
     if token is None:
         return await repository.get_message(message_id)
@@ -33,6 +38,7 @@ async def deliver(repository, transport, media_store, ticket, message, *, retry=
 
 
 async def _deliver_claimed(repository, transport, media_store, ticket, message, token):
+    from app.config import settings
     message_id = int(message['id'])
     started = False
     phase = "prepare"
@@ -77,6 +83,10 @@ async def _deliver_claimed(repository, transport, media_store, ticket, message, 
                            caption=body if kind in defaults and body not in defaults[kind] else None,
                            voice=kind == 'audio' and body == 'Voice note',
                            filename=asset.filename if kind == 'document' else None)
+        if settings.whatsapp_admin_recovery_enabled and await repository.administrative_delivery_blocked(common['phone_number_id'], message_id):
+            error = WhatsAppSendError('This number is paused.', delivery_uncertain=False)
+            error.bridge_code = 'ADMIN_PAUSED'
+            raise error
         # Fence a reclaimed worker before any customer-visible operation.
         if not await repository.begin_delivery(message_id, token):
             return await repository.get_message(message_id)
@@ -95,13 +105,15 @@ async def _deliver_claimed(repository, transport, media_store, ticket, message, 
         )
         # Only known rejections before provider submission can be retried automatically.
         held = safe and getattr(exc, 'bridge_code', None) in {
-            'NOT_CONNECTED', 'BRIDGE_UNAVAILABLE', 'BRIDGE_INITIALIZING', 'STORAGE_PRESSURE', 'STOPPING', 'MEDIA_UPLOAD_BUSY',
+            'NOT_CONNECTED', 'BRIDGE_UNAVAILABLE', 'BRIDGE_INITIALIZING', 'STORAGE_PRESSURE', 'STOPPING', 'MEDIA_UPLOAD_BUSY', 'ADMIN_PAUSED',
         }
         # Never store raw transport exceptions (which may contain credentials).
         await repository.finish_delivery(message_id, token, status='FAILED' if safe else 'UNCERTAIN',
                                          error='Not sent; retry is available.' if safe else 'Delivery is uncertain; do not resend.',
                                          **({'failure_code': exc.provider_code} if safe and isinstance(exc, WhatsAppSendError) and exc.provider_code else {}),
                                          **({'held': True} if held else {}))
+        if safe and getattr(exc, 'bridge_code', None) == 'ADMIN_PAUSED':
+            await repository.hold_for_administration(message_id)
         return await repository.get_message(message_id)
     # Persistence failure intentionally leaves DISPATCHING; recovery quarantines
     # it. It must never be classified as a provider rejection.

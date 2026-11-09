@@ -1,6 +1,7 @@
-// Read-only management. Lifecycle mutations stay in the existing Super Admin dialog.
+// Diagnostics and versioned recovery. Admins and Super Admins share every WhatsApp management permission.
 const bridgeManagement = {epoch: 0, selected: null, rows: new Map(), snapshot: null,
-  loading: false, historyAt: 0, historyLine: null, historyLoading: false, assessmentLoading: false};
+  loading: false, historyAt: 0, historyLine: null, historyLoading: false, assessmentLoading: false,
+  operationsLoading: false, freshAt: 0, submitting: false};
 const bridgeManagementBase = '/api/support/whatsapp-linked-device';
 
 function bridgeText(node, value) {
@@ -18,15 +19,17 @@ function bridgeLabel(value) { return value == null ? 'Unknown' : String(value).r
 function resetBridgeManagement() {
   bridgeManagement.epoch++;
   Object.assign(bridgeManagement, {selected: null, snapshot: null, loading: false,
-    historyAt: 0, historyLine: null, historyLoading: false, assessmentLoading: false});
+    historyAt: 0, historyLine: null, historyLoading: false, assessmentLoading: false,
+    operationsLoading: false, freshAt: 0, submitting: false});
   bridgeManagement.rows.clear();
-  for (const id of ['bridgeIdentities', 'bridgeFacts', 'bridgeFutureActions', 'bridgeHistory', 'bridgeIncidents']) {
+  for (const id of ['bridgeIdentities', 'bridgeFacts', 'bridgeFutureActions', 'bridgeHistory', 'bridgeIncidents', 'bridgeOperations']) {
     $(id).replaceChildren(); delete $(id).dataset.signature;
   }
   for (const id of ['bridgeAssessment', 'bridgeBlockers', 'bridgeExplanation', 'bridgeHistoryNotice']) bridgeText($(id), '');
   $('bridgeAssessment').classList.add('hidden'); $('bridgeAssessmentBtn').classList.add('hidden');
   $('bridgeAssessmentBtn').disabled = false;
   bridgeText($('bridgeIdentityTitle'), 'Select a number');
+  bridgeText($('bridgeOperationNotice'), '');
 }
 function openBridgeManagement() {
   if (!canViewBridgeManagement()) return;
@@ -46,12 +49,14 @@ async function loadBridgeManagement() {
   try {
     const payload = await api(bridgeManagementBase + '/management', {signal: AbortSignal.timeout(12000)});
     if (epoch !== bridgeManagement.epoch || state.activeModal !== 'bridgeManagementModal') return;
-    bridgeManagement.snapshot = payload; renderBridgeManagement(payload);
+    bridgeManagement.snapshot = payload; bridgeManagement.freshAt = Date.now(); renderBridgeManagement(payload);
     void loadBridgeHistory();
+    void loadBridgeOperations();
   } catch (_) {
     if (epoch !== bridgeManagement.epoch) return;
     $('bridgeTelemetryWarning').classList.remove('hidden');
     bridgeText($('bridgeTelemetryWarning'), 'Live diagnostics are unavailable. Any displayed observations are stale; no connection changes were made.');
+    bridgeManagement.freshAt = 0; renderBridgeDetail(); void loadBridgeOperations();
   } finally {
     if (epoch === bridgeManagement.epoch) { bridgeManagement.loading = false; $('refreshBridgeManagementBtn').disabled = false; }
   }
@@ -74,7 +79,7 @@ function renderBridgeManagement(payload) {
     }
     bridgeText(row.children[0], line.display_name);
     bridgeText(row.children[1], (line.phone || 'Phone unavailable') + ' · ' + line.line_id);
-    bridgeText(row.children[2], bridgeLabel(line.connection.state) + ' · ' + (line.lifecycle === 'decommissioned' ? 'Removed locally' : line.is_enabled === false ? 'Disabled in app' : line.is_enabled === true ? 'Enabled in app' : 'Routing unknown'));
+    bridgeText(row.children[2], bridgeLabel(line.connection.state) + ' · ' + (line.lifecycle === 'decommissioned' ? 'Removed locally' : line.is_enabled === false ? 'Disabled in app' : line.is_enabled === true ? 'Enabled in app' : 'Routing unknown') + (line.administration?.paused ? ' · Paused' : ''));
     row.setAttribute('aria-pressed', String(bridgeManagement.selected === line.line_id));
   }
   if (!payload.lines.length) bridgeText($('bridgeExplanation'), 'No identities are available in the current inventory. Check monitoring status above.');
@@ -88,6 +93,8 @@ function selectBridgeIdentity(lineId, load = true) {
   if (bridgeManagement.selected !== lineId) {
     bridgeManagement.selected = lineId; bridgeManagement.historyLine = null;
     $('bridgeHistory').replaceChildren();
+    $('bridgeOperations').replaceChildren(); delete $('bridgeOperations').dataset.signature;
+    bridgeText($('bridgeOperationNotice'), '');
     bridgeText($('bridgeHistoryNotice'), lineId ? 'Loading saved operator history…' : '');
     bridgeText($('bridgeAssessment'), ''); $('bridgeAssessment').classList.add('hidden');
     if (!lineId) {
@@ -98,7 +105,7 @@ function selectBridgeIdentity(lineId, load = true) {
     }
   }
   for (const [id, row] of bridgeManagement.rows) row.setAttribute('aria-pressed', String(id === lineId));
-  if (load) { renderBridgeDetail(); void loadBridgeHistory(); }
+  if (load) { renderBridgeDetail(); void loadBridgeHistory(); void loadBridgeOperations(); }
 }
 
 function bridgeFactGroup(title, facts) {
@@ -140,17 +147,151 @@ function renderBridgeDetail() {
     ['Heartbeat timeouts', line.heartbeat.heartbeat_timeouts], ['Heartbeat query timeouts', line.heartbeat.heartbeat_query_timeouts]]);
   bridgeFactGroup('Delivery evidence', [['Pending callbacks', line.delivery.pending_callbacks], ['Oldest callback (seconds)', line.delivery.oldest_callback_age_seconds],
     ['Failed callbacks', line.delivery.failed_callbacks], ['Waiting for history', line.delivery.waiting_history_reactions], ['Uncertain bridge sends', line.delivery.uncertain_sends]]);
-  const signature = JSON.stringify(line.actions);
+  if (line.administration) bridgeFactGroup('Administration', [['Paused', bridgeBool(line.administration.paused)],
+    ['Active operation', line.administration.active_operation_id || 'None'], ['State version', line.administration.version]]);
+  const blockedReason = Date.now() - bridgeManagement.freshAt > 15000 ? 'Diagnostics are stale. Refresh before requesting an action.' :
+    pendingBridgeOperation() ? 'Wait for the saved operation to be confirmed.' : bridgeManagement.submitting ? 'An operation request is being confirmed.' : '';
+  const blocked = Boolean(blockedReason);
+  const signature = JSON.stringify([line.actions, blockedReason, state.agent?.can_recover_whatsapp]);
   if ($('bridgeFutureActions').dataset.signature !== signature) {
     $('bridgeFutureActions').replaceChildren(...line.actions.map(action => {
       const wrapper = document.createElement('div'), button = document.createElement('button'), reason = document.createElement('small');
-      button.type = 'button'; button.className = 'btn small'; button.textContent = action.label; button.disabled = true;
-      reason.textContent = action.reason + (action.blockers.length ? ' ' + action.blockers.join(', ') : '');
+      button.type = 'button'; button.className = 'btn small'; button.textContent = action.label;
+      button.disabled = !action.enabled || blocked || state.agent?.can_recover_whatsapp !== true;
+      button.addEventListener('click', () => requestBridgeRecovery(action.action));
+      reason.textContent = (action.enabled && blockedReason ? blockedReason : action.reason) + (action.blockers.length ? ' ' + action.blockers.join(', ') : '');
       wrapper.append(button, reason); return wrapper;
     }));
     $('bridgeFutureActions').dataset.signature = signature;
   }
   $('bridgeAssessmentBtn').classList.toggle('hidden', state.agent?.can_assess_whatsapp_authentication !== true);
+}
+
+function bridgeOperationKey() { return 'support.bridge-operation.' + state.agent?.id; }
+// After this long, a 404 for the saved ID proves the request was never saved.
+const bridgeOperationSaveGraceMs = 60000;
+function pendingBridgeOperation() {
+  try { const item = JSON.parse(sessionStorage.getItem(bridgeOperationKey()) || 'null');
+    return item && /^[0-9a-f-]{36}$/.test(item.id) && /^\d{5,32}$/.test(item.line) ? item : null;
+  } catch (_) { return null; }
+}
+function forgetBridgeOperation(id) {
+  if (pendingBridgeOperation()?.id === id) sessionStorage.removeItem(bridgeOperationKey());
+}
+async function requestBridgeRecovery(action) {
+  const line = bridgeManagement.snapshot?.lines.find(item => item.line_id === bridgeManagement.selected);
+  const decision = line?.actions.find(item => item.action === action);
+  if (!line?.administration || !decision?.enabled || state.agent?.can_recover_whatsapp !== true ||
+      bridgeManagement.submitting || pendingBridgeOperation() || Date.now() - bridgeManagement.freshAt > 15000) return;
+  const epoch = bridgeManagement.epoch;
+  const guidance = {reconnect:'Reuse the saved paired session only if all safety checks pass.',
+    pause:'Stop new sends and automatic reconnects. Keep the session connected and retain pending work.',
+    resume:'Revalidate this session, then let retained work continue in order. Uncertain deliveries remain protected.'};
+  if (!guidance[action]) return;
+  bridgeManagement.submitting = true; renderBridgeDetail();
+  try {
+    const approved = await showConfirmDialog('confirm', {title:decision.label + ' · ' + line.display_name,
+      message:(line.phone || line.line_id) + '\n' + guidance[action], confirmLabel:decision.label});
+    if (!approved || epoch !== bridgeManagement.epoch) return;
+    const id = crypto.randomUUID();
+    // Save BEFORE submission. A lost HTTP response is resolved by GET, never
+    // by an automatic second POST or a fresh idempotency key.
+    sessionStorage.setItem(bridgeOperationKey(), JSON.stringify({id,line:line.line_id,at:Date.now()}));
+    bridgeText($('bridgeOperationNotice'), action === 'reconnect' ? 'Reconnecting WhatsApp. Please wait for confirmation.' : 'Saving the administrative operation…');
+    try {
+      const op = await api(bridgeManagementBase + '/lines/' + line.line_id + '/operations', {method:'POST',
+        headers:{'Idempotency-Key':id}, signal:AbortSignal.timeout(12000), body:JSON.stringify({operation_id:id, action,
+          confirm_line_id:line.line_id, expected_epoch:line.administration.epoch,
+          expected_generation:line.administration.generation, expected_version:line.administration.version})});
+      if (epoch !== bridgeManagement.epoch) return;
+      bridgeText($('bridgeOperationNotice'), op.message + ' Operation: ' + op.id);
+      if (op.terminal) forgetBridgeOperation(id);
+    } catch (error) {
+      if (epoch !== bridgeManagement.epoch) return;
+      if ([400,403,409,422,429].includes(error.status)) {
+        forgetBridgeOperation(id); bridgeText($('bridgeOperationNotice'), error.message);
+      } else bridgeText($('bridgeOperationNotice'), 'Confirmation is pending. Checking saved operation ' + id + '; do not submit another request.');
+    }
+  } catch (_) {
+    if (epoch === bridgeManagement.epoch) bridgeText($('bridgeOperationNotice'), 'The operation could not be prepared safely. Refresh diagnostics and check operation history.');
+  } finally {
+    if (epoch === bridgeManagement.epoch) {
+      bridgeManagement.submitting = false; renderBridgeDetail(); void loadBridgeOperations();
+      dashboardRefresh.request('bridge-management');
+    }
+  }
+}
+async function loadBridgeOperations() {
+  const id = bridgeManagement.selected, epoch = bridgeManagement.epoch;
+  const line = bridgeManagement.snapshot?.lines.find(item => item.line_id === id);
+  if (!id || bridgeManagement.operationsLoading || (!line?.administration && !pendingBridgeOperation())) return;
+  bridgeManagement.operationsLoading = true;
+  try {
+    const pending = pendingBridgeOperation();
+    if (pending) {
+      try {
+        const op = await api(bridgeManagementBase + '/operations/' + pending.id, {signal:AbortSignal.timeout(12000)});
+        if (epoch !== bridgeManagement.epoch) return;
+        bridgeText($('bridgeOperationNotice'), op.message + ' Number ' + op.line_id + ' · Operation ' + op.id);
+        if (op.terminal) forgetBridgeOperation(op.id);
+      } catch (error) {
+        if (epoch !== bridgeManagement.epoch) return;
+        // The server is the authority on active operations; this tab's marker
+        // only prevents duplicate clicks. A persistent 404 long after
+        // submission means the request was never saved, so nothing will run.
+        if (error?.status === 404 && Number.isFinite(pending.at) && Date.now() - pending.at > bridgeOperationSaveGraceMs) {
+          forgetBridgeOperation(pending.id);
+          bridgeText($('bridgeOperationNotice'), 'Operation ' + pending.id + ' was not saved, so no change was requested. Refresh diagnostics before trying again.');
+        } else bridgeText($('bridgeOperationNotice'), 'Operation ' + pending.id + ' is not yet confirmed. Its saved status will be checked automatically. No request was resubmitted.');
+      }
+    }
+    const payload = await api(bridgeManagementBase + '/lines/' + id + '/operations', {signal:AbortSignal.timeout(12000)});
+    if (epoch !== bridgeManagement.epoch || id !== bridgeManagement.selected) return;
+    const signature = JSON.stringify(payload.operations.map(({updated_at, ...op}) => op));
+    if ($('bridgeOperations').dataset.signature !== signature) {
+      $('bridgeOperations').dataset.signature = signature;
+      $('bridgeOperations').replaceChildren(...payload.operations.map(op => {
+        const item = document.createElement('li');
+        item.textContent = bridgeDate(op.created_at) + ' · ' + bridgeLabel(op.action) + ' · ' + op.message +
+          ' (' + op.reason_code + ') · Staff #' + op.operator_id + ' · ' + op.id +
+          (op.completed_at ? ' · Completed ' + bridgeDate(op.completed_at) : '');
+        const details = document.createElement('button'); details.type = 'button'; details.className = 'btn small';
+        details.textContent = 'View audit';
+        details.onclick = async () => {
+          details.disabled = true;
+          try {
+            const result = await api(bridgeManagementBase + '/operations/' + op.id, {signal:AbortSignal.timeout(12000)});
+            if (epoch === bridgeManagement.epoch && id === bridgeManagement.selected) bridgeText($('bridgeOperationNotice'),
+              result.message + ' · ' + result.id + '\n' + (result.audit || []).map(event => bridgeDate(event.created_at) +
+                ' · ' + bridgeLabel(event.state) + ' · ' + event.reason_code + ' · Staff #' + event.operator_id).join('\n'));
+          } catch (_) {
+            if (epoch === bridgeManagement.epoch) bridgeText($('bridgeOperationNotice'), 'The saved audit is unavailable. Try reading it again.');
+          } finally { details.disabled = false; }
+        };
+        item.append(details);
+        if (op.can_cancel && state.agent?.can_recover_whatsapp === true) {
+          const cancel = document.createElement('button'); cancel.type = 'button'; cancel.className = 'btn small';
+          cancel.textContent = 'Cancel queued operation';
+          cancel.onclick = async () => {
+            cancel.disabled = true;
+            try {
+              const result = await api(bridgeManagementBase + '/operations/' + op.id + '/cancel', {method:'POST', signal:AbortSignal.timeout(12000)});
+              if (epoch === bridgeManagement.epoch) { forgetBridgeOperation(op.id); bridgeText($('bridgeOperationNotice'), result.message); }
+            } catch (_) {
+              if (epoch === bridgeManagement.epoch) bridgeText($('bridgeOperationNotice'), 'Cancellation is unconfirmed or no longer safe. Check the existing operation status.');
+            }
+            dashboardRefresh.request('bridge-management');
+          };
+          item.append(cancel);
+        }
+        return item;
+      }));
+    }
+  } catch (_) {
+    if (epoch === bridgeManagement.epoch) bridgeText($('bridgeOperationNotice'), 'Operation history is unavailable. Any displayed results may be stale.');
+  } finally {
+    if (epoch === bridgeManagement.epoch) { bridgeManagement.operationsLoading = false; renderBridgeDetail(); }
+  }
 }
 
 function renderBridgeEntries(container, entries, format) {

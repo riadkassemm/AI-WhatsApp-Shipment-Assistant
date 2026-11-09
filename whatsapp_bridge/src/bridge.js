@@ -19,6 +19,7 @@ import { transportSnapshot, observeTransport, closeTransport } from './transport
 import { createWebSocketAgent } from './websocket-transport.js';
 import { hasAuthFence, retainAuth } from './fenced-auth.js';
 import { publishQuarantine, loadQuarantine, removalResult } from './decommission.js';
+import { Management } from './management.js';
 
 const silentLogger = pino({ level: 'silent' });
 const DEFAULT_MEDIA_HOST = 'mmg.whatsapp.net';
@@ -90,6 +91,7 @@ export class Bridge {
     this.fetch = dependencies.fetch ?? fetch;
     this.downloadMediaMessage = dependencies.downloadMediaMessage ?? downloadMediaMessage;
     this.lines = new Map();
+    this.management = new Management(this);
     this.registrationTail = Promise.resolve();
     this.phoneReservations = new Map();
     this.mediaFiles = new MediaFiles();
@@ -197,6 +199,7 @@ export class Bridge {
           });
         }
         this.assertRunning();
+        await this.management.initialize(line);
         prepared.push(line);
       } catch (error) {
         initializationFailed(line, error);
@@ -215,7 +218,7 @@ export class Bridge {
     this.startupPhase = 'connecting';
     for (const line of prepared) {
       this.assertRunning();
-      if (autoConnect && line.store.data.enabled) {
+      if (autoConnect && line.store.data.enabled && !this.management.paused(line)) {
         try { await this.connect(line.line_id); }
         catch (error) { initializationFailed(line, error); }
       }
@@ -381,6 +384,7 @@ export class Bridge {
   }
   async removeLine(id) {
     if (typeof id !== 'string' || !/^\d{5,32}$/.test(id)) throw new BridgeError(400, 'INVALID_LINE_ID', 'A numeric linked-device line ID is required.');
+    let guardedLine;
     const task = this.registrationTail.then(async () => {
       const manifest = validateLineManifest(this.manifest.data);
       if (manifest.quarantined_lines[id]) return removalResult(manifest.quarantined_lines[id]);
@@ -389,6 +393,8 @@ export class Bridge {
         return { line_id: id, removed: true, unlinked: true };
       }
       const line = this.getLine(id);
+      this.management.assertLifecycleAvailable(line);
+      line.lifecycleBusy = true; guardedLine = line;
       if (line.auth?.store?.failed) {
         line.status = 'error'; line.recoveryCategory = 'storage_failure'; line.retryBlocked = true;
         line.error = 'This saved session requires administrator recovery review or explicit permanent local removal. Its evidence is retained.';
@@ -480,8 +486,9 @@ export class Bridge {
         line.removalWaiter = null;
       }
     });
-    this.registrationTail = task.catch(() => {});
-    return task;
+    const finished = task.finally(() => { if (guardedLine) guardedLine.lifecycleBusy = false; });
+    this.registrationTail = finished.catch(() => {});
+    return finished;
   }
   stopRemovedSocket(line) {
     const socket = line.socket;
@@ -574,6 +581,7 @@ export class Bridge {
 
   async decommissionLine(id, {actor = 'administrator'} = {}) {
     if (typeof id !== 'string' || !/^\d{5,32}$/.test(id)) throw new BridgeError(400, 'INVALID_LINE_ID', 'A numeric linked-device line ID is required.');
+    let guardedLine;
     const task = this.registrationTail.then(async () => {
       if (this.stopping) throw new BridgeError(503, 'STOPPING', 'The bridge is shutting down.');
       const existing = validateLineManifest(this.manifest.data).quarantined_lines[id];
@@ -583,6 +591,8 @@ export class Bridge {
         await line.fencedAuth.verify(); return removalResult(existing);
       }
       const line = this.getLine(id);
+      this.management.assertLifecycleAvailable(line);
+      line.lifecycleBusy = true; guardedLine = line;
       if (!line.auth?.store?.failed && !line.fencedAuth) throw new BridgeError(409, 'FAILED_SESSION_REQUIRED', 'Use normal unlinking for a healthy session.');
       // The explicit administrator action closes admission for this identity
       // even if cessation cannot yet be proven. It never reconnects to unlink.
@@ -611,8 +621,9 @@ export class Bridge {
         throw new BridgeError(409, 'DECOMMISSION_BLOCKED', 'Local removal is paused because transport or writer cessation could not be verified. Saved evidence is unchanged; administrator review is required.');
       } finally {clearTimeout(timer);}
     });
-    this.registrationTail = task.catch(() => {});
-    return task;
+    const finished = task.finally(() => { if (guardedLine) guardedLine.lifecycleBusy = false; });
+    this.registrationTail = finished.catch(() => {});
+    return finished;
   }
 
   assertNotFenced(line) {
@@ -708,6 +719,7 @@ export class Bridge {
       ...(line.quarantined ? {local_removal: removalResult(line.fencedAuth.record)} : {}),
       recovery_category: line.recoveryCategory,
       retry_scheduled: Boolean(line.reconnectTimer),
+      administration: this.management.availability(line),
       diagnostics: { ...line.diagnostics,
         configured_ip_family: this.config.wsIpFamily ?? 0,
         last_frame_age_ms: line.diagnostics.last_frame_at ? Math.max(0, Date.now() - line.diagnostics.last_frame_at) : null },
@@ -769,6 +781,8 @@ export class Bridge {
   async connect(id) {
     this.assertRunning();
     const line = this.getLine(id);
+    this.management.assertLifecycleAvailable(line);
+    this.management.assertSendAllowed(line);
     this.assertNotFenced(line);
     if (line.removing) throw new BridgeError(503, 'LINE_REMOVING', 'This WhatsApp number is being removed.');
     if (line.socket && !line.session?.closed && ['connected', 'connecting', 'qr'].includes(line.status)) return this.lineStatus(line);
@@ -792,8 +806,10 @@ export class Bridge {
     assertIdle();
   }
 
-  async openSocket(line) {
+  async openSocket(line, {pairedOnly = false} = {}) {
+    if (!pairedOnly) line.safeReconnectOnly = false;
     this.assertNotFenced(line);
+    if (pairedOnly && this.management.reusableBlockers(line).length) throw new BridgeError(409, 'AUTHENTICATION_REVIEW_REQUIRED', 'The saved session is not safe to reuse.');
     if (this.stopping) throw new BridgeError(503, 'STOPPING', 'The bridge is shutting down.');
     if (line.recoveryCategory === 'logged_out' || line.status === 'logged_out' || line.store?.data?.auth_reset_required) await this.waitForLoggedOutEvents(line);
     const generation = ++line.generation;
@@ -814,6 +830,7 @@ export class Bridge {
       if (!line.store?.data) await this.prepareLine(line);
       this.assertRunning();
       line.auth ??= await this.loadAuth(line);
+      if (pairedOnly && (line.store.data.auth_reset_required || !line.auth.managementEvidence().paired)) throw new BridgeError(409, 'AUTHENTICATION_REVIEW_REQUIRED', 'Pairing is unavailable during safe reconnect.');
       if (line.store.data.auth_reset_required) {
         await line.eventTail;
         await line.transportClosed;
@@ -1161,6 +1178,12 @@ export class Bridge {
       }
       return;
     }
+    if (update.qr && line.safeReconnectOnly) {
+      line.status = 'error'; line.recoveryCategory = 'authentication_failure'; line.retryBlocked = true;
+      session.dispose(); socket.end(new Error('Safe reconnect requires authentication review'));
+      if (line.socket === socket) line.socket = null;
+      return;
+    }
     if (update.qr) {
       line.qr = update.qr;
       const qrUrl = await QRCode.toDataURL(update.qr, { errorCorrectionLevel: 'M', margin: 3, width: 320 });
@@ -1206,6 +1229,7 @@ export class Bridge {
       line.display_phone_number = ownPhone;
       session.ready = true;
       line.status = 'connected';
+      line.safeReconnectOnly = false;
       line.disconnectedSince = null;
       line.recoveryCategory = null;
       line.retryBlocked = false;
@@ -1262,6 +1286,7 @@ export class Bridge {
     }
   }
   scheduleReconnect(line, restartRequired = false) {
+    if (this.management.paused(line) || line.managementOperation) return;
     if (line.fencedAuth || line.isolating || line.auth?.store?.failed) return;
     if (this.stopping || line.removing || line.retryBlocked || !line.store?.data?.enabled || line.status !== 'disconnected' || line.reconnectTimer) return;
     const now = Date.now();
@@ -1279,7 +1304,7 @@ export class Bridge {
     line.reconnectTimer = setTimeout(() => {
       line.reconnectTimer = null;
       this.reconnectSlots.delete(line.line_id);
-      if (generation !== line.generation || this.stopping || line.removing || !line.store.data.enabled || line.status !== 'disconnected') return;
+      if (generation !== line.generation || this.stopping || line.removing || this.management.paused(line) || line.managementOperation || !line.store.data.enabled || line.status !== 'disconnected') return;
       line.diagnostics.reconnect_attempts++;
       this.connect(line.line_id).catch(error => {
         this.onError(error);
@@ -1302,13 +1327,19 @@ export class Bridge {
   }
 
   async disconnect(id) {
+    this.management.assertLifecycleAvailable(this.getLine(id));
+    this.management.assertSendAllowed(this.getLine(id));
     this.assertNotFenced(this.getLine(id));
     this.assertRunning();
     // Unlinking can outlive its HTTP connection. Share registration/removal
     // ownership so shutdown retains its stores until an admitted unlink ends.
+    let guardedLine;
     const task = this.registrationTail.then(async () => {
       this.assertRunning();
       const line = this.getLine(id);
+      this.management.assertLifecycleAvailable(line);
+      this.management.assertSendAllowed(line);
+      line.lifecycleBusy = true; guardedLine = line;
       if (line.removing) throw new BridgeError(503, 'LINE_REMOVING', 'This WhatsApp number is being removed.');
       if (!line.store?.data) throw new BridgeError(503, 'LINE_STORAGE_UNAVAILABLE', 'Check this line session storage before disconnecting.');
       clearTimeout(line.reconnectTimer);
@@ -1336,8 +1367,9 @@ export class Bridge {
       delete line.qr_data_url;
       return this.lineStatus(line);
     });
-    this.registrationTail = task.catch(() => {});
-    return task;
+    const finished = task.finally(() => { if (guardedLine) guardedLine.lifecycleBusy = false; });
+    this.registrationTail = finished.catch(() => {});
+    return finished;
   }
 
   // Baileys filters out negative contacts. An empty/absent response therefore
@@ -2044,6 +2076,7 @@ export class Bridge {
       } else throw new BridgeError(400, 'UNSUPPORTED_TYPE', 'This message type is not supported by the linked-device bridge.');
       const options = {};
       if (payload.context?.message_id) options.quoted = this.target(line, payload.context.message_id, phone, false).message;
+      this.management.assertSendAllowed(line);
       this.connected(line, socket);
       this.storageMonitor.assertCanSubmit(id);
       const nativeId = generateMessageIDV2(socket.user?.id);
@@ -2067,6 +2100,7 @@ export class Bridge {
           ...(mediaId ? { media_id: mediaId } : {}),
           ...(clientMessageId ? { client_message_id: clientMessageId } : {}),
         }; }));
+        this.management.assertSendAllowed(line);
         this.connected(line, socket);
         const sendStarted = Date.now();
         this.trace(line, 'send_attempt', { native_id: nativeId, content_type: payload.type });
@@ -2133,7 +2167,7 @@ export class Bridge {
   serialSend(line, action) {
     if (line.sendPending >= 64) throw new BridgeError(503, 'SEND_QUEUE_FULL', 'This connection is busy. The request was not submitted.');
     line.sendPending++;
-    const task = line.sendTail.then(action).finally(() => { line.sendPending--; });
+    const task = line.sendTail.then(() => { this.management.assertSendAllowed(line); return action(); }).finally(() => { line.sendPending--; });
     line.sendTail = task.catch(() => {});
     return task;
   }
@@ -2180,6 +2214,7 @@ export class Bridge {
       let waiter;
       let submitted = false;
       try {
+        this.management.assertSendAllowed(line);
         this.connected(line, socket);
         waiter = line.ack.expect(operation.provider_id, { deferred: true });
         this.trace(line, 'send_attempt', { native_id: operation.provider_id, content_type: kind });
@@ -2455,7 +2490,7 @@ export class Bridge {
       // initialize() may still be assigning a newly loaded facade to its line.
       // Its owner must settle before the final drain/close and lock release.
       this.initializePromise?.catch(() => {}), this.registrationTail,
-      this.recoveryTask, ...this.callbackTasks.values()]);
+      this.recoveryTask, this.management.drain(), ...this.callbackTasks.values()]);
     // A registration admitted before stopping can have finished during the
     // drain. Its new stores have no socket but still need orderly closure.
     for (const line of this.lines.values()) stopLine(line);

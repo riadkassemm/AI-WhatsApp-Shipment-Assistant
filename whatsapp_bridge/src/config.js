@@ -142,6 +142,7 @@ export function readConfig(env = process.env) {
     dataDir: path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..', env.WHATSAPP_LINKED_DEVICE_DATA_DIRECTORY ?? 'whatsapp_bridge/data'),
     maxMediaBytes: 192 * 1024 * 1024, ackTimeoutMs: 20_000,
     wsIpFamily: readWebSocketIpFamily(env.WHATSAPP_WS_IP_FAMILY),
+    managementEnabled: env.WHATSAPP_ADMIN_RECOVERY_ENABLED === 'true',
     storage: readStorageConfig(env),
   };
 }

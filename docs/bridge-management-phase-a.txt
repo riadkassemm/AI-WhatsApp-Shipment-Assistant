@@ -1,6 +1,11 @@
 WhatsApp Management — Phase A
 =============================
 
+Permission update (Phase B release): Admin and Super Admin now have identical
+WhatsApp management permissions, including authentication assessment,
+registration/pairing/QR, connect/disconnect and removal. Regular staff remain
+denied. Lines below that say "Super Admin only" describe the Phase A release.
+
 Scope
 -----
 Read-only diagnostics inside /support. No Node lifecycle/transport/storage

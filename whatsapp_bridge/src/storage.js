@@ -462,6 +462,18 @@ function authFacade(store, owner) {
       });
     },
     hasProviderWork: () => pending.size > 0,
+    // Fixed booleans only: used by the session owner for administrative admission.
+    managementEvidence: () => ({current_owner: owner.current === auth,
+      paired: creds.registered === true && Boolean(creds.me?.id) &&
+        creds.signedPreKey?.signature instanceof Uint8Array && creds.signedPreKey.signature.length >= 32 &&
+        Number.isInteger(creds.registrationId) && typeof creds.advSecretKey === 'string' && Boolean(creds.advSecretKey) &&
+        [creds.noiseKey, creds.signedIdentityKey, creds.signedPreKey?.keyPair].every(pair =>
+          pair?.public instanceof Uint8Array && pair.public.length >= 32 &&
+          pair?.private instanceof Uint8Array && pair.private.length >= 32),
+      healthy: !reportedFailure && !store.failed && !evidenceWriteFailed && owner.intents.size === 0 &&
+        credsDigest() === crypto.createHash('sha256').update(JSON.stringify(store.data.creds, BufferJSON.replacer)).digest('hex'),
+      settled: pending.size === 0 && tokens.size === 0 && credentialWrites === 0 && store.pending === 0,
+      transport_closed: transportState === 'closed', events_released: eventsReleased}),
     armSession: () => {
       active();
       activeArm ??= atomicWrite(store.filename + '.auth-active', { version: 1, started_at: Date.now(),

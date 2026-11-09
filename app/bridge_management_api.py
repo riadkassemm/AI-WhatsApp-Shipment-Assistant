@@ -37,7 +37,7 @@ async def diagnostics(line_id: str = Path(pattern=r"^[0-9]{5,32}$"), agent: Supp
 @router.get("/lines/{line_id}/auth-recovery")
 async def auth_recovery(line_id: str = Path(pattern=r"^[0-9]{5,32}$"), agent: SupportAgent = Depends(management_reader)):
     if not agent.can_assess_whatsapp_authentication:
-        raise HTTPException(403, "Only Super Admins can view detailed authentication assessments.")
+        raise HTTPException(403, "Only Admins and Super Admins can view detailed authentication assessments.")
     return await read_detail("assessment", line_id)
 
 
