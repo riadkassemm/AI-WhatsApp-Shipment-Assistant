@@ -85,22 +85,35 @@ function authFacade(store, owner) {
   let failureTail = Promise.resolve(), reportedFailure = false;
   let directSetTail = Promise.resolve(), activeArm, activeDisarm, activeArmed = false;
   let outsideProviderTransaction, inProviderTransaction;
+  // Group commit. Each caller still resolves only after a durable write that
+  // includes its change. Changes queued while a write is in flight share the
+  // next write. Writing each queued pipeline's intent alone rewrote the whole
+  // map once per job: an offline backlog of N messages cost O(N^2) fsynced
+  // bytes and outlasted the drain deadline, permanently failing the line.
   const changeIntent = change => {
-    const task = owner.intentTail.then(async () => {
-      if (store.failed) throw Object.assign(new Error('STORAGE_RESTART_REQUIRED'), { bridgePersistenceFailure: true });
-      const next = new Map(owner.intents);
-      change(next);
-      const filename = store.filename + '.auth-intent';
-      if (next.size) await atomicWrite(filename, { version: 1, operations: [...next.values()] });
-      else {
-        await fs.unlink(filename);
-        const directory = await fs.open(path.dirname(filename), 'r');
-        try { await directory.sync(); } finally { await directory.close(); }
-      }
-      owner.intents = next;
-    });
-    owner.intentTail = task.catch(() => {});
-    return task;
+    const done = new Promise((resolve, reject) => owner.intentQueue.push({ change, resolve, reject }));
+    if (!owner.intentFlushScheduled) {
+      owner.intentFlushScheduled = true;
+      owner.intentTail = owner.intentTail.then(async () => {
+        owner.intentFlushScheduled = false;
+        const batch = owner.intentQueue.splice(0);
+        try {
+          if (store.failed) throw Object.assign(new Error('STORAGE_RESTART_REQUIRED'), { bridgePersistenceFailure: true });
+          const next = new Map(owner.intents);
+          for (const item of batch) item.change(next);
+          const filename = store.filename + '.auth-intent';
+          if (next.size) await atomicWrite(filename, { version: 1, operations: [...next.values()] });
+          else if (owner.intents.size) {
+            await fs.unlink(filename);
+            const directory = await fs.open(path.dirname(filename), 'r');
+            try { await directory.sync(); } finally { await directory.close(); }
+          }
+          owner.intents = next;
+          for (const item of batch) item.resolve();
+        } catch (error) { for (const item of batch) item.reject(error); }
+      });
+    }
+    return done;
   };
   const saveIntent = async token => {
     const evidence = cloneAuth({ id: token.id, operation: token.method, started_at: token.started,
@@ -114,6 +127,21 @@ function authFacade(store, owner) {
       fail(error, { operation: 'intent', intent_id: token.id, mutations: token.mutations, creds: cloneAuth(creds) });
       throw error;
     }
+  };
+  // Resume mode: keep abandoned intents as evidence beside the journal and
+  // clear the live fence, serialized with every other intent change.
+  const archiveIntents = () => {
+    const task = owner.intentTail.then(async () => {
+      const count = owner.intents.size;
+      if (!count) return 0;
+      await fs.rename(store.filename + '.auth-intent', `${store.filename}.auth-intent.abandoned-${Date.now()}`);
+      const directory = await fs.open(path.dirname(store.filename), 'r');
+      try { await directory.sync(); } finally { await directory.close(); }
+      owner.intents = new Map();
+      return count;
+    });
+    owner.intentTail = task.catch(() => {});
+    return task;
   };
   const recordMutation = async (token, updates) => {
     // An awaited child callback may share the actual provider transaction.
@@ -142,15 +170,61 @@ function authFacade(store, owner) {
     // A known rejected mutation must not disappear on process restart. Retain
     // its private evidence and require explicit recovery before another socket
     // uses these credentials. Never automatically clear this fence.
-    failureEvidence.push(evidence);
-    const saved = cloneAuth({ version: 1, failures: failureEvidence });
-    failureTail = failureTail.then(() => atomicWrite(store.filename + '.auth-failure', saved)).catch(fenceError => {
-      error.authFencePersistenceFailed = true;
-      fenceError.bridgePersistenceFailure = true;
-      fenceError.code = 'AUTH_FAILURE_FENCE_UNWRITABLE';
-      auth.onFailure?.(fenceError);
-    });
+    recordEvidence(evidence);
+    persistFailure(error);
     if (!reportedFailure) { reportedFailure = true; auth.onFailure?.(error); }
+  };
+  // Every evidence entry is already a private copy when it is admitted. Writes
+  // done after a failure are merged into one entry holding the latest value
+  // per key. Repeated rejections then cost O(1) and the file stays the size of
+  // the distinct keys. Previously each rejection deep-cloned and rewrote all
+  // earlier evidence: quadratic, and it starved every other line's event loop.
+  let rejectedAfterFailure = null;
+  const recordEvidence = evidence => {
+    const operation = evidence?.operation;
+    if (operation !== 'rejected_keys_after_failure' && operation !== 'rejected_creds_after_failure') {
+      failureEvidence.push(evidence);
+      return;
+    }
+    if (!rejectedAfterFailure) {
+      rejectedAfterFailure = { operation: 'rejected_after_failure', rejections: 0, first_at: Date.now(), mutations: [{}] };
+      failureEvidence.push(rejectedAfterFailure);
+    }
+    rejectedAfterFailure.rejections++;
+    rejectedAfterFailure.last_at = Date.now();
+    if (evidence.creds) rejectedAfterFailure.creds = evidence.creds;
+    const merged = rejectedAfterFailure.mutations[0];
+    for (const update of evidence.mutations ?? []) {
+      for (const [type, values] of Object.entries(update)) {
+        merged[type] ??= {};
+        Object.assign(merged[type], values);
+      }
+    }
+  };
+  // One writer. Failures that arrive while it writes are covered by the next
+  // pass, so a burst of rejections produces at most two snapshots.
+  let failureWriting = false, evidenceRevision = 0, latestFailureError = null;
+  const persistFailure = error => {
+    evidenceRevision++;
+    latestFailureError = error;
+    if (failureWriting) return;
+    failureWriting = true;
+    failureTail = failureTail.then(async () => {
+      try {
+        let written = 0;
+        while (written !== evidenceRevision) {
+          const revision = evidenceRevision, reported = latestFailureError;
+          try { await atomicWrite(store.filename + '.auth-failure', { version: 1, failures: failureEvidence }); }
+          catch (fenceError) {
+            reported.authFencePersistenceFailed = true;
+            fenceError.bridgePersistenceFailure = true;
+            fenceError.code = 'AUTH_FAILURE_FENCE_UNWRITABLE';
+            auth.onFailure?.(fenceError);
+          }
+          written = revision;
+        }
+      } finally { failureWriting = false; }
+    });
   };
   const runProvider = (method, operation, args, independent = false, detached = false) => {
     active(method === 'set' ? () => ({ operation: 'rejected_keys_after_failure', mutations: [cloneKeyUpdates(args[0])] }) : undefined);
@@ -182,17 +256,20 @@ function authFacade(store, owner) {
       directSetTail = new Promise(resolve => { releaseSet = resolve; });
     }
     tokens.add(token);
-    const task = context.run(token, async () => {
+    const task = token.task = context.run(token, async () => {
       try {
         // Baileys' nontransactional PQueue can execute a queued callback in a
         // previous job's AsyncLocalStorage context. Keep top-level direct sets
         // out of that queue together; nested transactional sets remain inline.
         if (previousSet) await previousSet;
-        // This fence precedes any provider work, including network side effects.
-        // A crash can leave a conservative recovery requirement, never a new
-        // connection silently using keys from before an unfinished transaction.
-        if (method !== 'get') await saveIntent(token);
+        // Strict mode: this fence precedes any provider work, including network
+        // side effects. Resume mode: a provider pipeline writes its intent when
+        // it first starts a key transaction or mutation (the nested path
+        // below). A pipeline that never touches keys needs no fence, and an
+        // initial sync starts thousands of them at once (14,032 on 2026-11-09).
+        if (method !== 'get' && !(method === 'pipeline' && owner.resume)) await saveIntent(token);
         const result = await operation(...args);
+        if (!token.hasIntent && token.hasTransaction && credsDigest() !== token.originalCreds) await auth.saveCreds();
         if (token.hasIntent) {
           if (token.hasTransaction && credsDigest() !== token.originalCreds) await auth.saveCreds();
           await store.flush();
@@ -202,6 +279,14 @@ function authFacade(store, owner) {
         return result;
       }
       catch (error) {
+        // Work abandoned at retirement was already given up: clear its intent
+        // and keep the store usable (resume mode only).
+        if (token.abandoned) {
+          if (token.hasIntent) await changeIntent(intents => intents.delete(token.id)).catch(() => {});
+          throw error;
+        }
+        if (owner.resume && method === 'pipeline' && !token.hasIntent && !token.mutations.length &&
+            credsDigest() === token.originalCreds) throw error;
         // A normal read/query rejection with unchanged authentication state is
         // safe to abandon. Message-send uncertainty is tracked separately by
         // the bridge; only changed or ambiguous auth state poisons this owner.
@@ -304,7 +389,19 @@ function authFacade(store, owner) {
         if (!mutex || typeof mutex.mutex !== 'function' || attached.has(mutex)) continue;
         attached.add(mutex);
         const operation = mutex.mutex.bind(mutex);
-        mutex.mutex = async (...args) => runProvider('pipeline', operation, args);
+        // Admit at enqueue (a retired or failed owner rejects immediately), but
+        // fence with a durable intent only when the job acquires the mutex.
+        // A queued job has done no provider work. Registering intents at
+        // enqueue made an offline backlog of N jobs hold N intents, and every
+        // completion rewrote all remaining ones (O(N^2) fsynced bytes; on
+        // 2026-11-09 a 3,000-job backlog took ~35 min at full CPU). Jobs still
+        // queued at retirement now reject with AUTH_SESSION_RETIRED; their
+        // messages were never decrypted or acknowledged, so WhatsApp
+        // redelivers them to the next session.
+        mutex.mutex = async code => {
+          active();
+          return operation(() => runProvider('pipeline', code, []));
+        };
       }
     },
     trackProviderTask: operation => runProvider('pipeline', operation, [], true),
@@ -335,7 +432,7 @@ function authFacade(store, owner) {
       });
       return activeArm;
     },
-    drain: async ({ timeoutMs = 20_000 } = {}) => {
+    drain: async ({ timeoutMs = owner.drainTimeoutMs } = {}) => {
       let timer;
       try {
         await activeArm;
@@ -343,12 +440,23 @@ function authFacade(store, owner) {
           // An admitted native callback may start a separately tracked child
           // (offline queue, token issuance, post-login key work) while retiring.
           // Keep draining until those children also finish, under one deadline.
+          // Running work is always awaited: it may still emit accepted events.
           while (pending.size) await Promise.allSettled([...pending]);
         };
-        await Promise.race([settleProviderTasks(), new Promise((_, reject) => {
+        let timedOut = false;
+        await Promise.race([settleProviderTasks(), new Promise((resolve, reject) => {
           timer = setTimeout(() => {
             const error = Object.assign(new Error('AUTH_TRANSACTION_DRAIN_TIMEOUT'), { code: 'AUTH_TRANSACTION_DRAIN_TIMEOUT' });
             const mutations = [...tokens].flatMap(token => token.mutations);
+            if (owner.resume) {
+              // Give up stuck work instead of failing the line permanently: the
+              // journal still holds every committed write. Its intents are kept
+              // as evidence below; the next socket starts from committed state.
+              for (const token of tokens) { token.active = false; token.abandoned = true; }
+              timedOut = true;
+              resolve();
+              return;
+            }
             for (const token of tokens) token.active = false;
             fail(error, { operation: 'drain_timeout', mutations });
             reject(error);
@@ -356,6 +464,11 @@ function authFacade(store, owner) {
         })]);
         clearTimeout(timer);
         await store.flush();
+        if (owner.resume && (timedOut || owner.intents.size)) {
+          const stuck = tokens.size, archived = await archiveIntents();
+          owner.onRecovery?.({ event: 'auth_work_abandoned', reason: timedOut ? 'drain_timeout' : 'pending_intents',
+            stuck_tasks: stuck, archived_intents: archived });
+        }
         if (owner.intents.size) {
           const error = Object.assign(new Error('AUTH_PENDING_INTENTS'), { code: 'AUTH_PENDING_INTENTS' });
           fail(error, { operation: 'undrained_intents', intents: [...owner.intents.values()] });
@@ -399,6 +512,61 @@ function authFacade(store, owner) {
   return auth;
 }
 
+// Retiring a socket waits for its admitted provider work. Missing this
+// deadline permanently fails the line's auth store, so it must exceed the
+// provider's own query timeout (20 s) plus slow-disk fsync time (production
+// commits take ~200 ms each) by a wide margin.
+export const DEFAULT_AUTH_DRAIN_TIMEOUT_MS = 60_000;
+
+const markerExists = async filename => {
+  try { await access(filename); return true; }
+  catch (error) { if (error.code !== 'ENOENT') throw error; return false; }
+};
+
+// After an unclean exit (SIGKILL, crash, power loss) or a stuck retirement,
+// a line can keep recovery markers. Every committed auth write is in the
+// fsynced journal; the markers only describe work that was in progress:
+//   .auth-active   a session was running
+//   .auth-intent   a provider transaction was in flight (uncommitted)
+//   torn tail      the last journal write did not finish (already quarantined)
+//   .auth-failure  writes were rejected; resumable only when the failure began
+//                  with a drain timeout (not a disk or journal write error)
+// Resume from the committed state instead of forcing a full re-pair: the
+// in-flight change is discarded, and WhatsApp's retry receipts repair the few
+// chats it touched. Markers are renamed with an .abandoned/.resumed suffix,
+// never deleted, so the evidence stays auditable. A failure caused by a real
+// write error still fences the line. createAuth() itself stays strict.
+const RESUMABLE_FAILURE_ORIGINS = new Set(['drain_timeout']);
+export async function resumeAfterUncleanExit(store) {
+  if (store.failed) return { resumed: false, reason: 'store_failed' };
+  const markers = {};
+  for (const suffix of ['.auth-active', '.auth-intent', '.auth-failure']) markers[suffix] = await markerExists(store.filename + suffix);
+  if (!markers['.auth-active'] && !markers['.auth-intent'] && !markers['.auth-failure']) {
+    return { resumed: false, reason: 'no_marker' };
+  }
+  if (markers['.auth-failure']) {
+    let origin = null;
+    try {
+      // Read in-process only; recovery evidence is never logged.
+      const evidence = JSON.parse(await fs.readFile(store.filename + '.auth-failure', 'utf8'));
+      origin = evidence?.failures?.[0]?.operation ?? null;
+    } catch (_) { origin = null; }
+    if (!RESUMABLE_FAILURE_ORIGINS.has(origin)) return { resumed: false, reason: 'auth_failure_present' };
+  }
+  const stamp = Date.now(), retained = [];
+  for (const [suffix, present] of Object.entries(markers)) {
+    if (!present) continue;
+    const target = `${store.filename}${suffix}.${suffix === '.auth-active' ? 'resumed' : 'abandoned'}-${stamp}`;
+    await fs.rename(store.filename + suffix, target);
+    retained.push(path.basename(target));
+  }
+  const directory = await fs.open(path.dirname(store.filename), 'r');
+  try { await directory.sync(); } finally { await directory.close(); }
+  const reason = markers['.auth-failure'] ? 'drain_timeout_failure' : markers['.auth-intent'] ? 'in_flight_change_discarded'
+    : store.incompleteTailBytes ? 'journal_tail_quarantined' : 'active_marker_only';
+  return { resumed: true, reason, retained };
+}
+
 export async function assertAuthRecoveryClear(filename) {
   // Check existence without reading sensitive recovery evidence into logs.
   for (const suffix of ['.auth-failure', '.auth-intent', '.auth-active']) {
@@ -408,11 +576,13 @@ export async function assertAuthRecoveryClear(filename) {
   }
 }
 
-export async function createAuth(directory, { store, ...options } = {}) {
+export async function createAuth(directory, { store, drainTimeoutMs, resume = false, onRecovery, ...options } = {}) {
   store ??= await new JournalStore(path.join(directory, 'auth.json'), () => ({ creds: initAuthCreds(), keys: {} }), options).load();
   try { await assertAuthRecoveryClear(store.filename); } catch (error) { store.failed = true; throw error; }
   if (authOwners.has(store)) return authOwners.get(store).current.renew();
-  const owner = { current: null, generation: 0, intents: new Map(), intentTail: Promise.resolve() };
+  const owner = { current: null, generation: 0, intents: new Map(), intentTail: Promise.resolve(),
+    intentQueue: [], intentFlushScheduled: false, drainTimeoutMs: drainTimeoutMs ?? DEFAULT_AUTH_DRAIN_TIMEOUT_MS,
+    resume, onRecovery };
   authOwners.set(store, owner);
   return authFacade(store, owner);
 }
