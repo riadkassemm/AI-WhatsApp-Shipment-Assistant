@@ -44,6 +44,10 @@ class SupportAgent:
         return self.role == "supervisor"
 
     @property
+    def can_recover_whatsapp(self) -> bool:
+        return self.role in {'admin', 'supervisor'}
+
+    @property
     def can_assess_whatsapp_authentication(self) -> bool:
         return self.role == "supervisor"
 

@@ -864,3 +864,20 @@ def test_decommission_active_writer_blocks_archival(removal_bridge):
     assert result.status_code == 409
     assert removal_bridge["tickets"] == [23]
     assert not any(c[0] == "finish" for c in removal_bridge["calls"])
+
+
+def test_paused_bot_confirmation_uses_durable_delivery_namespace(linked_config, monkeypatch):
+    from app.bridge_paused_replies import paused_replies
+    calls = []
+    applied = False
+    async def confirm(event): calls.append(event); return applied
+    monkeypatch.setattr(paused_replies, 'confirm', confirm)
+    event = {'event_id':'paused-confirmation','type':'outgoing_confirmation','line_id':'90001',
+        'from_me':True,'client_message_id':'paused-bot:' + 'a'*64,'message_id':'ld:90001:confirmed',
+        'sender_phone':'155500001','timestamp':1794120000000}
+    assert request('POST','/api/whatsapp/linked-device/events',payload=event,token='wrong').status_code == 403
+    assert not calls
+    assert request('POST','/api/whatsapp/linked-device/events',payload=event).status_code == 503
+    applied = True
+    assert request('POST','/api/whatsapp/linked-device/events',payload=event).status_code == 200
+    assert len(calls) == 2

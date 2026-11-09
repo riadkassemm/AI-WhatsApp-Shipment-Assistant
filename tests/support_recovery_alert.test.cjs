@@ -15,7 +15,7 @@ function harness() {
   const $ = id => { if (!elements.has(id)) elements.set(id, element()); return elements.get(id); };
   const context = vm.createContext({$, text: (node, value) => { node.textContent = value; },
     state: {lineAlertsSeen: new Set(), currentTicketData: {ticket: {business_phone_number_id: '90011'}, permissions: {can_reply: true}}},
-    document: {createElement: element}, canLinkWhatsApp: () => true, canManageWhatsApp: () => false,
+    document: {createElement: element}, canLinkWhatsApp: () => true, canManageWhatsApp: () => false, canViewBridgeManagement: () => true,
     notifyNewCustomerActivity: value => notices.push(value), pendingLinkedDeviceAddition: () => false,
     createSupportNumberLabel: () => element()});
   vm.runInContext(helpers + '\n' + modal, context);

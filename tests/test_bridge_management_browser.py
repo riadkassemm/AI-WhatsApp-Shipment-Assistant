@@ -14,7 +14,8 @@ from app.support_ui import _ASSETS, _SCRIPT_NAMES, _TEMPLATE, _configure
 
 @pytest.mark.parametrize('role', ['agent', 'admin', 'supervisor'])
 @pytest.mark.parametrize('width', [1440, 390])
-def test_management_roles_layout_and_read_only_interactions(tmp_path, role, width):
+@pytest.mark.parametrize('recovery', [False, True])
+def test_management_roles_layout_and_read_only_interactions(tmp_path, role, width, recovery):
     browser = shutil.which(os.environ.get('SUPPORT_TEST_BROWSER', 'chromium'))
     if not browser:
         pytest.skip('Select Chromium with SUPPORT_TEST_BROWSER')
@@ -35,6 +36,11 @@ def test_management_roles_layout_and_read_only_interactions(tmp_path, role, widt
     payload = {'lines': lines, 'checked_at': iso(now), 'issues': [], 'recent_incidents': [],
                'incident_notice': 'Observed in this API worker only; gaps may omit incidents.',
                'incident_window_started_at': iso(now)}
+    if recovery:
+        lines[0]['administration'] = {'epoch':'00000000-0000-4000-8000-000000000001',
+            'generation':1,'version':0,'paused':False,'active_operation_id':None}
+        lines[0]['actions'] = [{'action':'pause','label':'Pause','enabled':True,'blockers':[],
+                               'reason':'Ready for an authorized request.'}]
     before = """window.testErrors=[]; addEventListener('error', event => testErrors.push(event.message));
 window.fetch = async () => {throw new Error('Unexpected network request');};
 """
@@ -48,21 +54,35 @@ window.fetch = async () => {throw new Error('Unexpected network request');};
     assertions = r"""
 (async () => {
   const check = (value, message) => {if (!value) throw new Error(message);};
-  const calls = [], role = ROLE, snapshot = SNAPSHOT;
+  const calls = [], role = ROLE, snapshot = SNAPSHOT, recovery = RECOVERY;
+  let operation = null;
   let unavailable = false;
   api = async (path, options = {}) => {
     calls.push([options.method || 'GET', path]);
-    check(!options.method || options.method === 'GET', 'Mutation request');
+    if (options.method === 'POST') {
+      check(recovery && role !== 'agent' && path.endsWith('/operations'), 'Unauthorized mutation');
+      const body=JSON.parse(options.body);
+      check(body.action === 'pause' && body.operation_id === options.headers['Idempotency-Key'] && body.confirm_line_id === '90001', 'Operation identity');
+      operation={id:body.operation_id,line_id:'90001',action:'pause',operator_id:'7',state:'succeeded',
+        reason_code:'ADMIN_PAUSED',message:'This number is paused by an administrator.',terminal:true,
+        can_cancel:false,created_at:snapshot.checked_at,completed_at:snapshot.checked_at,audit:[]};
+      snapshot.lines[0].administration.paused=true;
+      snapshot.lines[0].administration.version=1;
+      snapshot.lines[0].actions=[{action:'resume',label:'Resume',enabled:true,blockers:[],reason:'Ready for an authorized request.'}];
+      return operation;
+    }
     if (unavailable) throw new Error('Mock outage');
     if (path.endsWith('/management')) return structuredClone(snapshot);
     if (path.endsWith('/history')) return {events: []};
+    if (path.endsWith('/operations')) return {operations: operation ? [operation] : []};
+    if (path.includes('/operations/')) return operation;
     if (path.endsWith('/auth-recovery')) return {status: 'BLOCKED', recovery_allowed: false,
       notice: 'Observation only. No fence was changed.', blockers: ['OWNER_NOT_RETIRED']};
     throw new Error('Unexpected path');
   };
   state.agent = {id:'7', name:'Mock operator', role, can_view_whatsapp_management:role !== 'agent',
     can_manage_whatsapp:role === 'supervisor', can_link_whatsapp:role === 'supervisor',
-    can_assess_whatsapp_authentication:role === 'supervisor'};
+    can_assess_whatsapp_authentication:role === 'supervisor',can_recover_whatsapp:role !== 'agent'};
   setAgentIdentity(state.agent); configureStaffAccess();
   state.authenticated = true;
   $('sessionLoading').classList.add('hidden'); $('dashboard').classList.remove('hidden');
@@ -76,6 +96,15 @@ window.fetch = async () => {throw new Error('Unexpected network request');};
     check(dashboardRefresh.interval() === 5000, 'Five-second refresh');
     check($('bridgeLegacyWorkflowsBtn').classList.contains('hidden') === (role !== 'supervisor'), 'Legacy permission');
     check($('bridgeAssessmentBtn').classList.contains('hidden') === (role !== 'supervisor'), 'Assessment permission');
+    if (recovery) {
+      check(!$('bridgeFutureActions').querySelector('button').disabled, 'Pause enabled');
+      const pending=requestBridgeRecovery('pause');
+      await Promise.resolve();
+      check(state.activeModal === 'confirmModal', 'Explicit confirmation');
+      $('confirmAcceptBtn').click(); await pending; await Promise.resolve();
+      check(operation?.state === 'succeeded', 'Saved operation result');
+      check($('bridgeOperationNotice').textContent.includes('paused'), 'Progress/result message');
+    }
     selectBridgeIdentity('90003'); await Promise.resolve();
     const row = $('bridgeIdentities').children[2], facts = $('bridgeFacts').firstElementChild;
     row.focus(); await loadBridgeManagement();
@@ -88,12 +117,13 @@ window.fetch = async () => {throw new Error('Unexpected network request');};
     unavailable = false; await loadBridgeManagement();
     const panel = $('bridgeManagementModal').firstElementChild.getBoundingClientRect();
     check(panel.left >= 0 && panel.right <= innerWidth + 1, 'Modal horizontal overflow');
-    check(calls.every(([method]) => method === 'GET'), 'Read-only requests');
+    check(calls.filter(([method]) => method === 'POST').length === (recovery ? 1 : 0), 'No repeated mutations');
+    if (recovery) { selectBridgeIdentity('90001'); await loadBridgeOperations(); }
   }
   check(testErrors.length === 0, testErrors.join('; '));
   document.body.dataset.bridgeTest = 'passed';
 })().catch(error => {document.body.dataset.bridgeTest = 'FAILED: ' + error.stack;});
-""".replace('ROLE', json.dumps(role)).replace('SNAPSHOT', json.dumps(payload))
+""".replace('ROLE', json.dumps(role)).replace('SNAPSHOT', json.dumps(payload)).replace('RECOVERY', json.dumps(recovery))
     html = _configure(_TEMPLATE.replace('<script src="/support/image-editor.js"></script>', '')
         .replace('__SUPPORT_THEME__', '<script>' + before + '</script>')
         .replace('__SUPPORT_STYLE__', '<style>' + _ASSETS['support.css'] + '</style>')
@@ -108,7 +138,7 @@ window.fetch = async () => {throw new Error('Unexpected network request');};
     if artifact_dir and role == 'supervisor':
         folder = Path(artifact_dir)
         folder.mkdir(parents=True, exist_ok=True)
-        command.append('--screenshot=' + str(folder / f'bridge-management-{width}.png'))
+        command.append('--screenshot=' + str(folder / f'bridge-management-{width}-recovery-{recovery}.png'))
     result = subprocess.run([*command, page.as_uri()], capture_output=True, text=True, timeout=40)
     assert result.returncode == 0, result.stderr[-1000:]
     start = result.stdout.find('<body')

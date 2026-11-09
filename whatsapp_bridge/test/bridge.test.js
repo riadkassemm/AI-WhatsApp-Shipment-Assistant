@@ -1275,7 +1275,7 @@ test('first pairing pins the phone and later wrong-account reconnect cannot send
 });
 
 test('a failed scheduled reconnect retries transient network errors with backoff and resumes its saved session', async t => {
-  const { bridge, line, socket } = await fixture(t);
+  const { bridge, line, socket } = await fixture(t, 'ack', {random: () => 0});
   const resumedSocket = mockSocket();
   let attempts = 0;
   bridge.makeSocket = options => {
@@ -3190,4 +3190,194 @@ test('terminal disconnect classification cancels raw-close recovery before queue
     assert.equal(line.store.data.enabled, true, 'quarantine does not unlink the device');
     await bridge.close();
   }
+});
+
+// Phase B uses the real journal/auth owner with synthetic provider transports.
+async function recoveryFixture(t) {
+  const value = await fixture(t, 'ack', {random: () => 0, assertExclusiveOwnership: () => {}});
+  value.config.managementEnabled = true;
+  const creds = value.line.auth.state.creds;
+  creds.registered = true; creds.me = {id: value.socket.user.id};
+  await value.line.auth.saveCreds();
+  return value;
+}
+function recoveryRequest(bridge, line, action, id = randomUUID()) {
+  const view = bridge.management.availability(line);
+  return {id, action, operator:'7', role:'admin', reason:'OPERATOR_REQUEST',
+    expected_epoch:view.epoch, expected_version:view.version, expected_generation:view.generation};
+}
+
+test('administrative observations never write journals or expose credentials', async t => {
+  const {bridge,line} = await recoveryFixture(t);
+  const before = [line.store.seq,line.auth.store.seq];
+  for (let i=0;i<5;i++) {
+    const view = bridge.management.availability(line);
+    assert.equal(view.actions.pause.enabled,true);
+    assert.equal(view.actions.reconnect.enabled,false);
+    assert.equal(JSON.stringify(view).includes('advSecretKey'),false);
+  }
+  assert.deepEqual([line.store.seq,line.auth.store.seq],before);
+});
+
+test('pause retains transport and auth, idempotency and version checks prevent duplicate commands', async t => {
+  const {bridge,line,socket} = await recoveryFixture(t);
+  const auth = line.auth, request = recoveryRequest(bridge,line,'pause');
+  let logouts = 0; socket.logout = async () => {logouts++;};
+  const [a,b] = await Promise.all([bridge.management.submit(line,request),bridge.management.submit(line,request)]);
+  assert.equal(a.id,b.id); await bridge.management.drain();
+  assert.equal(bridge.management.get(line,request.id).state,'succeeded');
+  assert.equal(line.store.data.administration.version,1);
+  assert.equal(bridge.management.paused(line),true);
+  assert.equal(line.socket,socket); assert.equal(line.auth,auth); assert.equal(logouts,0);
+  await assert.rejects(bridge.send(LINE,{to:PHONE,type:'text',text:{body:'Held'}}), error => error.code==='ADMIN_PAUSED' && error.delivery_uncertain===false);
+  await assert.rejects(bridge.connect(LINE), error => error.code==='ADMIN_PAUSED');
+  await assert.rejects(bridge.disconnect(LINE), error => error.code==='ADMIN_PAUSED');
+  assert.throws(() => bridge.management.submit(line,{...request, action:'resume'}), error => error.code==='IDEMPOTENCY_CONFLICT');
+  assert.throws(() => bridge.management.submit(line,{...request,id:randomUUID(),action:'resume'}), error => error.code==='STALE_OBSERVATION');
+  const resume = recoveryRequest(bridge,line,'resume');
+  await bridge.management.submit(line,resume); await bridge.management.drain();
+  assert.equal(bridge.management.get(line,resume.id).state,'succeeded');
+  assert.equal(bridge.management.paused(line),false); assert.equal(line.socket,socket);
+});
+
+test('pause lets a dispatched send confirm but refuses queued new work', async t => {
+  const {bridge,line,socket} = await recoveryFixture(t);
+  let entered,release;
+  const dispatched = new Promise(resolve => {entered=resolve;});
+  const finish = new Promise(resolve => {release=resolve;});
+  const originalSend = socket.sendMessage;
+  socket.sendMessage = async (...args) => {entered(); await finish; return originalSend(...args);};
+  const sending = bridge.send(LINE,{to:PHONE,type:'text',text:{body:'In flight'},client_message_id:'before-pause'});
+  await dispatched;
+  await bridge.management.submit(line,recoveryRequest(bridge,line,'pause'));
+  await bridge.management.drain(); release();
+  assert.ok((await sending).messages[0].id);
+  assert.equal((await bridge.send(LINE,{to:PHONE,type:'text',text:{body:'In flight'},client_message_id:'before-pause'})).messages.length,1);
+  await assert.rejects(bridge.send(LINE,{to:PHONE,type:'text',text:{body:'New'},client_message_id:'after-pause'}), error => error.code==='ADMIN_PAUSED');
+  assert.equal(socket.calls.length,1);
+});
+
+test('reconnect waits for provider connection and never enters pairing or resets credentials', async t => {
+  const {bridge,line,socket} = await recoveryFixture(t);
+  await bridge.connectionUpdate(line,socket,{connection:'close'});
+  let made; const created = new Promise(resolve => {made=resolve;});
+  const replacement = mockSocket();
+  bridge.makeSocket = options => {assert.equal(options.auth.creds.registered,true); made(); return replacement;};
+  const oldReset = line.auth.reset;
+  line.auth.reset = async () => {throw new Error('UNEXPECTED_RESET');};
+  t.after(() => {line.auth.reset = oldReset;});
+  const request = recoveryRequest(bridge,line,'reconnect');
+  assert.equal(bridge.management.availability(line).actions.reconnect.enabled,true);
+  await bridge.management.submit(line,request); await created;
+  assert.equal(bridge.management.get(line,request.id).state,'running');
+  await bridge.connectionUpdate(line,replacement,{connection:'open'});
+  await bridge.management.drain();
+  assert.equal(bridge.management.get(line,request.id).state,'succeeded');
+  assert.equal(line.status,'connected'); assert.equal(line.qr,undefined);
+  assert.equal(line.store.data.administration.version,1);
+});
+
+test('reconnect QR challenge fails closed, without generating QR credentials', async t => {
+  const {bridge,line,socket} = await recoveryFixture(t);
+  await bridge.connectionUpdate(line,socket,{connection:'close'});
+  const replacement=mockSocket(); let made; const created=new Promise(resolve=>{made=resolve;});
+  bridge.makeSocket=()=>{made();return replacement;};
+  const request=recoveryRequest(bridge,line,'reconnect');
+  await bridge.management.submit(line,request); await created;
+  await bridge.connectionUpdate(line,replacement,{qr:'SYNTHETIC_SECRET'}); await bridge.management.drain();
+  assert.equal(bridge.management.get(line,request.id).state,'failed');
+  assert.equal(line.qr,undefined); assert.equal(line.qr_data_url,undefined);
+  assert.equal(line.auth.state.creds.registered,true); assert.equal(line.retryBlocked,true);
+});
+
+test('unsafe ownership, storage, authentication, transport and legacy operations block recovery', async t => {
+  const {bridge,line,socket} = await recoveryFixture(t);
+  await bridge.connectionUpdate(line,socket,{connection:'close'});
+  clearTimeout(line.reconnectTimer); line.reconnectTimer=null;
+  const evidence=line.auth.managementEvidence;
+  const cases=[['current_owner',false,'SESSION_OWNERSHIP_UNPROVEN'],['paired',false,'AUTHENTICATION_REVIEW_REQUIRED'],
+    ['healthy',false,'AUTHENTICATION_REVIEW_REQUIRED'],['settled',false,'WORK_NOT_SETTLED'],
+    ['transport_closed',false,'TRANSPORT_RELEASE_UNCONFIRMED'],['events_released',false,'EVENT_SUBSCRIPTION_NOT_RELEASED']];
+  for (const [key,value,reason] of cases) {
+    line.auth.managementEvidence=()=>({...evidence(),[key]:value});
+    assert.throws(()=>bridge.management.submit(line,recoveryRequest(bridge,line,'reconnect')),error=>error.code===reason);
+  }
+  line.auth.managementEvidence=evidence;
+  bridge.phoneReservations.set(line.store.data.bound_phone,'90002');
+  assert.throws(()=>bridge.management.submit(line,recoveryRequest(bridge,line,'reconnect')),error=>error.code==='CONFLICTING_SESSION_OWNER');
+  bridge.phoneReservations.clear();
+  for (const key of ['lifecycleBusy','quarantined','fencedAuth']) {
+    line[key]=true;
+    assert.equal(bridge.management.availability(line).actions.reconnect.enabled,false);
+    line[key]=false;
+  }
+  const status=bridge.storageMonitor.status;
+  bridge.storageMonitor.status=()=>({level:'ok',checked_at:Date.now()-61000});
+  assert.throws(()=>bridge.management.submit(line,recoveryRequest(bridge,line,'pause')),error=>error.code==='STORAGE_REVIEW_REQUIRED');
+  bridge.storageMonitor.status=status;
+  assert.equal(line.store.data.administration,undefined);
+});
+
+test('pause survives bridge restart and interrupted operations are retained without replay', async t => {
+  const {bridge,line,config}=await recoveryFixture(t);
+  const request=recoveryRequest(bridge,line,'pause');
+  await bridge.management.submit(line,request); await bridge.management.drain();
+  await line.store.update(data=>{data.administration.operations[request.id].state='running';});
+  await bridge.close(); let sockets=0;
+  const replacement=await new Bridge(config,{makeSocket:()=>{sockets++;return mockSocket();},
+    onError:()=>{},log:()=>{},storageFilesystem:healthyStorage,assertExclusiveOwnership:()=>{}}).initialize();
+  t.after(()=>replacement.close());
+  const restored=replacement.getLine(LINE);
+  assert.equal(sockets,0); assert.equal(replacement.management.paused(restored),true);
+  assert.equal(replacement.management.get(restored,request.id).state,'interrupted');
+  assert.equal(replacement.management.get(restored,request.id).reason_code,'BRIDGE_RESTARTED');
+  replacement.scheduleReconnect(restored); assert.equal(restored.reconnectTimer,null);
+});
+
+test('malformed administrative evidence stays paused and cannot silently reactivate', async t => {
+  const {bridge,line}=await recoveryFixture(t);
+  await line.store.update(data=>{data.administration={version:1,paused:'false',operations:{}};});
+  const seq=line.store.seq;
+  await assert.rejects(bridge.management.initialize(line),error=>error.code==='MANAGEMENT_STATE_INVALID');
+  assert.equal(bridge.management.paused(line),true);
+  assert.equal(line.store.seq,seq);
+  assert.equal(bridge.management.availability(line).actions.resume.enabled,false);
+  await assert.rejects(bridge.send(LINE,{to:PHONE,type:'text',text:{body:'Blocked'}}),error=>error.code==='ADMIN_PAUSED');
+});
+
+test('resume revalidates after persistence and retains pause if authentication changes', async t => {
+  const {bridge,line}=await recoveryFixture(t);
+  await bridge.management.submit(line,recoveryRequest(bridge,line,'pause')); await bridge.management.drain();
+  const update=line.store.update.bind(line.store), evidence=line.auth.managementEvidence;
+  line.store.update=async fn=>{
+    const result=await update(fn);
+    if(line.store.data.administration.paused===false) line.auth.managementEvidence=()=>({...evidence(),healthy:false});
+    return result;
+  };
+  const request=recoveryRequest(bridge,line,'resume');
+  await bridge.management.submit(line,request); await bridge.management.drain();
+  assert.equal(bridge.management.get(line,request.id).state,'failed');
+  assert.equal(bridge.management.paused(line),true);
+  line.store.update=update; line.auth.managementEvidence=evidence;
+});
+
+test('a resume interrupted after saving paused=false restarts paused and is not replayed', async t => {
+  const {bridge,line,config}=await recoveryFixture(t);
+  await bridge.management.submit(line,recoveryRequest(bridge,line,'pause')); await bridge.management.drain();
+  const id=randomUUID();
+  // Crash window: admission and paused=false are durable, revalidation is not.
+  await line.store.update(data=>{
+    data.administration.version++; data.administration.paused=false;
+    data.administration.operations[id]={id,action:'resume',operator:'7',role:'admin',reason:'OPERATOR_REQUEST',
+      fingerprint:'a'.repeat(64),state:'running',reason_code:'PROCESSING',created_at:Date.now(),completed_at:null};
+  });
+  await bridge.close(); let sockets=0;
+  const replacement=await new Bridge(config,{makeSocket:()=>{sockets++;return mockSocket();},
+    onError:()=>{},log:()=>{},storageFilesystem:healthyStorage,assertExclusiveOwnership:()=>{}}).initialize();
+  t.after(()=>replacement.close());
+  const restored=replacement.getLine(LINE);
+  assert.equal(replacement.management.paused(restored),true);
+  assert.equal(replacement.management.get(restored,id).state,'interrupted');
+  assert.equal(sockets,0);
+  await assert.rejects(replacement.send(LINE,{to:PHONE,type:'text',text:{body:'Blocked'}}),error=>error.code==='ADMIN_PAUSED');
 });

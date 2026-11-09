@@ -9,7 +9,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any
 
-from app.config import configured_linked_device_lines, quarantined_linked_device_line_ids
+from app.config import settings, configured_linked_device_lines, quarantined_linked_device_line_ids
 from app.bridge_management_repository import bridge_management_repository
 from app.whatsapp_client import linked_device_client
 from app.whatsapp_line_health import summarize_storage
@@ -263,11 +263,31 @@ class BridgeManagementService:
             raw_lines = {item["line_id"]: item for item in payload.get("lines", [])
                          if isinstance(item, dict) and isinstance(item.get("line_id"), str) and item["line_id"] in ids}
             previous = {line["line_id"]: line for line in (self.snapshot or {}).get("lines", [])}
+            controls, recovery_available = {}, False
+            if settings.whatsapp_admin_recovery_enabled:
+                from app.bridge_recovery_repository import bridge_recovery_repository
+                try:
+                    controls = {row['line_id']: row for row in await asyncio.wait_for(bridge_recovery_repository.controls(), 3)}
+                    recovery_available = True
+                except Exception:
+                    issues.append('RECOVERY_STATE_UNAVAILABLE')
             lines = []
             for line_id in sorted(ids):
                 row = by_id.get(line_id, {**self.labels.get(line_id, {}), "is_enabled": False if line_id in quarantined else None})
                 row = {**row, "display_phone_number": row.get("display_phone_number") or active.get(line_id)}
                 line = describe_line(line_id, row, raw_lines.get(line_id), payload.get("storage"), line_id in quarantined, checked_at, now)
+                if settings.whatsapp_admin_recovery_enabled:
+                    from app.bridge_recovery_service import recovery_actions, REASONS as RECOVERY_REASONS
+                    administration = recovery_actions(mapping(raw_lines.get(line_id)).get('administration'), controls.get(line_id),
+                        enabled_in_app=line['is_enabled'] is True and line_id in active and line_id not in quarantined,
+                        available=recovery_available and bridge_ok)
+                    if not recovery_available:
+                        for action in administration['actions']:
+                            action.update(enabled=False, reason_code='RECOVERY_STATE_UNAVAILABLE',
+                                          reason=RECOVERY_REASONS['RECOVERY_STATE_UNAVAILABLE'])
+                            action['blockers'].insert(0, 'RECOVERY_STATE_UNAVAILABLE')
+                    line['administration'] = {k:v for k,v in administration.items() if k != 'actions'}
+                    line['actions'] = administration['actions'] + [a for a in line['actions'] if a['action'] not in {'reconnect','pause'}]
                 if not line["telemetry_available"] and line_id in previous:
                     line["last_observed_at"] = previous[line_id].get("observed_at") or previous[line_id].get("last_observed_at")
                 signature = lambda item: (item["connection"]["state"], item["connection"]["reason_code"], item["lifecycle"], item["storage"]["level"])

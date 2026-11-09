@@ -422,7 +422,11 @@ async def receive_linked_device_event(request: Request):
         ):
             raise HTTPException(400, "Invalid linked device outgoing confirmation.")
         try:
-            applied = await support_service.confirm_linked_device_outgoing(event.model_dump())
+            if event.client_message_id.startswith('paused-bot:'):
+                from app.bridge_paused_replies import paused_replies
+                applied = await paused_replies.confirm(event.model_dump())
+            else:
+                applied = await support_service.confirm_linked_device_outgoing(event.model_dump())
         except (SupportValidationError, SupportConflictError) as exc:
             raise HTTPException(400, str(exc)) from exc
         if not applied:

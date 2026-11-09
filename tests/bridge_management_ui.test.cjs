@@ -66,3 +66,80 @@ test('failed refresh explicitly labels retained observations stale', async () =>
   assert.match(h.get('bridgeTelemetryWarning').textContent, /stale/);
   assert.equal(h.get('bridgeIdentities').children[0], button);
 });
+
+function recoveryHarness() {
+  const h=harness(), saved=new Map();
+  h.context.sessionStorage={getItem:key=>saved.get(key)||null,setItem:(key,value)=>saved.set(key,value),removeItem:key=>saved.delete(key)};
+  h.context.crypto={randomUUID:()=> '00000000-0000-4000-8000-000000000001'};
+  h.context.showConfirmDialog=async()=>true;
+  h.context.state.agent={id:'7',role:'admin',can_recover_whatsapp:true};
+  h.context.payload=structuredClone(snapshot);
+  const selected=h.context.payload.lines[0];
+  selected.administration={epoch:'00000000-0000-4000-8000-000000000002',version:0,generation:3,paused:false};
+  selected.actions=[{action:'pause',label:'Pause',enabled:true,reason:'Ready',blockers:[]}];
+  h.run('bridgeManagement.snapshot=payload; bridgeManagement.freshAt=Date.now(); renderBridgeManagement(payload)');
+  return h;
+}
+
+test('timed-out POST is tracked by its original ID across reload and never resubmitted',async()=>{
+  const h=recoveryHarness(), calls=[];
+  let complete=false;
+  h.context.api=async(path,options={})=>{
+    calls.push([options.method||'GET',path,options]);
+    if(options.method==='POST') throw new Error('Lost response');
+    if(path.includes('/operations/')) return {id:'00000000-0000-4000-8000-000000000001',line_id:'90001',
+      terminal:complete,message:complete?'Paused':'Still processing'};
+    if(path.endsWith('/operations')) return {operations:[]};
+    throw new Error('Unexpected call');
+  };
+  await h.run('requestBridgeRecovery("pause")');
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(calls.filter(c=>c[0]==='POST').length,1);
+  const request=JSON.parse(calls[0][2].body);
+  assert.equal(request.operation_id,calls[0][2].headers['Idempotency-Key']);
+  assert.equal(request.expected_generation,3);
+  assert.ok(h.run('pendingBridgeOperation()'));
+  await h.run('requestBridgeRecovery("pause")');
+  assert.equal(calls.filter(c=>c[0]==='POST').length,1);
+  h.run('resetBridgeManagement(); bridgeManagement.snapshot=payload; bridgeManagement.freshAt=Date.now(); renderBridgeManagement(payload)');
+  complete=true; await h.run('loadBridgeOperations()');
+  assert.equal(h.run('pendingBridgeOperation()'),null);
+  assert.match(h.get('bridgeOperationNotice').textContent,/Paused/);
+  assert.equal(calls.filter(c=>c[0]==='POST').length,1);
+});
+
+test('stale diagnostics and staff capability block recovery even when previous snapshot allowed it',async()=>{
+  const h=recoveryHarness();
+  h.run('bridgeManagement.freshAt=0; renderBridgeDetail()');
+  assert.equal(h.get('bridgeFutureActions').children[0].children[0].disabled,true);
+  assert.match(h.get('bridgeFutureActions').children[0].children[1].textContent,/stale/);
+  await h.run('requestBridgeRecovery("pause")');
+  h.run('bridgeManagement.freshAt=Date.now(); state.agent.can_recover_whatsapp=false; renderBridgeDetail()');
+  assert.equal(h.get('bridgeFutureActions').children[0].children[0].disabled,true);
+  await h.run('requestBridgeRecovery("pause")');
+  assert.equal(h.run('pendingBridgeOperation()'),null);
+});
+
+test('an unsaved request is released only after a persistent 404 well past submission, without resubmitting',async()=>{
+  const h=recoveryHarness(), calls=[];
+  h.context.api=async(path,options={})=>{
+    calls.push([options.method||'GET',path]);
+    if(options.method==='POST') throw Object.assign(new Error('Server unavailable'),{status:503});
+    if(path.includes('/operations/')) throw Object.assign(new Error('This operation was not found.'),{status:404});
+    if(path.endsWith('/operations')) return {operations:[]};
+    throw new Error('Unexpected call');
+  };
+  await h.run('requestBridgeRecovery("pause")');
+  await new Promise(resolve=>setImmediate(resolve));
+  const pending=h.run('pendingBridgeOperation()');
+  assert.ok(pending && Number.isFinite(pending.at));
+  // Within the grace period a 404 may only mean the save is still in flight.
+  await h.run('loadBridgeOperations()');
+  assert.ok(h.run('pendingBridgeOperation()'));
+  assert.match(h.get('bridgeOperationNotice').textContent,/not yet confirmed/);
+  h.run('sessionStorage.setItem(bridgeOperationKey(), JSON.stringify({...pendingBridgeOperation(), at: Date.now()-bridgeOperationSaveGraceMs-1}))');
+  await h.run('loadBridgeOperations()');
+  assert.equal(h.run('pendingBridgeOperation()'),null);
+  assert.match(h.get('bridgeOperationNotice').textContent,/was not saved/);
+  assert.equal(calls.filter(c=>c[0]==='POST').length,1);
+});

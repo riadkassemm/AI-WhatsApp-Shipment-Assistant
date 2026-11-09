@@ -47,6 +47,8 @@ class Settings(BaseSettings):
     # Cloud remains the default; additional linked-device routes are opt-in.
     whatsapp_transport: Literal["cloud", "linked_device"] = "cloud"
     whatsapp_linked_device_enabled: bool = False
+    # Enable only after the Phase B schema and owning bridge are verified.
+    whatsapp_admin_recovery_enabled: bool = False
     whatsapp_linked_device_default_line_id: str = ""
     whatsapp_linked_device_url: str = "http://127.0.0.1:3001"
     whatsapp_linked_device_secret: str = ""

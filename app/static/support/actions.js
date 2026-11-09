@@ -1422,14 +1422,18 @@ function renderComposerLineNotice(ticket) {
   const status = blockingIssues.length ? 'storage_recovery_required' : line?.connection_state ||
     (line?.status === 'logged_out' ? 'relink_required' : line?.status === 'reconnecting' ? 'reconnecting' : line?.status === 'offline' ? 'temporarily_unavailable' : 'connected');
   const messages = {
+    administratively_paused: 'This number is paused by an administrator. New replies are retained until it can safely resume.',
+    administration_unknown: 'Administrative status is unavailable. Saved replies are retained; check message status before retrying.',
     reconnecting: 'Reconnecting automatically. Saved replies are retained; check each message’s status before retrying.',
     temporarily_unavailable: 'Temporarily unavailable. Contact your administrator; saved messages and sessions are retained.',
     storage_recovery_required: whatsAppRecoveryNotice({issues: blockingIssues}).title + '. New sends are paused; contact your administrator. Saved sessions and delivery records are retained.',
     relink_required: 'Relink required. Ask an authorized staff member to reconnect the same phone; conversation history stays.'
   };
-  if (messages[status]) {
+  const message = line?.administratively_paused === true ? messages.administratively_paused :
+    line?.administratively_paused === null ? messages.administration_unknown : messages[status];
+  if (message) {
     element.dataset.connectionNotice = '1';
-    text(element, (line?.name ? line.name + ': ' : '') + messages[status]);
+    text(element, (line?.name ? line.name + ': ' : '') + message);
   } else if (element.dataset.connectionNotice) {
     delete element.dataset.connectionNotice;
     text(element, 'Connected. Messages are sent from the WhatsApp number for this conversation.');

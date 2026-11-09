@@ -78,6 +78,12 @@ export function createServer(bridge, config) {
       }
       if (request.method === 'DELETE' && parts.length === 3) return send(response, 200, await bridge.removeLine(id));
       bridge.getLine(id);
+      if (parts[3] === 'management-operations') {
+        const line = bridge.getLine(id);
+        if (request.method === 'POST' && parts.length === 4) return send(response, 202,
+          await bridge.management.submit(line, await readJson(request, 2048)));
+        if (request.method === 'GET' && parts.length === 5) return send(response, 200, bridge.management.get(line, parts[4]));
+      }
       if (request.method === 'GET' && parts.length === 4 && parts[3] === 'auth-recovery') {
         return send(response, 200, await bridge.assessAuthenticationRecovery(id));
       }

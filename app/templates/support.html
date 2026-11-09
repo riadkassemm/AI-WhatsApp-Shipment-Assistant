@@ -407,7 +407,7 @@ __SUPPORT_STYLE__
 <section class="modal-backdrop hidden" id="bridgeManagementModal" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="bridgeManagementTitle" aria-describedby="bridgeManagementSubtitle">
   <div class="modal-card bridge-management-card" role="document" tabindex="-1">
     <div class="modal-head">
-      <div><h2 id="bridgeManagementTitle">WhatsApp Management</h2><div class="modal-subtitle" id="bridgeManagementSubtitle">Connection diagnostics and recovery guidance · Read only</div></div>
+      <div><h2 id="bridgeManagementTitle">WhatsApp Management</h2><div class="modal-subtitle" id="bridgeManagementSubtitle">Connection diagnostics and guarded administrative recovery</div></div>
       <button class="icon-btn modal-close" id="closeBridgeManagementBtn" type="button" aria-label="Close WhatsApp Management"><svg class="icon" aria-hidden="true"><use href="#icon-x"></use></svg></button>
     </div>
     <div class="modal-body">
@@ -419,7 +419,9 @@ __SUPPORT_STYLE__
           <h3 id="bridgeIdentityTitle">Select a number</h3>
           <p id="bridgeExplanation"></p><p class="muted" id="bridgeBlockers"></p>
           <div class="bridge-facts" id="bridgeFacts"></div>
-          <div class="bridge-actions" id="bridgeFutureActions" aria-label="Future recovery actions"></div>
+          <div class="bridge-actions" id="bridgeFutureActions" aria-label="Recovery actions"></div>
+          <p id="bridgeOperationNotice" role="status" aria-live="polite"></p>
+          <ol class="bridge-history" id="bridgeOperations" aria-label="Recovery operation history"></ol>
           <button class="btn small hidden" id="bridgeAssessmentBtn" type="button">View authentication assessment</button>
           <div class="form-note hidden" id="bridgeAssessment" role="status"></div>
           <h4>Recent operator history</h4><p class="muted" id="bridgeHistoryNotice"></p>

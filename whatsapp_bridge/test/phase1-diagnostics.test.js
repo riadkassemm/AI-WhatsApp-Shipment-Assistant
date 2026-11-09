@@ -41,6 +41,7 @@ test('nearby reconnects are staggered without waiting behind another line long b
   t.mock.timers.enable({apis: ['setTimeout', 'Date'], now: 10000});
   const bridge = Object.assign(Object.create(Bridge.prototype), {
     stopping: false, reconnectSlots: new Map([['long', 70000]]), random: () => 0, trace: () => {},
+    management: {paused: () => false},
   });
   const line = id => ({line_id: id, generation: 1, store: {data: {enabled: true}}, status: 'disconnected'});
   const one = line('one'), two = line('two');
