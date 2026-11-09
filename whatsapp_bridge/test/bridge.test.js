@@ -1275,7 +1275,7 @@ test('first pairing pins the phone and later wrong-account reconnect cannot send
 });
 
 test('a failed scheduled reconnect retries transient network errors with backoff and resumes its saved session', async t => {
-  const { bridge, line, socket } = await fixture(t);
+  const { bridge, line, socket } = await fixture(t, 'ack', {random: () => 0});
   const resumedSocket = mockSocket();
   let attempts = 0;
   bridge.makeSocket = options => {
