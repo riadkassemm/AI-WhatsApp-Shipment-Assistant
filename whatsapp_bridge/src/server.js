@@ -89,6 +89,9 @@ export function createServer(bridge, config) {
       if (parts.length === 5 && parts[3] === 'messages' && parts[4] === 'status') return send(response, 200, bridge.deliveryStatus(id, payload));
       if (parts.length === 4 && parts[3] === 'connect') return send(response, 200, await bridge.connect(id));
       if (parts.length === 4 && parts[3] === 'disconnect') return send(response, 200, await bridge.disconnect(id));
+      if (parts.length === 4 && parts[3] === 'reconnect') return send(response, 200, await bridge.reconnectLine(id));
+      if (parts.length === 4 && parts[3] === 'reset-session') return send(response, 200, await bridge.resetSession(id));
+      if (parts.length === 4 && parts[3] === 'force-remove') return send(response, 200, await bridge.forceRemoveLine(id));
       if (parts.length === 4 && parts[3] === 'media') return send(response, 200, await bridge.uploadMedia(id, payload));
       if (parts.length === 4 && parts[3] === 'messages') return send(response, 200, await bridge.send(id, payload));
       if (parts.length === 5 && parts[3] === 'contacts' && parts[4] === 'check') return send(response, 200, await bridge.checkNumber(id, payload));

@@ -216,3 +216,65 @@ test('after a dead transport, the reconnect abandons stuck work at a short deadl
   await line.auth.state.keys.set({ session: { after: Buffer.from([2]) } });
   assert.deepEqual(line.auth.store.data.keys.session.after, Buffer.from([2]));
 });
+
+async function blockedLine(t) {
+  const dataDir = await tempDir(t, 'bridge-live-');
+  const { bridge } = await start(t, dataDir);
+  await connectAll(bridge);
+  await bridge.getLine(LINES[1]).store.update(data => { data.messages.KEEP = { phone: '96170000000', text: 'kept', timestamp: Date.now(), notified: true, message: { key: { id: 'KEEP' } } }; });
+  const crashed = await crashSnapshot(t, bridge, dataDir);
+  // A real write failure: the only marker that still blocks a number.
+  await writeFile(path.join(crashed, LINES[1], 'auth.json.auth-failure'), JSON.stringify({ version: 1, failures: [{ operation: 'keys', mutations: [] }] }), { mode: 0o600 });
+  const { bridge: restarted, logs } = await start(t, crashed);
+  assert.equal(restarted.getLine(LINES[1]).status, 'error');
+  return { crashed, bridge: restarted, logs };
+}
+const archived = async (crashed, pattern) => (await readdir(path.join(path.dirname(crashed), 'linked-device-archive')).catch(() => []))
+  .filter(name => name.includes(pattern));
+
+test('admin reset of a blocked number archives only its session and leaves it unpaired with its history', async t => {
+  const { crashed, bridge, logs } = await blockedLine(t);
+  t.after(() => rm(path.join(path.dirname(crashed), 'linked-device-archive'), { recursive: true, force: true }));
+  const status = await bridge.resetSession(LINES[1]);
+  assert.equal(status.is_paired, false);
+  assert.equal(status.error, undefined);
+  const line = bridge.getLine(LINES[1]);
+  assert.equal(line.store.data.messages.KEEP.text, 'kept', 'the conversation state stays');
+  const names = await readdir(path.join(crashed, LINES[1]));
+  assert.equal(names.some(name => name.startsWith('auth.json.auth-')), false, 'no markers remain');
+  const [archive] = await archived(crashed, `-reset-${LINES[1]}`);
+  assert.ok(archive, 'the old session moved to the archive');
+  assert.ok((await readdir(path.join(path.dirname(crashed), 'linked-device-archive', archive))).includes('auth.json.auth-failure'));
+  assert.ok(logs.some(entry => entry.event === 'auth_session_reset' && entry.line_id === LINES[1]));
+  await line.auth.state.keys.set({ session: { fresh: Buffer.from([1]) } });
+  assert.equal(line.auth.store.failed, false, 'the fresh session is writable');
+});
+
+test('admin force-remove archives a number that cannot be unlinked and tombstones it durably', async t => {
+  const { crashed, bridge, logs } = await blockedLine(t);
+  t.after(() => rm(path.join(path.dirname(crashed), 'linked-device-archive'), { recursive: true, force: true }));
+  const result = await bridge.forceRemoveLine(LINES[1]);
+  assert.deepEqual(result, { line_id: LINES[1], removed: true, forced: true });
+  assert.equal(await exists(path.join(crashed, LINES[1])), false);
+  const [archive] = await archived(crashed, `-remove-${LINES[1]}`);
+  assert.ok((await readdir(path.join(path.dirname(crashed), 'linked-device-archive', archive))).includes('state.json'), 'the whole folder is kept');
+  assert.throws(() => bridge.getLine(LINES[1]), { code: 'UNKNOWN_LINE' });
+  assert.deepEqual(await bridge.removeLine(LINES[1]), { line_id: LINES[1], removed: true, unlinked: true }, 'the normal removal then completes');
+  assert.ok(logs.some(entry => entry.event === 'line_force_removed'));
+  await bridge.close();
+  const { bridge: restarted } = await start(t, crashed);
+  assert.throws(() => restarted.getLine(LINES[1]), { code: 'UNKNOWN_LINE' }, 'stays removed after a restart');
+  assert.equal(restarted.getLine(LINES[0]).store.failed, false);
+});
+
+test('admin reconnect replaces only that number connection', async t => {
+  const dataDir = await tempDir(t, 'bridge-live-');
+  const { bridge } = await start(t, dataDir);
+  await connectAll(bridge);
+  const [first, second] = LINES.map(id => bridge.getLine(id).socket);
+  const status = await bridge.reconnectLine(LINES[0]);
+  assert.notEqual(bridge.getLine(LINES[0]).socket, first, 'a new connection was opened');
+  assert.equal(status.status, 'connecting');
+  assert.equal(bridge.getLine(LINES[1]).socket, second, 'the other number is untouched');
+  await assert.rejects(bridge.resetSession(LINES[1]), { code: 'LINE_CONNECTED' }, 'a connected number is never reset');
+});

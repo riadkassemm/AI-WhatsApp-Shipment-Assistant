@@ -65,6 +65,10 @@ class RemoveLinkedDeviceLineRequest(BaseModel):
     close_active_tickets: bool = Field(default=False, strict=True)
 
 
+class ForceRemoveLinkedDeviceLineRequest(RemoveLinkedDeviceLineRequest):
+    confirm: str = Field(min_length=1, max_length=20)
+
+
 class LinkedDeviceEvent(BaseModel):
     event_id: str = Field(min_length=1, max_length=128)
     type: Literal["message", "message_snapshot", "message_tombstone", "outgoing_message", "outgoing_confirmation", "message_status", "message_updated", "message_deleted_for_everyone"]
@@ -240,6 +244,57 @@ async def disconnect_linked_device(
         return await linked_device_status(agent)
     except WhatsAppSendError as exc:
         raise HTTPException(503, str(exc)) from exc
+
+
+# ---- Admin recovery actions (Admins and Super Admins) --------------------
+@router.post("/api/support/whatsapp-linked-device/lines/{line_id}/reconnect")
+async def reconnect_linked_device(line_id: str, agent: SupportAgent = Depends(require_support_csrf)) -> dict:
+    _require_manager(agent)
+    _require_line(line_id)
+    try:
+        await linked_device_client.reconnect(line_id)
+    except WhatsAppSendError as exc:
+        raise HTTPException(503, str(exc)) from exc
+    logger.info("Linked-device reconnect requested: staff_id=%s line_id=%s", agent.id, line_id)
+    return await linked_device_status(agent)
+
+
+@router.post("/api/support/whatsapp-linked-device/lines/{line_id}/reset-session")
+async def reset_linked_device_session(line_id: str, agent: SupportAgent = Depends(require_support_csrf)) -> dict:
+    # Archives the stuck session; the number keeps its line ID and history and
+    # can only be re-paired with the same phone.
+    _require_manager(agent)
+    _require_line(line_id)
+    try:
+        await linked_device_client.reset_session(line_id)
+    except WhatsAppSendError as exc:
+        raise HTTPException(503, str(exc)) from exc
+    logger.info("Linked-device session reset: staff_id=%s line_id=%s", agent.id, line_id)
+    return await linked_device_status(agent)
+
+
+@router.post("/api/support/whatsapp-linked-device/lines/{line_id}/force-remove")
+async def force_remove_linked_device_line(
+    line_id: str, body: ForceRemoveLinkedDeviceLineRequest,
+    agent: SupportAgent = Depends(require_support_csrf),
+) -> dict:
+    # For a number whose session cannot unlink: the bridge archives its folder
+    # and tombstones it; the normal removal then completes the registry and
+    # conversation handling exactly as "Remove and unlink" does.
+    _require_manager(agent)
+    if body.confirm.strip().upper() != "REMOVE":
+        raise HTTPException(422, "Type REMOVE to confirm.")
+    if line_id not in configured_linked_device_lines() and line_id not in removed_linked_device_line_ids():
+        raise HTTPException(404, "This WhatsApp linked-device number is not registered.")
+    try:
+        await linked_device_client.force_remove(line_id)
+    except WhatsAppSendError as exc:
+        raise HTTPException(503, str(exc)) from exc
+    logger.info("Linked-device number force-removed: staff_id=%s line_id=%s", agent.id, line_id)
+    result = await remove_linked_device_line(
+        line_id, RemoveLinkedDeviceLineRequest(close_active_tickets=body.close_active_tickets), agent,
+    )
+    return {**result, "forced": True}
 
 
 @router.delete("/api/support/whatsapp-linked-device/lines/{line_id}")
