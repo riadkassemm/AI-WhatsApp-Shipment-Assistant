@@ -5,9 +5,9 @@ import makeWASocket, { Browsers, DisconnectReason, downloadMediaMessage, normali
 import pino from 'pino';
 import QRCode from 'qrcode';
 import { BridgeError, phoneDigits, wrapId, unwrapId, validateLineManifest, UUID_PATTERN, MANIFEST_MAX_BYTES } from './config.js';
-import { FileStore, createAuth, resumeAfterUncleanExit } from './storage.js';
-import { JournalStore, encode } from './journal-store.js';
-import { safeStorageCode } from './journal-maintenance.js';
+import { FileStore, createAuth, resumeAfterUncleanExit, authFailureDiskCode } from './storage.js';
+import { JournalStore, encode, readJournal } from './journal-store.js';
+import { safeStorageCode, errorLabel } from './journal-maintenance.js';
 import { StorageMonitor } from './storage-monitor.js';
 import { MediaFiles } from './media-files.js';
 import { AckTracker } from './ack.js';
@@ -104,7 +104,7 @@ export class Bridge {
     this.random = dependencies.random ?? Math.random;
     this.eventLoop = new EventLoopDiagnostics();
     this.onError = dependencies.onError ?? (error => this.log({component: 'whatsapp_bridge',
-      event: 'operation_failed', code: safeStorageCode(error),
+      event: 'operation_failed', code: errorLabel(error),
       persistence_failure: error?.bridgePersistenceFailure === true}));
   }
 
@@ -468,13 +468,77 @@ export class Bridge {
     this.registrationTail = task.catch(() => {});
     return task;
   }
+  authStoreOf(line) {
+    const filename = path.join(line.directory, 'auth.json');
+    return line.auth?.store ?? [...this.ownedStores].find(store => store.filename === filename) ?? null;
+  }
+  sessionBlocked(line) {
+    return this.authStoreOf(line)?.failed === true;
+  }
+  savedLogin(line) {
+    const creds = this.authStoreOf(line)?.data?.creds;
+    return Boolean(creds?.registered || creds?.me?.id);
+  }
+  sessionBlockedError() {
+    return new BridgeError(409, 'SESSION_BLOCKED', "This number's saved session is blocked. Use Resume session (no phone needed) or Reset session (pair with the phone).");
+  }
   // Drop and re-open only this number's connection.
   async reconnectLine(id) {
     const line = this.getLine(id);
     if (line.removing || line.resetting) throw new BridgeError(503, 'LINE_BUSY', 'This number is being changed. Try again shortly.');
+    if (this.sessionBlocked(line)) throw this.sessionBlockedError();
     if (line.socket && line.session && !line.session.closed) this.restartStaleSocket(line, line.socket);
     line.retryBlocked = false;
     return this.connect(id);
+  }
+  // For a blocked number: continue from its last saved WhatsApp session, no
+  // phone needed. Safeguards: never on a connected number; only when the
+  // session is actually blocked; never after a recorded disk or journal
+  // failure; only when the saved session reads cleanly and contains a login.
+  // The markers move to linked-device-archive/<time>-resume-<line>/; the
+  // committed keys stay. Only this number reconnects.
+  resumeSession(id) {
+    return this.recoveryAction(id, async () => {
+      const line = this.getLine(id);
+      if (line.removing || line.resetting) throw new BridgeError(503, 'LINE_BUSY', 'This number is being changed. Try again shortly.');
+      if (line.status === 'connected') throw new BridgeError(409, 'LINE_CONNECTED', 'This number is connected. There is nothing to resume.');
+      const filename = path.join(line.directory, 'auth.json');
+      const markerNames = (await readdir(line.directory)).filter(name =>
+        /^auth\.json\.auth-(active|intent|failure)$/.test(name) || /^auth\.json\.auth-failure\.[0-9a-f-]+\.tmp$/.test(name));
+      if (!this.sessionBlocked(line) && !markerNames.some(name => /^auth\.json\.auth-(intent|failure)$/.test(name))) {
+        throw new BridgeError(409, 'SESSION_NOT_BLOCKED', "This number's session is not blocked. Use Reconnect instead.");
+      }
+      const diskCode = await authFailureDiskCode(line.directory);
+      if (diskCode) {
+        throw new BridgeError(409, 'STORAGE_FAILURE', `This session stopped on a disk error (${diskCode}). Ask a developer to check the server disk, then use Reset session.`);
+      }
+      let saved;
+      try { saved = await readJournal(filename, () => ({ creds: null, keys: {} }), { repairTail: false }); }
+      catch (_) { throw new BridgeError(409, 'SESSION_DAMAGED', 'The saved session cannot be read. Use Reset session and pair with the phone.'); }
+      if (!(saved.data?.creds?.registered || saved.data?.creds?.me?.id)) {
+        throw new BridgeError(409, 'NO_SAVED_LOGIN', 'There is no saved WhatsApp login to resume. Use Reset session and pair with the phone.');
+      }
+      line.resetting = true;
+      let archive;
+      try {
+        await line.connectPromise?.catch(() => {});
+        await this.releaseAuth(line);
+        archive = this.archiveDirectory('resume', id);
+        await mkdir(archive, {recursive: true, mode: 0o700});
+        for (const name of (await readdir(line.directory)).filter(item =>
+          /^auth\.json\.auth-(active|intent|failure)$/.test(item) || /^auth\.json\.auth-failure\.[0-9a-f-]+\.tmp$/.test(item))) {
+          await rename(path.join(line.directory, name), path.join(archive, name));
+        }
+        await this.syncDirectory(line.directory);
+        await this.syncDirectory(archive);
+        line.auth = await this.loadAuth(line);
+        Object.assign(line, {status: 'disconnected', retryBlocked: false, recoveryCategory: null});
+        delete line.error;
+      } finally { line.resetting = false; }
+      this.log({component: 'whatsapp_bridge', event: 'auth_session_resumed_by_admin', line_id: id,
+        archived_markers: markerNames.length, archive: path.basename(archive)});
+      return this.connect(id);
+    });
   }
   // For a number that cannot connect: archive its session keys and start an
   // unpaired session on the same line. state.json (messages, bound phone) is
@@ -621,6 +685,9 @@ export class Bridge {
     return { line_id: line.line_id, display_phone_number: line.display_phone_number, status: line.status,
       is_paired: Boolean(creds?.registered || creds?.me?.id),
       recovery_category: line.recoveryCategory,
+      // A blocked session cannot reconnect or pair until it is resumed or reset.
+      session_blocked: this.sessionBlocked(line),
+      saved_login: this.savedLogin(line),
       retry_scheduled: Boolean(line.reconnectTimer),
       diagnostics: { ...line.diagnostics,
         last_frame_age_ms: line.diagnostics.last_frame_at ? Math.max(0, Date.now() - line.diagnostics.last_frame_at) : null },
@@ -663,6 +730,7 @@ export class Bridge {
     this.assertRunning();
     const line = this.getLine(id);
     if (line.removing) throw new BridgeError(503, 'LINE_REMOVING', 'This WhatsApp number is being removed.');
+    if (this.sessionBlocked(line)) throw this.sessionBlockedError();
     if (line.socket && !line.session?.closed && ['connected', 'connecting', 'qr'].includes(line.status)) return this.lineStatus(line);
     if (line.connectPromise) return line.connectPromise;
     line.connectPromise = this.openSocket(line).finally(() => { line.connectPromise = null; });

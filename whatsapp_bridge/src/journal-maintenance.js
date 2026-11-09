@@ -13,6 +13,31 @@ export function safeStorageCode(error) {
   return typeof code === 'string' && /^[A-Z][A-Z0-9_]{1,80}$/.test(code) ? code : 'STORAGE_IO_ERROR';
 }
 
+// Disk-level failures and journal integrity problems: the only failures that
+// must keep a WhatsApp session blocked. Everything else (a dropped
+// connection, a provider timeout) is not a storage problem.
+const DISK_ERRNO = new Set(['EIO', 'ENOSPC', 'EROFS', 'EDQUOT', 'EFBIG', 'EACCES', 'EPERM', 'EMFILE', 'ENFILE', 'EBADF', 'ENOENT']);
+const INTEGRITY_CODE = /^(JOURNAL_|SNAPSHOT_|INVALID_|MISSING_STORAGE_BASE|AUTH_FAILURE_FENCE_UNWRITABLE)/;
+export function isDiskFailureCode(code) {
+  return typeof code === 'string' && (DISK_ERRNO.has(code) || INTEGRITY_CODE.test(code));
+}
+export function isStorageFailure(error) {
+  if (!error) return false;
+  return error.bridgePersistenceFailure === true || isDiskFailureCode(error.code) ||
+    /^STORAGE_/.test(typeof error.code === 'string' ? error.code : '');
+}
+// Log/evidence label: storage errors keep their storage code, provider errors
+// (for example a closed WhatsApp connection, HTTP-like status 428) are labelled
+// PROVIDER_<status>, and nothing is called a storage error unless it is one.
+export function errorLabel(error) {
+  if (isStorageFailure(error)) return safeStorageCode(error);
+  const status = error?.output?.statusCode;
+  if (Number.isInteger(status)) return 'PROVIDER_' + status;
+  const code = error?.code ?? error?.message;
+  if (typeof code === 'string' && /^[A-Z][A-Z0-9_]{1,80}$/.test(code)) return code;
+  return 'PROVIDER_ERROR';
+}
+
 // At most one checkpoint worker and extra materialized store in this process.
 // Stores waiting here retain ordinary independent write queues.
 let checkpointTail = Promise.resolve();

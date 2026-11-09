@@ -851,3 +851,36 @@ test('resume mode: a provider transaction stuck past the deadline is abandoned w
   await next.state.keys.set({ session: { resumed: Buffer.from([2]) } });
   assert.deepEqual(next.store.data.keys.session.resumed, Buffer.from([2]));
 });
+
+test('resume mode: a transaction cut off by a closed connection discards its key changes instead of blocking the session', async t => {
+  const { auth, events } = await resumeFixture(t);
+  const keys = providerKeys(auth);
+  // Production 2026-11-09 (Turkey, 90054): a message relay updated 3 batches of
+  // keys, then the send failed with Baileys' "Connection Closed" (428).
+  const closed = Object.assign(new Error('Connection Closed'), { isBoom: true, output: { statusCode: 428 } });
+  await assert.rejects(keys.transaction(async () => {
+    await keys.set({ session: { buffered: Buffer.from([7]) } });
+    throw closed;
+  }, 'peer'), /Connection Closed/);
+  assert.equal(auth.store.failed, false, 'the session stays usable');
+  assert.equal(auth.store.data.keys.session, undefined, 'the uncommitted change is discarded');
+  await assert.rejects(readFile(auth.store.filename + '.auth-intent'), { code: 'ENOENT' });
+  await assert.rejects(readFile(auth.store.filename + '.auth-failure'), { code: 'ENOENT' });
+  assert.ok(events.some(event => event.event === 'auth_transaction_discarded' && event.reason === 'PROVIDER_428'));
+  await keys.transaction(async () => keys.set({ session: { after: Buffer.from([1]) } }), 'peer');
+  assert.deepEqual(auth.store.data.keys.session.after, Buffer.from([1]));
+});
+
+test('resume mode: a real disk write error inside a transaction still blocks the session and records its code', async t => {
+  const { auth } = await resumeFixture(t);
+  const keys = providerKeys(auth);
+  const append = auth.store.append;
+  auth.store.append = async () => { throw Object.assign(new Error('Synthetic disk failure'), { code: 'EIO' }); };
+  try {
+    await assert.rejects(keys.transaction(async () => keys.set({ session: { lost: Buffer.from([1]) } }), 'peer'));
+  } finally { auth.store.append = append; }
+  assert.equal(auth.store.failed, true);
+  await auth.drain().catch(() => {});
+  const evidence = JSON.parse(await readFile(auth.store.filename + '.auth-failure', 'utf8'), BufferJSON.reviver);
+  assert.equal(evidence.failures[0].error_code, 'EIO');
+});

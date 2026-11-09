@@ -2526,7 +2526,8 @@ test('credential persistence failures halt the owning session before a blocked m
     assert.equal(line.reconnectTimer, null);
     let created = 0;
     bridge.makeSocket = () => { created++; return mockSocket(); };
-    await assert.rejects(bridge.connect(LINE), /STORAGE_RESTART_REQUIRED/);
+    // A blocked session is refused with guidance (409), never reused.
+    await assert.rejects(bridge.connect(LINE), {code: 'SESSION_BLOCKED', status: 409});
     assert.equal(created, 0);
   } finally {
     messages.resolve();
@@ -2556,7 +2557,8 @@ test('incoming messages and delivery evidence accepted before credential failure
     await reported.promise;
     assert.equal(line.socket, null);
     assert.equal(line.status, 'error');
-    await assert.rejects(bridge.connect(LINE), /STORAGE_RESTART_REQUIRED/);
+    // A blocked session is refused with guidance (409), never reused.
+    await assert.rejects(bridge.connect(LINE), {code: 'SESSION_BLOCKED', status: 409});
     await socket.eventHandler({ 'messages.upsert': { messages: [original('AFTER_RETIREMENT', false)] } });
     blocked.resolve();
     await Promise.all([incoming, delivery, failingBatch]);
@@ -2651,7 +2653,8 @@ test('a rejected real provider key commit immediately stops its owning socket an
     blocked.resolve();
     await Promise.all([incoming, rejected]);
     assert.equal(line.store.data.messages.BEFORE_KEY_FAILURE.text, 'Original body');
-    await assert.rejects(bridge.connect(LINE), /STORAGE_RESTART_REQUIRED/);
+    // A blocked session is refused with guidance (409), never reused.
+    await assert.rejects(bridge.connect(LINE), {code: 'SESSION_BLOCKED', status: 409});
     assert.equal(socket.calls.length, 0);
   } finally {
     blocked.resolve(); await Promise.all([incoming, rejected]);
@@ -2894,7 +2897,8 @@ test('credential failure flushes incoming messages and receipts retained by the 
     const saved = (await readJournal(line.store.filename, () => ({}))).data;
     assert.equal(saved.messages.BUFFERED_BEFORE_FAILURE.text, 'Original body');
     assert.equal(saved.messages.ORIGINAL.receipt, 'read');
-    await assert.rejects(bridge.connect(LINE), /STORAGE_RESTART_REQUIRED/);
+    // A blocked session is refused with guidance (409), never reused.
+    await assert.rejects(bridge.connect(LINE), {code: 'SESSION_BLOCKED', status: 409});
     assert.equal(socket.endCount, 1);
     assert.equal(socket.calls.length, 0);
   } finally {

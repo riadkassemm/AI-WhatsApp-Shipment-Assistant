@@ -141,6 +141,9 @@ async def linked_device_status(agent: SupportAgent = Depends(get_current_agent))
             "logout_reason": item.get("logout_reason") if isinstance(item.get("logout_reason"), str) else None,
             "logged_out_at": item.get("logged_out_at") if isinstance(item.get("logged_out_at"), int) else None,
             "recovering_history": item.get("recovering_history") is True,
+            "recovery_category": item.get("recovery_category") if isinstance(item.get("recovery_category"), str) else None,
+            "session_blocked": item.get("session_blocked") is True,
+            "saved_login": item.get("saved_login") is True,
         })
     return {"configured": True, "lines": lines, "default_transport": settings.whatsapp_transport}
 
@@ -225,7 +228,7 @@ async def connect_linked_device(
         await linked_device_client.connect(line_id)
         return await linked_device_status(agent)
     except WhatsAppSendError as exc:
-        raise HTTPException(503, str(exc)) from exc
+        raise _bridge_http_error(exc) from exc
 
 
 @router.post("/api/support/whatsapp-linked-device/lines/{line_id}/disconnect")
@@ -247,6 +250,25 @@ async def disconnect_linked_device(
 
 
 # ---- Admin recovery actions (Admins and Super Admins) --------------------
+def _bridge_http_error(exc: WhatsAppSendError) -> HTTPException:
+    # Keep the bridge's 409 guidance ("use Resume session ...") instead of a generic 503.
+    return HTTPException(409 if getattr(exc, "http_status", None) == 409 else 503, str(exc))
+
+
+@router.post("/api/support/whatsapp-linked-device/lines/{line_id}/resume-session")
+async def resume_linked_device_session(line_id: str, agent: SupportAgent = Depends(require_support_csrf)) -> dict:
+    # Continues a blocked number from its saved login without the phone. The
+    # bridge refuses connected, healthy, disk-failed or login-less sessions.
+    _require_manager(agent)
+    _require_line(line_id)
+    try:
+        await linked_device_client.resume_session(line_id)
+    except WhatsAppSendError as exc:
+        raise _bridge_http_error(exc) from exc
+    logger.info("Linked-device session resumed by an admin: staff_id=%s line_id=%s", agent.id, line_id)
+    return await linked_device_status(agent)
+
+
 @router.post("/api/support/whatsapp-linked-device/lines/{line_id}/reconnect")
 async def reconnect_linked_device(line_id: str, agent: SupportAgent = Depends(require_support_csrf)) -> dict:
     _require_manager(agent)
@@ -254,7 +276,7 @@ async def reconnect_linked_device(line_id: str, agent: SupportAgent = Depends(re
     try:
         await linked_device_client.reconnect(line_id)
     except WhatsAppSendError as exc:
-        raise HTTPException(503, str(exc)) from exc
+        raise _bridge_http_error(exc) from exc
     logger.info("Linked-device reconnect requested: staff_id=%s line_id=%s", agent.id, line_id)
     return await linked_device_status(agent)
 
@@ -268,7 +290,7 @@ async def reset_linked_device_session(line_id: str, agent: SupportAgent = Depend
     try:
         await linked_device_client.reset_session(line_id)
     except WhatsAppSendError as exc:
-        raise HTTPException(503, str(exc)) from exc
+        raise _bridge_http_error(exc) from exc
     logger.info("Linked-device session reset: staff_id=%s line_id=%s", agent.id, line_id)
     return await linked_device_status(agent)
 
@@ -289,7 +311,7 @@ async def force_remove_linked_device_line(
     try:
         await linked_device_client.force_remove(line_id)
     except WhatsAppSendError as exc:
-        raise HTTPException(503, str(exc)) from exc
+        raise _bridge_http_error(exc) from exc
     logger.info("Linked-device number force-removed: staff_id=%s line_id=%s", agent.id, line_id)
     result = await remove_linked_device_line(
         line_id, RemoveLinkedDeviceLineRequest(close_active_tickets=body.close_active_tickets), agent,

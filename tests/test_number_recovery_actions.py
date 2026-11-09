@@ -88,3 +88,59 @@ assert.equal(linkedDeviceRecoveryActions({status: 'error'}).find(action => actio
 """
     result = subprocess.run(["node", "-e", script], text=True, capture_output=True, timeout=10)
     assert result.returncode == 0, result.stderr
+
+
+def test_resume_is_admin_only_and_keeps_the_bridge_guidance_as_409(bridge, monkeypatch) -> None:
+    from app.whatsapp_client import WhatsAppSendError
+    with pytest.raises(HTTPException) as denied:
+        asyncio.run(linked_device_api.resume_linked_device_session("90052", STAFF))
+    assert denied.value.status_code == 403
+    calls = []
+
+    async def resumed(line_id):
+        calls.append(line_id)
+        return {"line_id": line_id}
+    monkeypatch.setattr(linked_device_api.linked_device_client, "resume_session", resumed)
+    asyncio.run(linked_device_api.resume_linked_device_session("90052", ADMIN))
+    assert calls == ["90052"]
+
+    async def refused(line_id):
+        error = WhatsAppSendError("This session stopped on a disk error (EIO).", delivery_uncertain=False)
+        error.http_status = 409
+        raise error
+    monkeypatch.setattr(linked_device_api.linked_device_client, "resume_session", refused)
+    with pytest.raises(HTTPException) as conflict:
+        asyncio.run(linked_device_api.resume_linked_device_session("90052", ADMIN))
+    assert conflict.value.status_code == 409 and "disk error" in conflict.value.detail
+
+
+def test_status_tells_the_dashboard_which_sessions_are_blocked(monkeypatch) -> None:
+    monkeypatch.setattr(linked_device_api.settings, "whatsapp_linked_device_secret", "s" * 40)
+    monkeypatch.setattr(linked_device_api, "configured_linked_device_lines", lambda: {"90054": "+90"})
+    monkeypatch.setattr(linked_device_api, "get_transport", lambda line_id: "linked_device")
+
+    async def bridge_status():
+        return {"lines": [{"line_id": "90054", "status": "error", "is_paired": False,
+                           "session_blocked": True, "saved_login": True, "recovery_category": "storage_failure"}]}
+    monkeypatch.setattr(linked_device_api.linked_device_client, "get_status", bridge_status)
+    line = asyncio.run(linked_device_api.linked_device_status(ADMIN))["lines"][0]
+    assert line["session_blocked"] is True and line["saved_login"] is True
+    assert line["recovery_category"] == "storage_failure"
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is unavailable")
+def test_a_blocked_session_offers_resume_reset_and_remove_but_never_reconnect_or_pair() -> None:
+    code = _HTML[_HTML.index("const BLOCKED_CATEGORIES"): _HTML.index("async function loadLinkedDeviceStatus(")]
+    script = r"""
+const assert = require('node:assert/strict');
+""" + code + r"""
+const labels = line => linkedDeviceRecoveryActions(line).map(action => action.label);
+assert.deepEqual(labels({status: 'error', is_paired: true, session_blocked: true, saved_login: true}), ['Resume session', 'Reset session', 'Force remove']);
+assert.deepEqual(labels({status: 'error', is_paired: false, session_blocked: true, saved_login: false}), ['Reset session', 'Force remove'], 'no saved login: resume cannot help');
+assert.deepEqual(labels({status: 'connected', is_paired: true}), ['Reconnect']);
+assert.equal(linkedDeviceRecoveryActions({status: 'error', session_blocked: true, saved_login: true})[0].primary, true);
+"""
+    result = subprocess.run(["node", "-e", script], text=True, capture_output=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    render = _HTML[_HTML.index("function renderLinkedDeviceStatus("): _HTML.index("async function loadLinkedDeviceStatus(")]
+    assert "!line.session_blocked && line.recovery_category !== 'storage_failure'" in render, "Pair is never offered for a blocked session"
