@@ -5,8 +5,11 @@ import { readConfig } from './config.js';
 import { installLibsignalConsoleFilter } from './safe-console.js';
 import { patchBaileys } from '../scripts/patch-baileys-lifecycle.js';
 import { createRuntime } from './runtime-lifecycle.js';
+import { readFreezeRestartMs, startFreezeWatchdog } from './freeze-watchdog.js';
 
 process.umask(0o077);
+// Kill and let systemd restart a bridge whose main thread is frozen (see freeze-watchdog.js).
+startFreezeWatchdog({ thresholdMs: readFreezeRestartMs() });
 installLibsignalConsoleFilter();
 const runtime = createRuntime({prepare: async () => {
   dotenv.config({ path: path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../.env'), quiet: true });
