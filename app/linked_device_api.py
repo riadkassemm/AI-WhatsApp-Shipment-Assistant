@@ -257,27 +257,29 @@ def _bridge_http_error(exc: WhatsAppSendError) -> HTTPException:
 
 @router.post("/api/support/whatsapp-linked-device/lines/{line_id}/resume-session")
 async def resume_linked_device_session(line_id: str, agent: SupportAgent = Depends(require_support_csrf)) -> dict:
-    # Continues a blocked number from its saved login without the phone. The
-    # bridge refuses connected, healthy, disk-failed or login-less sessions.
-    _require_manager(agent)
+    # Continues a blocked number from its saved login without the phone. Any
+    # staff role may use it: the bridge refuses connected, healthy,
+    # disk-failed or login-less sessions, and only that number reconnects.
+    _require_staff(agent)
     _require_line(line_id)
     try:
         await linked_device_client.resume_session(line_id)
     except WhatsAppSendError as exc:
         raise _bridge_http_error(exc) from exc
-    logger.info("Linked-device session resumed by an admin: staff_id=%s line_id=%s", agent.id, line_id)
+    logger.info("Linked-device session resumed from the dashboard: staff_id=%s role=%s line_id=%s", agent.id, agent.role, line_id)
     return await linked_device_status(agent)
 
 
 @router.post("/api/support/whatsapp-linked-device/lines/{line_id}/reconnect")
 async def reconnect_linked_device(line_id: str, agent: SupportAgent = Depends(require_support_csrf)) -> dict:
-    _require_manager(agent)
+    # Any staff role: reconnects only this number.
+    _require_staff(agent)
     _require_line(line_id)
     try:
         await linked_device_client.reconnect(line_id)
     except WhatsAppSendError as exc:
         raise _bridge_http_error(exc) from exc
-    logger.info("Linked-device reconnect requested: staff_id=%s line_id=%s", agent.id, line_id)
+    logger.info("Linked-device reconnect requested: staff_id=%s role=%s line_id=%s", agent.id, agent.role, line_id)
     return await linked_device_status(agent)
 
 
