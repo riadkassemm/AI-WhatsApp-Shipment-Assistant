@@ -12,6 +12,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
+from app import bridge_restart
 from app.config import removed_linked_device_line_ids, settings
 from app.customer_directory import normalize_phone
 from app.support_auth import SupportAgent, get_current_agent, require_support_csrf
@@ -138,6 +139,30 @@ async def linked_device_status(agent: SupportAgent = Depends(get_current_agent))
             "recovering_history": item.get("recovering_history") is True,
         })
     return {"configured": True, "lines": lines, "default_transport": settings.whatsapp_transport}
+
+
+@router.get("/api/support/whatsapp-linked-device/restart")
+async def bridge_restart_status(agent: SupportAgent = Depends(get_current_agent)) -> dict:
+    _require_manager(agent)
+    return bridge_restart.status()
+
+
+@router.post("/api/support/whatsapp-linked-device/restart")
+async def restart_bridge(agent: SupportAgent = Depends(require_support_csrf)) -> dict:
+    # Works when the bridge is frozen: nothing here talks to the bridge.
+    _require_manager(agent)
+    try:
+        result = bridge_restart.request_restart(agent.id)
+    except bridge_restart.BridgeRestartUnavailable as exc:
+        raise HTTPException(503, str(exc)) from exc
+    except bridge_restart.BridgeRestartTooSoon as exc:
+        raise HTTPException(429, str(exc)) from exc
+    except OSError as exc:
+        logger.warning("Bridge restart request could not be written: error=%s", type(exc).__name__)
+        raise HTTPException(503, "The restart request could not be saved. Try again.") from exc
+    if result.get("requested"):
+        logger.info("Bridge restart requested from the dashboard: staff_id=%s request_id=%s", agent.id, result.get("request_id"))
+    return result
 
 
 @router.post("/api/support/whatsapp-linked-device/lines")

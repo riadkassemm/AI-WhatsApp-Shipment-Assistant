@@ -389,6 +389,7 @@ async def support_login(payload: LoginRequest, response: Response) -> dict:
         "can_manage_whatsapp": login.agent.is_supervisor,
         "can_link_whatsapp": login.agent.is_staff,
         "linked_device_available": len(settings.whatsapp_linked_device_secret) >= 32,
+        "bridge_restart_available": login.agent.is_supervisor and bool(settings.whatsapp_bridge_restart_enabled),
         "expires_at": login.expires_at.isoformat(),
     }
 
@@ -417,6 +418,7 @@ async def support_me(agent: SupportAgent = Depends(get_current_agent)) -> dict:
         "can_manage_whatsapp": agent.is_supervisor,
         "can_link_whatsapp": agent.is_staff,
         "linked_device_available": len(settings.whatsapp_linked_device_secret) >= 32,
+        "bridge_restart_available": agent.is_supervisor and bool(settings.whatsapp_bridge_restart_enabled),
     }
 
 

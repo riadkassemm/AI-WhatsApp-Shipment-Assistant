@@ -1283,6 +1283,7 @@ body.column-resizing * { cursor: col-resize !important; }
 .ai-schedule-grid .wide { grid-column: 1 / -1; }
 .ai-next-change { margin-top: -4px; margin-bottom: 16px; color: var(--text-muted); font-size: var(--text-sm); }
 .staff-view-heading, .section-title { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.section-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
 .staff-view-heading { margin-bottom: 18px; padding-bottom: 14px; border-bottom: 1px solid var(--border); }
 .staff-view-heading strong, .section-title strong { color: var(--text-strong); font-size: var(--text-base); font-weight: 650; }
 .staff-view-heading .muted, .section-title .muted { margin-top: 2px; font-size: var(--text-sm); }
