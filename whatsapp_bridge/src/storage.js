@@ -128,6 +128,21 @@ function authFacade(store, owner) {
       throw error;
     }
   };
+  // Resume mode: keep abandoned intents as evidence beside the journal and
+  // clear the live fence, serialized with every other intent change.
+  const archiveIntents = () => {
+    const task = owner.intentTail.then(async () => {
+      const count = owner.intents.size;
+      if (!count) return 0;
+      await fs.rename(store.filename + '.auth-intent', `${store.filename}.auth-intent.abandoned-${Date.now()}`);
+      const directory = await fs.open(path.dirname(store.filename), 'r');
+      try { await directory.sync(); } finally { await directory.close(); }
+      owner.intents = new Map();
+      return count;
+    });
+    owner.intentTail = task.catch(() => {});
+    return task;
+  };
   const recordMutation = async (token, updates) => {
     // An awaited child callback may share the actual provider transaction.
     // Its successful return cannot erase the outer transaction's obligation
@@ -241,17 +256,20 @@ function authFacade(store, owner) {
       directSetTail = new Promise(resolve => { releaseSet = resolve; });
     }
     tokens.add(token);
-    const task = context.run(token, async () => {
+    const task = token.task = context.run(token, async () => {
       try {
         // Baileys' nontransactional PQueue can execute a queued callback in a
         // previous job's AsyncLocalStorage context. Keep top-level direct sets
         // out of that queue together; nested transactional sets remain inline.
         if (previousSet) await previousSet;
-        // This fence precedes any provider work, including network side effects.
-        // A crash can leave a conservative recovery requirement, never a new
-        // connection silently using keys from before an unfinished transaction.
-        if (method !== 'get') await saveIntent(token);
+        // Strict mode: this fence precedes any provider work, including network
+        // side effects. Resume mode: a provider pipeline writes its intent when
+        // it first starts a key transaction or mutation (the nested path
+        // below). A pipeline that never touches keys needs no fence, and an
+        // initial sync starts thousands of them at once (14,032 on 2026-11-09).
+        if (method !== 'get' && !(method === 'pipeline' && owner.resume)) await saveIntent(token);
         const result = await operation(...args);
+        if (!token.hasIntent && token.hasTransaction && credsDigest() !== token.originalCreds) await auth.saveCreds();
         if (token.hasIntent) {
           if (token.hasTransaction && credsDigest() !== token.originalCreds) await auth.saveCreds();
           await store.flush();
@@ -261,6 +279,14 @@ function authFacade(store, owner) {
         return result;
       }
       catch (error) {
+        // Work abandoned at retirement was already given up: clear its intent
+        // and keep the store usable (resume mode only).
+        if (token.abandoned) {
+          if (token.hasIntent) await changeIntent(intents => intents.delete(token.id)).catch(() => {});
+          throw error;
+        }
+        if (owner.resume && method === 'pipeline' && !token.hasIntent && !token.mutations.length &&
+            credsDigest() === token.originalCreds) throw error;
         // A normal read/query rejection with unchanged authentication state is
         // safe to abandon. Message-send uncertainty is tracked separately by
         // the bridge; only changed or ambiguous auth state poisons this owner.
@@ -414,12 +440,23 @@ function authFacade(store, owner) {
           // An admitted native callback may start a separately tracked child
           // (offline queue, token issuance, post-login key work) while retiring.
           // Keep draining until those children also finish, under one deadline.
+          // Running work is always awaited: it may still emit accepted events.
           while (pending.size) await Promise.allSettled([...pending]);
         };
-        await Promise.race([settleProviderTasks(), new Promise((_, reject) => {
+        let timedOut = false;
+        await Promise.race([settleProviderTasks(), new Promise((resolve, reject) => {
           timer = setTimeout(() => {
             const error = Object.assign(new Error('AUTH_TRANSACTION_DRAIN_TIMEOUT'), { code: 'AUTH_TRANSACTION_DRAIN_TIMEOUT' });
             const mutations = [...tokens].flatMap(token => token.mutations);
+            if (owner.resume) {
+              // Give up stuck work instead of failing the line permanently: the
+              // journal still holds every committed write. Its intents are kept
+              // as evidence below; the next socket starts from committed state.
+              for (const token of tokens) { token.active = false; token.abandoned = true; }
+              timedOut = true;
+              resolve();
+              return;
+            }
             for (const token of tokens) token.active = false;
             fail(error, { operation: 'drain_timeout', mutations });
             reject(error);
@@ -427,6 +464,11 @@ function authFacade(store, owner) {
         })]);
         clearTimeout(timer);
         await store.flush();
+        if (owner.resume && (timedOut || owner.intents.size)) {
+          const stuck = tokens.size, archived = await archiveIntents();
+          owner.onRecovery?.({ event: 'auth_work_abandoned', reason: timedOut ? 'drain_timeout' : 'pending_intents',
+            stuck_tasks: stuck, archived_intents: archived });
+        }
         if (owner.intents.size) {
           const error = Object.assign(new Error('AUTH_PENDING_INTENTS'), { code: 'AUTH_PENDING_INTENTS' });
           fail(error, { operation: 'undrained_intents', intents: [...owner.intents.values()] });
@@ -481,33 +523,48 @@ const markerExists = async filename => {
   catch (error) { if (error.code !== 'ENOENT') throw error; return false; }
 };
 
-// After an unclean exit (SIGKILL, crash, power loss), every line that was
-// connected keeps its .auth-active marker. The marker alone does not mean
-// anything was lost: every acknowledged auth write is fsynced to the journal,
-// and every unfinished provider transaction leaves an .auth-intent. When
-// .auth-active is the only marker and this replay found no torn journal tail,
-// resume from the committed state instead of forcing a full re-pair. The
-// marker is renamed, never deleted, so the event stays auditable.
-// .auth-intent or .auth-failure (an operation in flight or a rejected write)
-// still keeps the line fenced.
-// Residual risk, accepted to avoid re-pairing every line after a crash: a
-// standalone credential write rejected while the disk also refused the
-// .auth-failure sidecar, followed by a crash, leaves only .auth-active and
-// resumes slightly older credentials. WhatsApp's retry receipts repair the
-// affected sessions. createAuth() itself stays strict.
+// After an unclean exit (SIGKILL, crash, power loss) or a stuck retirement,
+// a line can keep recovery markers. Every committed auth write is in the
+// fsynced journal; the markers only describe work that was in progress:
+//   .auth-active   a session was running
+//   .auth-intent   a provider transaction was in flight (uncommitted)
+//   torn tail      the last journal write did not finish (already quarantined)
+//   .auth-failure  writes were rejected; resumable only when the failure began
+//                  with a drain timeout (not a disk or journal write error)
+// Resume from the committed state instead of forcing a full re-pair: the
+// in-flight change is discarded, and WhatsApp's retry receipts repair the few
+// chats it touched. Markers are renamed with an .abandoned/.resumed suffix,
+// never deleted, so the evidence stays auditable. A failure caused by a real
+// write error still fences the line. createAuth() itself stays strict.
+const RESUMABLE_FAILURE_ORIGINS = new Set(['drain_timeout']);
 export async function resumeAfterUncleanExit(store) {
-  const active = store.filename + '.auth-active';
-  if (!await markerExists(active)) return { resumed: false, reason: 'no_marker' };
   if (store.failed) return { resumed: false, reason: 'store_failed' };
-  if (store.incompleteTailBytes) return { resumed: false, reason: 'journal_tail_incomplete' };
-  for (const suffix of ['.auth-intent', '.auth-failure']) {
-    if (await markerExists(store.filename + suffix)) return { resumed: false, reason: suffix.slice(1).replace('-', '_') + '_present' };
+  const markers = {};
+  for (const suffix of ['.auth-active', '.auth-intent', '.auth-failure']) markers[suffix] = await markerExists(store.filename + suffix);
+  if (!markers['.auth-active'] && !markers['.auth-intent'] && !markers['.auth-failure']) {
+    return { resumed: false, reason: 'no_marker' };
   }
-  const retained = `${active}.resumed-${Date.now()}`;
-  await fs.rename(active, retained);
-  const directory = await fs.open(path.dirname(active), 'r');
+  if (markers['.auth-failure']) {
+    let origin = null;
+    try {
+      // Read in-process only; recovery evidence is never logged.
+      const evidence = JSON.parse(await fs.readFile(store.filename + '.auth-failure', 'utf8'));
+      origin = evidence?.failures?.[0]?.operation ?? null;
+    } catch (_) { origin = null; }
+    if (!RESUMABLE_FAILURE_ORIGINS.has(origin)) return { resumed: false, reason: 'auth_failure_present' };
+  }
+  const stamp = Date.now(), retained = [];
+  for (const [suffix, present] of Object.entries(markers)) {
+    if (!present) continue;
+    const target = `${store.filename}${suffix}.${suffix === '.auth-active' ? 'resumed' : 'abandoned'}-${stamp}`;
+    await fs.rename(store.filename + suffix, target);
+    retained.push(path.basename(target));
+  }
+  const directory = await fs.open(path.dirname(store.filename), 'r');
   try { await directory.sync(); } finally { await directory.close(); }
-  return { resumed: true, reason: 'active_marker_only', retained: path.basename(retained) };
+  const reason = markers['.auth-failure'] ? 'drain_timeout_failure' : markers['.auth-intent'] ? 'in_flight_change_discarded'
+    : store.incompleteTailBytes ? 'journal_tail_quarantined' : 'active_marker_only';
+  return { resumed: true, reason, retained };
 }
 
 export async function assertAuthRecoveryClear(filename) {
@@ -519,12 +576,13 @@ export async function assertAuthRecoveryClear(filename) {
   }
 }
 
-export async function createAuth(directory, { store, drainTimeoutMs, ...options } = {}) {
+export async function createAuth(directory, { store, drainTimeoutMs, resume = false, onRecovery, ...options } = {}) {
   store ??= await new JournalStore(path.join(directory, 'auth.json'), () => ({ creds: initAuthCreds(), keys: {} }), options).load();
   try { await assertAuthRecoveryClear(store.filename); } catch (error) { store.failed = true; throw error; }
   if (authOwners.has(store)) return authOwners.get(store).current.renew();
   const owner = { current: null, generation: 0, intents: new Map(), intentTail: Promise.resolve(),
-    intentQueue: [], intentFlushScheduled: false, drainTimeoutMs: drainTimeoutMs ?? DEFAULT_AUTH_DRAIN_TIMEOUT_MS };
+    intentQueue: [], intentFlushScheduled: false, drainTimeoutMs: drainTimeoutMs ?? DEFAULT_AUTH_DRAIN_TIMEOUT_MS,
+    resume, onRecovery };
   authOwners.set(store, owner);
   return authFacade(store, owner);
 }

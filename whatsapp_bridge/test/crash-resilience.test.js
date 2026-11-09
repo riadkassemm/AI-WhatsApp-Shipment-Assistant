@@ -92,21 +92,27 @@ test('after an unclean exit, every line whose only marker is auth-active resumes
   assert.equal(await exists(path.join(crashed, LINES[0], 'auth.json.auth-active')), true, 'the new session arms a fresh marker');
 });
 
-test('an unfinished provider transaction or rejected write still fences only its own line after an unclean exit', async t => {
+const listing = async (directory, id) => readdir(path.join(directory, id));
+
+test('a change in flight at the crash is discarded and the line resumes from its committed state', async t => {
   const dataDir = await tempDir(t, 'bridge-live-');
   const { bridge } = await start(t, dataDir);
   await connectAll(bridge);
+  await bridge.getLine(LINES[1]).auth.state.keys.set({ session: { committed: Buffer.from([1]) } });
   const crashed = await crashSnapshot(t, bridge, dataDir);
   await writeFile(path.join(crashed, LINES[1], 'auth.json.auth-intent'), '{"version":1,"operations":[]}', { mode: 0o600 });
   const { bridge: restarted, logs } = await start(t, crashed);
-  assert.notEqual(restarted.getLine(LINES[0]).status, 'error');
-  assert.equal(restarted.getLine(LINES[1]).status, 'error');
-  assert.equal(await exists(path.join(crashed, LINES[1], 'auth.json.auth-active')), true, 'a fenced line keeps its marker');
-  assert.deepEqual(logs.filter(entry => entry.event === 'auth_session_fenced_after_unclean_exit')
-    .map(({ line_id, reason }) => ({ line_id, reason })), [{ line_id: LINES[1], reason: 'auth_intent_present' }]);
+  const line = restarted.getLine(LINES[1]);
+  assert.notEqual(line.status, 'error', line.error);
+  assert.deepEqual(line.auth.store.data.keys.session.committed, Buffer.from([1]));
+  const names = await listing(crashed, LINES[1]);
+  assert.ok(!names.includes('auth.json.auth-intent'));
+  assert.equal(names.filter(name => name.startsWith('auth.json.auth-intent.abandoned-')).length, 1, 'kept as evidence');
+  assert.ok(logs.some(entry => entry.event === 'auth_session_resumed_after_unclean_exit' && entry.line_id === LINES[1] &&
+    entry.reason === 'in_flight_change_discarded'));
 });
 
-test('a write torn by the crash keeps that line fenced instead of resuming possibly stale credentials', async t => {
+test('a journal write torn by the crash is quarantined and the line resumes from the last complete write', async t => {
   const dataDir = await tempDir(t, 'bridge-live-');
   const { bridge } = await start(t, dataDir);
   await connectAll(bridge);
@@ -114,10 +120,29 @@ test('a write torn by the crash keeps that line fenced instead of resuming possi
   const crashed = await crashSnapshot(t, bridge, dataDir);
   await appendFile(path.join(crashed, LINES[1], 'auth.json.journal'), '{"record":"partial');
   const { bridge: restarted, logs } = await start(t, crashed);
+  const line = restarted.getLine(LINES[1]);
+  assert.notEqual(line.status, 'error', line.error);
+  assert.deepEqual(line.auth.store.data.keys.session.committed, Buffer.from([1]));
+  assert.ok((await listing(crashed, LINES[1])).some(name => name.startsWith('auth.json.journal.tail-')), 'torn bytes kept as evidence');
+  assert.ok(logs.some(entry => entry.event === 'auth_session_resumed_after_unclean_exit' && entry.line_id === LINES[1] &&
+    entry.reason === 'journal_tail_quarantined'));
+});
+
+test('a failure that began with a drain timeout resumes; a real write failure keeps only that line fenced', async t => {
+  const dataDir = await tempDir(t, 'bridge-live-');
+  const { bridge } = await start(t, dataDir);
+  await connectAll(bridge);
+  const crashed = await crashSnapshot(t, bridge, dataDir);
+  const evidence = operation => JSON.stringify({ version: 1, failures: [{ operation, mutations: [] }, { operation: 'nested_transaction' }] });
+  await writeFile(path.join(crashed, LINES[0], 'auth.json.auth-failure'), evidence('drain_timeout'), { mode: 0o600 });
+  await writeFile(path.join(crashed, LINES[1], 'auth.json.auth-failure'), evidence('keys'), { mode: 0o600 });
+  const { bridge: restarted, logs } = await start(t, crashed);
   assert.notEqual(restarted.getLine(LINES[0]).status, 'error');
+  assert.ok((await listing(crashed, LINES[0])).some(name => name.startsWith('auth.json.auth-failure.abandoned-')));
   assert.equal(restarted.getLine(LINES[1]).status, 'error');
-  assert.ok(logs.some(entry => entry.event === 'auth_session_fenced_after_unclean_exit' && entry.line_id === LINES[1] &&
-    entry.reason === 'journal_tail_incomplete'));
+  assert.ok((await listing(crashed, LINES[1])).includes('auth.json.auth-failure'), 'a real write failure keeps its fence');
+  assert.deepEqual(logs.filter(entry => entry.event === 'auth_session_fenced_after_unclean_exit')
+    .map(({ line_id, reason }) => ({ line_id, reason })), [{ line_id: LINES[1], reason: 'auth_failure_present' }]);
 });
 
 test('operators can keep the strict fence after an unclean exit', async t => {

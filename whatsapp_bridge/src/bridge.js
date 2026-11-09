@@ -237,7 +237,9 @@ export class Bridge {
           line_id: line.line_id, reason: outcome.reason});
       }
     }
-    const auth = await createAuth(line.directory, {store, drainTimeoutMs: this.config.auth?.drainTimeoutMs});
+    const resume = this.config.auth?.resumeAfterUncleanExit !== false;
+    const auth = await createAuth(line.directory, {store, drainTimeoutMs: this.config.auth?.drainTimeoutMs, resume,
+      onRecovery: event => this.log({component: 'whatsapp_bridge', line_id: line.line_id, ...event})});
     if (this.stopping) { auth.retire(); await auth.drain(); this.assertRunning(); }
     return auth;
   }

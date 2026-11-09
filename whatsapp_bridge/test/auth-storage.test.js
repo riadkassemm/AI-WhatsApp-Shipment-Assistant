@@ -791,3 +791,63 @@ test('a queued provider mutex backlog holds one intent at a time and retirement 
   // Start, mutation and clear: a constant number of small writes per executed job.
   assert.ok(intentWrites <= ran * 4 + 4, `${intentWrites} intent writes for ${ran} executed jobs`);
 });
+
+async function resumeFixture(t, options = {}) {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'bridge-auth-resume-'));
+  const events = [];
+  const auth = await createAuth(directory, { resume: true, onRecovery: event => events.push(event), ...options });
+  t.after(async () => { auth.retire(); await auth.drain().catch(() => {}); await auth.store.close().catch(() => {}); await rm(directory, { recursive: true, force: true }); });
+  return { directory, auth, events };
+}
+
+test('resume mode: an initial-sync burst writes no intents and, if still running at the deadline, is abandoned without blocking', async t => {
+  const { auth, events } = await resumeFixture(t, { drainTimeoutMs: 300 });
+  await auth.armSession();
+  const release = gate(), jobs = 14_000;
+  // Production 2026-11-09: 14,032 provider tasks started within 5 s of pairing.
+  const tasks = Array.from({ length: jobs }, () => auth.trackProviderTask(async () => { await release.promise; }));
+  tasks.forEach(task => task.catch(() => {}));
+  await new Promise(resolve => setImmediate(resolve));
+  await assert.rejects(readFile(auth.store.filename + '.auth-intent'), { code: 'ENOENT' });
+  const started = performance.now();
+  const next = await auth.renew();
+  assert.ok(performance.now() - started < 3_000, 'retirement ends at the deadline');
+  assert.equal(auth.store.failed, false);
+  assert.ok(events.some(event => event.event === 'auth_work_abandoned' && event.reason === 'drain_timeout' && event.archived_intents === 0));
+  release.resolve();
+  const outcomes = await Promise.allSettled(tasks);
+  assert.ok(outcomes.every(outcome => outcome.status === 'fulfilled' || outcome.reason.code === 'AUTH_SESSION_RETIRED'));
+  assert.equal(auth.store.failed, false);
+  await next.state.keys.set({ session: { after: Buffer.from([1]) } });
+  assert.deepEqual(next.store.data.keys.session.after, Buffer.from([1]));
+});
+
+test('resume mode: a provider transaction stuck past the deadline is abandoned with evidence, not failed', async t => {
+  const { auth, events } = await resumeFixture(t);
+  await auth.armSession();
+  const keys = providerKeys(auth), entered = gate(), never = gate();
+  const stuck = keys.transaction(async () => {
+    await keys.set({ session: { buffered: Buffer.from([6]) } });
+    entered.resolve(); await never.promise;
+  }, 'peer');
+  stuck.catch(() => {});
+  await entered.promise;
+  auth.retire();
+  await auth.drain({ timeoutMs: 50 });
+  assert.equal(auth.store.failed, false);
+  await assert.rejects(readFile(auth.store.filename + '.auth-intent'), { code: 'ENOENT' });
+  await assert.rejects(readFile(auth.store.filename + '.auth-failure'), { code: 'ENOENT' });
+  await assert.rejects(readFile(auth.store.filename + '.auth-active'), { code: 'ENOENT' });
+  const archived = (await fs.readdir(path.dirname(auth.store.filename))).filter(name => name.startsWith('auth.json.auth-intent.abandoned-'));
+  assert.equal(archived.length, 1);
+  const evidence = JSON.parse(await readFile(path.join(path.dirname(auth.store.filename), archived[0]), 'utf8'), BufferJSON.reviver);
+  assert.deepEqual(evidence.operations[0].mutations[0].session.buffered, Buffer.from([6]));
+  assert.ok(events.some(event => event.event === 'auth_work_abandoned' && event.reason === 'drain_timeout' && event.archived_intents === 1));
+  assert.equal(auth.store.data.keys.session, undefined, 'the uncommitted change is discarded');
+  const next = await createAuth(path.dirname(auth.store.filename), { store: auth.store, resume: true });
+  never.resolve();
+  await assert.rejects(stuck);
+  assert.equal(auth.store.failed, false, 'the abandoned task cannot poison the store when it finally returns');
+  await next.state.keys.set({ session: { resumed: Buffer.from([2]) } });
+  assert.deepEqual(next.store.data.keys.session.resumed, Buffer.from([2]));
+});
