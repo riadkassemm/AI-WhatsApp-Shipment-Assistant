@@ -1,0 +1,118 @@
+# Dynamic expected identities: the collector derives them from the registry
+# (enabled, not removed) and compares each one with the bridge.
+rule_files:
+  - storage-alerts.yml
+evaluation_interval: 1m
+tests:
+  # Four enabled, four healthy (after two intentional removals): no alert.
+  - interval: 1m
+    input_series:
+      - {series: support_monitoring_expected, values: '1+0x10'}
+      - {series: support_bridge_ready, values: '1+0x10'}
+      - {series: support_bridge_registry_up, values: '1+0x10'}
+      - {series: support_bridge_manifest_up, values: '1+0x10'}
+      - {series: support_bridge_expected_lines, values: '4+0x10'}
+      - {series: support_bridge_expected_healthy_lines, values: '4+0x10'}
+      - {series: support_bridge_expected_unhealthy_lines, values: '0+0x10'}
+      - {series: support_bridge_removed_reactivated_lines, values: '0+0x10'}
+      - {series: support_bridge_decommissioned_lines, values: '2+0x10'}
+      - {series: support_bridge_pairing_lines, values: '1+0x10'}
+      - {series: support_bridge_unregistered_lines, values: '0+0x10'}
+    alert_rule_test:
+      - {eval_time: 8m, alertname: BridgeDisconnected, exp_alerts: []}
+      - {eval_time: 8m, alertname: BridgeRemovedIdentityReactivated, exp_alerts: []}
+      - {eval_time: 8m, alertname: BridgePairingStalled, exp_alerts: []}
+      - {eval_time: 8m, alertname: BridgeRegistryMismatch, exp_alerts: []}
+  # Five enabled; one disconnects. The expected count must not shrink with it.
+  - interval: 1m
+    input_series:
+      - {series: support_monitoring_expected, values: '1+0x10'}
+      - {series: support_bridge_ready, values: '1+0x10'}
+      - {series: support_bridge_registry_up, values: '1+0x10'}
+      - {series: support_bridge_manifest_up, values: '1+0x10'}
+      - {series: support_bridge_expected_lines, values: '5+0x10'}
+      - {series: support_bridge_expected_healthy_lines, values: '5+0x3 4+0x6'}
+      - {series: support_bridge_expected_unhealthy_lines, values: '0+0x3 1+0x6'}
+    alert_rule_test:
+      - {eval_time: 3m, alertname: BridgeDisconnected, exp_alerts: []}
+      - eval_time: 8m
+        alertname: BridgeDisconnected
+        exp_alerts:
+          - exp_labels: {severity: critical}
+  # Registry unreadable: identity monitoring is incomplete, never healthy.
+  - interval: 1m
+    input_series:
+      - {series: support_monitoring_expected, values: '1+0x10'}
+      - {series: support_bridge_ready, values: '1+0x10'}
+      - {series: support_bridge_registry_up, values: '0+0x10'}
+      - {series: support_bridge_manifest_up, values: '1+0x10'}
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: BridgeDisconnected
+        exp_alerts:
+          - exp_labels: {severity: critical}
+  # A removed identity reappearing is critical; an unregistered live identity
+  # and a long-waiting pairing are warnings; neither is a disconnect.
+  - interval: 1m
+    input_series:
+      - {series: support_monitoring_expected, values: '1+0x40'}
+      - {series: support_bridge_ready, values: '1+0x40'}
+      - {series: support_bridge_registry_up, values: '1+0x40'}
+      - {series: support_bridge_manifest_up, values: '1+0x40'}
+      - {series: support_bridge_expected_lines, values: '3+0x40'}
+      - {series: support_bridge_expected_healthy_lines, values: '3+0x40'}
+      - {series: support_bridge_expected_unhealthy_lines, values: '0+0x40'}
+      - {series: support_bridge_removed_reactivated_lines, values: '1+0x40'}
+      - {series: support_bridge_unregistered_lines, values: '1+0x40'}
+      - {series: support_bridge_pairing_lines, values: '1+0x40'}
+    alert_rule_test:
+      - {eval_time: 35m, alertname: BridgeDisconnected, exp_alerts: []}
+      - eval_time: 35m
+        alertname: BridgeRemovedIdentityReactivated
+        exp_alerts:
+          - exp_labels: {severity: critical}
+            exp_annotations:
+              summary: "A durably removed WhatsApp identity is routable or live again"
+              description: "Removal tombstones must not be reused. Investigate before any further change; preserve all evidence."
+      - eval_time: 35m
+        alertname: BridgeRegistryMismatch
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: "The bridge serves an identity the application registry does not list"
+              description: "Compare the WhatsApp number registry with bridge diagnostics. A number appears in monitoring only after it is enabled in the app."
+      - eval_time: 35m
+        alertname: BridgePairingStalled
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: "A new WhatsApp identity has been waiting for pairing for 30 minutes"
+              description: "Pairing of a not-yet-enabled number is not a disconnect. Finish or cancel pairing from Customer Support."
+  # Storage: active-identity critical stays critical; retained-only is separate.
+  - interval: 1m
+    input_series:
+      - {series: support_monitoring_expected, values: '1+0x20'}
+      - {series: 'bridge_storage_health_level{job="node",instance="local"}', values: '2+0x20'}
+      - {series: 'support_bridge_eligible_storage_critical{job="node",instance="local"}', values: '0+0x20'}
+      - {series: bridge_watchdog_timestamp_seconds, values: '0+60x20'}
+    alert_rule_test:
+      - {eval_time: 15m, alertname: BridgeStorageUnavailable, exp_alerts: []}
+      - eval_time: 15m
+        alertname: BridgeRetainedIdentityStorageIssue
+        exp_alerts:
+          - exp_labels: {severity: warning, job: node, instance: local}
+            exp_annotations:
+              summary: "Storage issues are limited to safely retained or decommissioned identities"
+              description: "Active identities are unaffected; BridgeStorageUnavailable covers them. Retained evidence must not be repaired or reused."
+  - interval: 1m
+    input_series:
+      - {series: support_monitoring_expected, values: '1+0x20'}
+      - {series: 'bridge_storage_health_level{job="node",instance="local"}', values: '2+0x20'}
+      - {series: 'support_bridge_eligible_storage_critical{job="node",instance="local"}', values: '1+0x20'}
+      - {series: bridge_watchdog_timestamp_seconds, values: '0+60x20'}
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: BridgeStorageUnavailable
+        exp_alerts:
+          - exp_labels: {severity: critical, job: node, instance: local}
+      - {eval_time: 15m, alertname: BridgeRetainedIdentityStorageIssue, exp_alerts: []}

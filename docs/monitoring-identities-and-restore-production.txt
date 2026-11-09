@@ -1,0 +1,182 @@
+Dynamic WhatsApp identity monitoring and restore verification — production
+=========================================================================
+Status: prepared for review. NOT deployed. Monitoring-only release: no API,
+bridge, database schema, Redis, session or app.env change. No service restart
+other than a Prometheus configuration reload.
+
+Root causes (read-only investigation, 9 November 2026)
+-----------------------------------------------------
+BridgeDisconnected (critical, firing since 2026-11-09 05:17:48Z)
+  /usr/local/libexec/whatsapp-support/export_runtime_metrics.py exported
+  support_bridge_expected_lines from the static WHATSAPP_EXPECTED_IDENTITIES
+  (6 in /etc/whatsapp-support/app.env). The rule required eligible, connected
+  and paired counts to EQUAL that number. Intentional removals (90013 on
+  2026-11-08 17:29, 90017 decommissioned 2026-11-09 07:10, both audited as
+  LINKED_DEVICE_LINE_REMOVED) left 4 healthy identities, so 4 != 6 alarmed.
+  The rule also alarmed on any QR, including legitimate pairing of a new number.
+  Other assumptions of a fixed count: scripts/attended_support_monitor.py
+  (4 count checks), the retirement rule test fixture, .env.example (8).
+
+LocalBackupRestoreOverdue (critical)
+  export_storage_metrics.py publishes the receipt
+  /srv/migration/reports/verified-local-backup.json (restored_at, verified).
+  The only receipt was written once by the cutover run 20261106T191111Z
+  (restored 2026-11-06 20:44:25Z; 31 tables; on-server). The rule requires a
+  verified restore within 48 hours. Production has NO scheduled database,
+  Redis or media backup and NO restore verification (only ad hoc, unverified
+  deployment dumps). The path, parsing and threshold are correct: this is a
+  real recovery-evidence gap, not a monitoring defect. The alert is unchanged.
+
+Change
+------
+Expected identities are recomputed on every 30 s collection from the
+application's authoritative registry: whatsapp_phone_numbers rows with
+source='LINKED_DEVICE' and removed_at IS NULL that are either enabled
+(is_enabled=1, the Super Admin "Add to app" state) or in an unconfirmed
+removal. Removal disables the row first (audit LINKED_DEVICE_REMOVAL_STARTED)
+and deletes it only when durably confirmed (LINKED_DEVICE_LINE_REMOVED), so an
+identity stops counting only after confirmation; a stuck removal alerts. A
+newly paired number is registered disabled (audit LINKED_DEVICE_LINE_CREATED):
+visible as support_bridge_disabled_lines, tracked once enabled. Example on
+2026-11-09: 90039 was linked at 10:07 and is disabled in the app; the dry run
+reports expected 4, disabled 1, unregistered 0. Each
+expected identity is compared individually with its bridge state:
+healthy, missing, pairing, disconnected, unpaired, ineligible, retained
+(registry/bridge disagreement) or unknown (bridge unavailable). It is never
+derived from connected sockets: a disconnected or vanished identity stays
+expected until a Super Admin disables or removes it.
+  New metrics: support_bridge_registry_up, support_bridge_manifest_up,
+  support_bridge_expected_{lines,healthy_lines,unhealthy_lines},
+  support_bridge_identity_expected{,_healthy,_state}{identity=<hash>},
+  support_bridge_{disabled,removal_pending,unregistered,pairing,removed_reactivated}_lines.
+  Identities stay pseudonymous (SHA-256 prefix); no phone numbers are exported.
+Rules (deployment/monitoring/storage-alerts.yml):
+  BridgeDisconnected (critical, same name/severity/for, no annotation change):
+    bridge not ready, registry or manifest unreadable/absent, any expected
+    identity unhealthy, healthy != expected, or expected metrics absent.
+  BridgeRemovedIdentityReactivated (critical): a removal tombstone in the
+    bridge manifest reappears in the registry or as a live bridge identity.
+  BridgeRegistryMismatch (warning, 10m): bridge serves an identity with no
+    registry row.
+  BridgePairingStalled (warning, 30m): QR pending for a not-yet-enabled number.
+  BridgeRetainedIdentityStorageIssue (warning, 10m): critical storage level
+    while eligible (active) storage is not critical, i.e. limited to safely
+    retained/decommissioned identities. BridgeStorageUnavailable is unchanged
+    and stays critical for active identities.
+Attended console (scripts/attended_support_monitor.py): the count checks are
+replaced by identity_registry_available, identity_manifest_available,
+all_expected_identities_healthy and no_removed_identity_reactivated.
+WHATSAPP_EXPECTED_IDENTITIES is no longer read. Leave it in app.env for now
+(removing it is cosmetic and would change the preserved app.env fingerprint).
+
+What LocalBackupRestoreOverdue means (scope decision)
+  The alert's only input, local_backup_last_restore_verified_timestamp_seconds,
+  comes from the receipt; the original cutover receipt recorded database_tables
+  only. It therefore represents MariaDB (and, with this tool, Redis) restore
+  verification, NOT complete Customer Support disaster recovery. The receipt
+  now states scope ["mariadb","redis"] and not_verified ["customer_media",
+  "whatsapp_authentication","configuration_and_releases"]. Do not describe a
+  green alert as full recoverability.
+  Proposed separate indicators (not implemented; each needs its own review):
+    local_media_backup_verified_timestamp_seconds — copy of the media tree with
+      a per-file SHA-256 manifest compared after copy (the method already used
+      in deployment backups), stored outside the live tree, with retention;
+    whatsapp_auth_offline_snapshot_timestamp_seconds — ONLY from a stopped
+      bridge (deployment windows) via the quarantine-aware snapshot/validation
+      procedure; never from live journals, never restored automatically;
+    release_and_configuration_backup_timestamp_seconds — app.env (root-only,
+      encrypted at rest), systemd units/drop-ins, nginx vhost, release REVISION.
+  Each with its own alert so one gap is never hidden by another's success.
+
+Restore verification (scripts/verify_local_backup_restore.py)
+  Reads production only: mariadb-dump --single-transaction --skip-lock-tables
+  and redis-cli --rdb (same commands as the deployment backups). Restores both
+  into throwaway, socket-only instances (mariadbd --skip-networking as user
+  mysql, redis-server --port 0) under the service's private /var/tmp, then
+  requires: identical table/view set, routines and triggers; every table's row
+  count within the source counts taken before and after the dump; CHECK TABLE
+  OK; RDB check and load. Only then is the receipt replaced atomically (0600).
+  Failure exits non-zero, leaves the previous receipt and removes the partial
+  run. Verified artifacts: /var/backups/whatsapp-support/verified/<UTC>/
+  (database.sql.gz, redis.rdb, receipt.json), newest 3 kept. WhatsApp
+  authentication journals and media are deliberately out of scope.
+  Production tables are all InnoDB (verified read-only), so the dump is one
+  consistent snapshot; redis-cli --rdb is a point-in-time fork snapshot.
+  Hardening: refuses to start below 20 GiB free on the artifact, work and
+  receipt filesystems; non-blocking lock (ALREADY_RUNNING); receipt write is
+  fsync + atomic rename + directory fsync; unexpected errors print only a
+  type code; systemd KillMode=control-group stops throwaway children on
+  timeout. Expected footprint per verified run ~70 MB (54 MB SQL gzip + RDB),
+  3 kept; the throwaway restore needs roughly 1 GB transiently in /var/tmp.
+  deployment/backup/whatsapp-support-restore-verify.{service,timer}: daily
+  03:30 Asia/Beirut all year (systemd >= 235; production 255 verified:
+  01:30 UTC in winter, 00:30 UTC in summer), +<=20 min, Nice 10, idle I/O,
+  2 GiB, 1 CPU.
+
+Verification performed (isolated)
+---------------------------------
+- Unit tests: tests/test_runtime_metrics.py, tests/test_attended_support_monitor.py.
+- promtool 2.45.3 ON production, in a root-only scratch directory removed
+  afterwards (live rules untouched): check rules + all five rule-test files,
+  including the new storage-alerts-identity-test.yml, SUCCESS.
+- Registry probe SQL on MariaDB 10.11.14 (disposable): enabled, removal
+  pending, removal-then-disabled and disabled rows classified correctly.
+- Read-only dry run (updated collector, 2026-11-09 PM): registry 4 enabled +
+  1 disabled (90039), expected 4, healthy 4, removal_pending 0.
+- Read-only dry run of the first collector version on production (stdout only):
+  registry_up 1, manifest_up 1, expected 4, healthy 4, unhealthy 0,
+  disabled 0, unregistered 0, pairing 0, removed_reactivated 0,
+  decommissioned 2. BridgeDisconnected therefore resolves. The new warning
+  BridgeRetainedIdentityStorageIssue is EXPECTED to fire (90017/90035 retained
+  auth STORE_UNAVAILABLE) and is the intended separate report.
+- Restore verifier against disposable local MariaDB/Redis: success writes a
+  fresh receipt; a corrupt dump fails with the receipt unchanged; retention.
+
+Production deployment (after explicit approval; attended)
+--------------------------------------------------------
+Pin TASK_APPROVED_REV to the merged commit. Record dir: /root/support-monitoring-<rev12>.
+1. Read-only preflight: record sha256 of /usr/local/libexec/whatsapp-support/*
+   and /etc/prometheus/storage-alerts.yml (expected e76c0ca0…), firing ALERTS,
+   prometheus_config_last_reload_successful == 1, bridge/API PIDs, disk.
+   Archive only the approved commit (git archive) and verify its checksum.
+2. Copy the current libexec files, rule file and the two collector units'
+   effective configuration into the record (root-only).
+3. Validate in a root-only scratch directory with production promtool:
+   promtool check rules storage-alerts.yml and promtool test rules on every
+   deployment/monitoring/*-test.yml. Abort on any failure.
+4. Dry run the new collector exactly as in "Verification" (stdout only).
+   Require registry_up 1, manifest_up 1, unhealthy 0 and expected equal to the
+   enabled plus removal-pending linked-device registry rows observed at that
+   moment (fresh snapshot; never a hard-coded number). Disabled rows (e.g. a
+   newly linked number) are reported, not expected.
+5. Install atomically (install -m0755 to a temporary name, then mv):
+   export_runtime_metrics.py, attended_support_monitor.py into
+   /usr/local/libexec/whatsapp-support/. Keep check_inbound_drain.py,
+   bridge_tcp_diagnostics.py, check_bridge_storage.py, export_storage_metrics.py
+   (unchanged; verify their hashes equal the commit).
+6. Wait for two support-runtime-metrics runs (>= 60 s). Require the new
+   metrics in /var/lib/prometheus/node-exporter/support-runtime.prom.
+7. Install the rule file atomically (0644), promtool check rules it in place,
+   then systemctl reload prometheus. Require
+   prometheus_config_last_reload_successful == 1 and the new rule names in
+   /api/v1/rules. Never restart the API, bridge, MariaDB or Redis.
+8. Observe >= 10 minutes: BridgeDisconnected resolves; no new critical alert;
+   BridgeRetainedIdentityStorageIssue may fire (expected); attended console
+   (/usr/local/libexec/.../attended_support_monitor.py --once) reports only
+   the restore-overdue alert until step 9.
+Restore verification (separate approval step, outside staff hours):
+9. Check free disk (>= 20 GiB; today ~422 GiB). Install the script to
+   /usr/local/libexec/whatsapp-support/ (0755) and both units to
+   /etc/systemd/system/ (0644); daemon-reload. Run ONCE attended:
+   systemctl start whatsapp-support-restore-verify.service; require success,
+   a fresh receipt and unchanged API/bridge PIDs and SQL/Redis health. The
+   storage collector publishes the receipt within 30 s; LocalBackupRestoreOverdue
+   then resolves. Only after that: systemctl enable --now the timer.
+
+Rollback
+--------
+Restore the saved libexec files and rule file from the record (atomic mv),
+promtool check rules, systemctl reload prometheus; disable/remove the timer
+and service. No database, Redis, session or receipt rollback: a receipt
+written by a successful verification is genuine evidence. Rolling back
+reinstates the false BridgeDisconnected alert (static count 6).

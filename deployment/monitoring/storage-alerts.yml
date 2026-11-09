@@ -57,10 +57,41 @@ groups:
         expr: (support_api_up == 0 or absent(support_api_up) or support_redis_up == 0 or absent(support_redis_up)) and on() (support_monitoring_expected == 1)
         for: 2m
         labels: {severity: critical}
+      # Expected identities = registry numbers a Super Admin enabled and did not
+      # remove, compared one by one with the bridge (never derived from live
+      # sockets). Missing registry/manifest/bridge data alarms, never passes.
       - alert: BridgeDisconnected
-        expr: (support_bridge_ready == 0 or absent(support_bridge_ready) or support_bridge_connected_lines < support_bridge_eligible_lines or support_bridge_eligible_lines != on(job, instance) support_bridge_expected_lines or absent(support_bridge_eligible_lines) or support_bridge_expected_lines < 1 or absent(support_bridge_expected_lines) or absent(support_bridge_connected_lines) or support_bridge_eligible_paired_lines != on(job, instance) support_bridge_expected_lines or absent(support_bridge_eligible_paired_lines) or support_bridge_qr_codes != 0 or absent(support_bridge_qr_codes)) and on() (support_monitoring_expected == 1)
+        expr: (support_bridge_ready == 0 or absent(support_bridge_ready) or support_bridge_registry_up == 0 or absent(support_bridge_registry_up) or support_bridge_manifest_up == 0 or absent(support_bridge_manifest_up) or support_bridge_expected_unhealthy_lines > 0 or absent(support_bridge_expected_unhealthy_lines) or absent(support_bridge_expected_lines) or support_bridge_expected_healthy_lines != on(job, instance) support_bridge_expected_lines or absent(support_bridge_expected_healthy_lines)) and on() (support_monitoring_expected == 1)
         for: 2m
         labels: {severity: critical}
+      - alert: BridgeRemovedIdentityReactivated
+        expr: (support_bridge_removed_reactivated_lines > 0 or (absent(support_bridge_removed_reactivated_lines) and on() support_bridge_manifest_up == 1 and on() support_bridge_registry_up == 1)) and on() (support_monitoring_expected == 1)
+        for: 2m
+        labels: {severity: critical}
+        annotations:
+          summary: "A durably removed WhatsApp identity is routable or live again"
+          description: "Removal tombstones must not be reused. Investigate before any further change; preserve all evidence."
+      - alert: BridgeRegistryMismatch
+        expr: (support_bridge_unregistered_lines > 0) and on() (support_monitoring_expected == 1)
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: "The bridge serves an identity the application registry does not list"
+          description: "Compare the WhatsApp number registry with bridge diagnostics. A number appears in monitoring only after it is enabled in the app."
+      - alert: BridgePairingStalled
+        expr: (support_bridge_pairing_lines > 0) and on() (support_monitoring_expected == 1)
+        for: 30m
+        labels: {severity: warning}
+        annotations:
+          summary: "A new WhatsApp identity has been waiting for pairing for 30 minutes"
+          description: "Pairing of a not-yet-enabled number is not a disconnect. Finish or cancel pairing from Customer Support."
+      - alert: BridgeRetainedIdentityStorageIssue
+        expr: (bridge_storage_health_level == 2 and on(job, instance) support_bridge_eligible_storage_critical == 0) and on() (support_monitoring_expected == 1)
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: "Storage issues are limited to safely retained or decommissioned identities"
+          description: "Active identities are unaffected; BridgeStorageUnavailable covers them. Retained evidence must not be repaired or reused."
       - alert: BridgeIdentityFenced
         expr: (support_bridge_fenced_lines > 0) and on() (support_monitoring_expected == 1)
         for: 0m
