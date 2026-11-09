@@ -316,13 +316,15 @@ function authFacade(store, owner) {
     task.then(finished, finished);
     return task;
   };
-  const transition = async reset => {
+  const transition = async (reset, { drainTimeoutMs } = {}) => {
     if (owner.current !== auth) throw retiredAuth();
     auth.retire();
     const generation = ++owner.generation;
     // Include provider transactions still buffering mutations and retrying a
     // commit, not only raw writes already admitted to the journal queue.
-    await auth.drain();
+    // Resume mode: after a dead transport the caller may shorten the deadline;
+    // stuck work is then abandoned with evidence instead of awaited.
+    await auth.drain(owner.resume && drainTimeoutMs ? { timeoutMs: drainTimeoutMs } : {});
     if (reset) await store.update(data => { data.creds = initAuthCreds(); data.keys = {}; });
     else await store.flush();
     if (owner.generation !== generation) throw retiredAuth();
@@ -505,7 +507,7 @@ function authFacade(store, owner) {
       catch (error) { fail(error, { operation: 'prepare_retirement' }); }
       finally { retired = true; retiring = false; }
     },
-    renew: () => transition(false),
+    renew: options => transition(false, options),
     reset: () => transition(true),
   };
   owner.current = auth;
