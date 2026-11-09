@@ -363,7 +363,19 @@ function authFacade(store, owner) {
         if (!mutex || typeof mutex.mutex !== 'function' || attached.has(mutex)) continue;
         attached.add(mutex);
         const operation = mutex.mutex.bind(mutex);
-        mutex.mutex = async (...args) => runProvider('pipeline', operation, args);
+        // Admit at enqueue (a retired or failed owner rejects immediately), but
+        // fence with a durable intent only when the job acquires the mutex.
+        // A queued job has done no provider work. Registering intents at
+        // enqueue made an offline backlog of N jobs hold N intents, and every
+        // completion rewrote all remaining ones (O(N^2) fsynced bytes; on
+        // 2026-11-09 a 3,000-job backlog took ~35 min at full CPU). Jobs still
+        // queued at retirement now reject with AUTH_SESSION_RETIRED; their
+        // messages were never decrypted or acknowledged, so WhatsApp
+        // redelivers them to the next session.
+        mutex.mutex = async code => {
+          active();
+          return operation(() => runProvider('pipeline', code, []));
+        };
       }
     },
     trackProviderTask: operation => runProvider('pipeline', operation, [], true),

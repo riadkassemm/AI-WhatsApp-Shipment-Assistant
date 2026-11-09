@@ -748,3 +748,46 @@ test('a burst of queued provider pipelines shares durable intent writes instead 
   assert.ok(intentWrites < 20, `${intentWrites} intent rewrites for ${jobs} queued jobs`);
   assert.equal(auth.store.failed, false);
 });
+
+test('a queued provider mutex backlog holds one intent at a time and retirement drops jobs that never started', async t => {
+  const { auth } = await fixture(t);
+  await auth.armSession();
+  const keys = providerKeys(auth), socket = { messageMutex: makeMutex() }, release = gate(), entered = gate();
+  auth.trackProviderPipelines(socket);
+  const open = fs.open;
+  let intentWrites = 0;
+  t.mock.method(fs, 'open', async (filename, ...args) => {
+    if (String(filename).includes('.auth-intent.')) intentWrites++;
+    return open(filename, ...args);
+  });
+  // Production: 3,074 queued jobs each held an intent from enqueue, and every
+  // completion rewrote all remaining ones.
+  const first = socket.messageMutex.mutex(async () => {
+    await keys.transaction(async () => keys.set({ session: { first: Buffer.from([1]) } }), 'peer');
+    entered.resolve(); await release.promise;
+  });
+  let ran = 0;
+  const queued = Array.from({ length: 300 }, (_, index) => socket.messageMutex.mutex(async () => {
+    ran++;
+    await keys.transaction(async () => keys.set({ session: { ['queued' + index]: Buffer.from([index % 251]) } }), 'peer');
+  }));
+  queued.forEach(job => job.catch(() => {}));
+  await entered.promise;
+  const intents = JSON.parse(await readFile(auth.store.filename + '.auth-intent', 'utf8'), BufferJSON.reviver);
+  assert.equal(intents.operations.length, 1, 'only the running job is fenced');
+  // Let part of the backlog run, then retire mid-backlog.
+  release.resolve(); await first;
+  while (ran < 50) await new Promise(resolve => setImmediate(resolve));
+  auth.retire();
+  const started = performance.now();
+  await auth.drain();
+  assert.ok(performance.now() - started < 2_000, 'drain waits only for the running job');
+  const outcomes = await Promise.allSettled(queued);
+  const rejected = outcomes.filter(outcome => outcome.status === 'rejected');
+  assert.ok(rejected.length > 0 && rejected.every(outcome => outcome.reason.code === 'AUTH_SESSION_RETIRED'));
+  assert.equal(auth.store.failed, false);
+  await assert.rejects(readFile(auth.store.filename + '.auth-intent'), { code: 'ENOENT' });
+  await assert.rejects(readFile(auth.store.filename + '.auth-active'), { code: 'ENOENT' });
+  // Start, mutation and clear: a constant number of small writes per executed job.
+  assert.ok(intentWrites <= ran * 4 + 4, `${intentWrites} intent writes for ${ran} executed jobs`);
+});
