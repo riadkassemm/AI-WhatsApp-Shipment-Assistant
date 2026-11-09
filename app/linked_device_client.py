@@ -409,6 +409,19 @@ class LinkedDeviceWhatsAppClient:
         line = self._phone_number_id(phone_number_id)
         return await self._json_request("POST", f"/v1/lines/{line}/disconnect")
 
+    # Admin recovery actions (dashboard). The bridge archives, never deletes.
+    async def reconnect(self, phone_number_id: str) -> dict:
+        line = self._phone_number_id(phone_number_id)
+        return await self._json_request("POST", f"/v1/lines/{line}/reconnect")
+
+    async def reset_session(self, phone_number_id: str) -> dict:
+        line = self._phone_number_id(phone_number_id)
+        return await self._json_request("POST", f"/v1/lines/{line}/reset-session")
+
+    async def force_remove(self, phone_number_id: str) -> dict:
+        line = self._phone_number_id(phone_number_id)
+        return await self._json_request("POST", f"/v1/lines/{line}/force-remove")
+
     async def remove_line(self, phone_number_id: str) -> dict:
         """Unlink and erase a bridge registration, with safe tombstone retries."""
         if not isinstance(phone_number_id, str) or not re.fullmatch(r"[0-9]{5,32}", phone_number_id):

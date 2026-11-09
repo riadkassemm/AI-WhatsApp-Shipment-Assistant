@@ -1290,10 +1290,35 @@ function renderLinkedDeviceStatus(payload) {
       remove.disabled = state.linkedDeviceBusy || state.whatsappBusy;
       remove.onclick = () => removeLinkedDeviceNumber(line.line_id);
       row.append(remove);
+      for (const action of linkedDeviceRecoveryActions(line)) {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'btn small' + (action.danger ? ' danger' : '');
+        button.textContent = action.label;
+        button.title = action.title;
+        button.disabled = state.linkedDeviceBusy || state.whatsappBusy;
+        button.onclick = () => action.run(line.line_id);
+        row.append(button);
+      }
     }
     container.append(row);
   }
   text($('linkedDeviceStatus'), 'Only paired lines added to the app can send or receive messages here.');
+}
+
+// Recovery buttons for Admins and Super Admins, so staff do not need a
+// developer. The server archives files; nothing is deleted.
+const BLOCKED_CATEGORIES = ['storage_failure', 'authentication_failure', 'session_conflict', 'protocol_failure'];
+function linkedDeviceRecoveryActions(line) {
+  const blocked = line.status !== 'connected' && (line.status === 'error' || BLOCKED_CATEGORIES.includes(line.recovery_category));
+  const actions = [];
+  if (line.is_paired && line.status !== 'qr') actions.push({label: 'Reconnect', run: lineId => reconnectLinkedDevice(lineId),
+    title: 'Reconnect only this number. Other numbers are not affected.'});
+  if (blocked) actions.push({label: 'Reset session', run: lineId => resetLinkedDeviceSession(lineId),
+    title: 'Clear this number\'s stuck session and pair it again with the same phone. Conversations are kept.'});
+  if (line.status === 'error') actions.push({label: 'Force remove', run: lineId => forceRemoveLinkedDevice(lineId), danger: true,
+    title: 'Remove a number that cannot be unlinked normally.'});
+  return actions;
 }
 
 async function loadLinkedDeviceStatus() {
@@ -1466,6 +1491,55 @@ async function addLinkedDeviceNumber() {
       try { await loadWhatsAppRegistry(); }
       catch (_) { await loadLinkedDeviceStatus(); }
     } else await loadLinkedDeviceStatus();
+  }
+}
+
+async function runLinkedDeviceRecovery(path, options, success) {
+  state.linkedDeviceBusy = true;
+  state.linkedDeviceRequest++;
+  if (state.linkedDeviceStatus) renderLinkedDeviceStatus(state.linkedDeviceStatus);
+  try {
+    const payload = await api(path, {method: 'POST', ...options});
+    if (payload.registry) renderWhatsAppRegistry(payload.registry);
+    renderLinkedDeviceStatus(payload);
+    notify(success);
+    return payload;
+  } catch (error) {
+    notify(error.message, 'error');
+    return null;
+  } finally {
+    state.linkedDeviceBusy = false;
+    if (state.linkedDeviceStatus) renderLinkedDeviceStatus(state.linkedDeviceStatus);
+  }
+}
+
+async function reconnectLinkedDevice(lineId) {
+  if (!canManageWhatsApp() || state.linkedDeviceBusy) return;
+  await runLinkedDeviceRecovery('/api/support/whatsapp-linked-device/lines/' + encodeURIComponent(lineId) + '/reconnect', {},
+    'Reconnecting this number.');
+}
+
+async function resetLinkedDeviceSession(lineId) {
+  if (!canManageWhatsApp() || state.linkedDeviceBusy) return;
+  if (!(await confirmDialog({title: 'Reset this number\'s session?',
+    message: 'Its stuck session is cleared (kept in the server archive). Then tap Pair WhatsApp and scan with the same phone. Conversations and history stay. On the phone, log out the old "Support Dashboard" device under Linked devices.',
+    confirmLabel: 'Reset session', tone: 'danger'}))) return;
+  await runLinkedDeviceRecovery('/api/support/whatsapp-linked-device/lines/' + encodeURIComponent(lineId) + '/reset-session', {},
+    'Session reset. Tap Pair WhatsApp and scan with the same phone.');
+}
+
+async function forceRemoveLinkedDevice(lineId) {
+  if (!canManageWhatsApp() || state.linkedDeviceBusy) return;
+  const typed = await promptDialog({title: 'Force remove this number?', label: 'Type REMOVE to confirm', confirmLabel: 'Force remove', tone: 'danger',
+    message: 'Use this only when Remove and unlink fails. The number is removed from the app and its files are archived on the server. Active conversations are closed; their history is kept. Then, on the phone, log out the old "Support Dashboard" device under Linked devices.'});
+  if (typeof typed !== 'string') return;
+  if (typed.trim().toUpperCase() !== 'REMOVE') { notify('Nothing was removed. Type REMOVE to confirm.', 'error'); return; }
+  const payload = await runLinkedDeviceRecovery('/api/support/whatsapp-linked-device/lines/' + encodeURIComponent(lineId) + '/force-remove',
+    {body: JSON.stringify({close_active_tickets: true, confirm: 'REMOVE'})},
+    'Number removed. Log out the old device on the phone under Linked devices.');
+  if (payload) {
+    saveLinkedDeviceAddition(null);
+    try { await loadWhatsAppRegistry(); } catch (_) { /* The removal itself succeeded. */ }
   }
 }
 

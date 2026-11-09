@@ -1,4 +1,4 @@
-import { mkdir, readFile, unlink, rm, stat } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rename, unlink, rm, stat, open as openFile } from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import makeWASocket, { Browsers, DisconnectReason, downloadMediaMessage, normalizeMessageContent, proto, generateMessageIDV2, initAuthCreds, DEFAULT_CONNECTION_CONFIG } from '@whiskeysockets/baileys';
@@ -432,6 +432,126 @@ export class Bridge {
     });
     this.registrationTail = task.catch(() => {});
     return task;
+  }
+  // ---- Admin recovery actions (dashboard). None deletes data: files move to
+  // linked-device-archive/<timestamp>-<action>-<line>/ beside the data dir.
+  archiveDirectory(action, id) {
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    return path.join(path.dirname(this.config.dataDir), 'linked-device-archive', `${stamp}-${action}-${id}`);
+  }
+  async syncDirectory(directory) {
+    const handle = await openFile(directory, 'r');
+    try { await handle.sync(); } finally { await handle.close(); }
+  }
+  // Stop the transport and close this line's auth journal, including a
+  // failed or fenced one that never produced an auth owner.
+  async releaseAuth(line) {
+    this.stopRemovedSocket(line);
+    const auth = line.auth;
+    line.auth = null;
+    if (auth) await auth.drain({timeoutMs: 15_000}).catch(() => {});
+    const filename = path.join(line.directory, 'auth.json');
+    for (const store of [...this.ownedStores]) {
+      if (store.filename !== filename) continue;
+      // close() fences writes before flushing; a failed store refuses the flush.
+      try { await store.close(); } catch (error) { if (!store.failed) throw error; }
+      this.ownedStores.delete(store);
+    }
+  }
+  recoveryAction(id, action) {
+    if (typeof id !== 'string' || !/^\d{5,32}$/.test(id)) throw new BridgeError(400, 'INVALID_LINE_ID', 'A numeric linked-device line ID is required.');
+    this.assertRunning();
+    const task = this.registrationTail.then(async () => {
+      this.assertRunning();
+      return action();
+    });
+    this.registrationTail = task.catch(() => {});
+    return task;
+  }
+  // Drop and re-open only this number's connection.
+  async reconnectLine(id) {
+    const line = this.getLine(id);
+    if (line.removing || line.resetting) throw new BridgeError(503, 'LINE_BUSY', 'This number is being changed. Try again shortly.');
+    if (line.socket && line.session && !line.session.closed) this.restartStaleSocket(line, line.socket);
+    line.retryBlocked = false;
+    return this.connect(id);
+  }
+  // For a number that cannot connect: archive its session keys and start an
+  // unpaired session on the same line. state.json (messages, bound phone) is
+  // kept, so it can only be re-paired with the same phone and keeps its history.
+  resetSession(id) {
+    return this.recoveryAction(id, async () => {
+      const line = this.getLine(id);
+      if (line.removing || line.resetting) throw new BridgeError(503, 'LINE_BUSY', 'This number is being changed. Try again shortly.');
+      if (line.status === 'connected') throw new BridgeError(409, 'LINE_CONNECTED', 'This number is connected. Use Reconnect instead; reset is only for a number that cannot connect.');
+      line.resetting = true;
+      try {
+        await line.connectPromise?.catch(() => {});
+        await this.releaseAuth(line);
+        const archive = this.archiveDirectory('reset', id);
+        await mkdir(archive, {recursive: true, mode: 0o700});
+        for (const name of await readdir(line.directory)) {
+          if (name.startsWith('auth.json')) await rename(path.join(line.directory, name), path.join(archive, name));
+        }
+        await this.syncDirectory(line.directory);
+        await this.syncDirectory(archive);
+        line.auth = await this.loadAuth(line);
+        Object.assign(line, {status: 'disconnected', retryBlocked: true, recoveryCategory: null});
+        delete line.error;
+        this.log({component: 'whatsapp_bridge', event: 'auth_session_reset', line_id: id, archive: path.basename(archive)});
+        return this.lineStatus(line);
+      } finally { line.resetting = false; }
+    });
+  }
+  // For a number that cannot be unlinked (no usable session): archive the
+  // whole folder and tombstone it. The phone still lists the old device; the
+  // dashboard tells the admin to log it out there.
+  forceRemoveLine(id) {
+    return this.recoveryAction(id, async () => {
+      if (validateLineManifest(this.manifest.data).removed_line_ids.includes(id)) return { line_id: id, removed: true, forced: true };
+      const line = this.getLine(id);
+      if (line.removing || line.resetting) throw new BridgeError(503, 'LINE_BUSY', 'This number is being changed. Try again shortly.');
+      line.removing = true;
+      try {
+        await Promise.allSettled([line.sendTail, line.readTail, line.mediaTail, line.connectPromise]);
+        await this.releaseAuth(line);
+        await Promise.allSettled([line.eventTail, line.ackTail, ...line.confirmationTasks.values()]);
+        if (line.store?.data) {
+          await this.retirePhone(line).catch(this.onError);
+          await this.closeStore(line.store).catch(error => { if (!line.store.failed) throw error; });
+        }
+        const archive = this.archiveDirectory('remove', id);
+        await mkdir(path.dirname(archive), {recursive: true, mode: 0o700});
+        await rename(line.directory, archive);
+        await this.syncDirectory(this.config.dataDir);
+        await this.manifest.update(data => {
+          data.removed_line_ids ??= [];
+          data.removed_request_ids ??= [];
+          if (!data.removed_line_ids.includes(id)) data.removed_line_ids.push(id);
+          delete data.lines[id];
+          for (const [requestId, request] of Object.entries(data.requests ?? {})) {
+            if (request.line_id === id) {
+              delete data.requests[requestId];
+              if (!data.removed_request_ids.includes(requestId)) data.removed_request_ids.push(requestId);
+            }
+          }
+          validateLineManifest(data);
+        });
+        await this.outbox.update(data => {
+          data.entries = data.entries.filter(item => item.event.line_id !== id);
+          data.dead_letters = (data.dead_letters ?? []).filter(item => item.event.line_id !== id);
+        });
+        this.storageMonitor.unregister(id);
+        this.lines.delete(id);
+        line.restoreNativeEvents?.();
+        line.store = null;
+        this.log({component: 'whatsapp_bridge', event: 'line_force_removed', line_id: id, archive: path.basename(archive)});
+        return { line_id: id, removed: true, forced: true };
+      } catch (error) {
+        line.removing = false;
+        throw error;
+      }
+    });
   }
   stopRemovedSocket(line) {
     const socket = line.socket;
