@@ -1,0 +1,12 @@
+# Install: /etc/systemd/system/whatsapp-bridge-restart.service (started only by the .path unit)
+[Unit]
+Description=Restart the WhatsApp bridge on a dashboard request
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /usr/local/libexec/whatsapp-support/restart_bridge_on_request.py
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/whatsapp-support/control

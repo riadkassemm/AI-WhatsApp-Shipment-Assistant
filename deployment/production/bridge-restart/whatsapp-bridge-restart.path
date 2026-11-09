@@ -1,0 +1,11 @@
+# Install: /etc/systemd/system/whatsapp-bridge-restart.path
+#          systemctl daemon-reload && systemctl enable --now whatsapp-bridge-restart.path
+[Unit]
+Description=Watch for dashboard requests to restart the WhatsApp bridge
+
+[Path]
+PathExists=/var/lib/whatsapp-support/control/bridge-restart.request
+Unit=whatsapp-bridge-restart.service
+
+[Install]
+WantedBy=multi-user.target

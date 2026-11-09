@@ -50,6 +50,10 @@ class Settings(BaseSettings):
     whatsapp_linked_device_default_line_id: str = ""
     whatsapp_linked_device_url: str = "http://127.0.0.1:3001"
     whatsapp_linked_device_secret: str = ""
+    # Dashboard "Restart WhatsApp service" (Admins and Super Admins). Requires the
+    # root path unit in deployment/production/bridge-restart/ on the server.
+    whatsapp_bridge_restart_enabled: bool = False
+    whatsapp_bridge_control_directory: str = "/var/lib/whatsapp-support/control"
     whatsapp_linked_device_timeout_seconds: float = Field(default=30.0, ge=1.0, le=120.0)
     # Keep existing numeric business-number IDs as routing keys. Values pin a
     # bridge session to its expected phone number; an empty value permits pairing.

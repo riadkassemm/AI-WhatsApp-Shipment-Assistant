@@ -182,7 +182,7 @@ function element() {return {children: [], classList: {toggle() {}},
   replaceChildren() {this.children = []}, append(...children) {this.children.push(...children)}}}
 const document = {createElement: element};
 const elements = {linkedDeviceSection: element(), linkedDeviceLines: element(),
-  addLinkedDeviceBtn: element(), linkedDeviceStatus: element()};
+  addLinkedDeviceBtn: element(), linkedDeviceStatus: element(), restartBridgeBtn: element()};
 const $ = key => elements[key];
 const text = (element, value) => {element.textContent = value};
 const notify = () => {};

@@ -1240,6 +1240,7 @@ function renderLinkedDeviceStatus(payload) {
   container.replaceChildren();
   $('addLinkedDeviceBtn').disabled = state.linkedDeviceBusy || state.whatsappBusy;
   $('addLinkedDeviceBtn').textContent = pendingLinkedDeviceAddition() ? 'Retry linking' : 'Link another number';
+  syncBridgeRestartButton();
   if (!payload?.configured) return;
   alertLinkedDeviceProblems(payload.lines || []);
   for (const line of payload.lines || []) {
@@ -1317,6 +1318,49 @@ function alertLinkedDeviceProblems(lines) {
   state.alertedLinkedDeviceProblems = current;
 }
 
+// "Restart WhatsApp service" (Admins and Super Admins). The request never
+// talks to the bridge, so it also works when the bridge is frozen; a root
+// helper on the server performs the restart (deployment/production/bridge-restart).
+function syncBridgeRestartButton() {
+  const button = $('restartBridgeBtn');
+  button.classList.toggle('hidden', !state.agent?.bridge_restart_available);
+  button.disabled = Boolean(state.bridgeRestartBusy);
+  button.textContent = state.bridgeRestartBusy ? 'Restarting…' : 'Restart WhatsApp service';
+}
+
+async function restartWhatsAppService() {
+  if (state.bridgeRestartBusy || !state.agent?.bridge_restart_available) return;
+  if (!(await confirmDialog({title: 'Restart WhatsApp service?',
+    message: 'Every number disconnects for about 30 seconds, then reconnects with its saved session. Messages that arrive meanwhile are delivered after reconnecting.',
+    confirmLabel: 'Restart service', tone: 'danger'}))) return;
+  state.bridgeRestartBusy = true;
+  syncBridgeRestartButton();
+  try {
+    await api('/api/support/whatsapp-linked-device/restart', {method: 'POST'});
+    notify('Restarting the WhatsApp service. Numbers reconnect in about 30 seconds.');
+    const deadline = Date.now() + 150_000;
+    await new Promise(resolve => window.setTimeout(resolve, 8000));
+    while (Date.now() < deadline) {
+      try {
+        const payload = await api('/api/support/whatsapp-linked-device/status');
+        if (state.activeModal === 'whatsappModal') renderLinkedDeviceStatus(payload);
+        const paired = (payload.lines || []).filter(line => line.is_paired);
+        if (paired.length && paired.every(line => line.status === 'connected')) {
+          notify('WhatsApp service restarted. All numbers are connected.');
+          return;
+        }
+      } catch (_) { /* The service is still starting. */ }
+      await new Promise(resolve => window.setTimeout(resolve, 4000));
+    }
+    notify('The WhatsApp service is still reconnecting. Check again in a minute.', 'error');
+  } catch (error) {
+    notify(error.message, 'error');
+  } finally {
+    state.bridgeRestartBusy = false;
+    syncBridgeRestartButton();
+  }
+}
+
 async function loadLinkedDeviceStatus() {
   if (!canLinkWhatsApp() || !state.agent?.linked_device_available || state.linkedDeviceBusy) return;
   const request = ++state.linkedDeviceRequest;
@@ -1326,6 +1370,7 @@ async function loadLinkedDeviceStatus() {
   } catch (error) {
     if (request !== state.linkedDeviceRequest || state.activeModal !== 'whatsappModal') return;
     $('linkedDeviceSection').classList.remove('hidden');
+    syncBridgeRestartButton();
     $('linkedDeviceLines').replaceChildren();
     text($('linkedDeviceStatus'), error.message || 'The WhatsApp connection service is unavailable.');
     $('addLinkedDeviceBtn').disabled = state.linkedDeviceBusy || state.whatsappBusy;
@@ -2687,6 +2732,7 @@ $('aiModeScheduled').addEventListener('change', syncAiSettingsFields);
 
 $('closeWhatsAppBtn').addEventListener('click', closeWhatsAppModal);
 $('addLinkedDeviceBtn').addEventListener('click', addLinkedDeviceNumber);
+$('restartBridgeBtn').addEventListener('click', restartWhatsAppService);
 $('refreshWhatsAppBtn').addEventListener('click', refreshWhatsAppRegistry);
 $('wabaSyncForm').addEventListener('submit', syncWabaForm);
 $('startChatLine').addEventListener('change', renderStartChatLinePreview);
