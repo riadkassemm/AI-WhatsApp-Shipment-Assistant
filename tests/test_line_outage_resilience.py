@@ -195,23 +195,26 @@ function element() {return {dataset: {}, textContent: '', classList: {hidden: tr
 const elements = {lineAlertBanner: element(), lineAlertText: element(), lineAlertActionBtn: element(), composerHelp: element()};
 const $ = id => elements[id], text = (node, value) => {node.textContent = value};
 const canLinkWhatsApp = () => true, sounds = [], notifyNewCustomerActivity = value => sounds.push(value);
+const toasts = [], notify = (message, type, onOpen) => toasts.push({message, type, action: Boolean(onOpen)});
 const state = {lineAlertsSeen: new Set(), currentTicketData: {ticket: {business_phone_number_id: '90020'}, permissions: {can_reply: true}}};
 """ + helpers + r"""
 const payload = {lines: [{line_id:'90020', name:'Saida Office', status:'connected', alert:false}],
   storage:{level:'warning', issues:[{line_id:'90020', name:'Saida Office', level:'warning', code:'COMPACTION_FAILED'}]}};
 renderLineHealth(payload); renderLineHealth(payload);
-assert.equal(elements.lineAlertBanner.classList.hidden, false);
-assert.match(elements.lineAlertText.textContent, /Saida Office.*Contact your server administrator/);
-assert.ok(!elements.lineAlertText.textContent.includes('Re-pair'));
-assert.equal(elements.lineAlertActionBtn.classList.hidden, true);
+assert.equal(elements.lineAlertBanner.classList.hidden, true, 'no persistent banner');
+assert.equal(toasts.length, 1, 'one brief toast for the same storage issue');
+assert.equal(toasts[0].message, 'WhatsApp storage needs attention for Saida Office.');
+assert.equal(toasts[0].type, 'error');
+assert.ok(!toasts[0].message.includes('Re-pair'));
 assert.equal(sounds.length, 1, 'one notification for the same storage issue');
 payload.storage = {level:'critical', issues:[{line_id:null, level:'critical', code:'DISK_SPACE_LOW'}]};
 renderLineHealth(payload);
 assert.equal(sounds.length, 2, 'escalation alerts immediately');
+assert.equal(toasts.at(-1).message, 'WhatsApp storage needs attention. New sends are paused.');
 assert.match(elements.composerHelp.textContent, /New sends are paused.*Saved sessions and delivery records are retained/);
 payload.storage = {level:'ok', issues:[]};
 renderLineHealth(payload);
-assert.equal(elements.lineAlertBanner.classList.hidden, true);
+assert.equal(toasts.length, 2, 'a resolved problem shows nothing');
 assert.equal(elements.composerHelp.textContent, 'Connected. Messages are sent from the WhatsApp number for this conversation.');
 payload.storage = {level:'critical', issues:[{line_id:'90021', name:'Tyre Office', level:'critical', code:'JOURNAL_LIMIT'}]};
 renderLineHealth(payload);
@@ -281,31 +284,32 @@ let staff = false;
 const canLinkWhatsApp = () => staff;
 const sounds = [];
 const notifyNewCustomerActivity = message => sounds.push(message);
+const toasts = [], notify = (message, type, onOpen) => toasts.push({message, type, action: Boolean(onOpen)});
 const state = {authenticated: true, lineHealthAt: 0, lineAlertsSeen: new Set(),
   currentTicketData: {ticket: {business_phone_number_id: '90020'}, permissions: {can_reply: true}}};
 """ + helpers + r"""
 const down = {lines: [{line_id: '90020', name: 'Saida Office', status: 'logged_out', since: '2026-10-31T08:10:27Z', alert: true}]};
 renderLineHealth(down);
-assert.equal(elements.lineAlertBanner.classList.hidden, false);
-assert.match(elements.lineAlertText.textContent, /^Saida Office needs relinking since .+\. Ask an authorized staff member to relink the same phone/);
-assert.equal(elements.lineAlertActionBtn.classList.hidden, true, 'no re-pair button without link rights');
+assert.equal(elements.lineAlertBanner.classList.hidden, true, 'no persistent banner');
+assert.match(toasts[0].message, /^Saida Office needs relinking since .+\.$/);
+assert.equal(toasts[0].action, false, 'no settings shortcut without link rights');
 assert.deepEqual(sounds, [], 'nobody who cannot fix it is paged');
 assert.match(elements.composerHelp.textContent, /^Saida Office: Relink required\. Ask an authorized staff member/);
 staff = true; state.lineAlertsSeen.clear();  // every staff role can re-pair
 renderLineHealth(down); renderLineHealth(down);
-assert.match(elements.lineAlertText.textContent, /relink the same phone; conversation history stays/);
-assert.equal(elements.lineAlertActionBtn.classList.hidden, false);
+assert.equal(toasts.length, 2, 'shown again after a page refresh (seen set cleared), once');
+assert.equal(toasts[1].action, true, 'opens WhatsApp settings for staff who can relink');
 assert.equal(sounds.length, 1, 'one sound per outage');
 renderLineHealth({lines: [{line_id: '90020', name: 'Saida Office', status: 'connected', since: null, alert: false}]});
-assert.equal(elements.lineAlertBanner.classList.hidden, true);
+assert.equal(toasts.length, 2);
 assert.equal(elements.composerHelp.textContent, 'Connected. Messages are sent from the WhatsApp number for this conversation.');
 renderLineHealth({available: false,
   lines: [{line_id: '90020', name: 'Saida Office', status: 'offline', connection_state: 'temporarily_unavailable', alert: false}],
   storage: {level: 'critical', issues: [{code: 'BRIDGE_UNAVAILABLE', level: 'critical'}, {code: 'MONITOR_UNAVAILABLE', level: 'critical'}]}});
 assert.match(elements.composerHelp.textContent, /Temporarily unavailable/);
 assert.doesNotMatch(elements.composerHelp.textContent, /Storage recovery required/);
-assert.match(elements.lineAlertText.textContent, /connection status is unavailable/);
-assert.equal(elements.lineAlertActionBtn.classList.hidden, true, 'missing telemetry is not a reason to relink');
+assert.equal(toasts.at(-1).message, 'WhatsApp status is unavailable.');
+assert.equal(toasts.at(-1).action, false, 'missing telemetry is not a reason to relink');
 """
     result = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=10)
     assert result.returncode == 0, result.stderr
