@@ -71,8 +71,12 @@ jobs:
       - name: Unit regressions
         run: python -m pytest --ignore=tests/integration
       - name: Real MariaDB and Redis integration (fresh schema per test)
+        # Run even when an earlier suite fails: known UI fixture failures must
+        # not hide database and bridge results. The job still fails overall.
+        if: ${{ !cancelled() }}
         env:
           SUPPORT_INTEGRATION: '1'
         run: python -m pytest tests/integration
       - name: Bridge regressions (mock WhatsApp)
+        if: ${{ !cancelled() }}
         run: npm test --prefix whatsapp_bridge
