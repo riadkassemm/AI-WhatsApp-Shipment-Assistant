@@ -86,6 +86,9 @@ def registry_probe():
 
     ``is_enabled`` is the Super Admin "Add to app" decision. A newly paired
     number is registered disabled, so it is tracked only after it is enabled.
+    Removal disables the row first (LINKED_DEVICE_REMOVAL_STARTED) and deletes
+    it only when the removal is durably confirmed (LINKED_DEVICE_LINE_REMOVED):
+    until then the identity stays expected ("removal_pending").
     """
     import pymysql
     host = os.environ.get('DB_HOST', '127.0.0.1')
@@ -96,9 +99,16 @@ def registry_probe():
         connect_timeout=2, read_timeout=3, write_timeout=2, autocommit=True)
     try:
         with connection.cursor() as cursor:
-            cursor.execute("""SELECT phone_number_id, is_enabled FROM whatsapp_phone_numbers
-                WHERE source = 'LINKED_DEVICE' AND removed_at IS NULL""")
-            return {str(line_id): bool(enabled) for line_id, enabled in cursor.fetchall()}
+            cursor.execute("""SELECT p.phone_number_id, p.is_enabled,
+                    (SELECT a.action FROM whatsapp_integration_audit a
+                      WHERE BINARY a.phone_number_id = BINARY p.phone_number_id
+                        AND a.action IN ('LINKED_DEVICE_REMOVAL_STARTED', 'LINKED_DEVICE_LINE_REMOVED',
+                                         'WHATSAPP_NUMBER_ENABLED', 'WHATSAPP_NUMBER_DISABLED')
+                      ORDER BY a.id DESC LIMIT 1)
+                FROM whatsapp_phone_numbers p WHERE p.source = 'LINKED_DEVICE' AND p.removed_at IS NULL""")
+            return {str(line_id): 'enabled' if enabled else
+                    'removal_pending' if last_action == 'LINKED_DEVICE_REMOVAL_STARTED' else 'disabled'
+                    for line_id, enabled, last_action in cursor.fetchall()}
     finally:
         connection.close()
 
@@ -155,7 +165,12 @@ def identity_inventory(registry, removed, lines):
     for line_id in registry:
         if not line_id.isdigit() or not 5 <= len(line_id) <= 32:
             raise ValueError('INVALID_REGISTRY_IDENTITY')
-    expected = sorted(line_id for line_id, enabled in registry.items() if enabled)
+    # True/False are accepted as enabled/disabled for compatibility.
+    lifecycle = {line_id: ('enabled' if value is True else 'disabled' if value is False else value)
+                 for line_id, value in registry.items()}
+    if any(value not in {'enabled', 'removal_pending', 'disabled'} for value in lifecycle.values()):
+        raise ValueError('INVALID_REGISTRY_STATE')
+    expected = sorted(line_id for line_id, value in lifecycle.items() if value != 'disabled')
     values, healthy = {}, 0
     for line_id in expected:
         state = 'unknown' if lines is None else _identity_state(by_id.get(line_id))
@@ -171,7 +186,9 @@ def identity_inventory(registry, removed, lines):
         support_bridge_expected_healthy_lines=healthy,
         support_bridge_expected_unhealthy_lines=len(expected) - healthy,
         # Visible in diagnostics, never expected: disabled in the app.
-        support_bridge_disabled_lines=sum(not enabled for enabled in registry.values()),
+        support_bridge_disabled_lines=sum(value == 'disabled' for value in lifecycle.values()),
+        # Removal started but not durably confirmed: still expected (alerts if stuck).
+        support_bridge_removal_pending_lines=sum(value == 'removal_pending' for value in lifecycle.values()),
         # Bridge serves a number the application has no registry row for.
         support_bridge_unregistered_lines=sum(line_id not in registry and line.get('eligible', True) is True
                                               and line.get('lifecycle') != 'decommissioned' for line_id, line in by_id.items()),

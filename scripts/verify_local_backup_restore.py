@@ -6,8 +6,11 @@ throwaway, socket-only instances in a private work directory, verified, and
 the instances are removed. The monitored receipt is written atomically ONLY
 after every check passes; a failure never refreshes it.
 
-Out of scope by design: WhatsApp authentication journals (never copied or
-restored while their owner runs) and customer media (separate manifest checks).
+Scope: MariaDB (all tables are InnoDB, so the dump is one consistent snapshot)
+and Redis. NOT verified here, and never claimed in the receipt: customer media,
+WhatsApp authentication journals/credential stores (never copied or restored
+while their owner runs; a live copy is not a consistent snapshot) and
+application configuration/release metadata.
 Output and the receipt contain counts, sizes and hashes only.
 """
 from __future__ import annotations
@@ -124,8 +127,9 @@ def verify(args):
     if not IDENTIFIER.match(args.database):
         fail('INVALID_DATABASE_NAME')
     args.artifacts.mkdir(mode=0o700, parents=True, exist_ok=True)
-    if shutil.disk_usage(args.artifacts).free < args.min_free_bytes:
-        fail('DISK_RESERVE_LOW')
+    for path in (args.artifacts, args.work_base, args.receipt.parent):
+        if shutil.disk_usage(path).free < args.min_free_bytes:
+            fail('DISK_RESERVE_LOW')
     run = args.artifacts / time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())
     run.mkdir(mode=0o700)
     try:
@@ -192,6 +196,8 @@ def _verify_into(args, run):
             keys = int(subprocess.run(['redis-cli', '-s', str(socket), 'dbsize'], capture_output=True, text=True).stdout.strip())
 
     receipt = {'verified': True, 'restored_at': time.time(), 'method': 'isolated_logical_restore',
+               'scope': ['mariadb', 'redis'],
+               'not_verified': ['customer_media', 'whatsapp_authentication', 'configuration_and_releases'],
                'database_tables': sum(kind == 'BASE TABLE' for kind in before['tables'].values()),
                'database_rows': sum(restored['counts'].values()), 'redis_keys': keys,
                'database_dump_sha256': digest(dump), 'redis_rdb_sha256': digest(rdb),
@@ -203,6 +209,11 @@ def _verify_into(args, run):
         handle.write(json.dumps(receipt))
         handle.flush(); os.fsync(handle.fileno())
     os.replace(temporary_receipt, args.receipt)
+    directory = os.open(args.receipt.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory)  # The rename itself survives a crash.
+    finally:
+        os.close(directory)
     # Retention: only this tool's own verified run directories.
     runs = sorted(path for path in args.artifacts.iterdir() if path.is_dir() and NAME.match(path.name) and (path / 'receipt.json').exists())
     for old in runs[:-args.keep]:
@@ -225,11 +236,18 @@ def main():
         parser.error('--keep must be at least 1')
     args.artifacts.mkdir(mode=0o700, parents=True, exist_ok=True)
     with (args.artifacts / '.lock').open('w') as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            print(json.dumps({'verified': False, 'code': 'ALREADY_RUNNING'}), flush=True)
+            raise SystemExit(1)
         try:
             print(json.dumps(verify(args)), flush=True)
         except VerificationFailed as error:
             print(json.dumps({'verified': False, 'code': str(error)}), flush=True)
+            raise SystemExit(1)
+        except Exception as error:  # Never print paths, SQL or data; the receipt is untouched.
+            print(json.dumps({'verified': False, 'code': 'UNEXPECTED_' + type(error).__name__}), flush=True)
             raise SystemExit(1)
 
 

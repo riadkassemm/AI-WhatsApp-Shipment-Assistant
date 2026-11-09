@@ -223,3 +223,23 @@ def test_decommissioned_identity_keeps_uncertainty_visible_without_counting_as_e
     assert metrics['support_bridge_fenced_unresolved_lines'] == 0
     assert metrics['support_bridge_diagnostics_up'] == 1
     assert any(k.startswith('support_bridge_uncertain_sends{') and v == 41 for k, v in metrics.items())
+
+
+def test_removal_stops_counting_only_after_durable_confirmation():
+    data = snapshot(); data['lines'] = data['lines'][:2]
+    # Removal started (row disabled, audit LINKED_DEVICE_REMOVAL_STARTED) and the
+    # bridge has already dropped the identity: still expected, so it alerts.
+    del data['lines'][1]
+    output = run(data, {'90000': 'enabled', '90001': 'removal_pending'})
+    assert 'support_bridge_expected_lines 2\n' in output and 'support_bridge_expected_unhealthy_lines 1\n' in output
+    assert 'support_bridge_removal_pending_lines 1\n' in output and output.count('state="missing"} 1') == 1
+    # Confirmed (registry row deleted, tombstoned in the manifest): no longer expected.
+    output = run(data, {'90000': 'enabled'}, {'90001'})
+    assert 'support_bridge_expected_lines 1\n' in output and 'support_bridge_expected_unhealthy_lines 0\n' in output
+    assert 'support_bridge_removal_pending_lines 0\n' in output and 'support_bridge_removed_reactivated_lines 0\n' in output
+    # A plain "Deactivate" (no removal in progress) is visible but not expected.
+    output = run(data, {'90000': 'enabled', '90001': 'disabled'})
+    assert 'support_bridge_expected_lines 1\n' in output and 'support_bridge_disabled_lines 1\n' in output
+    # An unknown lifecycle value fails closed.
+    output = run(data, {'90000': 'private-unknown-state'})
+    assert 'support_bridge_registry_up 0' in output and 'private' not in output
