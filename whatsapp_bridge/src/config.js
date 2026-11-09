@@ -114,6 +114,18 @@ export function readStorageConfig(env = process.env) {
   return {maintenance, monitoring};
 }
 
+export function readAuthConfig(env = process.env) {
+  const prefix = 'WHATSAPP_LINKED_DEVICE_AUTH_';
+  const rawTimeout = env[prefix + 'DRAIN_TIMEOUT_MS'];
+  const drainTimeoutMs = rawTimeout === undefined ? undefined : Number(rawTimeout);
+  if (drainTimeoutMs !== undefined && (!Number.isSafeInteger(drainTimeoutMs) || drainTimeoutMs < 30_000)) {
+    throw new Error(`${prefix}DRAIN_TIMEOUT_MS must be an integer of at least 30000.`);
+  }
+  const resume = env[prefix + 'RESUME_AFTER_UNCLEAN_EXIT'] ?? 'true';
+  if (!['true', 'false'].includes(resume)) throw new Error(`${prefix}RESUME_AFTER_UNCLEAN_EXIT must be true or false.`);
+  return { drainTimeoutMs, resumeAfterUncleanExit: resume === 'true' };
+}
+
 export function readConfig(env = process.env) {
   const secret = env.WHATSAPP_LINKED_DEVICE_SECRET ?? '';
   if (secret.length < 32) throw new Error('WHATSAPP_LINKED_DEVICE_SECRET must contain at least 32 characters.');
@@ -144,6 +156,7 @@ export function readConfig(env = process.env) {
     wsIpFamily: readWebSocketIpFamily(env.WHATSAPP_WS_IP_FAMILY),
     managementEnabled: env.WHATSAPP_ADMIN_RECOVERY_ENABLED === 'true',
     storage: readStorageConfig(env),
+    auth: readAuthConfig(env),
   };
 }
 

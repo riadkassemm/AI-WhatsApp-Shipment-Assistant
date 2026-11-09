@@ -722,3 +722,133 @@ test('already admitted callbacks retain later rejected keys and credentials afte
     await assert.rejects(auth.renew(), /STORAGE_RESTART_REQUIRED/);
   } finally { release.resolve(); auth.store.append = append; }
 });
+
+test('a burst of queued provider pipelines shares durable intent writes instead of rewriting every intent per job', async t => {
+  const { auth } = await fixture(t);
+  const open = fs.open;
+  let intentWrites = 0;
+  t.mock.method(fs, 'open', async (filename, ...args) => {
+    if (String(filename).includes('.auth-intent.')) intentWrites++;
+    return open(filename, ...args);
+  });
+  const release = gate(), jobs = 300;
+  const started = [];
+  // Baileys enqueues every offline message into its mutex at once; each job's
+  // intent must be durable before it runs, but they need not be written alone.
+  const tasks = Array.from({ length: jobs }, (_, index) => auth.trackProviderTask(async () => {
+    started.push(index);
+    await release.promise;
+    return index;
+  }));
+  while (started.length < jobs) await new Promise(resolve => setImmediate(resolve));
+  const intents = JSON.parse(await readFile(auth.store.filename + '.auth-intent', 'utf8'), BufferJSON.reviver);
+  assert.equal(intents.operations.length, jobs, 'every running job is fenced by a durable intent');
+  release.resolve();
+  assert.deepEqual(await Promise.all(tasks), [...Array(jobs).keys()]);
+  await assert.rejects(readFile(auth.store.filename + '.auth-intent'), { code: 'ENOENT' });
+  assert.ok(intentWrites < 20, `${intentWrites} intent rewrites for ${jobs} queued jobs`);
+  assert.equal(auth.store.failed, false);
+});
+
+test('a queued provider mutex backlog holds one intent at a time and retirement drops jobs that never started', async t => {
+  const { auth } = await fixture(t);
+  await auth.armSession();
+  const keys = providerKeys(auth), socket = { messageMutex: makeMutex() }, release = gate(), entered = gate();
+  auth.trackProviderPipelines(socket);
+  const open = fs.open;
+  let intentWrites = 0;
+  t.mock.method(fs, 'open', async (filename, ...args) => {
+    if (String(filename).includes('.auth-intent.')) intentWrites++;
+    return open(filename, ...args);
+  });
+  // Production: 3,074 queued jobs each held an intent from enqueue, and every
+  // completion rewrote all remaining ones.
+  const first = socket.messageMutex.mutex(async () => {
+    await keys.transaction(async () => keys.set({ session: { first: Buffer.from([1]) } }), 'peer');
+    entered.resolve(); await release.promise;
+  });
+  let ran = 0;
+  const queued = Array.from({ length: 300 }, (_, index) => socket.messageMutex.mutex(async () => {
+    ran++;
+    await keys.transaction(async () => keys.set({ session: { ['queued' + index]: Buffer.from([index % 251]) } }), 'peer');
+  }));
+  queued.forEach(job => job.catch(() => {}));
+  await entered.promise;
+  const intents = JSON.parse(await readFile(auth.store.filename + '.auth-intent', 'utf8'), BufferJSON.reviver);
+  assert.equal(intents.operations.length, 1, 'only the running job is fenced');
+  // Let part of the backlog run, then retire mid-backlog.
+  release.resolve(); await first;
+  while (ran < 50) await new Promise(resolve => setImmediate(resolve));
+  auth.retire();
+  const started = performance.now();
+  await auth.drain();
+  assert.ok(performance.now() - started < 2_000, 'drain waits only for the running job');
+  const outcomes = await Promise.allSettled(queued);
+  const rejected = outcomes.filter(outcome => outcome.status === 'rejected');
+  assert.ok(rejected.length > 0 && rejected.every(outcome => outcome.reason.code === 'AUTH_SESSION_RETIRED'));
+  assert.equal(auth.store.failed, false);
+  await assert.rejects(readFile(auth.store.filename + '.auth-intent'), { code: 'ENOENT' });
+  await assert.rejects(readFile(auth.store.filename + '.auth-active'), { code: 'ENOENT' });
+  // Start, mutation and clear: a constant number of small writes per executed job.
+  assert.ok(intentWrites <= ran * 4 + 4, `${intentWrites} intent writes for ${ran} executed jobs`);
+});
+
+async function resumeFixture(t, options = {}) {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'bridge-auth-resume-'));
+  const events = [];
+  const auth = await createAuth(directory, { resume: true, onRecovery: event => events.push(event), ...options });
+  t.after(async () => { auth.retire(); await auth.drain().catch(() => {}); await auth.store.close().catch(() => {}); await rm(directory, { recursive: true, force: true }); });
+  return { directory, auth, events };
+}
+
+test('resume mode: an initial-sync burst writes no intents and, if still running at the deadline, is abandoned without blocking', async t => {
+  const { auth, events } = await resumeFixture(t, { drainTimeoutMs: 300 });
+  await auth.armSession();
+  const release = gate(), jobs = 14_000;
+  // Production 2026-11-09: 14,032 provider tasks started within 5 s of pairing.
+  const tasks = Array.from({ length: jobs }, () => auth.trackProviderTask(async () => { await release.promise; }));
+  tasks.forEach(task => task.catch(() => {}));
+  await new Promise(resolve => setImmediate(resolve));
+  await assert.rejects(readFile(auth.store.filename + '.auth-intent'), { code: 'ENOENT' });
+  const started = performance.now();
+  const next = await auth.renew();
+  assert.ok(performance.now() - started < 3_000, 'retirement ends at the deadline');
+  assert.equal(auth.store.failed, false);
+  assert.ok(events.some(event => event.event === 'auth_work_abandoned' && event.reason === 'drain_timeout' && event.archived_intents === 0));
+  release.resolve();
+  const outcomes = await Promise.allSettled(tasks);
+  assert.ok(outcomes.every(outcome => outcome.status === 'fulfilled' || outcome.reason.code === 'AUTH_SESSION_RETIRED'));
+  assert.equal(auth.store.failed, false);
+  await next.state.keys.set({ session: { after: Buffer.from([1]) } });
+  assert.deepEqual(next.store.data.keys.session.after, Buffer.from([1]));
+});
+
+test('resume mode: a provider transaction stuck past the deadline is abandoned with evidence, not failed', async t => {
+  const { auth, events } = await resumeFixture(t);
+  await auth.armSession();
+  const keys = providerKeys(auth), entered = gate(), never = gate();
+  const stuck = keys.transaction(async () => {
+    await keys.set({ session: { buffered: Buffer.from([6]) } });
+    entered.resolve(); await never.promise;
+  }, 'peer');
+  stuck.catch(() => {});
+  await entered.promise;
+  auth.retire();
+  await auth.drain({ timeoutMs: 50 });
+  assert.equal(auth.store.failed, false);
+  await assert.rejects(readFile(auth.store.filename + '.auth-intent'), { code: 'ENOENT' });
+  await assert.rejects(readFile(auth.store.filename + '.auth-failure'), { code: 'ENOENT' });
+  await assert.rejects(readFile(auth.store.filename + '.auth-active'), { code: 'ENOENT' });
+  const archived = (await fs.readdir(path.dirname(auth.store.filename))).filter(name => name.startsWith('auth.json.auth-intent.abandoned-'));
+  assert.equal(archived.length, 1);
+  const evidence = JSON.parse(await readFile(path.join(path.dirname(auth.store.filename), archived[0]), 'utf8'), BufferJSON.reviver);
+  assert.deepEqual(evidence.operations[0].mutations[0].session.buffered, Buffer.from([6]));
+  assert.ok(events.some(event => event.event === 'auth_work_abandoned' && event.reason === 'drain_timeout' && event.archived_intents === 1));
+  assert.equal(auth.store.data.keys.session, undefined, 'the uncommitted change is discarded');
+  const next = await createAuth(path.dirname(auth.store.filename), { store: auth.store, resume: true });
+  never.resolve();
+  await assert.rejects(stuck);
+  assert.equal(auth.store.failed, false, 'the abandoned task cannot poison the store when it finally returns');
+  await next.state.keys.set({ session: { resumed: Buffer.from([2]) } });
+  assert.deepEqual(next.store.data.keys.session.resumed, Buffer.from([2]));
+});

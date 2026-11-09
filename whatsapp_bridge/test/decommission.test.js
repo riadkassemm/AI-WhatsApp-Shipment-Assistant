@@ -26,7 +26,8 @@ async function fixture(t) {
   const manifest = await new FileStore(path.join(dataDir,'lines.json'),()=>({version:1,lines:{[ID]:''},requests:{}})).load();
   const before = await inventory(directory);
   const sockets=[];
-  const config={dataDir,lines:HEALTHY.map(line_id=>({line_id,expected_phone:''})),fallbackLineId:ID,storage:{maintenance:{enabled:false}},ackTimeoutMs:30};
+  // Strict fence machinery under test; resume mode is covered in crash-resilience.test.js.
+  const config={dataDir,lines:HEALTHY.map(line_id=>({line_id,expected_phone:''})),fallbackLineId:ID,storage:{maintenance:{enabled:false}},ackTimeoutMs:30,auth:{resumeAfterUncleanExit:false}};
   const deps={assertExclusiveOwnership:release.assertHeld,storageFilesystem:disk,log(){},onError(){},
     fetch:async()=>{throw new Error('Unexpected callback');},makeSocket:()=>{
       const ws=new EventEmitter();ws.isOpen=true;let end;

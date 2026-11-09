@@ -48,7 +48,9 @@ async function fixture(t, change = () => {}) {
   const release = await acquireDataDirectory(dataDir), sockets = [];
   const config = {dataDir, secret: 'isolated-mock-secret-longer-than-32-bytes',
     lines: HEALTHY.map(line_id => ({line_id, expected_phone: ''})), callbackUrl: 'http://127.0.0.1/unused',
-    ackTimeoutMs: 30, storage: {maintenance: {enabled: false}}};
+    ackTimeoutMs: 30, storage: {maintenance: {enabled: false}},
+    // These tests verify the strict fence machinery; resume mode is covered in crash-resilience.test.js.
+    auth: {resumeAfterUncleanExit: false}};
   const deps = {assertExclusiveOwnership: release.assertHeld, storageFilesystem: disk, log() {}, onError() {},
     makeSocket: () => {const s = socket(sockets.length); sockets.push(s); return s;}, fetch: async () => {throw new Error('Unexpected callback');}};
   const seed = await new Bridge(config, deps).initialize({autoConnect: false});
