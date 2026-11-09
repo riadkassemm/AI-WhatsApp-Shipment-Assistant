@@ -135,6 +135,9 @@ class Settings(BaseSettings):
     support_audio_max_bytes: int = 16 * 1024 * 1024
     support_document_max_bytes: int = 25 * 1024 * 1024
     support_video_max_bytes: int = 192 * 1024 * 1024
+    # Ceiling for every staff upload (all media types, quick replies, saved
+    # attachments). Inbound customer media keeps the per-type limits above.
+    support_upload_max_bytes: int = 32 * 1024 * 1024
     support_media_download_timeout_seconds: float = 20.0
     support_media_transcode_timeout_seconds: float = 30.0
     support_media_ffmpeg_path: str = "ffmpeg"
