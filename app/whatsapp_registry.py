@@ -419,7 +419,7 @@ class WhatsAppRegistryService:
     def _require_manager(agent: SupportAgent) -> None:
         if not agent.can_manage_whatsapp_connections:
             raise WhatsAppRegistryForbiddenError(
-                "Only Super Admins can change WhatsApp numbers."
+                "Only Admins and Super Admins can change WhatsApp numbers."
             )
 
     @staticmethod

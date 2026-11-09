@@ -204,14 +204,12 @@ async def test_api_requires_valid_session_csrf_and_current_manager_role(infrastr
         client.cookies.set(settings.support_cookie_name, 'token-3')
         assert (await client.delete(path)).status_code == 403
         assert not (await sql('SELECT removed_at FROM whatsapp_phone_numbers WHERE phone_number_id=%s', (LINE,)))[0]['removed_at']
-        # Since Phase A (PR #88) only Super Admins may change WhatsApp numbers;
-        # an Admin is refused and nothing is removed.
-        await sql("UPDATE staff SET role='admin' WHERE id=8")
-        assert (await client.delete(path, headers=headers)).status_code == 403
-        assert not (await sql('SELECT removed_at FROM whatsapp_phone_numbers WHERE phone_number_id=%s', (LINE,)))[0]['removed_at']
-        await sql("UPDATE staff SET role='supervisor' WHERE id=8")
-        response = await client.delete(path, headers=headers)
-        assert response.status_code == 200 and response.json()['numbers'] == []
+        # Admin and Super Admin share every WhatsApp management permission
+        # (Staff stays denied above). The repeated removal is idempotent.
+        for role in ('admin', 'supervisor'):
+            await sql('UPDATE staff SET role=%s WHERE id=8', (role,))
+            response = await client.delete(path, headers=headers)
+            assert response.status_code == 200 and response.json()['numbers'] == []
         await sql("UPDATE staff SET is_active=0 WHERE id=8")
         assert (await client.delete(path, headers=headers)).status_code == 401
 

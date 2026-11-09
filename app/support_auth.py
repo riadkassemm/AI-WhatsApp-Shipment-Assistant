@@ -18,6 +18,7 @@ from app.staff_repository import staff_repository
 logger = logging.getLogger("shipment-bot")
 
 _ALLOWED_ROLES = {"agent", "supervisor", "admin"}
+_WHATSAPP_MANAGERS = frozenset({"admin", "supervisor"})
 # Fixed bcrypt hash used only to make unknown-email login attempts pay roughly the
 # same password-verification cost as known accounts. It is not a credential.
 _DUMMY_BCRYPT_HASH = b"$2b$12$C6UzMDM.H6dfI/f/IKcEe.9N5qg3wY.xBmQmH0GmTKp6WZL6f8BqK"
@@ -35,21 +36,25 @@ class SupportAgent:
     def is_supervisor(self) -> bool:
         return self.role in {"supervisor", "admin"}
 
+    # WhatsApp management: Admin and Super Admin have identical permissions
+    # (diagnostics, assessment, register/link/pair/QR, rename, enable/disable,
+    # connect/disconnect/remove, safe reconnect, pause/resume, history). Staff
+    # has none. Customer conversation access is governed separately.
     @property
     def can_view_whatsapp_management(self) -> bool:
-        return self.role in {"admin", "supervisor"}
+        return self.role in _WHATSAPP_MANAGERS
 
     @property
     def can_manage_whatsapp_connections(self) -> bool:
-        return self.role == "supervisor"
+        return self.role in _WHATSAPP_MANAGERS
 
     @property
     def can_recover_whatsapp(self) -> bool:
-        return self.role in {'admin', 'supervisor'}
+        return self.role in _WHATSAPP_MANAGERS
 
     @property
     def can_assess_whatsapp_authentication(self) -> bool:
-        return self.role == "supervisor"
+        return self.role in _WHATSAPP_MANAGERS
 
     @property
     def is_staff(self) -> bool:

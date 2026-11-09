@@ -128,17 +128,17 @@ def test_cookie_rbac_and_csrf_cover_new_and_legacy_routes_without_side_effects(r
         for suffix in READS:
             assert (await request('GET', PREFIX + suffix)).status_code == 401
             assert (await request('GET', PREFIX + suffix, 'agent')).status_code == 403
-        assert (await request('GET', PREFIX + READS[-1], 'admin')).status_code == 403
         for method, path, body in MUTATIONS:
             assert (await request(method, path, payload=body)).status_code == 401
-            for role in ('agent', 'admin'):
-                assert (await request(method, path, role, body)).status_code == 403
-            assert (await request(method, path, 'supervisor', body, csrf=False)).status_code == 403
+            assert (await request(method, path, 'agent', body)).status_code == 403
+            # Admin and Super Admin share WhatsApp management; both still need CSRF.
+            for role in ('admin', 'supervisor'):
+                assert (await request(method, path, role, body, csrf=False)).status_code == 403
         assert not sql and not calls and not writes
         for role in ('agent', 'admin', 'supervisor'):
             response = await request('GET', PREFIX + '/status', role)
             assert response.status_code == 200
-            assert ('SYNTHETIC_QR_SECRET' in response.text) == (role == 'supervisor')
+            assert ('SYNTHETIC_QR_SECRET' in response.text) == (role in ('admin', 'supervisor'))
             assert 'SYNTHETIC_PRIVATE_EVIDENCE' not in response.text
     asyncio.run(run())
 
@@ -150,7 +150,7 @@ def test_refresh_detail_history_assessment_preserve_all_synthetic_state(release,
         for _ in range(2):
             service.at = -100
             for role in ('admin', 'supervisor'):
-                for suffix in READS[:3] + (READS[3:] if role == 'supervisor' else []):
+                for suffix in READS:
                     response = await request('GET', PREFIX + suffix, role)
                     assert response.status_code == 200
                     assert response.headers['cache-control'] == 'no-store'

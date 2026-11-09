@@ -291,7 +291,7 @@ def test_linked_mutation_callback_waits_for_original_and_preserves_event(linked_
     assert request("POST", "/api/whatsapp/linked-device/events", payload=event).json() == {"status": "applied"}
 
 
-def test_linked_status_filters_accounts_and_restricts_qr_to_super_admin(linked_config, monkeypatch):
+def test_linked_status_filters_accounts_and_restricts_qr_to_whatsapp_managers(linked_config, monkeypatch):
     calls = []
 
     async def status():
@@ -305,10 +305,14 @@ def test_linked_status_filters_accounts_and_restricts_qr_to_super_admin(linked_c
     path = "/api/support/whatsapp-linked-device/status"
     assert request("GET", path, role="driver").status_code == 403
     assert calls == []
-    for role in ("agent", "admin"):
-        response = request("GET", path, role=role)
-        assert response.status_code == 200
-        assert "qr_data_url" not in response.text and "base64" not in response.text
+    response = request("GET", path, role="agent")
+    assert response.status_code == 200
+    assert "qr_data_url" not in response.text and "base64" not in response.text
+    # Admin and Super Admin pair numbers, so both see this account's QR only.
+    for role in ("admin", "supervisor"):
+        managed = request("GET", path, role=role)
+        assert managed.status_code == 200 and "data:image/png;base64,test" in managed.text
+        assert "private-other-account" not in managed.text
     payload = request("GET", path).json()
     assert len(payload["lines"]) == 1 and payload["lines"][0]["line_id"] == "90001"
     assert payload["lines"][0]["active_transport"] == "linked_device"
@@ -446,15 +450,14 @@ def test_pairing_failure_preserves_registered_disabled_row_for_existing_pair(all
     assert state["lines"]["90001"] == "connected"
 
 
-def test_add_number_requires_super_admin(allocation_bridge):
+def test_add_number_requires_whatsapp_manager(allocation_bridge):
     response = request("POST", "/api/support/whatsapp-linked-device/lines", payload={"request_id": str(uuid4())}, role="driver")
     assert response.status_code == 403 and allocation_bridge["calls"] == []
     response = request("POST", "/api/support/whatsapp-linked-device/lines", payload={"request_id": str(uuid4())}, role="agent")
     assert response.status_code == 403 and allocation_bridge["calls"] == []
-    response = request("POST", "/api/support/whatsapp-linked-device/lines", payload={"request_id": str(uuid4())}, role="admin")
-    assert response.status_code == 403 and allocation_bridge["calls"] == []
-    response = request("POST", "/api/support/whatsapp-linked-device/lines", payload={"request_id": str(uuid4())}, role="supervisor")
-    assert response.status_code == 200 and allocation_bridge["calls"]
+    for count, role in enumerate(("admin", "supervisor"), 1):
+        response = request("POST", "/api/support/whatsapp-linked-device/lines", payload={"request_id": str(uuid4())}, role=role)
+        assert response.status_code == 200 and len([c for c in allocation_bridge["calls"] if c[0] == "add"]) == count
 
 
 @pytest.mark.parametrize("body", [{}, {"request_id": "invalid"}, {"request_id": str(uuid4()), "expected_phone": "not-a-phone"}, {"request_id": str(uuid4()), "expected_phone": "123"}, {"request_id": str(uuid4()), "line_id": "90003"}])
@@ -686,7 +689,7 @@ def test_remove_success_survives_followup_status_outage(removal_bridge):
     assert response.status_code == 200 and response.json()["unlinked"] and response.json()["status_unavailable"]
 
 
-@pytest.mark.parametrize("role", ["agent", "admin", "driver"])
+@pytest.mark.parametrize("role", ["agent", "driver"])
 def test_remove_is_manager_only(removal_bridge, role):
     assert request("DELETE", "/api/support/whatsapp-linked-device/lines/90001", payload={"close_active_tickets": True}, role=role).status_code == 403
     assert removal_bridge["calls"] == []

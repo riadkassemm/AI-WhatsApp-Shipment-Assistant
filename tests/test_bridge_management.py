@@ -127,31 +127,31 @@ def test_staff_cannot_read_management(service, role, path):
     assert service.client.calls == service.repository.calls == []
 
 
-def test_admin_read_access_and_super_admin_assessment(service):
+@pytest.mark.parametrize('role', ['admin', 'supervisor'])
+def test_admin_and_super_admin_have_identical_read_and_assessment_access(service, role):
     async def run():
-        assert (await request('/management')).status_code == 200
-        assert (await request('/lines/90001/diagnostics')).status_code == 200
-        history = await request('/lines/90002/history')
+        assert (await request('/management', role)).status_code == 200
+        assert (await request('/lines/90001/diagnostics', role)).status_code == 200
+        history = await request('/lines/90002/history', role)
         assert history.status_code == 200 and 'PRIVATE' not in history.text
         assert history.headers['cache-control'] == 'no-store'
-        assert (await request('/lines/90001/auth-recovery')).status_code == 403
-        response = await request('/lines/90001/auth-recovery', 'supervisor')
+        response = await request('/lines/90001/auth-recovery', role)
         assert response.status_code == 200 and response.json()['recovery_allowed'] is False
         assert 'PRIVATE' not in response.text
-        assert (await request('/lines/99999/diagnostics')).status_code == 404
-        assert (await request('/lines/99999/auth-recovery', 'supervisor')).status_code == 404
+        assert (await request('/lines/99999/diagnostics', role)).status_code == 404
+        assert (await request('/lines/99999/auth-recovery', role)).status_code == 404
         assert service.client.calls.count('assessment') == 1
     asyncio.run(run())
 
 
-@pytest.mark.parametrize('role', ['agent', 'admin'])
+@pytest.mark.parametrize('role', ['agent', 'driver'])
 @pytest.mark.parametrize('method,path,payload', [
     ('POST', '/lines', {'request_id': '00000000-0000-4000-8000-000000000001'}),
     ('POST', '/lines/90001/connect', None), ('POST', '/lines/90001/disconnect', None),
     ('DELETE', '/lines/90001', {'close_active_tickets': True}),
     ('DELETE', '/lines/90001', {'close_active_tickets': True, 'mode': 'decommission'}),
 ])
-def test_legacy_mutation_routes_deny_admin_and_staff_before_bridge_access(service, role, method, path, payload):
+def test_legacy_mutation_routes_deny_staff_before_bridge_access(service, role, method, path, payload):
     assert asyncio.run(request(path, role, method, payload)).status_code == 403
     assert service.client.calls == service.repository.calls == []
 
@@ -164,11 +164,11 @@ def test_quarantined_assessment_never_contacts_auth_owner(service):
     asyncio.run(run())
 
 
-def test_registry_mutations_deny_admin_and_staff_before_persistence():
+def test_registry_mutations_deny_staff_before_persistence():
     from app.whatsapp_registry import WhatsAppRegistryForbiddenError, WhatsAppRegistryService
     service = WhatsAppRegistryService(repository=object())
     async def run():
-        for role in ('agent', 'admin'):
+        for role in ('agent', 'driver'):
             agent = SupportAgent(id='1', name='Operator', role=role)
             for operation in (lambda: service.set_number_enabled(agent, '90001', True),
                               lambda: service.set_number_enabled(agent, '90001', False),

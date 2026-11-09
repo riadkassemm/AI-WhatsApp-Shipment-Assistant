@@ -1537,7 +1537,7 @@ async function removeLinkedDeviceNumber(lineId) {
 }
 
 async function changeLinkedDeviceConnection(lineId, action) {
-  // Existing pairing/logout workflows require the explicit Super Admin capability.
+  // Pairing/logout workflows require the server-granted WhatsApp management capability (Admin or Super Admin).
   if (!(action === 'connect' ? canLinkWhatsApp() : canManageWhatsApp()) || state.linkedDeviceBusy) return;
   if (action === 'disconnect' && !(await confirmDialog({title: 'Unlink device?', message: 'Unlink this WhatsApp device? You will need to pair it again to use this connection.', confirmLabel: 'Unlink device', tone: 'danger'}))) return;
   state.linkedDeviceBusy = true;

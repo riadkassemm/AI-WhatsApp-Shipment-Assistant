@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from app.bridge_management_service import describe_line, iso
+from app.support_auth import SupportAgent
 from app.support_ui import _ASSETS, _SCRIPT_NAMES, _TEMPLATE, _configure
 
 
@@ -19,6 +20,12 @@ def test_management_roles_layout_and_read_only_interactions(tmp_path, role, widt
     browser = shutil.which(os.environ.get('SUPPORT_TEST_BROWSER', 'chromium'))
     if not browser:
         pytest.skip('Select Chromium with SUPPORT_TEST_BROWSER')
+    agent = SupportAgent(id='7', name='Mock operator', role=role)
+    capabilities = {'can_view_whatsapp_management': agent.can_view_whatsapp_management,
+                    'can_manage_whatsapp': agent.can_manage_whatsapp_connections,
+                    'can_link_whatsapp': agent.can_manage_whatsapp_connections,
+                    'can_assess_whatsapp_authentication': agent.can_assess_whatsapp_authentication,
+                    'can_recover_whatsapp': agent.can_recover_whatsapp}
     now = time.time()
     lines = []
     for index, state in enumerate(('connected', 'disconnected', 'error', 'decommissioned'), 1):
@@ -80,9 +87,11 @@ window.fetch = async () => {throw new Error('Unexpected network request');};
       notice: 'Observation only. No fence was changed.', blockers: ['OWNER_NOT_RETIRED']};
     throw new Error('Unexpected path');
   };
-  state.agent = {id:'7', name:'Mock operator', role, can_view_whatsapp_management:role !== 'agent',
-    can_manage_whatsapp:role === 'supervisor', can_link_whatsapp:role === 'supervisor',
-    can_assess_whatsapp_authentication:role === 'supervisor',can_recover_whatsapp:role !== 'agent'};
+  // Capabilities come from the real backend policy (support_auth.SupportAgent).
+  state.agent = {id:'7', name:'Mock operator', role, ...CAPABILITIES};
+  const manager = role !== 'agent';
+  check(['can_view_whatsapp_management','can_manage_whatsapp','can_link_whatsapp','can_assess_whatsapp_authentication',
+    'can_recover_whatsapp'].every(flag => state.agent[flag] === manager), 'Admin and Super Admin share WhatsApp capabilities');
   setAgentIdentity(state.agent); configureStaffAccess();
   state.authenticated = true;
   $('sessionLoading').classList.add('hidden'); $('dashboard').classList.remove('hidden');
@@ -94,8 +103,8 @@ window.fetch = async () => {throw new Error('Unexpected network request');};
     await loadBridgeManagement();
     check($('bridgeIdentities').children.length === 4, 'Complete inventory');
     check(dashboardRefresh.interval() === 5000, 'Five-second refresh');
-    check($('bridgeLegacyWorkflowsBtn').classList.contains('hidden') === (role !== 'supervisor'), 'Legacy permission');
-    check($('bridgeAssessmentBtn').classList.contains('hidden') === (role !== 'supervisor'), 'Assessment permission');
+    check(!$('bridgeLegacyWorkflowsBtn').classList.contains('hidden'), 'Legacy pairing/removal permission');
+    check(!$('bridgeAssessmentBtn').classList.contains('hidden'), 'Assessment permission');
     if (recovery) {
       check(!$('bridgeFutureActions').querySelector('button').disabled, 'Pause enabled');
       const pending=requestBridgeRecovery('pause');
@@ -111,7 +120,7 @@ window.fetch = async () => {throw new Error('Unexpected network request');};
     check(document.activeElement === row && $('bridgeFacts').firstElementChild === facts, 'Focus/DOM continuity');
     check($('bridgeExplanation').textContent.includes('authentication review'), 'Fenced explanation');
     check([...$('bridgeFutureActions').querySelectorAll('button')].every(button => button.disabled), 'Recovery disabled');
-    if (role === 'supervisor') {await loadBridgeAssessment(); check($('bridgeAssessment').textContent.includes('OWNER_NOT_RETIRED'), 'Sanitized assessment');}
+    await loadBridgeAssessment(); check($('bridgeAssessment').textContent.includes('OWNER_NOT_RETIRED'), 'Sanitized assessment');
     unavailable = true; await loadBridgeManagement();
     check($('bridgeTelemetryWarning').textContent.includes('stale'), 'Telemetry outage');
     unavailable = false; await loadBridgeManagement();
@@ -123,7 +132,7 @@ window.fetch = async () => {throw new Error('Unexpected network request');};
   check(testErrors.length === 0, testErrors.join('; '));
   document.body.dataset.bridgeTest = 'passed';
 })().catch(error => {document.body.dataset.bridgeTest = 'FAILED: ' + error.stack;});
-""".replace('ROLE', json.dumps(role)).replace('SNAPSHOT', json.dumps(payload)).replace('RECOVERY', json.dumps(recovery))
+""".replace('CAPABILITIES', json.dumps(capabilities)).replace('ROLE', json.dumps(role)).replace('SNAPSHOT', json.dumps(payload)).replace('RECOVERY', json.dumps(recovery))
     html = _configure(_TEMPLATE.replace('<script src="/support/image-editor.js"></script>', '')
         .replace('__SUPPORT_THEME__', '<script>' + before + '</script>')
         .replace('__SUPPORT_STYLE__', '<style>' + _ASSETS['support.css'] + '</style>')

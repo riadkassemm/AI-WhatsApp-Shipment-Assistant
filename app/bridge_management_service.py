@@ -18,8 +18,8 @@ from app.whatsapp_line_health import summarize_storage
 REASONS = {
     "temporary_transport": "Connection interrupted. Automatic reconnection may recover this session.",
     "restart_required": "WhatsApp requested a connection restart.",
-    "logged_out": "WhatsApp has logged this session out. Super Admin pairing review is required.",
-    "authentication_failure": "WhatsApp rejected the saved authentication. Super Admin review is required.",
+    "logged_out": "WhatsApp has logged this session out. Admin or Super Admin pairing review is required.",
+    "authentication_failure": "WhatsApp rejected the saved authentication. Admin or Super Admin review is required.",
     "session_conflict": "Another session replaced this connection. Session ownership needs review.",
     "protocol_failure": "WhatsApp could not accept this connection. Technical review is required.",
     "storage_failure": "The saved session requires authentication or storage review.",

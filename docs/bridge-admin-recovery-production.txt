@@ -22,16 +22,20 @@ eligible identities' sockets open across replacement of their owning process.
 No logout, relink, credential reset, journal rewrite or duplicate owner is needed.
 The expected outcome is reconnection of exactly the identities that were eligible
 and connected in the fresh preflight snapshot, with reused credentials over IPv4.
-The identity set is NOT fixed: Super Admins add and remove numbers. Every gate
+The identity set is NOT fixed: Admins and Super Admins add and remove numbers. Every gate
 compares against a snapshot taken in the same window, never a remembered list.
 PR #90 (callback fix) is merged and deployed; it is in this branch's ancestry.
 
 Behavior and ownership
 ----------------------
-- Admin (stored role admin) and Super Admin (supervisor) receive the explicit
-  can_recover_whatsapp capability. Staff has none. Existing Super Admin pairing,
-  rename/removal and privileged authentication-assessment boundaries stay intact.
-  No role obtains additional conversation or attachment access.
+- Permissions: Admin (stored role admin) and Super Admin (supervisor) have
+  IDENTICAL WhatsApp management permissions (one role set in support_auth.py):
+  diagnostics and authentication assessment; register/link/pair and QR codes;
+  rename; enable/disable; connect/disconnect/remove/decommission; safe
+  reconnect, pause/resume, operation history and cancellation. Regular Staff
+  (agent) has none. Every mutation still requires the cookie session + CSRF and
+  all existing authentication, ownership, delivery and decommissioning safety
+  checks. No role obtains additional conversation or attachment access.
 - Public API prefix /api/support/whatsapp-linked-device:
     POST /lines/{id}/operations        create a queued command (202)
     GET  /operations/{uuid}            status and sanitized audit
@@ -146,7 +150,7 @@ Inventory snapshot (used by every gate below). Taken read-only from:
   (BridgeRegistryMismatch); no identity is pairing (no line with a QR or
   status "qr"); no registry row is in an unconfirmed removal (latest audit
   LINKED_DEVICE_REMOVAL_STARTED). Freeze identity changes (no add, enable,
-  disable, remove, pair or rename by Super Admins) for the whole window.
+  disable, remove, pair or rename by Admins or Super Admins) for the whole window.
 
 1. Finish PR review and CI disposition for THIS release. CI's MariaDB/Redis
    integration and bridge steps are skipped whenever the unit step fails (the
@@ -252,13 +256,13 @@ callbacks to pass a gate.
 
 Manual acceptance (attended, approved internal identity/conversation only)
 ------------------------------------------------------------------------
-- Super Admin: full diagnostics/assessment; existing link/rename/remove entry
-  points remain permission-gated. Do not exercise destructive pairing/removal
-  against healthy production identities as an acceptance test.
-- Admin: diagnostics plus safe commands. Privileged auth assessment, registration,
-  legacy connect/disconnect/removal and QR credentials remain forbidden. Staff:
-  ordinary permitted conversation access, no management commands or credentials.
-  Test direct new/legacy URLs with each role and missing CSRF (403).
+- Admin AND Super Admin (verify both, same results): diagnostics, assessment,
+  legacy pairing/removal entry points visible, QR visible only for the number
+  being paired, safe commands available. Do not exercise destructive pairing/
+  removal against healthy production identities as an acceptance test.
+- Staff: ordinary permitted conversation access; no management view, commands,
+  assessment or QR (403 on direct new/legacy URLs). Missing CSRF is 403 for
+  every role.
 - Confirm connected, disabled, offline and quarantined views; stale/unavailable
   telemetry must disable commands and display unknown rather than healthy.
 - On an approved internal test line, Pause: socket stays connected; new replies

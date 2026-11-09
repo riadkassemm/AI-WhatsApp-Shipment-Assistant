@@ -87,7 +87,7 @@ class LinkedDeviceEvent(BaseModel):
 
 def _require_manager(agent: SupportAgent) -> None:
     if not agent.can_manage_whatsapp_connections:
-        raise HTTPException(403, "Only Super Admins can change WhatsApp connections.")
+        raise HTTPException(403, "Only Admins and Super Admins can change WhatsApp connections.")
 
 
 def _require_staff(agent: SupportAgent) -> None:

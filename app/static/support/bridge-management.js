@@ -1,4 +1,4 @@
-// Diagnostics and versioned recovery. Pairing/removal remain Super Admin workflows.
+// Diagnostics and versioned recovery. Admins and Super Admins share every WhatsApp management permission.
 const bridgeManagement = {epoch: 0, selected: null, rows: new Map(), snapshot: null,
   loading: false, historyAt: 0, historyLine: null, historyLoading: false, assessmentLoading: false,
   operationsLoading: false, freshAt: 0, submitting: false};

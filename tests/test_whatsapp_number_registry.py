@@ -124,16 +124,16 @@ def test_new_linked_number_requires_its_own_pairing_and_stores_paired_phone(monk
     assert result["numbers"][0]["is_enabled"] is True
 
 
-def test_every_staff_role_sees_numbers_but_only_super_admin_changes_them() -> None:
+def test_every_staff_role_sees_numbers_but_only_admins_and_super_admins_change_them() -> None:
     repo = FakeRepository()
     service = WhatsAppRegistryService(repo)
     with pytest.raises(WhatsAppRegistryForbiddenError):
         asyncio.run(service.list_payload(actor("driver")))
     for role in ("agent", "supervisor", "admin"):
         assert asyncio.run(service.list_payload(actor(role)))["numbers"]
-    for role in ("agent", "admin"):
-        with pytest.raises(WhatsAppRegistryForbiddenError):
-            asyncio.run(service.set_number_enabled(actor(role), "1375394715655384", True))
+    with pytest.raises(WhatsAppRegistryForbiddenError):
+        asyncio.run(service.set_number_enabled(actor("agent"), "1375394715655384", True))
+    assert asyncio.run(service.set_number_enabled(actor("admin"), "1375394715655384", True))["numbers"][0]["is_enabled"] is True
     assert asyncio.run(service.set_number_enabled(actor("supervisor"), "1375394715655384", True))["numbers"][0]["is_enabled"] is True
     with pytest.raises(WhatsAppRegistryForbiddenError):
         asyncio.run(service.set_number_enabled(actor("agent"), "1375394715655384", False))
@@ -189,16 +189,16 @@ def test_linked_number_rename_is_separate_from_paired_phone(monkeypatch) -> None
     assert asyncio.run(service.list_enabled_numbers(actor("agent")))[0]["display_name"] == "TestNumber"
 
 
-def test_number_rename_requires_super_admin_and_valid_number_and_name() -> None:
+def test_number_rename_requires_whatsapp_manager_and_valid_number_and_name() -> None:
     repo = FakeRepository()
     service = WhatsAppRegistryService(repo)
     with pytest.raises(WhatsAppRegistryForbiddenError):
         asyncio.run(service.set_number_display_name(actor("driver"), repo.number["phone_number_id"], "Label"))
     renamed = WhatsAppRegistryService(FakeRepository())
-    for role in ("agent", "admin"):
-        with pytest.raises(WhatsAppRegistryForbiddenError):
-            asyncio.run(renamed.set_number_display_name(actor(role), repo.number["phone_number_id"], "Label"))
-    assert asyncio.run(renamed.set_number_display_name(actor("supervisor"), repo.number["phone_number_id"], "Label"))["numbers"][0]["display_name"] == "Label"
+    with pytest.raises(WhatsAppRegistryForbiddenError):
+        asyncio.run(renamed.set_number_display_name(actor("agent"), repo.number["phone_number_id"], "Label"))
+    for role in ("admin", "supervisor"):
+        assert asyncio.run(renamed.set_number_display_name(actor(role), repo.number["phone_number_id"], "Label"))["numbers"][0]["display_name"] == "Label"
     with pytest.raises(WhatsAppRegistryValidationError, match="numeric"):
         asyncio.run(service.set_number_display_name(actor("supervisor"), "other", "Label"))
     with pytest.raises(WhatsAppRegistryValidationError, match="control characters"):

@@ -26,7 +26,7 @@ REASONS = {
     'EVENT_SUBSCRIPTION_NOT_RELEASED': 'The previous connection is still finishing its work.',
     'WORK_NOT_SETTLED': 'Existing operations must finish before this action is safe.',
     'STORAGE_REVIEW_REQUIRED': 'Saved session storage needs review before recovery.',
-    'SESSION_DISABLED': 'The saved session is disabled. Super Admin review is required.',
+    'SESSION_DISABLED': 'The saved session is disabled. Admin or Super Admin review is required.',
     'STALE_OBSERVATION': 'The connection changed. Refresh diagnostics before requesting another action.',
     'MANAGEMENT_OPERATION_ACTIVE': 'Another operation for this number is still processing.',
     'ACTION_RATE_LIMITED': 'Too many recovery requests. Wait a minute before trying again.',
