@@ -83,7 +83,7 @@ export function createServer(bridge, config) {
         await bridge.storageMonitor?.sample();
         bridge.storageMonitor?.assertCanSubmit(id);
       }
-      const limit = parts[3] === 'media' ? Math.ceil(config.maxMediaBytes * 4 / 3) + 4096 : 64 * 1024;
+      const limit = parts[3] === 'media' ? Math.ceil((config.maxUploadBytes ?? config.maxMediaBytes) * 4 / 3) + 4096 : 64 * 1024;
       const payload = await readJson(request, limit);
       if (parts.length === 5 && parts[3] === 'messages' && parts[4] === 'read') return send(response, 200, await bridge.markRead(id, payload));
       if (parts.length === 5 && parts[3] === 'messages' && parts[4] === 'status') return send(response, 200, bridge.deliveryStatus(id, payload));

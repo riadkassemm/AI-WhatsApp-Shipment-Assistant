@@ -43,7 +43,7 @@ from app.staff_management import (
 )
 from app.support_events import event_stream
 from app.support_statistics import router as statistics_router
-from app.support_media import SupportMediaError, max_media_bytes
+from app.support_media import SupportMediaError, max_media_bytes, max_upload_bytes
 from app.support_repository import SupportConflictError, SupportNotFoundError, SupportSchemaError
 from app.vcf_contacts import (
     MAX_VCF_IMPORT_BYTES,
@@ -493,8 +493,8 @@ async def _save_quick_reply_pdf_upload(
     file: UploadFile, title: str, body: str, agent: SupportAgent, reply_id: int | None = None,
 ) -> dict:
     try:
-        content = await file.read(max_media_bytes("document") + 1)
-        if len(content) > max_media_bytes("document"):
+        content = await file.read(max_upload_bytes("document") + 1)
+        if len(content) > max_upload_bytes("document"):
             raise SupportValidationError("The PDF document is too large.")
         return await support_service.save_quick_reply_pdf(agent, title=title, body=body,
             content=content, filename=file.filename, reply_id=reply_id)
@@ -542,8 +542,8 @@ async def assign_quick_reply_pdf(
             payload = QuickReplyAssignment.model_validate_json(assignment)
         except ValidationError:
             raise SupportValidationError("Invalid quick reply or staff selection.") from None
-        content = await file.read(max_media_bytes("document") + 1)
-        if len(content) > max_media_bytes("document"):
+        content = await file.read(max_upload_bytes("document") + 1)
+        if len(content) > max_upload_bytes("document"):
             raise SupportValidationError("The PDF document is too large.")
         return await support_service.assign_quick_reply(agent, **payload.model_dump(), content=content, filename=file.filename)
     except Exception as exc:
@@ -590,7 +590,7 @@ async def _save_quick_reply_image_upload(file, title, body, agent, reply_id=None
     try:
         if file.content_type not in {"image/jpeg", "image/png"}:
             raise SupportValidationError("Choose a JPEG or PNG image.")
-        content = await file.read(max_media_bytes("image") + 1)
+        content = await file.read(max_upload_bytes("image") + 1)
         return await support_service.save_quick_reply_pdf(agent, title=title, body=body,
             content=content, filename=file.filename, reply_id=reply_id, mime_type=file.content_type)
     except Exception as exc:
@@ -625,7 +625,7 @@ async def assign_quick_reply_image(file: UploadFile = File(...), assignment: str
             payload = QuickReplyAssignment.model_validate_json(assignment)
         except ValidationError:
             raise SupportValidationError("Invalid quick reply or staff selection.") from None
-        content = await file.read(max_media_bytes("image") + 1)
+        content = await file.read(max_upload_bytes("image") + 1)
         return await support_service.assign_quick_reply(agent, **payload.model_dump(), content=content,
             filename=file.filename, mime_type=file.content_type)
     except Exception as exc:
@@ -1443,7 +1443,7 @@ async def send_ticket_media(
     file: UploadFile = File(...),
     agent: SupportAgent = Depends(require_support_csrf),
 ) -> dict:
-    limit = max_media_bytes(media_type)
+    limit = max_upload_bytes(media_type)
     try:
         content = await file.read(max(1, limit) + 1)
         if len(content) > limit:

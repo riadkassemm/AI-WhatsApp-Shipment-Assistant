@@ -27,6 +27,7 @@ from app.support_media import (
     SupportMediaError,
     StoredSupportMedia,
     max_media_bytes,
+    max_upload_bytes,
     media_extension,
     media_kind_for_mime,
     normalize_mime_type,
@@ -3729,7 +3730,7 @@ class SupportService:
                 raise SupportValidationError("Use a JPEG or PNG image.")
             if not content:
                 raise SupportValidationError("The image is empty.")
-            if len(content) > max_media_bytes("image"):
+            if len(content) > max_upload_bytes("image"):
                 raise SupportValidationError("The image is larger than the 5 MB limit.")
             prepared = content
             prepared_mime = normalized_mime
@@ -3741,9 +3742,9 @@ class SupportService:
                 raise SupportValidationError("Use an MP4 or 3GP video.")
             if not content:
                 raise SupportValidationError("The video is empty.")
-            if len(content) > max_media_bytes("video"):
+            if len(content) > max_upload_bytes("video"):
                 raise SupportValidationError(
-                    f"The video is larger than the {max_media_bytes('video') // (1024 * 1024)} MB limit."
+                    f"The video is larger than the {max_upload_bytes('video') // (1024 * 1024)} MB limit."
                 )
             prepared = content
             prepared_mime = normalized_mime
@@ -3755,7 +3756,7 @@ class SupportService:
                 raise SupportValidationError("Use a WebP file for a WhatsApp sticker.")
             if not content:
                 raise SupportValidationError("The sticker is empty.")
-            if len(content) > max_media_bytes("sticker"):
+            if len(content) > max_upload_bytes("sticker"):
                 raise SupportValidationError("The sticker is larger than the 500 KB limit.")
             prepared = content
             prepared_mime = "image/webp"
@@ -3780,7 +3781,7 @@ class SupportService:
                 raise SupportValidationError("Only PDF documents are supported.")
             if not content:
                 raise SupportValidationError("The PDF document is empty.")
-            if len(content) > max_media_bytes("document"):
+            if len(content) > max_upload_bytes("document"):
                 raise SupportValidationError("The PDF document is too large.")
             prepared = content
             prepared_mime = "application/pdf"

@@ -7,6 +7,7 @@ from fastapi import APIRouter
 from fastapi.responses import HTMLResponse, Response
 
 from app.config import settings
+from app.support_media import max_upload_bytes
 
 router = APIRouter(tags=["support-ui"])
 _ROOT = Path(__file__).parent
@@ -26,11 +27,11 @@ SUPPORT_UI_VERSION = hashlib.sha256(
 def _configure(source: str) -> str:
     return (source.replace("__POLL_MS__", str(max(1, settings.support_queue_poll_seconds) * 1000))
             .replace("__CSRF_COOKIE__", settings.support_csrf_cookie_name)
-            .replace("__AUDIO_MAX_BYTES__", str(max(1, settings.support_audio_max_bytes)))
-            .replace("__VIDEO_MAX_BYTES__", str(max(1, settings.support_video_max_bytes)))
-            .replace("__IMAGE_MAX_BYTES__", str(max(1, settings.support_image_max_bytes)))
-            .replace("__DOCUMENT_MAX_BYTES__", str(max(1, settings.support_document_max_bytes)))
-            .replace("__STICKER_MAX_BYTES__", str(max(1, settings.support_sticker_max_bytes)))
+            .replace("__AUDIO_MAX_BYTES__", str(max_upload_bytes("audio")))
+            .replace("__VIDEO_MAX_BYTES__", str(max_upload_bytes("video")))
+            .replace("__IMAGE_MAX_BYTES__", str(max_upload_bytes("image")))
+            .replace("__DOCUMENT_MAX_BYTES__", str(max_upload_bytes("document")))
+            .replace("__STICKER_MAX_BYTES__", str(max_upload_bytes("sticker")))
             .replace("__UI_VERSION__", SUPPORT_UI_VERSION))
 
 
@@ -65,7 +66,7 @@ async def support_asset(asset_name: str) -> Response:
 async def support_image_editor_script() -> Response:
     if not settings.support_ui_enabled:
         return Response(status_code=404)
-    script = _EDITOR.replace("__IMAGE_MAX_BYTES__", str(max(1, settings.support_image_max_bytes)))
+    script = _EDITOR.replace("__IMAGE_MAX_BYTES__", str(max_upload_bytes("image")))
     return Response(script, media_type="text/javascript", headers={"Cache-Control": "no-store"})
 
 

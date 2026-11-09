@@ -394,7 +394,7 @@ function chooseImage() {
   if (state.composerEnabled && !state.busy && !state.mediaRecorder && !state.voiceRecording) $('imageInput').click();
 }
 
-const VIDEO_MAX_BYTES = Number('__VIDEO_MAX_BYTES__') || 192 * 1024 * 1024;
+const VIDEO_MAX_BYTES = Number('__VIDEO_MAX_BYTES__') || 32 * 1024 * 1024;
 
 function canAttachToComposer() {
   return Boolean(state.ticketId && state.composerEnabled && !state.busy && !state.mediaRecorder && !state.voiceRecording && !state.editTarget);
