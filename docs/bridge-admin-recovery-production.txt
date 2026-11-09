@@ -217,6 +217,10 @@ Inventory snapshot (used by every gate below). Taken read-only from:
        command can reach it; durable pause state is honored either way.
      API: start with the flag OFF first; enable it in step 9 (API-only restart).
 8. Start the new API (flag off), require schema/readiness, then the bridge.
+   Admin/Super Admin WhatsApp permission parity is NOT behind the flag: from
+   this start, Admins can also pair (QR), rename, enable/disable, connect,
+   disconnect and remove numbers. Inform Admins before the window; verify
+   with real Admin, Super Admin and Staff sessions in acceptance (step 10).
    Take snapshot S1 after reconnection (bounded wait, e.g. 120 s) and require:
    the same enabled/disabled/decommissioned/removed membership as S0; exactly
    one bridge directory owner; every S0 manifest line that was connected
