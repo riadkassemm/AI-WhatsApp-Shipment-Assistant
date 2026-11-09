@@ -192,6 +192,7 @@ const pendingLinkedDeviceAddition = () => null;
 const createSupportNumberLabel = line => {const node = element(); node.textContent = line.display_name || line.display_phone_number || line.line_id; return node};
 let manager = true;
 const canManageWhatsApp = () => manager;
+const canLinkWhatsApp = () => true;  // every staff role
 const changes = [];
 const changeLinkedDeviceConnection = (...args) => changes.push(args);
 const removeLinkedDeviceNumber = id => changes.push(['remove', id]);

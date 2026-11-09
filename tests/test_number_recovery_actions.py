@@ -9,8 +9,9 @@ from fastapi import HTTPException
 from app import linked_device_api
 from app.support_ui import _HTML
 
-STAFF = types.SimpleNamespace(id=3, is_supervisor=False, is_staff=True)
-ADMIN = types.SimpleNamespace(id=4, is_supervisor=True, is_staff=True)
+STAFF = types.SimpleNamespace(id=3, role="agent", is_supervisor=False, is_staff=True)
+ADMIN = types.SimpleNamespace(id=4, role="admin", is_supervisor=True, is_staff=True)
+OUTSIDER = types.SimpleNamespace(id=5, role="viewer", is_supervisor=False, is_staff=False)
 
 
 @pytest.fixture
@@ -33,16 +34,20 @@ def bridge(monkeypatch):
     return calls
 
 
-def test_recovery_actions_are_for_admins_and_super_admins_only(bridge) -> None:
-    for action in (linked_device_api.reconnect_linked_device, linked_device_api.reset_linked_device_session):
-        with pytest.raises(HTTPException) as denied:
-            asyncio.run(action("90052", STAFF))
-        assert denied.value.status_code == 403
+def test_reset_and_force_remove_stay_with_admins_while_reconnect_is_for_all_staff(bridge) -> None:
+    with pytest.raises(HTTPException) as denied:
+        asyncio.run(linked_device_api.reset_linked_device_session("90052", STAFF))
+    assert denied.value.status_code == 403
     body = linked_device_api.ForceRemoveLinkedDeviceLineRequest(close_active_tickets=True, confirm="REMOVE")
     with pytest.raises(HTTPException) as denied:
         asyncio.run(linked_device_api.force_remove_linked_device_line("90052", body, STAFF))
     assert denied.value.status_code == 403
     assert bridge == []
+    asyncio.run(linked_device_api.reconnect_linked_device("90052", STAFF))
+    assert bridge == [("reconnect", "90052")], "every staff role may reconnect a number"
+    with pytest.raises(HTTPException) as outsider:
+        asyncio.run(linked_device_api.reconnect_linked_device("90052", OUTSIDER))
+    assert outsider.value.status_code == 403
 
 
 def test_reconnect_and_reset_reach_only_the_requested_number(bridge) -> None:
@@ -90,10 +95,10 @@ assert.equal(linkedDeviceRecoveryActions({status: 'error'}).find(action => actio
     assert result.returncode == 0, result.stderr
 
 
-def test_resume_is_admin_only_and_keeps_the_bridge_guidance_as_409(bridge, monkeypatch) -> None:
+def test_resume_is_for_all_staff_and_keeps_the_bridge_guidance_as_409(bridge, monkeypatch) -> None:
     from app.whatsapp_client import WhatsAppSendError
     with pytest.raises(HTTPException) as denied:
-        asyncio.run(linked_device_api.resume_linked_device_session("90052", STAFF))
+        asyncio.run(linked_device_api.resume_linked_device_session("90052", OUTSIDER))
     assert denied.value.status_code == 403
     calls = []
 
@@ -101,8 +106,10 @@ def test_resume_is_admin_only_and_keeps_the_bridge_guidance_as_409(bridge, monke
         calls.append(line_id)
         return {"line_id": line_id}
     monkeypatch.setattr(linked_device_api.linked_device_client, "resume_session", resumed)
+    asyncio.run(linked_device_api.resume_linked_device_session("90052", STAFF))
     asyncio.run(linked_device_api.resume_linked_device_session("90052", ADMIN))
-    assert calls == ["90052"]
+    assert calls == ["90052", "90052"], "Regular Staff and Admins may both resume"
+
 
     async def refused(line_id):
         error = WhatsAppSendError("This session stopped on a disk error (EIO).", delivery_uncertain=False)
@@ -144,3 +151,22 @@ assert.equal(linkedDeviceRecoveryActions({status: 'error', session_blocked: true
     assert result.returncode == 0, result.stderr
     render = _HTML[_HTML.index("function renderLinkedDeviceStatus("): _HTML.index("async function loadLinkedDeviceStatus(")]
     assert "!line.session_blocked && line.recovery_category !== 'storage_failure'" in render, "Pair is never offered for a blocked session"
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is unavailable")
+def test_regular_staff_see_reconnect_and_resume_but_not_reset_or_force_remove() -> None:
+    code = _HTML[_HTML.index("const BLOCKED_CATEGORIES"): _HTML.index("async function loadLinkedDeviceStatus(")]
+    script = r"""
+const assert = require('node:assert/strict');
+""" + code + r"""
+const forStaff = line => linkedDeviceRecoveryActions(line).filter(action => !action.managersOnly).map(action => action.label);
+assert.deepEqual(forStaff({status: 'error', is_paired: true, session_blocked: true, saved_login: true}), ['Resume session']);
+assert.deepEqual(forStaff({status: 'connected', is_paired: true}), ['Reconnect']);
+assert.deepEqual(forStaff({status: 'error', session_blocked: true, saved_login: false}), [], 'without a saved login an Admin must reset');
+const managersOnly = linkedDeviceRecoveryActions({status: 'error', session_blocked: true, saved_login: true}).filter(action => action.managersOnly).map(action => action.label);
+assert.deepEqual(managersOnly, ['Reset session', 'Force remove']);
+"""
+    result = subprocess.run(["node", "-e", script], text=True, capture_output=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    render = _HTML[_HTML.index("function renderLinkedDeviceStatus("): _HTML.index("async function loadLinkedDeviceStatus(")]
+    assert "action.managersOnly ? !canManageWhatsApp() : !canLinkWhatsApp()" in render

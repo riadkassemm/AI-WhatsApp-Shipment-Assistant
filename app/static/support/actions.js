@@ -1259,8 +1259,8 @@ function renderLinkedDeviceStatus(payload) {
       : line.status === 'disconnected' && line.is_paired ? 'Reconnecting…' : labels[line.status] || 'Not paired';
     if (line.session_blocked) {
       status.textContent = line.saved_login
-        ? 'Session blocked after an interrupted update · Admins: Resume session continues from the saved login (no phone needed)'
-        : 'Session blocked · Admins: Reset session, then pair with the phone';
+        ? 'Session blocked after an interrupted update · Resume session continues from the saved login (no phone needed)'
+        : 'Session blocked · An Admin must reset the session, then pair it with the phone';
     } else if (line.status === 'logged_out' && line.logged_out_at) {
       status.textContent = 'Logged out by WhatsApp at ' + new Date(line.logged_out_at).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'})
         + '. Re-pair it with the same phone: every conversation and its history stays.';
@@ -1294,24 +1294,28 @@ function renderLinkedDeviceStatus(payload) {
       remove.disabled = state.linkedDeviceBusy || state.whatsappBusy;
       remove.onclick = () => removeLinkedDeviceNumber(line.line_id);
       row.append(remove);
-      for (const action of linkedDeviceRecoveryActions(line)) {
-        const button = document.createElement('button');
-        button.type = 'button';
-        button.className = 'btn small' + (action.danger ? ' danger' : action.primary ? ' primary' : '');
-        button.textContent = action.label;
-        button.title = action.title;
-        button.disabled = state.linkedDeviceBusy || state.whatsappBusy;
-        button.onclick = () => action.run(line.line_id);
-        row.append(button);
-      }
+    }
+    // Reconnect and Resume session: every staff role. Reset session and
+    // Force remove: Admins and Super Admins.
+    for (const action of linkedDeviceRecoveryActions(line)) {
+      if (action.managersOnly ? !canManageWhatsApp() : !canLinkWhatsApp()) continue;
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'btn small' + (action.danger ? ' danger' : action.primary ? ' primary' : '');
+      button.textContent = action.label;
+      button.title = action.title;
+      button.disabled = state.linkedDeviceBusy || state.whatsappBusy;
+      button.onclick = () => action.run(line.line_id);
+      row.append(button);
     }
     container.append(row);
   }
   text($('linkedDeviceStatus'), 'Only paired lines added to the app can send or receive messages here.');
 }
 
-// Recovery buttons for Admins and Super Admins, so staff do not need a
-// developer. The server archives files; nothing is deleted.
+// Recovery buttons, so staff do not need a developer: Reconnect and Resume
+// session for every staff role; Reset session and Force remove for Admins and
+// Super Admins. The server archives files; nothing is deleted.
 const BLOCKED_CATEGORIES = ['storage_failure', 'authentication_failure', 'session_conflict', 'protocol_failure'];
 function linkedDeviceRecoveryActions(line) {
   const sessionBlocked = Boolean(line.session_blocked);
@@ -1323,9 +1327,9 @@ function linkedDeviceRecoveryActions(line) {
   if (sessionBlocked && line.saved_login && line.status !== 'connected') actions.push({label: 'Resume session', primary: true,
     run: lineId => resumeLinkedDeviceSession(lineId),
     title: 'Continue from the saved login without the phone. Other numbers are not affected.'});
-  if (failing) actions.push({label: 'Reset session', run: lineId => resetLinkedDeviceSession(lineId),
+  if (failing) actions.push({label: 'Reset session', managersOnly: true, run: lineId => resetLinkedDeviceSession(lineId),
     title: 'Clear this number\'s stuck session and pair it again with the same phone. Conversations are kept.'});
-  if (sessionBlocked || line.status === 'error') actions.push({label: 'Force remove', run: lineId => forceRemoveLinkedDevice(lineId), danger: true,
+  if (sessionBlocked || line.status === 'error') actions.push({label: 'Force remove', managersOnly: true, run: lineId => forceRemoveLinkedDevice(lineId), danger: true,
     title: 'Remove a number that cannot be unlinked normally.'});
   return actions;
 }
@@ -1593,7 +1597,7 @@ function linkedDeviceName(lineId) {
 }
 
 async function resumeLinkedDeviceSession(lineId) {
-  if (!canManageWhatsApp() || state.linkedDeviceBusy) return;
+  if (!canLinkWhatsApp() || state.linkedDeviceBusy) return;
   const name = linkedDeviceName(lineId);
   if (!(await confirmDialog({title: 'Resume ' + name + '\'s session?',
     message: 'This number stopped after an update to its encryption keys was interrupted (usually a network drop). ' +
@@ -1620,7 +1624,7 @@ async function resumeLinkedDeviceSession(lineId) {
 }
 
 async function reconnectLinkedDevice(lineId) {
-  if (!canManageWhatsApp() || state.linkedDeviceBusy) return;
+  if (!canLinkWhatsApp() || state.linkedDeviceBusy) return;
   await runLinkedDeviceRecovery('/api/support/whatsapp-linked-device/lines/' + encodeURIComponent(lineId) + '/reconnect', {},
     'Reconnecting this number.');
 }
