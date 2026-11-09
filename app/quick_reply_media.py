@@ -6,7 +6,7 @@ import uuid
 from pathlib import Path
 
 from app.config import settings
-from app.support_media import SupportMediaError, max_media_bytes, _safe_filename
+from app.support_media import SupportMediaError, max_upload_bytes, _safe_filename
 
 
 class QuickReplyMediaStore:
@@ -29,7 +29,7 @@ class QuickReplyMediaStore:
         if not valid:
             raise SupportMediaError('Choose a valid PDF file.' if mime_type == 'application/pdf' else 'Choose a valid JPEG/PNG image.')
         kind = 'document' if mime_type == 'application/pdf' else 'image'
-        if len(content) > max_media_bytes(kind):
+        if len(content) > max_upload_bytes(kind):
             raise SupportMediaError('The saved attachment is too large.')
         extension = extensions[mime_type]
         name = _safe_filename(str(filename or '').replace('\\', '/'), 'attachment' + extension)

@@ -139,6 +139,14 @@ def max_media_bytes(kind: str) -> int:
     raise SupportMediaError("Unsupported media type.")
 
 
+def max_upload_bytes(kind: str) -> int:
+    """Staff uploads: the per-type limit, never above the global upload cap.
+
+    Inbound customer media keeps max_media_bytes(); only what staff send is capped.
+    """
+    return min(max_media_bytes(kind), max(1, int(settings.support_upload_max_bytes)))
+
+
 def _safe_filename(value: str | None, fallback: str) -> str:
     candidate = Path(str(value or "")).name.strip()
     if not candidate:

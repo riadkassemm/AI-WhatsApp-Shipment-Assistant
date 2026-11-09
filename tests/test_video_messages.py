@@ -45,6 +45,7 @@ from app.support_media import (
     SUPPORT_MEDIA_MESSAGE_TYPES,
     SupportMediaStore,
     max_media_bytes,
+    max_upload_bytes,
     media_extension,
     media_kind_for_mime,
 )
@@ -80,7 +81,8 @@ def test_video_mime_types_size_limit_and_storage(tmp_path: Path, monkeypatch) ->
     assert media_extension("video/3gpp") == ".3gp"
     # Browser voice recordings may arrive as video/webm; they must stay audio.
     assert media_kind_for_mime("video/webm", allow_browser_audio=True) == "audio"
-    assert max_media_bytes("video") == 192 * 1024 * 1024
+    assert max_media_bytes("video") == 192 * 1024 * 1024  # inbound customer media
+    assert max_upload_bytes("video") == 32 * 1024 * 1024  # staff uploads
 
     monkeypatch.setattr(config.settings, "support_media_directory", str(tmp_path / "media"))
     store = SupportMediaStore()
@@ -213,9 +215,9 @@ def test_unsupported_or_empty_videos_are_rejected_before_sending(monkeypatch, co
     assert "send" not in sent
 
 
-def test_staff_can_send_a_video_at_the_192_mb_limit(monkeypatch, outbound_unit) -> None:
+def test_staff_can_send_a_video_at_the_32_mb_upload_limit(monkeypatch, outbound_unit) -> None:
     sent = _stub_agent_send(monkeypatch)
-    content = bytes(192 * 1024 * 1024)
+    content = bytes(32 * 1024 * 1024)
     result = asyncio.run(support_service_module.support_service.send_agent_media(
         77, agent=AGENT, media_type="video", content=content, content_type="video/mp4",
         filename="large.mp4", caption=None, client_message_id="client-video-limit",
@@ -226,9 +228,9 @@ def test_staff_can_send_a_video_at_the_192_mb_limit(monkeypatch, outbound_unit) 
 
 def test_oversized_video_is_rejected(monkeypatch, outbound_unit) -> None:
     sent = _stub_agent_send(monkeypatch)
-    with pytest.raises(SupportValidationError, match="192 MB limit"):
+    with pytest.raises(SupportValidationError, match="32 MB limit"):
         asyncio.run(support_service_module.support_service.send_agent_media(
-            77, agent=AGENT, media_type="video", content=bytes(192 * 1024 * 1024 + 1), content_type="video/mp4",
+            77, agent=AGENT, media_type="video", content=bytes(32 * 1024 * 1024 + 1), content_type="video/mp4",
             filename="clip.mp4", caption=None, client_message_id="client-video-4",
         ))
     assert "send" not in sent
@@ -251,6 +253,7 @@ def test_upload_route_accepts_video_with_the_video_size_limit() -> None:
     annotation = inspect.signature(support_api.send_ticket_media).parameters["media_type"].annotation
     assert "video" in str(annotation)
     assert max_media_bytes("video") == config.settings.support_video_max_bytes
+    assert max_upload_bytes("video") == min(config.settings.support_video_max_bytes, config.settings.support_upload_max_bytes)
 
 
 def test_dashboard_page_gets_the_configured_video_limit(monkeypatch) -> None:
@@ -276,17 +279,17 @@ const showError = message => calls.push(['error', message]);
 const setPendingMedia = (kind, file) => calls.push(['pending', kind, file.name]);
 const setAppStatus = message => calls.push(['status', message]);
 const formatBytes = bytes => Math.round(bytes / 1024 / 1024) + ' MB';
-""" + picker.replace("'__VIDEO_MAX_BYTES__'", "'201326592'") + r"""
-for (const size of [5, 64, 128, 192]) {
+""" + picker.replace("'__VIDEO_MAX_BYTES__'", "'33554432'") + r"""
+for (const size of [5, 16, 32]) {
   input.files = [{name: 'clip.mp4', type: 'video/mp4', size: size * 1024 * 1024}];
   imageSelected();
   assert.deepEqual(calls[0], ['pending', 'video', 'clip.mp4']);
   assert.match(calls[1][1], /Review the preview/);
   calls.length = 0;
 }
-input.files = [{name: 'big.mp4', type: 'video/mp4', size: 192 * 1024 * 1024 + 1}];
+input.files = [{name: 'big.mp4', type: 'video/mp4', size: 32 * 1024 * 1024 + 1}];
 imageSelected();
-assert.deepEqual(calls[0], ['error', 'This file exceeds the 192 MB limit.']);
+assert.deepEqual(calls[0], ['error', 'This file exceeds the 32 MB limit.']);
 assert.deepEqual(calls[1], ['status', '0 of 1 attachments added. Review the file errors.']);
 assert.equal(input.value, '');
 calls.length = 0;
@@ -342,3 +345,20 @@ def test_dashboard_renders_video_and_copy_image_actions() -> None:
     assert "if (kind === 'video') return 'Video';" in _HTML
     assert 'id="copyMediaBtn"' in _HTML and 'id="editorCopyBtn"' in _HTML
     assert 'id="editorCropBtn"' in _HTML and 'id="editorRotateBtn"' in _HTML
+
+
+def test_every_staff_upload_is_capped_at_32_mb_while_inbound_limits_stay(monkeypatch) -> None:
+    for kind in ("image", "sticker", "audio", "document", "video"):
+        assert max_upload_bytes(kind) <= 32 * 1024 * 1024
+        assert max_upload_bytes(kind) == min(max_media_bytes(kind), 32 * 1024 * 1024)
+    # Raising a per-type limit never lifts an upload above the global cap.
+    monkeypatch.setattr(config.settings, "support_document_max_bytes", 100 * 1024 * 1024)
+    assert max_upload_bytes("document") == 32 * 1024 * 1024
+    assert max_media_bytes("document") == 100 * 1024 * 1024
+
+
+def test_dashboard_assets_advertise_the_capped_upload_limits() -> None:
+    from app.support_ui import support_asset
+    body = asyncio.run(support_asset("media.js")).body
+    assert f"Number('{32 * 1024 * 1024}')".encode() in body
+    assert b"Number('201326592')" not in body
