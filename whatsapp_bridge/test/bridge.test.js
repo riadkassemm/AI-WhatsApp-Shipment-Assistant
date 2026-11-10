@@ -3095,3 +3095,75 @@ test('a quiet connection that does not answer the ping is reconnected and the me
   assert.equal(bridge.deliveryStatus(LINE, { client_message_id: payload.client_message_id, phone: PHONE }).status, 'unknown');
   assert.deepEqual(traces.filter(entry => entry.event === 'send_liveness_probe').map(entry => entry.alive), [false]);
 });
+
+async function unacknowledgedSend(t, key, { sameIdRetry = true } = {}) {
+  const context = await fixture(t, 'timeout');
+  context.config.sameIdRetry = sameIdRetry;
+  const payload = recoveryPayload(key);
+  await assert.rejects(context.bridge.send(LINE, payload), error => error.delivery_uncertain === true);
+  const nativeId = context.line.store.data.send_requests[createHash('sha256').update(key).digest('hex')].native_id;
+  return { ...context, payload, nativeId };
+}
+async function reconnect(bridge, line) {
+  const fresh = mockSocket();
+  bridge.makeSocket = options => { fresh.providerOptions = options; return fresh; };
+  await bridge.connect(LINE); await bridge.connectionUpdate(line, fresh, { connection: 'open' });
+  await line.sendTail; await line.ackTail;
+  return fresh;
+}
+
+test('after a reconnect, a message that left without an ACK is re-sent once with the same WhatsApp ID', async t => {
+  const { bridge, line, payload, nativeId } = await unacknowledgedSend(t, 'same-id');
+  assert.equal(line.store.data.messages[nativeId].relay_started, true);
+  const fresh = await reconnect(bridge, line);
+  assert.equal(fresh.calls.length, 1);
+  assert.equal(fresh.calls[0].options.messageId, nativeId, 'the original ID, never a new message');
+  assert.equal(fresh.calls[0].content, undefined, 'relayed as the stored message, not rebuilt');
+  assert.equal(line.store.data.messages[nativeId].retransmit_attempts, 1);
+  assert.equal(bridge.deliveryStatus(LINE, { client_message_id: payload.client_message_id, phone: PHONE }).status, 'confirmed');
+  assert.equal(bridge.outbox.data.entries.filter(entry => entry.event.type === 'outgoing_confirmation').length, 1);
+  const again = await reconnect(bridge, line);
+  assert.equal(again.calls.length, 0, 'an acknowledged message is never re-sent');
+});
+
+test('same-ID re-sends are off by default, limited to recent messages and to two attempts', async t => {
+  {
+    const { bridge, line } = await unacknowledgedSend(t, 'flag-off', { sameIdRetry: false });
+    assert.equal((await reconnect(bridge, line)).calls.length, 0);
+  }
+  {
+    const { bridge, line, nativeId } = await unacknowledgedSend(t, 'too-old');
+    await line.store.update(data => { data.messages[nativeId].timestamp = Date.now() - 11 * 60_000; });
+    assert.equal((await reconnect(bridge, line)).calls.length, 0, 'never long after the conversation moved on');
+  }
+  {
+    const { bridge, line, nativeId } = await unacknowledgedSend(t, 'attempts');
+    await line.store.update(data => { data.messages[nativeId].retransmit_attempts = 2; });
+    assert.equal((await reconnect(bridge, line)).calls.length, 0);
+  }
+});
+
+test('the relay hook keeps the exact content that left, for a later same-ID re-send', async t => {
+  const { bridge, line, socket } = await fixture(t);
+  const content = { conversation: 'Kept for a same-ID re-send' };
+  socket.sendMessage = async (jid, message, options) => {
+    await socket.providerOptions.bridgeBeforeRelay(options.messageId, content);
+    socket.calls.push(options);
+    return new Promise(() => {});  // the provider never returns
+  };
+  bridge.config.textSubmissionTimeoutMs = 50;
+  await assert.rejects(bridge.send(LINE, recoveryPayload('kept')), error => error.delivery_uncertain === true);
+  const record = Object.values(line.store.data.messages).find(item => item.client_message_id === 'kept');
+  assert.deepEqual(record.relay_message, content);
+});
+
+test('the same-ID diagnostic sends one text and relays it again with the same ID, without a dashboard record', async t => {
+  const { bridge, line, socket } = await fixture(t);
+  const result = await bridge.sameIdRetransmitTest(LINE, { phone: PHONE, text: 'Delivery test', delay_ms: 0 });
+  assert.deepEqual(result.attempts.map(item => item.acknowledged), [true, true]);
+  assert.equal(socket.calls.length, 2);
+  assert.equal(socket.calls[0].options.messageId, socket.calls[1].options.messageId);
+  assert.equal(result.message_id, wrapId(LINE, socket.calls[0].options.messageId));
+  assert.equal(line.store.data.messages[socket.calls[0].options.messageId], undefined);
+  assert.deepEqual(result.server_errors, []);
+});

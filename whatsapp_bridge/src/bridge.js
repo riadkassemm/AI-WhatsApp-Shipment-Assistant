@@ -97,6 +97,9 @@ const PRE_RELAY_FAILURE_LIMIT = 3, PRE_RELAY_FAILURE_WINDOW_MS = 5 * 60_000;
 // A connection silent this long is pinged before a message is put on it. The
 // keepalive runs every 30 s, so a dead socket can otherwise look connected.
 const LIVENESS_IDLE_MS = 15_000, LIVENESS_PROBE_MS = 5_000;
+// Same-ID re-send after a reconnect: only for a message that left recently
+// (it must not arrive long after the conversation moved on), and at most twice.
+const SAME_ID_RETRY_WINDOW_MS = 10 * 60_000, SAME_ID_RETRY_LIMIT = 2;
 const notSentError = (code, message, cause) => {
   const error = new BridgeError(503, code, message);
   error.delivery_uncertain = false;
@@ -860,7 +863,7 @@ export class Bridge {
       markOnlineOnConnect: false, connectTimeoutMs: 25_000, defaultQueryTimeoutMs: 20_000,
       shouldIgnoreJid: jid => /@(g\.us|broadcast|newsletter)$/.test(jid),
       getMessage: async key => line.store.data.messages[key.id]?.message?.message,
-      bridgeBeforeRelay: messageId => this.beforeRelay(line, socket, generation, messageId),
+      bridgeBeforeRelay: (messageId, message) => this.beforeRelay(line, socket, generation, messageId, message),
     });
       if (socket.authState?.keys) auth.trackProviderKeys(socket.authState.keys);
       auth.trackProviderPipelines(socket);
@@ -1141,6 +1144,7 @@ export class Bridge {
         this.trace(line, 'recovery_completed', { duration_ms: seconds * 1000 });
       }
       this.trace(line, 'connection_transition', { state: 'ready' });
+      if (this.config.sameIdRetry) this.retransmitUnconfirmed(line).catch(error => this.onError(error));
       if (line.store.data.logged_out_at) await line.store.update(data => { delete data.logged_out_at; });
       if (line.store.data.recover_since && !line.store.data.recover_until) {
         // WhatsApp sends recent history right after pairing; accept it for a bounded time.
@@ -1942,7 +1946,7 @@ export class Bridge {
   }
   // Called by the patched provider immediately before it writes a message
   // stanza. Throwing here keeps the message off the wire.
-  async beforeRelay(line, socket, generation, messageId) {
+  async beforeRelay(line, socket, generation, messageId, message) {
     const gate = line.relayGates.get(messageId);
     // No gate: edit/delete relays and recipient retry requests for older
     // messages. relayStarted: a recipient retry for a message already sent.
@@ -1959,7 +1963,14 @@ export class Bridge {
     };
     let refusal = refuse();
     if (refusal) throw refusal;
-    await line.store.update(data => { if (data.messages[messageId]) data.messages[messageId].relay_started = true; });
+    // The exact content leaving the device is kept, so an unacknowledged send
+    // can be re-sent later with the same WhatsApp ID.
+    await line.store.update(data => {
+      const record = data.messages[messageId];
+      if (!record) return;
+      record.relay_started = true;
+      if (message && typeof message === 'object') record.relay_message = message;
+    });
     // Check again after the durable write, synchronously with the decision
     // below: either the send is closed and nothing is written, or the
     // dispatcher sees relayStarted and treats the outcome as unconfirmed.
@@ -1983,6 +1994,96 @@ export class Bridge {
     if (alive) return;
     this.restartStaleSocket(line, socket);
     throw notSentError('NOT_CONNECTED', 'The WhatsApp connection stopped responding. The message was not sent; it is sent again once reconnected.');
+  }
+  // After a reconnect: re-send each recent message that left this device
+  // without an acknowledgement, with its original WhatsApp ID. Recipients
+  // identify a message by that ID, so a copy that already arrived is not
+  // shown twice. Messages go through the normal per-number send queue.
+  async retransmitUnconfirmed(line) {
+    const now = Date.now();
+    const pending = Object.entries(line.store?.data?.messages ?? {})
+      .filter(([, record]) => record.client_message_id && record.relay_started && !record.ack_confirmed &&
+        !record.echo_seen && !record.receipt && !record.pending_send && !record.deleted &&
+        (record.retransmit_attempts ?? 0) < SAME_ID_RETRY_LIMIT &&
+        now - (record.timestamp ?? 0) < SAME_ID_RETRY_WINDOW_MS &&
+        (record.relay_message || record.message?.message) && record.message?.key?.remoteJid)
+      .sort(([, a], [, b]) => (a.timestamp ?? 0) - (b.timestamp ?? 0));
+    for (const [nativeId] of pending) {
+      try {
+        await this.serialSend(line, () => this.retransmit(line, nativeId));
+      } catch (error) {
+        // The number dropped again: the next reconnect tries the rest.
+        if (['NOT_CONNECTED', 'LINE_REMOVING', 'SEND_QUEUE_FULL'].includes(error?.code)) return;
+        this.onError(error);
+      }
+    }
+  }
+  async retransmit(line, nativeId) {
+    const record = line.store.data.messages[nativeId];
+    if (!record || record.ack_confirmed || record.echo_seen || record.receipt) return;
+    const socket = this.connected(line);
+    await this.ensureLive(line, socket);
+    const content = record.relay_message ?? record.message.message;
+    const attempt = (record.retransmit_attempts ?? 0) + 1;
+    await line.store.update(data => {
+      const current = data.messages[nativeId];
+      if (current) { current.retransmit_attempts = attempt; current.last_retransmit_at = Date.now(); }
+    });
+    const waiter = line.ack.expect(nativeId, { deferred: true });
+    this.trace(line, 'send_retransmit', { native_id: nativeId, attempt });
+    try {
+      await this.awaitSubmission(socket.relayMessage(record.message.key.remoteJid, content, { messageId: nativeId }), waiter,
+        { media: MEDIA_TYPES.some(type => content?.[`${type}Message`]) });
+      waiter.startTimer();
+      await waiter.promise;
+      // The ACK handler records ack_confirmed and queues the API confirmation.
+      await line.ackTail;
+      await line.store.update(data => { if (data.messages[nativeId]) { data.messages[nativeId].ack_confirmed = true; data.messages[nativeId].delivery_uncertain = false; } });
+      await this.enqueueOwnConfirmation(line, nativeId);
+      this.trace(line, 'send_retransmit_result', { native_id: nativeId, attempt, acknowledged: true });
+    } catch (error) {
+      waiter.cancel();
+      this.trace(line, 'send_retransmit_result', { native_id: nativeId, attempt, acknowledged: false, cause: errorLabel(error), error_name: errorName(error) });
+      if (staleConnectionError(error)) this.restartStaleSocket(line, socket);
+    }
+  }
+  // Diagnostic for the real-phone check of same-ID re-sends: sends one short
+  // text, then relays the identical message again with the same ID. Not
+  // recorded as a dashboard message. Loopback and bridge secret only.
+  async sameIdRetransmitTest(id, payload) {
+    const line = this.getLine(id);
+    const phone = phoneDigits(payload?.phone);
+    const text = typeof payload?.text === 'string' && payload.text.trim() ? payload.text.trim().slice(0, 200) : 'Delivery test';
+    const delayMs = Math.min(Math.max(Number(payload?.delay_ms) || 3_000, 0), 60_000);
+    return this.serialSend(line, async () => {
+      const socket = this.connected(line);
+      const jid = `${phone}@s.whatsapp.net`;
+      const nativeId = generateMessageIDV2(socket.user?.id);
+      const errors = [];
+      const observe = node => { if (node?.attrs?.id === nativeId && node.attrs.error) errors.push(String(node.attrs.error).slice(0, 16)); };
+      socket.ws.on('CB:ack,class:message', observe);
+      const attempts = [];
+      try {
+        let content;
+        for (const attempt of [1, 2]) {
+          if (attempt === 2) await new Promise(resolve => setTimeout(resolve, delayMs));
+          const waiter = line.ack.expect(nativeId, { deferred: true });
+          const started = Date.now();
+          try {
+            if (attempt === 1) content = (await this.awaitSubmission(socket.sendMessage(jid, { text, linkPreview: null }, { messageId: nativeId }), waiter)).message;
+            else await this.awaitSubmission(socket.relayMessage(jid, content, { messageId: nativeId }), waiter);
+            waiter.startTimer();
+            await waiter.promise;
+            attempts.push({ attempt, acknowledged: true, ms: Date.now() - started });
+          } catch (error) {
+            waiter.cancel();
+            attempts.push({ attempt, acknowledged: false, ms: Date.now() - started, cause: errorLabel(error) });
+          }
+        }
+      } finally { socket.ws.off('CB:ack,class:message', observe); }
+      this.trace(line, 'same_id_test', { native_id: nativeId, attempts: attempts.map(item => item.acknowledged), server_errors: errors });
+      return { message_id: wrapId(id, nativeId), attempts, server_errors: errors };
+    });
   }
   notePreRelayFailure(line, socket, error) {
     // Refusals because the line is offline or busy say nothing new about it.
