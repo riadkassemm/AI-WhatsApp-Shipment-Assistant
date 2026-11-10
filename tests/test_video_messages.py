@@ -81,8 +81,8 @@ def test_video_mime_types_size_limit_and_storage(tmp_path: Path, monkeypatch) ->
     assert media_extension("video/3gpp") == ".3gp"
     # Browser voice recordings may arrive as video/webm; they must stay audio.
     assert media_kind_for_mime("video/webm", allow_browser_audio=True) == "audio"
-    assert max_media_bytes("video") == 192 * 1024 * 1024  # inbound customer media
-    assert max_upload_bytes("video") == 32 * 1024 * 1024  # staff uploads
+    assert max_media_bytes("video") == 192 * 1024 * 1024  # per-type setting
+    assert max_upload_bytes("video") == 32 * 1024 * 1024  # the cap for staff uploads and customer media
 
     monkeypatch.setattr(config.settings, "support_media_directory", str(tmp_path / "media"))
     store = SupportMediaStore()

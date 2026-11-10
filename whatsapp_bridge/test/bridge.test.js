@@ -48,6 +48,8 @@ function mockSocket(mode = 'ack') {
       return options.messageId;
     },
     sendMessage: async (jid, content, options) => {
+      // Like the patched provider: the bridge hook runs right before the stanza is written.
+      await socket.providerOptions?.bridgeBeforeRelay?.(options.messageId);
       socket.calls.push({ jid, content, options });
       if (mode !== 'timeout') setImmediate(() => ws.emit('CB:ack,class:message', { attrs: { id: options.messageId } }));
       return { key: { remoteJid: jid, id: options.messageId, fromMe: true }, message: { conversation: content.text }, messageTimestamp: Math.floor(Date.now() / 1000) };
@@ -60,7 +62,7 @@ async function fixture(t, mode = 'ack', dependencies = {}) {
   const config = { secret: SECRET, lines: [{ line_id: LINE, expected_phone: '' }], dataDir,
     callbackUrl: 'http://127.0.0.1/callback', maxMediaBytes: 25 * 1024 * 1024, ackTimeoutMs: 30 };
   const socket = mockSocket(mode);
-  const bridge = await new Bridge(config, { makeSocket: () => socket, onError: () => {}, log: () => {}, storageFilesystem: healthyStorage, ...dependencies }).initialize({ autoConnect: false });
+  const bridge = await new Bridge(config, { makeSocket: options => { socket.providerOptions = options; return socket; }, onError: () => {}, log: () => {}, storageFilesystem: healthyStorage, ...dependencies }).initialize({ autoConnect: false });
   await bridge.connect(LINE);
   const line = bridge.getLine(LINE);
   await bridge.connectionUpdate(line, socket, { connection: 'open' });
@@ -84,7 +86,7 @@ test('configuration rejects weak secrets, nonnumeric lines, and public binds', (
   const config = readConfig(valid);
   assert.equal(config.host, '127.0.0.1');
   assert.equal(config.port, 3001);
-  assert.equal(config.maxMediaBytes, 192 * 1024 * 1024, 'incoming customer media keep the larger download limit');
+  assert.equal(config.maxMediaBytes, 32 * 1024 * 1024, 'customer media follow the same 32 MiB limit as uploads');
   assert.equal(config.maxUploadBytes, 32 * 1024 * 1024, 'every outgoing upload is capped at 32 MiB');
   assert.equal(config.lines[0].expected_phone, '');
   assert.throws(() => readConfig({ ...valid, WHATSAPP_LINKED_DEVICE_SECRET: 'short' }), /at least 32/);
@@ -1293,6 +1295,27 @@ test('media on an unresolvable WhatsApp host is downloaded through the default m
   assert.deepEqual(calls, [null]);
 });
 
+test('incoming media above the limit is refused before or during the download', async t => {
+  let downloads = 0;
+  const downloadMediaMessage = async () => { downloads++; return Readable.from([Buffer.alloc(600 * 1024), Buffer.alloc(600 * 1024)]); };
+  const { bridge, line, config } = await fixture(t, 'ack', { downloadMediaMessage });
+  config.maxMediaBytes = 1024 * 1024;
+  const receiveVideo = async (id, fileLength) => {
+    const video = { videoMessage: { mimetype: 'video/mp4', url: 'https://mmg.whatsapp.net/v/t62/video.enc', directPath: '/v/t62/video.enc', ...(fileLength === undefined ? {} : { fileLength }) } };
+    await bridge.receive(line, { ...original(id), message: video });
+    return bridge.outbox.data.entries.at(-1).event.payload.entry[0].changes[0].value.messages[0].video.id;
+  };
+  // WhatsApp declares the size: refused without any download.
+  const declared = await receiveVideo('PHONE-BIG-VIDEO', String(80 * 1024 * 1024));
+  await assert.rejects(bridge.downloadMedia(LINE, declared), error => error.code === 'MEDIA_TOO_LARGE' && error.status === 413);
+  assert.equal(downloads, 0);
+  // No declared size: the download stops once it passes the limit.
+  const undeclared = await receiveVideo('PHONE-UNSIZED-VIDEO');
+  await assert.rejects(bridge.downloadMedia(LINE, undeclared), error => error.code === 'MEDIA_TOO_LARGE');
+  assert.equal(downloads, 1);
+  assert.equal(line.store.data.media[undeclared].downloaded, false, 'nothing is stored');
+});
+
 test('number lookup confirms accounts but treats empty responses as inconclusive', async t => {
   const { bridge, socket } = await fixture(t);
   const asked = [];
@@ -1553,8 +1576,8 @@ test('delivery lookup reads durable evidence without sending and enforces recipi
   });
   const payload = { client_message_id: 'lookup', phone: PHONE };
   const before = JSON.stringify(line.store.data);
-  assert.deepEqual(bridge.deliveryStatus(LINE, payload), { status: 'unconfirmed' });
-  assert.deepEqual(bridge.deliveryStatus(LINE, { ...payload, client_message_id: 'missing' }), { status: 'unknown' });
+  assert.deepEqual(bridge.deliveryStatus(LINE, payload), { status: 'unconfirmed', on_wire: null, bridge_started_at: bridge.startedAt });
+  assert.deepEqual(bridge.deliveryStatus(LINE, { ...payload, client_message_id: 'missing' }), { status: 'unknown', bridge_started_at: bridge.startedAt });
   assert.throws(() => bridge.deliveryStatus(LINE, { ...payload, phone: '15555555555' }), /another recipient/);
   assert.equal(JSON.stringify(line.store.data), before);
   for (const evidence of ['ack_confirmed', 'echo_seen']) {
@@ -1583,7 +1606,7 @@ test('delivery lookup HTTP route requires bridge auth and never dispatches', asy
     Authorization: `Bearer ${SECRET}`, 'Content-Type': 'application/json',
   }, body: payload });
   assert.equal(response.status, 200);
-  assert.deepEqual(await response.json(), { status: 'unknown' });
+  assert.deepEqual(await response.json(), { status: 'unknown', bridge_started_at: bridge.startedAt });
   assert.equal(socket.calls.length, 0);
 });
 
@@ -1975,6 +1998,7 @@ test('disconnect during an unresolved submission releases the queue but never re
   const entered = barrier(), finish = barrier();
   let nativeId;
   socket.sendMessage = async (jid, content, options) => {
+    await socket.providerOptions.bridgeBeforeRelay(options.messageId);  // the stanza is leaving
     socket.calls.push(options); nativeId = options.messageId; entered.resolve();
     await finish.promise;
     return {...original(nativeId), message:{conversation:content.text}};
@@ -2055,10 +2079,9 @@ test('submission timeout bounds a hung provider call without treating it as safe
   const {bridge,line,socket,config}=await fixture(t);
   config.submissionTimeoutMs=100;
   const entered=barrier();
-  socket.sendMessage=()=>{entered.resolve();return new Promise(()=>{});};
-  t.mock.timers.enable({apis:['setTimeout']});
+  socket.sendMessage=async (jid, content, options)=>{await socket.providerOptions.bridgeBeforeRelay(options.messageId);entered.resolve();return new Promise(()=>{});};
   const rejection=assert.rejects(bridge.send(LINE,recoveryPayload('hung-call')),e=>e.delivery_uncertain===true);
-  await entered.promise;t.mock.timers.tick(100);await rejection;
+  await entered.promise;await rejection;
   assert.equal(line.ack.waiting.size,0);
   assert.equal(line.session.ready,false);
   await assert.rejects(bridge.send(LINE,recoveryPayload('hung-call')),{code:'DELIVERY_UNCERTAIN'});
@@ -2139,9 +2162,12 @@ test('HTTP recovery errors distinguish non-submission and never log raw provider
   socket.ws.isOpen=false;
   let response=await send('http-closed');assert.equal(response.status,503);assert.equal((await response.json()).delivery_uncertain,false);
   assert.equal(socket.calls.length,0);
-  const replacement=mockSocket();bridge.makeSocket=()=>replacement;
+  const replacement=mockSocket();bridge.makeSocket=options=>{replacement.providerOptions=options;return replacement;};
   await bridge.connect(LINE);await bridge.connectionUpdate(line,replacement,{connection:'open'});
   replacement.sendMessage=async()=>{throw Error('PRIVATE-BODY '+SECRET+' '+PHONE);};
+  response=await send('http-before-wire');assert.equal(response.status,503);
+  let body=await response.json();assert.equal(body.delivery_uncertain,false);assert.equal(body.error.code,'NOT_SENT');
+  replacement.sendMessage=async(jid,content,options)=>{await replacement.providerOptions.bridgeBeforeRelay(options.messageId);throw Error('PRIVATE-BODY '+SECRET+' '+PHONE);};
   response=await send('http-after-invocation');assert.equal(response.status,500);assert.equal((await response.json()).delivery_uncertain,true);
   assert.ok(logs.some(item=>JSON.parse(item).event==='request_failed'));
   const text=logs.join('\n');for(const secret of ['PRIVATE-BODY',SECRET,PHONE])assert.equal(text.includes(secret),false);
@@ -2926,4 +2952,218 @@ test('terminal disconnect classification cancels raw-close recovery before queue
     assert.equal(line.store.data.enabled, true, 'quarantine does not unlink the device');
     await bridge.close();
   }
+});
+
+test('a send that fails before its stanza leaves is not sent: it can be sent again and a late relay is refused', async t => {
+  const { bridge, line, socket, config } = await fixture(t);
+  config.textSubmissionTimeoutMs = 80;
+  const defaultSend = socket.sendMessage;
+  const release = barrier();
+  let firstId, lateRelay;
+  socket.sendMessage = async (jid, content, options) => {
+    firstId = options.messageId;
+    await release.promise;  // e.g. a slow device or key lookup
+    lateRelay = socket.providerOptions.bridgeBeforeRelay(options.messageId);
+    await lateRelay;
+    socket.calls.push(options);  // would be the wire
+    return { key: { remoteJid: jid, id: options.messageId, fromMe: true }, message: { conversation: content.text } };
+  };
+  const payload = recoveryPayload('before-wire');
+  await assert.rejects(bridge.send(LINE, payload), error => error.code === 'NOT_SENT' && error.delivery_uncertain === false);
+  assert.equal(line.store.data.messages[firstId], undefined, 'no unconfirmed record remains');
+  assert.equal(bridge.deliveryStatus(LINE, { client_message_id: payload.client_message_id, phone: PHONE }).status, 'not_sent');
+  // The abandoned provider call resumes later: it must never reach the wire.
+  release.resolve();
+  while (!lateRelay) await new Promise(resolve => setImmediate(resolve));
+  await assert.rejects(lateRelay, { code: 'NOT_CONNECTED' });
+  assert.equal(socket.calls.length, 0);
+  // The timeout restarted the connection. Once it is back, sending again with
+  // the same dashboard ID goes out once, with a new native ID.
+  void defaultSend;
+  const fresh = mockSocket();
+  bridge.makeSocket = options => { fresh.providerOptions = options; return fresh; };
+  await bridge.connect(LINE); await bridge.connectionUpdate(line, fresh, { connection: 'open' });
+  const sent = await bridge.send(LINE, payload);
+  assert.notEqual(unwrapId(LINE, sent.messages[0].id), firstId);
+  assert.equal(fresh.calls.length, 1);
+  assert.equal(bridge.deliveryStatus(LINE, { client_message_id: payload.client_message_id, phone: PHONE }).status, 'confirmed');
+});
+
+test('a send that left but got no ACK stays unconfirmed and is reported as on the wire', async t => {
+  const { bridge, socket } = await fixture(t, 'timeout');
+  const payload = recoveryPayload('on-wire');
+  await assert.rejects(bridge.send(LINE, payload), error => error.delivery_uncertain === true);
+  assert.equal(socket.calls.length, 1);
+  const status = bridge.deliveryStatus(LINE, { client_message_id: payload.client_message_id, phone: PHONE });
+  assert.equal(status.status, 'unconfirmed');
+  assert.equal(status.on_wire, true);
+  await assert.rejects(bridge.send(LINE, payload), { code: 'DELIVERY_UNCERTAIN' });
+  assert.equal(socket.calls.length, 1, 'never sent twice');
+});
+
+test('a send past its deadline is refused before reservation; the deadline is not part of the send identity', async t => {
+  const { bridge, line, socket } = await fixture(t);
+  const payload = recoveryPayload('deadline');
+  await assert.rejects(bridge.send(LINE, { ...payload, deadline_at_ms: Date.now() - 1 }),
+    error => error.code === 'SEND_DEADLINE_EXCEEDED' && error.delivery_uncertain === false);
+  assert.equal(socket.calls.length, 0);
+  assert.equal(Object.keys(line.store.data.send_requests).length, 0);
+  const sent = await bridge.send(LINE, { ...payload, deadline_at_ms: Date.now() + 10_000 });
+  assert.equal(sent.messages.length, 1);
+  assert.deepEqual(await bridge.send(LINE, { ...payload, deadline_at_ms: Date.now() + 20_000 }), sent, 'a retry with a new deadline is the same send');
+  assert.equal(socket.calls.length, 1);
+});
+
+test('a send queued behind a stuck one is refused once its start deadline passes', async t => {
+  const { bridge, socket, config } = await fixture(t);
+  config.sendStartMs = 60;
+  const release = barrier();
+  const defaultSend = socket.sendMessage;
+  socket.sendMessage = async (...args) => { await release.promise; return defaultSend(...args); };
+  const first = bridge.send(LINE, recoveryPayload('stuck'));
+  const queued = assert.rejects(bridge.send(LINE, recoveryPayload('queued')), { code: 'SEND_DEADLINE_EXCEEDED' });
+  await new Promise(resolve => setTimeout(resolve, 90));
+  release.resolve();
+  await first.catch(() => {});
+  await queued;
+  assert.equal(socket.calls.filter(call => call.options?.messageId).length <= 1, true);
+});
+
+test('after a crash, a reservation that never reached the wire becomes a safe non-send; one that did stays unconfirmed', async t => {
+  const { bridge, line, config } = await fixture(t);
+  const key = id => createHash('sha256').update(id).digest('hex');
+  await line.store.update(data => {
+    data.send_requests[key('crash-before')] = { native_id: 'BEFORE', fingerprint: 'f1' };
+    data.messages.BEFORE = { message: { key: { id: 'BEFORE', remoteJid: `${PHONE}@s.whatsapp.net`, fromMe: true } }, phone: PHONE,
+      pending_send: true, relay_tracking: true, client_message_id: 'crash-before', request_fingerprint: 'f1', timestamp: Date.now() };
+    data.send_requests[key('crash-after')] = { native_id: 'AFTER', fingerprint: 'f2' };
+    data.messages.AFTER = { message: { key: { id: 'AFTER', remoteJid: `${PHONE}@s.whatsapp.net`, fromMe: true } }, phone: PHONE,
+      pending_send: true, relay_tracking: true, relay_started: true, client_message_id: 'crash-after', request_fingerprint: 'f2', timestamp: Date.now() };
+  });
+  await bridge.close();
+  const socket = mockSocket();
+  const restarted = await new Bridge(config, { makeSocket: () => socket, onError: () => {}, log: () => {}, storageFilesystem: healthyStorage }).initialize({ autoConnect: false });
+  t.after(() => restarted.closed ? null : restarted.close());
+  const data = restarted.getLine(LINE).store.data;
+  assert.equal(data.messages.BEFORE, undefined);
+  assert.deepEqual(data.send_requests[key('crash-before')], { native_id: null, fingerprint: 'f1', retry_safe: true });
+  assert.equal(data.messages.AFTER.delivery_uncertain, true);
+  assert.equal(restarted.deliveryStatus(LINE, { client_message_id: 'crash-before', phone: PHONE }).status, 'not_sent');
+  assert.equal(restarted.deliveryStatus(LINE, { client_message_id: 'crash-after', phone: PHONE }).status, 'unconfirmed');
+});
+
+test('repeated failures before the wire on a connected number reconnect it', async t => {
+  const { bridge, line, socket } = await fixture(t);
+  const traces = [];
+  bridge.log = entry => traces.push(entry);
+  socket.sendMessage = async () => { throw new TypeError("Cannot read properties of undefined (reading 'attrs')"); };
+  for (const key of ['broken-1', 'broken-2']) await assert.rejects(bridge.send(LINE, recoveryPayload(key)), { code: 'NOT_SENT' });
+  assert.equal(line.session.ready, true);
+  await assert.rejects(bridge.send(LINE, recoveryPayload('broken-3')), { code: 'NOT_SENT' });
+  assert.equal(line.session.ready, false, 'the third failure restarts the connection');
+  const notSent = traces.filter(entry => entry.event === 'send_not_sent');
+  assert.equal(notSent.length, 3);
+  assert.deepEqual([...new Set(notSent.map(entry => `${entry.cause}/${entry.error_name}`))], ['PROVIDER_ERROR/TypeError']);
+  assert.equal(traces.some(entry => entry.event === 'send_path_reconnect'), true);
+  assert.equal(JSON.stringify(traces).includes('attrs'), false, 'no provider message text in traces');
+});
+
+test('a quiet connection is pinged before a message goes onto it; a busy one is not', async t => {
+  const { bridge, line, socket } = await fixture(t);
+  const pings = () => socket.queries.filter(entry => entry.node.attrs?.xmlns === 'w:p').length;
+  await bridge.send(LINE, recoveryPayload('busy-line'));
+  assert.equal(pings(), 0, 'a connection that just spoke is not probed');
+  line.diagnostics.last_frame_at = Date.now() - 60_000;
+  line.session.readyAt = Date.now() - 60_000;
+  await bridge.send(LINE, recoveryPayload('quiet-line'));
+  assert.equal(pings(), 1);
+  assert.equal(socket.queries.at(-1).timeoutMs, 5_000);
+  assert.equal(socket.calls.length, 2, 'the healthy quiet connection still sends');
+});
+
+test('a quiet connection that does not answer the ping is reconnected and the message is not sent', async t => {
+  const { bridge, line, socket } = await fixture(t);
+  const traces = [];
+  bridge.log = entry => traces.push(entry);
+  line.diagnostics.last_frame_at = Date.now() - 60_000;
+  line.session.readyAt = Date.now() - 60_000;
+  socket.query = async (node, timeoutMs) => { socket.queries.push({ node, timeoutMs }); return undefined; };  // rc14 timeout
+  const payload = recoveryPayload('dead-line');
+  await assert.rejects(bridge.send(LINE, payload), error => error.code === 'NOT_CONNECTED' && error.delivery_uncertain === false);
+  assert.equal(socket.calls.length, 0, 'nothing was put on the dead connection');
+  assert.equal(line.session.ready, false, 'the connection is restarted');
+  assert.equal(bridge.deliveryStatus(LINE, { client_message_id: payload.client_message_id, phone: PHONE }).status, 'unknown');
+  assert.deepEqual(traces.filter(entry => entry.event === 'send_liveness_probe').map(entry => entry.alive), [false]);
+});
+
+async function unacknowledgedSend(t, key, { sameIdRetry = true } = {}) {
+  const context = await fixture(t, 'timeout');
+  context.config.sameIdRetry = sameIdRetry;
+  const payload = recoveryPayload(key);
+  await assert.rejects(context.bridge.send(LINE, payload), error => error.delivery_uncertain === true);
+  const nativeId = context.line.store.data.send_requests[createHash('sha256').update(key).digest('hex')].native_id;
+  return { ...context, payload, nativeId };
+}
+async function reconnect(bridge, line) {
+  const fresh = mockSocket();
+  bridge.makeSocket = options => { fresh.providerOptions = options; return fresh; };
+  await bridge.connect(LINE); await bridge.connectionUpdate(line, fresh, { connection: 'open' });
+  await line.sendTail; await line.ackTail;
+  return fresh;
+}
+
+test('after a reconnect, a message that left without an ACK is re-sent once with the same WhatsApp ID', async t => {
+  const { bridge, line, payload, nativeId } = await unacknowledgedSend(t, 'same-id');
+  assert.equal(line.store.data.messages[nativeId].relay_started, true);
+  const fresh = await reconnect(bridge, line);
+  assert.equal(fresh.calls.length, 1);
+  assert.equal(fresh.calls[0].options.messageId, nativeId, 'the original ID, never a new message');
+  assert.equal(fresh.calls[0].content, undefined, 'relayed as the stored message, not rebuilt');
+  assert.equal(line.store.data.messages[nativeId].retransmit_attempts, 1);
+  assert.equal(bridge.deliveryStatus(LINE, { client_message_id: payload.client_message_id, phone: PHONE }).status, 'confirmed');
+  assert.equal(bridge.outbox.data.entries.filter(entry => entry.event.type === 'outgoing_confirmation').length, 1);
+  const again = await reconnect(bridge, line);
+  assert.equal(again.calls.length, 0, 'an acknowledged message is never re-sent');
+});
+
+test('same-ID re-sends are off by default, limited to recent messages and to two attempts', async t => {
+  {
+    const { bridge, line } = await unacknowledgedSend(t, 'flag-off', { sameIdRetry: false });
+    assert.equal((await reconnect(bridge, line)).calls.length, 0);
+  }
+  {
+    const { bridge, line, nativeId } = await unacknowledgedSend(t, 'too-old');
+    await line.store.update(data => { data.messages[nativeId].timestamp = Date.now() - 11 * 60_000; });
+    assert.equal((await reconnect(bridge, line)).calls.length, 0, 'never long after the conversation moved on');
+  }
+  {
+    const { bridge, line, nativeId } = await unacknowledgedSend(t, 'attempts');
+    await line.store.update(data => { data.messages[nativeId].retransmit_attempts = 2; });
+    assert.equal((await reconnect(bridge, line)).calls.length, 0);
+  }
+});
+
+test('the relay hook keeps the exact content that left, for a later same-ID re-send', async t => {
+  const { bridge, line, socket } = await fixture(t);
+  const content = { conversation: 'Kept for a same-ID re-send' };
+  socket.sendMessage = async (jid, message, options) => {
+    await socket.providerOptions.bridgeBeforeRelay(options.messageId, content);
+    socket.calls.push(options);
+    return new Promise(() => {});  // the provider never returns
+  };
+  bridge.config.textSubmissionTimeoutMs = 50;
+  await assert.rejects(bridge.send(LINE, recoveryPayload('kept')), error => error.delivery_uncertain === true);
+  const record = Object.values(line.store.data.messages).find(item => item.client_message_id === 'kept');
+  assert.deepEqual(record.relay_message, content);
+});
+
+test('the same-ID diagnostic sends one text and relays it again with the same ID, without a dashboard record', async t => {
+  const { bridge, line, socket } = await fixture(t);
+  const result = await bridge.sameIdRetransmitTest(LINE, { phone: PHONE, text: 'Delivery test', delay_ms: 0 });
+  assert.deepEqual(result.attempts.map(item => item.acknowledged), [true, true]);
+  assert.equal(socket.calls.length, 2);
+  assert.equal(socket.calls[0].options.messageId, socket.calls[1].options.messageId);
+  assert.equal(result.message_id, wrapId(LINE, socket.calls[0].options.messageId));
+  assert.equal(line.store.data.messages[socket.calls[0].options.messageId], undefined);
+  assert.deepEqual(result.server_errors, []);
 });

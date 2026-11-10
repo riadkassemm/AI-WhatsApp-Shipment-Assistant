@@ -1845,7 +1845,9 @@ function addMessage(container, m, extraClass = '', {allowReply = true} = {}) {
     } else {
       const unavailable = document.createElement('div');
       unavailable.className = 'media-unavailable';
-      unavailable.textContent = kind === 'image'
+      unavailable.textContent = m.media_too_large
+        ? 'This file is larger than ' + (m.media_limit_label || 'the size limit') + ', so it was not downloaded. Ask the customer to send a smaller file.'
+        : kind === 'image'
         ? 'Image is not available in support storage.'
         : kind === 'video'
           ? 'Video is not available in support storage.'
@@ -2050,8 +2052,8 @@ function addMessage(container, m, extraClass = '', {allowReply = true} = {}) {
     const heldUntil = m.held_until ? parseServerDate(m.held_until) : null;
     if (heldUntil && !Number.isNaN(heldUntil.getTime())) {
       failed.className = 'send-state held';
-      failureLabel = 'Waiting for the line to reconnect · sends automatically';
-      failed.title = 'This WhatsApp line was offline. The reply is sent automatically once it reconnects, until '
+      failureLabel = 'Not sent yet · sends automatically';
+      failed.title = 'WhatsApp has not received this reply yet (for example, the number was reconnecting). It is sent automatically once the number is ready, until '
         + heldUntil.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'}) + '.';
     }
     failed.append(createIcon(heldUntil ? 'clock' : 'alert', 'icon icon-sm'), document.createTextNode(failureLabel));
@@ -2080,11 +2082,25 @@ function addMessage(container, m, extraClass = '', {allowReply = true} = {}) {
       retry.onclick = () => retryOriginalTextRequest(m, m.ticket_id || state.ticketId);
       meta.append(check, retry);
     }
+  } else if (m.send_status === 'NOT_DELIVERED') {
+    const notDelivered = document.createElement('span');
+    notDelivered.className = 'send-state failed';
+    notDelivered.title = m.error_message || 'WhatsApp did not confirm this message within 24 hours.';
+    notDelivered.append(createIcon('alert', 'icon icon-sm'), document.createTextNode('Not delivered'));
+    meta.append(notDelivered);
+    if (!extraClass && canCopyUncertainMessage(m)) {
+      const again = document.createElement('button');
+      again.type = 'button';
+      again.className = 'btn send-retry-btn';
+      again.textContent = 'Send again';
+      again.onclick = () => sendUncertainCopy(m, again);
+      meta.append(again);
+    }
   } else if (m.send_status === 'UNCERTAIN') {
     const uncertain = document.createElement('span');
     uncertain.className = 'send-state failed';
-    uncertain.textContent = 'Delivery uncertain';
-    uncertain.title = 'WhatsApp may have received this message. Check its status before deciding whether to send a new copy.';
+    uncertain.textContent = 'Not confirmed yet';
+    uncertain.title = 'This message reached the WhatsApp connection, but WhatsApp has not confirmed it. It is checked automatically and marked Not delivered after 24 hours without confirmation.';
     meta.append(uncertain);
     if (!extraClass && m.id && !m.deleted_for_everyone_at) {
       const check = document.createElement('button');
@@ -2133,7 +2149,7 @@ function addMessage(container, m, extraClass = '', {allowReply = true} = {}) {
 // Compact message toolbar: the visible label stays in textContent (accessible
 // name); CSS draws the glyph from data-action and shows data-tooltip.
 function canCopyUncertainMessage(m) {
-  return Boolean(m.id && m.direction === 'OUTBOUND' && m.send_status === 'UNCERTAIN' &&
+  return Boolean(m.id && m.direction === 'OUTBOUND' && ['UNCERTAIN', 'NOT_DELIVERED'].includes(m.send_status) &&
     !m.deleted_for_everyone_at && state.currentTicketData?.permissions?.can_reply &&
     String(m.ticket_id || state.ticketId) === String(state.ticketId));
 }
@@ -2152,9 +2168,14 @@ async function checkUncertainDelivery(m, button) {
 
 async function sendUncertainCopy(m, button) {
   const ticketId = m.ticket_id || state.ticketId;
-  const accepted = await confirmDialog({title: 'Send a new copy?',
-    message: 'The original may already have reached the customer or could arrive later. Sending a new copy could deliver the message twice. The original will remain in the history.',
-    confirmLabel: 'Send a new copy', tone: 'danger'});
+  const expired = m.send_status === 'NOT_DELIVERED';
+  const accepted = await confirmDialog(expired
+    ? {title: 'Send again?',
+       message: 'WhatsApp did not confirm the original within 24 hours, so it most likely did not arrive. A new copy is sent, and the original stays in the history.',
+       confirmLabel: 'Send again'}
+    : {title: 'Send a new copy?',
+       message: 'The original may already have reached the customer or could arrive later. Sending a new copy could deliver the message twice. The original will remain in the history.',
+       confirmLabel: 'Send a new copy', tone: 'danger'});
   if (!accepted) return;
   setButtonBusy(button, true, 'Sending…');
   try {

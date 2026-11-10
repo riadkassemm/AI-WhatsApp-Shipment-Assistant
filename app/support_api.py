@@ -43,7 +43,7 @@ from app.staff_management import (
 )
 from app.support_events import event_stream
 from app.support_statistics import router as statistics_router
-from app.support_media import SupportMediaError, max_media_bytes, max_upload_bytes
+from app.support_media import SupportMediaError, SupportMediaTooLargeError, max_media_bytes, max_upload_bytes
 from app.support_repository import SupportConflictError, SupportNotFoundError, SupportSchemaError
 from app.vcf_contacts import (
     MAX_VCF_IMPORT_BYTES,
@@ -317,6 +317,8 @@ def _translate_error(exc: Exception) -> HTTPException:
         return HTTPException(status_code=409, detail=str(exc))
     if isinstance(exc, SupportValidationError):
         return HTTPException(status_code=422, detail=str(exc))
+    if isinstance(exc, SupportMediaTooLargeError):
+        return HTTPException(status_code=413, detail=str(exc))
     if isinstance(exc, SupportMediaError):
         return HTTPException(status_code=503 if exc.retryable else 404, detail=str(exc))
     if isinstance(exc, SupportSendError):

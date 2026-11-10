@@ -25,7 +25,9 @@ from app.support_models import ALLOWED_TRANSITIONS, ACTIVE_TICKET_STATUSES, Hand
 from app.support_media import (
     SUPPORT_MEDIA_MESSAGE_TYPES,
     SupportMediaError,
+    SupportMediaTooLargeError,
     StoredSupportMedia,
+    format_media_limit,
     max_media_bytes,
     max_upload_bytes,
     media_extension,
@@ -49,6 +51,36 @@ from app.whatsapp_registry import whatsapp_registry_service
 
 
 logger = logging.getLogger("shipment-bot")
+
+# An unconfirmed send may be copied by its agent; NOT_DELIVERED ones expired
+# after 24 hours without any WhatsApp confirmation.
+COPYABLE_DELIVERY_STATUSES = frozenset({"UNCERTAIN", "NOT_DELIVERED"})
+# The bridge refuses a send that did not start within 120 s of arriving, so a
+# request it never reserved is final after this long.
+_UNKNOWN_SEND_FINAL_MS = 180_000
+# Proven non-sends are resent automatically only while still this recent.
+_AUTOMATIC_RESEND_WINDOW = timedelta(minutes=30)
+
+
+def _utc_datetime(value: Any) -> datetime | None:
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if not isinstance(value, datetime):
+        return None
+    return value.astimezone(timezone.utc) if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
+def _utc_epoch_ms(value: Any) -> int | None:
+    moment = _utc_datetime(value)
+    return int(moment.timestamp() * 1000) if moment else None
+
+
+def _recent_for_automatic_resend(message: dict[str, Any]) -> bool:
+    created = _utc_datetime(message.get("created_at"))
+    return created is not None and datetime.now(timezone.utc) - created < _AUTOMATIC_RESEND_WINDOW
 
 SUPPORTED_REACTION_EMOJIS: frozenset[str] = frozenset(
     {"👍", "❤️", "😂", "😮", "😢", "🙏"}
@@ -439,7 +471,8 @@ def _serialize_support_messages(
             for field in ("body", "location_latitude", "location_longitude", "location_name", "location_address", "provider_media_id",
                           "provider_media_mime_type", "provider_media_filename", "error_message"):
                 safe_row[field] = None
-            for field in ("media_url", "media_filename", "media_mime_type", "media_size_bytes", "media_available", "media_cached"):
+            for field in ("media_url", "media_filename", "media_mime_type", "media_size_bytes", "media_available", "media_cached",
+                          "media_too_large", "media_limit_label"):
                 safe_row.pop(field, None)
             safe_row["reactions"] = []
         if isinstance(safe_row.get("body"), str):
@@ -457,10 +490,14 @@ def _serialize_support_messages(
             provider_media_filename = str(
                 safe_row.get("provider_media_filename") or ""
             ).strip()
-            recoverable = remote is not None or bool(provider_media_id)
+            too_large_limit = None if asset is not None else support_media_store.too_large_limit(ticket_id, message_id)
+            recoverable = (remote is not None or bool(provider_media_id)) and too_large_limit is None
             safe_row["media_kind"] = str(safe_row.get("message_type"))
             safe_row["media_available"] = asset is not None or recoverable
             safe_row["media_cached"] = asset is not None
+            if too_large_limit is not None:
+                safe_row["media_too_large"] = True
+                safe_row["media_limit_label"] = format_media_limit(too_large_limit)
             if asset is not None or recoverable:
                 media_url = f"/api/support/tickets/{ticket_id}/messages/{message_id}/media"
                 if media_context_ticket_id and int(media_context_ticket_id) != int(ticket_id):
@@ -1350,7 +1387,13 @@ class SupportService:
         return ticket, message
 
     async def _reconcile_delivery(self, ticket, message):
-        """Query saved bridge evidence only; never dispatch or infer failure."""
+        """Apply saved bridge evidence. Never dispatches anything itself.
+
+        Confirmed evidence marks the send SENT. Proof that it never reached
+        WhatsApp makes it an ordinary retry-safe failure (recent ones are
+        resent automatically by the held-reply loop). Anything else stays
+        unconfirmed until evidence arrives or it expires.
+        """
         line_id = str(ticket.get('business_phone_number_id') or '')
         if message.get('send_status') not in {'UNCERTAIN', 'DISPATCHING'}:
             return
@@ -1365,8 +1408,46 @@ class SupportService:
                 'message_id': evidence['message_id'], 'timestamp': evidence['timestamp'],
                 'sender_phone': str(ticket['whatsapp_phone']), 'client_message_id': message['transport_client_id'],
             })
+            return
+        proven = evidence['status'] == 'not_sent'
+        if evidence['status'] == 'unknown':
+            # The running bridge never reserved it. That proves nothing about a
+            # send made before the bridge started: its saved history may have
+            # been reset or pruned since. For a send made while it was running,
+            # its records are complete and the start deadline means no request
+            # can still begin after the longest send window.
+            started = message.get('delivery_started_at') or message.get('created_at')
+            bridge_started = evidence.get('bridge_started_at')
+            started_ms = _utc_epoch_ms(started) if started else None
+            proven = (started_ms is not None and isinstance(bridge_started, (int, float)) and started_ms >= bridge_started
+                      and int(datetime.now(timezone.utc).timestamp() * 1000) - started_ms > _UNKNOWN_SEND_FINAL_MS)
+        if not proven:
+            return
+        # Only explicit "not sent" from the current bridge is resent
+        # automatically, and only while the conversation is still current.
+        recent = _recent_for_automatic_resend(message)
+        updated = await support_repository.resolve_delivery_not_sent(
+            int(message['id']), hold=evidence['status'] == 'not_sent' and recent)
+        if updated:
+            ticket_id = int(updated['ticket_id'])
+            logger.info('Unconfirmed send proven not sent: message_id=%s evidence=%s held=%s',
+                        updated['id'], evidence['status'], bool(updated.get('held_until')))
+            await publish_support_event('outbound_message', ticket_id=ticket_id, message_id=int(updated['id']),
+                                        message=_serialize_support_messages(ticket_id, [updated])[0])
+
+    async def expire_unconfirmed_deliveries(self) -> int:
+        expired = await support_repository.expire_unconfirmed_deliveries()
+        for row in expired:
+            ticket_id = int(row['ticket_id'])
+            await publish_support_event('outbound_message', ticket_id=ticket_id, message_id=int(row['id']),
+                                        message=_serialize_support_messages(ticket_id, [row])[0])
+        if expired:
+            logger.info('Unconfirmed sends marked not delivered: count=%s', len(expired))
+        return len(expired)
 
     async def reconcile_uncertain_deliveries(self, after_id=0):
+        if not after_id:
+            await self.expire_unconfirmed_deliveries()
         rows = await support_repository.list_delivery_reconciliation_candidates(after_id, limit=20)
         for row in rows:
             try:
@@ -1425,10 +1506,19 @@ class SupportService:
         except Exception as exc:
             raise SupportSendError('Delivery status could not be checked. No message was sent. Try again later.') from exc
         current = await support_repository.get_message(message_id)
-        confirmed = current.get('send_status') == 'SENT'
-        return {'message': _serialize_support_messages(ticket_id, [current])[0],
-                'notice': 'WhatsApp acceptance is confirmed.' if confirmed else
-                    'No acceptance confirmation is available. The original may still arrive. Nothing was resent.'}
+        status = current.get('send_status')
+        if status == 'SENT':
+            notice = 'WhatsApp acceptance is confirmed.'
+        elif status == 'FAILED' and current.get('held_until'):
+            notice = 'WhatsApp never received this message. It is sent again automatically once the number is ready.'
+        elif status == 'FAILED':
+            notice = 'WhatsApp never received this message. It is safe to send it again.'
+        elif status == 'NOT_DELIVERED':
+            notice = 'WhatsApp did not confirm this message within 24 hours. It most likely did not arrive.'
+        else:
+            notice = ('WhatsApp has not confirmed this message yet. It is checked automatically, and marked '
+                      'Not delivered if there is still no confirmation after 24 hours. Nothing was resent.')
+        return {'message': _serialize_support_messages(ticket_id, [current])[0], 'notice': notice}
 
     async def send_uncertain_copy(self, ticket_id, message_id, *, agent, accept_duplicate_risk=False):
         if accept_duplicate_risk is not True:
@@ -1448,7 +1538,7 @@ class SupportService:
         # Recheck available evidence before creating a customer-visible copy.
         await self.check_message_delivery(ticket_id, message_id, agent=agent)
         original = await support_repository.get_message(message_id)
-        if original['send_status'] != 'UNCERTAIN':
+        if original['send_status'] not in COPYABLE_DELIVERY_STATUSES:
             raise SupportConflictError('The original delivery is no longer uncertain. Refresh before sending.')
         kind = str(original.get('message_type') or 'text')
         if kind not in {'text', 'location'} | SUPPORT_MEDIA_MESSAGE_TYPES:
@@ -1596,6 +1686,12 @@ class SupportService:
 
         if message_type not in SUPPORT_MEDIA_MESSAGE_TYPES:
             raise SupportMediaError("Unsupported inbound media type.")
+        # A file already found to be too large is never downloaded again.
+        rejected_limit = support_media_store.too_large_limit(ticket_id, message_id)
+        if rejected_limit is not None:
+            raise SupportMediaTooLargeError(rejected_limit)
+        # Customer media follows the same cap as staff uploads.
+        limit = max_upload_bytes(message_type)
 
         # Persist the provider reference before the network download. If Meta is
         # temporarily unavailable (or a local media file is later lost), the
@@ -1644,6 +1740,8 @@ class SupportService:
                 ),
             )
         except WhatsAppMediaError as exc:
+            if getattr(exc, "too_large", False):
+                await self._reject_too_large_media(ticket_id, message, message_type, limit)
             raise SupportMediaError(str(exc), retryable=exc.retryable) from exc
 
         downloaded_mime = str(downloaded.mime_type or "").strip()
@@ -1661,11 +1759,8 @@ class SupportService:
         else:
             raise SupportMediaError("WhatsApp returned an unsupported media format.")
         mime_type = normalize_mime_type(raw_mime_type)
-        limit = max_media_bytes(message_type)
         if len(downloaded.content) > limit:
-            raise SupportMediaError(
-                f"Inbound {message_type} exceeded the configured {limit // (1024 * 1024)} MB limit."
-            )
+            await self._reject_too_large_media(ticket_id, message, message_type, limit)
         stored = support_media_store.save(
             ticket_id=ticket_id,
             message_id=message_id,
@@ -1691,6 +1786,24 @@ class SupportService:
             message=_serialize_support_messages(ticket_id, [message])[0],
         )
         return stored
+
+    async def _reject_too_large_media(
+        self, ticket_id: int, message: dict[str, Any], message_type: str, limit: int
+    ) -> None:
+        """Record a customer file above the limit, tell the dashboard, and stop."""
+        message_id = int(message["id"])
+        support_media_store.mark_too_large(ticket_id, message_id, limit_bytes=limit)
+        logger.warning(
+            "Customer media above the size limit was not stored: ticket_id=%s message_id=%s type=%s limit_bytes=%s",
+            ticket_id, message_id, message_type, limit,
+        )
+        # The same event a stored file sends: the dashboard redraws the bubble
+        # from the message, which now says why the file is missing.
+        await publish_support_event(
+            "message_media_ready", ticket_id=ticket_id, message_id=message_id,
+            message=_serialize_support_messages(ticket_id, [message])[0],
+        )
+        raise SupportMediaTooLargeError(limit)
 
     async def get_ticket_media(
         self,

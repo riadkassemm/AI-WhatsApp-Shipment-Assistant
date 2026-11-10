@@ -94,8 +94,11 @@ async def _deliver_claimed(repository, transport, media_store, ticket, message, 
             ticket['id'], message_id, phase, type(exc).__name__, safe,
         )
         # Only known rejections before provider submission can be retried automatically.
+        # NOT_SENT / SEND_DEADLINE_EXCEEDED: the bridge proved the message never
+        # reached WhatsApp (it failed before leaving, or waited too long).
         held = safe and getattr(exc, 'bridge_code', None) in {
             'NOT_CONNECTED', 'BRIDGE_UNAVAILABLE', 'BRIDGE_INITIALIZING', 'STORAGE_PRESSURE', 'STOPPING', 'MEDIA_UPLOAD_BUSY',
+            'NOT_SENT', 'SEND_DEADLINE_EXCEEDED',
         }
         # Never store raw transport exceptions (which may contain credentials).
         await repository.finish_delivery(message_id, token, status='FAILED' if safe else 'UNCERTAIN',

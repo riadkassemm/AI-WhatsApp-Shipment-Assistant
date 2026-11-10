@@ -90,6 +90,7 @@ export function createServer(bridge, config) {
       if (parts.length === 4 && parts[3] === 'connect') return send(response, 200, await bridge.connect(id));
       if (parts.length === 4 && parts[3] === 'disconnect') return send(response, 200, await bridge.disconnect(id));
       if (parts.length === 4 && parts[3] === 'reconnect') return send(response, 200, await bridge.reconnectLine(id));
+      if (parts.length === 5 && parts[3] === 'diagnostics' && parts[4] === 'same-id-test') return send(response, 200, await bridge.sameIdRetransmitTest(id, payload));
       if (parts.length === 4 && parts[3] === 'reset-session') return send(response, 200, await bridge.resetSession(id));
       if (parts.length === 4 && parts[3] === 'resume-session') return send(response, 200, await bridge.resumeSession(id));
       if (parts.length === 4 && parts[3] === 'force-remove') return send(response, 200, await bridge.forceRemoveLine(id));

@@ -58,6 +58,24 @@ class SupportMediaError(RuntimeError):
         self.retryable = retryable
 
 
+class SupportMediaTooLargeError(SupportMediaError):
+    """A customer file is above the support media limit. This is final."""
+
+    def __init__(self, limit_bytes: int) -> None:
+        self.limit_bytes = int(limit_bytes)
+        super().__init__(
+            f"This file is larger than {format_media_limit(self.limit_bytes)}, so it was not downloaded. "
+            "Ask the customer to send a smaller file."
+        )
+
+
+def format_media_limit(limit_bytes: int) -> str:
+    limit = int(limit_bytes)
+    if limit >= 1024 * 1024:
+        return f"{limit // (1024 * 1024)} MB"
+    return f"{max(1, limit // 1024)} KB"
+
+
 @dataclass(frozen=True)
 class StoredSupportMedia:
     ticket_id: int
@@ -140,9 +158,9 @@ def max_media_bytes(kind: str) -> int:
 
 
 def max_upload_bytes(kind: str) -> int:
-    """Staff uploads: the per-type limit, never above the global upload cap.
+    """The per-type limit, never above the shared upload cap (32 MB by default).
 
-    Inbound customer media keeps max_media_bytes(); only what staff send is capped.
+    It applies both ways: to files staff send and to files customers send.
     """
     return min(max_media_bytes(kind), max(1, int(settings.support_upload_max_bytes)))
 
@@ -168,6 +186,27 @@ class SupportMediaStore:
 
     def _remote_reference_path(self, ticket_id: int, message_id: int) -> Path:
         return self._message_dir(ticket_id, message_id) / "remote.json"
+
+    def _too_large_path(self, ticket_id: int, message_id: int) -> Path:
+        return self._message_dir(ticket_id, message_id) / "too-large.json"
+
+    def mark_too_large(self, ticket_id: int, message_id: int, *, limit_bytes: int) -> None:
+        """Remember that this customer file is above the limit, so nothing
+        downloads it again and the dashboard can say why it is missing."""
+        directory = self._message_dir(ticket_id, message_id)
+        directory.mkdir(parents=True, exist_ok=True)
+        tmp = directory / f".too-large.{os.getpid()}.tmp"
+        tmp.write_text(json.dumps({"limit_bytes": int(limit_bytes)}), encoding="utf-8")
+        os.replace(tmp, self._too_large_path(ticket_id, message_id))
+
+    def too_large_limit(self, ticket_id: int, message_id: int) -> int | None:
+        """The limit a rejected file exceeded, or None if it was not rejected."""
+        try:
+            payload = json.loads(self._too_large_path(ticket_id, message_id).read_text(encoding="utf-8"))
+            limit = int(payload["limit_bytes"])
+        except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+            return None
+        return limit if limit > 0 else None
 
     def save_remote_reference(
         self,

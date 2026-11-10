@@ -101,6 +101,18 @@ export const patchManifest = Object.freeze({
         '                    inFlightTcTokenIssuance.delete(tcTokenJid);\n                }))();'),
       edit('                    process.nextTick(async () => {\n                        await messageMutex.mutex(() => upsertMessage(fullMsg, \'append\'));\n                    });',
         '                    void bridgeDetachedTask(async () => {\n                        await new Promise(resolve => process.nextTick(resolve));\n                        await messageMutex.mutex(() => upsertMessage(fullMsg, \'append\'));\n                    })();'),
+      // rc14 query() returns undefined after its 20 s timeout. The media
+      // connection lookup then threw a TypeError that stayed cached in
+      // mediaConn, so every later upload on that socket failed instantly.
+      // Never reuse a failed lookup, and report an empty answer as a timeout.
+      edit('    const refreshMediaConn = async (forceGet = false) => {\n        const media = await mediaConn;',
+        '    const refreshMediaConn = async (forceGet = false) => {\n        const media = await Promise.resolve(mediaConn).catch(() => undefined);'),
+      edit("                const mediaConnNode = getBinaryNodeChild(result, 'media_conn');",
+        "                const mediaConnNode = getBinaryNodeChild(result, 'media_conn');\n                if (!mediaConnNode) {\n                    throw new Boom('Timed Out', { statusCode: 408 });\n                }"),
+      // The one point where a message stanza leaves this device. The bridge
+      // records it durably first; anything that fails before it was not sent.
+      edit('            logger.debug({ msgId }, `sending message to ${participants.length} devices`);\n            await sendNode(stanza);',
+        '            logger.debug({ msgId }, `sending message to ${participants.length} devices`);\n            await config.bridgeBeforeRelay?.(msgId, message);\n            await sendNode(stanza);'),
     ],
   },
   'lib/Socket/messages-recv.js': {

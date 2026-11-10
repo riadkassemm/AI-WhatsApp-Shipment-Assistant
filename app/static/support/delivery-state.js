@@ -33,7 +33,8 @@ function mergeSupportMessage(previous, incoming) {
   if (result.deleted_for_everyone_at) {
     for (const field of ['body', 'location_latitude', 'location_longitude', 'location_name', 'location_address',
         'provider_media_id', 'provider_media_mime_type', 'provider_media_filename', 'error_message']) result[field] = null;
-    for (const field of ['media_url', 'media_filename', 'media_mime_type', 'media_size_bytes', 'media_available', 'media_cached']) delete result[field];
+    for (const field of ['media_url', 'media_filename', 'media_mime_type', 'media_size_bytes', 'media_available', 'media_cached',
+        'media_too_large', 'media_limit_label']) delete result[field];
     result.reactions = [];
   }
   if (result.id) { delete result.local_submission; delete result.confirmation_required; }

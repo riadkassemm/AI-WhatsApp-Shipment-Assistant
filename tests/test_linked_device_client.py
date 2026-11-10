@@ -420,6 +420,30 @@ def test_download_response_bound_is_enforced(bridge, monkeypatch):
         asyncio.run(LinkedDeviceWhatsAppClient().download_media(MEDIA))
 
 
+def test_customer_media_above_the_shared_cap_is_reported_as_too_large(bridge, monkeypatch):
+    assert LinkedDeviceWhatsAppClient._media_limit() == settings.support_upload_max_bytes == 32 * 1024 * 1024
+    # The bridge refuses the file (MEDIA_TOO_LARGE).
+    bridge(lambda _: httpx.Response(413, json={"error": {"code": "MEDIA_TOO_LARGE", "message": "Incoming media exceeds the 32 MiB limit."}}))
+    with pytest.raises(WhatsAppMediaError) as refused:
+        asyncio.run(LinkedDeviceWhatsAppClient().download_media(MEDIA))
+    assert refused.value.too_large is True and refused.value.retryable is False
+    # An older bridge sends the bytes: the client stops reading at the cap.
+    monkeypatch.setattr(settings, "support_upload_max_bytes", 4)
+    bridge(lambda _: httpx.Response(200, content=b"oversized"))
+    with pytest.raises(WhatsAppMediaError) as cut:
+        asyncio.run(LinkedDeviceWhatsAppClient().download_media(MEDIA))
+    assert cut.value.too_large is True and cut.value.retryable is False
+
+
+def test_cloud_media_declared_above_the_cap_is_not_downloaded(bridge, monkeypatch):
+    monkeypatch.setattr(settings, "support_upload_max_bytes", 1024)
+    requests = bridge(lambda _: httpx.Response(200, json={"url": "https://lookaside.example/media", "mime_type": "video/mp4", "file_size": 4096}))
+    with pytest.raises(WhatsAppMediaError) as refused:
+        asyncio.run(WhatsAppClient().download_media("media-cloud-1"))
+    assert refused.value.too_large is True and refused.value.retryable is False
+    assert len(requests) == 1, "only the metadata request is made"
+
+
 @pytest.mark.parametrize("status,retryable", [(404, False), (429, True), (503, True)])
 def test_media_failure_retryability_is_safe_and_explicit(bridge, status, retryable):
     bridge(lambda _: httpx.Response(status, json={"error": "Unavailable"}))

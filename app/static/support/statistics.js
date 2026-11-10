@@ -201,7 +201,7 @@ function investigationDate(value, options = {}) {
 function investigationLabel(value) {
   return {NEW:'New',ASSIGNED:'Assigned',IN_PROGRESS:'In progress',WAITING_CUSTOMER:'Waiting for customer',
     WAITING_INTERNAL:'Waiting internally',RESOLVED:'Resolved',CLOSED:'Archived',SENT:'Sent',RECEIVED:'Received',
-    PENDING:'Waiting to send',DISPATCHING:'Sending',UNCERTAIN:'Delivery uncertain',FAILED:'Send failed'}[value] || 'Not recorded';
+    PENDING:'Waiting to send',DISPATCHING:'Sending',UNCERTAIN:'Not confirmed yet',NOT_DELIVERED:'Not delivered',FAILED:'Send failed'}[value] || 'Not recorded';
 }
 function investigationActivity(event) {
   let data;

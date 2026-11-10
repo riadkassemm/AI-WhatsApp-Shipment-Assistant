@@ -9,6 +9,12 @@ import aiomysql
 DELIVERY_LEASE_MINUTES = 5
 # A reply refused because its line was offline is resent automatically within this window.
 HELD_REPLY_MINUTES = 30
+# An unconfirmed send with no WhatsApp ACK, echo or receipt for this long is
+# marked NOT_DELIVERED. A late confirmation still turns it into SENT.
+UNCONFIRMED_EXPIRY_HOURS = 24
+NOT_SENT_ERROR = 'Not sent: WhatsApp never received this message, so it is safe to send again.'
+NOT_DELIVERED_ERROR = 'Not delivered: WhatsApp did not confirm this message within 24 hours.'
+NOT_DELIVERED_COPIED_ERROR = 'Not delivered: WhatsApp did not confirm this message within 24 hours. A new copy was sent.'
 
 
 class DeliveryRepositoryMixin:
@@ -255,6 +261,63 @@ class DeliveryRepositoryMixin:
                             AND delivery_claimed_at >= UTC_TIMESTAMP(6) - INTERVAL %s MINUTE))
                 """, (message_id, token, DELIVERY_LEASE_MINUTES))
             await conn.commit()
+
+    async def resolve_delivery_not_sent(self, message_id: int, *, hold: bool) -> dict | None:
+        """Record bridge proof that an unconfirmed send never reached WhatsApp.
+
+        It becomes an ordinary retry-safe failure. A recent one is held, so the
+        held-reply loop sends it again once its line is ready. Returns the row
+        when it changed.
+        """
+        if self._pool is None:
+            await self.connect()
+        async with self._pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute("""
+                    UPDATE support_ticket_messages
+                    SET send_status = 'FAILED', delivery_retry_safe = 1, error_message = %s,
+                        held_until = CASE WHEN %s THEN UTC_TIMESTAMP(6) + INTERVAL %s MINUTE ELSE NULL END,
+                        updated_at = UTC_TIMESTAMP(6)
+                    WHERE id = %s AND direction = 'OUTBOUND' AND whatsapp_message_id IS NULL
+                      AND deleted_for_everyone_at IS NULL
+                      AND (send_status = 'UNCERTAIN' OR (send_status = 'DISPATCHING'
+                           AND delivery_claimed_at < UTC_TIMESTAMP(6) - INTERVAL %s MINUTE))
+                """, (NOT_SENT_ERROR, bool(hold), HELD_REPLY_MINUTES, message_id, DELIVERY_LEASE_MINUTES))
+                changed = cur.rowcount == 1
+                row = None
+                if changed:
+                    await cur.execute("SELECT * FROM support_ticket_messages WHERE id = %s", (message_id,))
+                    row = await cur.fetchone()
+            await conn.commit()
+        return row
+
+    async def expire_unconfirmed_deliveries(self, limit: int = 200) -> list[dict]:
+        """Mark unconfirmed sends older than the expiry window NOT_DELIVERED."""
+        if self._pool is None:
+            await self.connect()
+        expired: list[dict] = []
+        async with self._pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute("""
+                    SELECT m.id, EXISTS(SELECT 1 FROM support_ticket_messages r
+                                        WHERE r.replacement_for_message_id = m.id AND r.send_status = 'SENT') AS copied
+                    FROM support_ticket_messages m
+                    WHERE m.send_status = 'UNCERTAIN' AND m.direction = 'OUTBOUND'
+                      AND COALESCE(m.delivery_started_at, m.created_at) < UTC_TIMESTAMP(6) - INTERVAL %s HOUR
+                    ORDER BY m.id LIMIT %s
+                """, (UNCONFIRMED_EXPIRY_HOURS, limit))
+                for candidate in list(await cur.fetchall()):
+                    await cur.execute("""
+                        UPDATE support_ticket_messages
+                        SET send_status = 'NOT_DELIVERED', delivery_retry_safe = 0, held_until = NULL,
+                            error_message = %s, updated_at = UTC_TIMESTAMP(6)
+                        WHERE id = %s AND send_status = 'UNCERTAIN'
+                    """, (NOT_DELIVERED_COPIED_ERROR if candidate['copied'] else NOT_DELIVERED_ERROR, candidate['id']))
+                    if cur.rowcount == 1:
+                        await cur.execute("SELECT * FROM support_ticket_messages WHERE id = %s", (candidate['id'],))
+                        expired.append(await cur.fetchone())
+            await conn.commit()
+        return expired
 
     async def recover_abandoned_deliveries(self) -> int:
         """Quarantine lost dispatches. Never automatically resend customer messages."""
