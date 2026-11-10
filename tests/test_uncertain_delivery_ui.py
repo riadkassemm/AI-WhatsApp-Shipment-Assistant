@@ -59,6 +59,15 @@ const api = async (path,options) => {
   fail=true;
   await check.onclick();
   if(check.disabled || !alerts.at(-1).message.includes('unavailable')) throw Error('Failed check left action disabled');
+  fail=false; state.ticketId=42;
+  if(!c.textContent.includes('Not confirmed yet') || c.textContent.includes('Delivery uncertain')) throw Error('Unconfirmed label missing');
+  const expired={...original,id:12,send_status:'NOT_DELIVERED',error_message:'Not delivered: WhatsApp did not confirm this message within 24 hours.'};
+  const d=document.createElement('div'); c.append(d);
+  addMessage(d,expired);
+  const again=[...d.querySelectorAll('button')].find(b=>b.textContent==='Send again');
+  if(!d.textContent.includes('Not delivered') || !again || [...d.querySelectorAll('button')].some(b=>b.textContent==='Check status')) throw Error('Not delivered actions incorrect');
+  accept=false; await again.onclick();
+  if(confirmation.title!=='Send again?' || confirmation.message.includes('twice') || confirmation.tone==='danger') throw Error('Send again dialog incorrect');
   document.body.dataset.result='passed';
 } catch(error) {document.body.dataset.result='failed: '+error.message}})();
 '''

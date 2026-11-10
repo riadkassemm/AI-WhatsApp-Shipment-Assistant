@@ -157,3 +157,38 @@ test('patched offline processor recovers its ownership after a processing-yield 
   assert.deepEqual(handled, [1, 2]);
   assert.equal(errors.length, 1);
 });
+
+// rc14 query() resolves undefined after its timeout. Run the provider's own
+// refreshMediaConn source (original and patched) against that behaviour.
+async function mediaConnection(source, answers) {
+  const { Boom } = await import('@hapi/boom');
+  const baileys = await import('@whiskeysockets/baileys');
+  const start = source.indexOf('    const refreshMediaConn = async');
+  const end = source.indexOf('        return mediaConn;\n    };', start) + '        return mediaConn;\n    };'.length;
+  const query = async () => answers.shift();
+  return new Function('query', 'Boom', 'getBinaryNodeChild', 'getBinaryNodeChildren', 'S_WHATSAPP_NET', 'logger',
+    `let mediaConn; let mediaHost; ${source.slice(start, end)}; return refreshMediaConn;`)(
+    query, Boom, baileys.getBinaryNodeChild, baileys.getBinaryNodeChildren, baileys.S_WHATSAPP_NET, { debug() {} });
+}
+
+test('a timed-out media connection lookup no longer breaks every later upload on that connection', async t => {
+  const { original } = await fixture(t);
+  const name = 'lib/Socket/messages-send.js';
+  const answer = { tag: 'iq', attrs: {}, content: [{ tag: 'media_conn', attrs: { auth: 'synthetic', ttl: '300' },
+    content: [{ tag: 'host', attrs: { hostname: 'mmg.whatsapp.net', maxContentLengthBytes: '1' } }] }] };
+  const unpatched = await mediaConnection(original.get(name), [undefined, answer]);
+  await assert.rejects(unpatched(), TypeError);
+  await assert.rejects(unpatched(), TypeError, 'the original keeps returning the cached failure');
+  const patched = await mediaConnection(transformProviderSource(name, original.get(name)), [undefined, answer]);
+  await assert.rejects(patched(), error => error.output?.statusCode === 408, 'an empty answer is a timeout');
+  assert.equal((await patched()).auth, 'synthetic', 'the next upload fetches a fresh media connection');
+});
+
+test('the bridge relay hook runs immediately before the message stanza is written', async t => {
+  const { original } = await fixture(t);
+  const patched = transformProviderSource('lib/Socket/messages-send.js', original.get('lib/Socket/messages-send.js'));
+  const hook = '            await config.bridgeBeforeRelay?.(msgId, message);\n            await sendNode(stanza);';
+  assert.equal(patched.split(hook).length - 1, 1);
+  const relay = patched.slice(patched.indexOf('    const relayMessage = async'), patched.indexOf(hook));
+  assert.equal(relay.includes('await sendNode(stanza);\n                return;'), true, 'only the ignored newsletter path writes elsewhere');
+});

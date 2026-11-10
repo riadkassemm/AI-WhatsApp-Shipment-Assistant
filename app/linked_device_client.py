@@ -12,6 +12,7 @@ import ipaddress
 import json
 import logging
 import re
+import time
 import uuid
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote, urlsplit
@@ -49,6 +50,15 @@ def _send_error(message: str, *, uncertain: bool = False, retryable: bool = Fals
     error.retryable = retryable
     error.http_status = http_status
     return error
+
+
+# A send must reach WhatsApp's connection within this window or the bridge
+# refuses it as not sent. The API then waits for the bridge's ACK wait (20 s)
+# plus a margin, so its own timeout never decides a send's outcome.
+_TEXT_SEND_START_SECONDS = 25
+_MEDIA_SEND_START_SECONDS = 85
+_SEND_ACK_WAIT_SECONDS = 30
+_MEDIA_MESSAGE_TYPES = frozenset({"image", "audio", "document", "sticker", "video"})
 
 
 class LinkedDeviceWhatsAppClient:
@@ -222,7 +232,10 @@ class LinkedDeviceWhatsAppClient:
             self._media_reference(payload[kind].get("id"), line)
         if client_message_id is not None:
             payload = {**payload, "client_message_id": client_message_id}
-        data = await self._json_request("POST", f"/v1/lines/{line}/messages", payload=payload, mutating=True)
+        window = _MEDIA_SEND_START_SECONDS if kind in _MEDIA_MESSAGE_TYPES else _TEXT_SEND_START_SECONDS
+        payload = {**payload, "deadline_at_ms": int((time.time() + window) * 1000)}
+        data = await self._json_request("POST", f"/v1/lines/{line}/messages", payload=payload, mutating=True,
+                                        timeout_seconds=window + _SEND_ACK_WAIT_SECONDS)
         from app.whatsapp_client import WhatsAppClient, is_linked_device_message
         if not is_linked_device_message(WhatsAppClient._message_id(data), line):
             raise _send_error("The linked-device bridge did not confirm a valid message ID.", uncertain=True)
@@ -366,7 +379,7 @@ class LinkedDeviceWhatsAppClient:
         line = self._phone_number_id(phone_number_id)
         data = await self._json_request('POST', f'/v1/lines/{line}/messages/status',
             payload={'phone': phone, 'client_message_id': client_message_id}, timeout_seconds=5.0)
-        if data.get('status') not in {'unknown', 'unconfirmed', 'confirmed'}:
+        if data.get('status') not in {'unknown', 'unconfirmed', 'confirmed', 'not_sent', 'in_progress'}:
             raise _send_error('The bridge returned an invalid delivery status.')
         if data['status'] == 'confirmed' and not str(data.get('message_id') or '').startswith(f'ld:{line}:'):
             raise _send_error('The bridge returned an invalid delivery confirmation.')

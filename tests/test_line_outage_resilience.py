@@ -337,7 +337,7 @@ try {
   addMessage(c, {...base, id: 1, held_until: '2026-10-31T08:45:00Z'});
   addMessage(c, {...base, id: 2, held_until: null});
   const [held, failed] = c.querySelectorAll('.send-state');
-  if (!held.classList.contains('held') || !held.textContent.includes('Waiting for the line to reconnect')) throw Error('Held label missing');
+  if (!held.classList.contains('held') || !held.textContent.includes('Not sent yet · sends automatically')) throw Error('Held label missing');
   if (!held.title.includes('sent automatically')) throw Error('Held explanation missing');
   if (failed.textContent !== 'Not sent') throw Error('Ordinary failure changed');
   if ([...c.querySelectorAll('button')].filter(b => b.textContent === 'Resend').length !== 2) throw Error('Manual resend must stay available');

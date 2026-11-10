@@ -277,3 +277,53 @@ async def test_candidate_cursor_includes_uncertain_and_old_dispatch_not_live_wor
     assert not await repo.list_delivery_reconciliation_candidates(first['id'])
     await sql('UPDATE support_ticket_messages SET delivery_claimed_at=UTC_TIMESTAMP(6)-INTERVAL 6 MINUTE WHERE id=%s', (second['id'],))
     assert [row['id'] for row in await repo.list_delivery_reconciliation_candidates(first['id'])] == [second['id']]
+
+
+@pytest.mark.asyncio
+async def test_bridge_proof_of_non_sending_becomes_a_held_retry_that_resends_once(infrastructure, monkeypatch):
+    repo, sql, _ = infrastructure
+    row = await uncertain(repo)
+    calls = provider(monkeypatch, status='not_sent')
+    await service.support_service.reconcile_uncertain_deliveries()
+    resolved = await repo.get_message(row['id'])
+    assert resolved['send_status'] == 'FAILED' and resolved['delivery_retry_safe'] == 1 and resolved['held_until']
+    assert resolved['error_message'].startswith('Not sent: WhatsApp never received this message')
+    assert [held['id'] for held in await repo.list_held_replies()] == [row['id']]
+    # The held-reply loop resends the same row once its line is connected.
+    async def connected():
+        return {'lines': [{'line_id': '90005', 'status': 'connected'}]}
+    monkeypatch.setattr(service.linked_device_client, 'get_status', connected, raising=False)
+    assert await service.support_service.resend_held_replies() == 1
+    sent = await repo.get_message(row['id'])
+    assert sent['send_status'] == 'SENT' and sent['transport_client_id'] == row['transport_client_id']
+    assert sum(action == 'send' for action, _ in calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_unconfirmed_sends_expire_after_24_hours_and_a_late_confirmation_still_wins(infrastructure, monkeypatch):
+    repo, sql, _ = infrastructure
+    old, copied, recent = await uncertain(repo, key='old'), await uncertain(repo, key='copied'), await uncertain(repo, key='recent')
+    await sql("UPDATE support_ticket_messages SET delivery_started_at = UTC_TIMESTAMP(6) - INTERVAL 25 HOUR WHERE id IN (%s, %s)",
+              (old['id'], copied['id']))
+    calls = provider(monkeypatch)
+    sent = iter(range(1, 10))
+    async def send(**kwargs):
+        calls.append(('send', kwargs))
+        return {'messages': [{'id': f'ld:90005:copy-{next(sent)}'}]}
+    monkeypatch.setattr(service.whatsapp_client, 'send_text', send)
+    copy = await service.support_service.send_uncertain_copy(42, copied['id'], agent=AGENT, accept_duplicate_risk=True)
+    assert (await repo.get_message(copy['id']))['send_status'] == 'SENT'
+    await service.support_service.reconcile_uncertain_deliveries()
+    assert (await repo.get_message(recent['id']))['send_status'] == 'UNCERTAIN'
+    expired = await repo.get_message(old['id'])
+    assert expired['send_status'] == 'NOT_DELIVERED' and expired['delivery_retry_safe'] == 0
+    assert expired['error_message'] == 'Not delivered: WhatsApp did not confirm this message within 24 hours.'
+    assert (await repo.get_message(copied['id']))['error_message'].endswith('A new copy was sent.')
+    # Staff may send a not-delivered message again as a new copy.
+    again = await service.support_service.send_uncertain_copy(42, old['id'], agent=AGENT, accept_duplicate_risk=True)
+    assert (await repo.get_message(again['id']))['replacement_for_message_id'] == old['id']
+    # WhatsApp evidence arriving later is still applied.
+    await service.support_service.confirm_linked_device_outgoing({
+        'type': 'outgoing_confirmation', 'from_me': True, 'line_id': '90005', 'message_id': 'ld:90005:LATE',
+        'timestamp': 1792660000000, 'sender_phone': '155500042', 'client_message_id': old['transport_client_id']})
+    assert (await repo.get_message(old['id']))['send_status'] == 'SENT'

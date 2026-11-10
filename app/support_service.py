@@ -52,6 +52,36 @@ from app.whatsapp_registry import whatsapp_registry_service
 
 logger = logging.getLogger("shipment-bot")
 
+# An unconfirmed send may be copied by its agent; NOT_DELIVERED ones expired
+# after 24 hours without any WhatsApp confirmation.
+COPYABLE_DELIVERY_STATUSES = frozenset({"UNCERTAIN", "NOT_DELIVERED"})
+# The bridge refuses a send that did not start within 120 s of arriving, so a
+# request it never reserved is final after this long.
+_UNKNOWN_SEND_FINAL_MS = 180_000
+# Proven non-sends are resent automatically only while still this recent.
+_AUTOMATIC_RESEND_WINDOW = timedelta(minutes=30)
+
+
+def _utc_datetime(value: Any) -> datetime | None:
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if not isinstance(value, datetime):
+        return None
+    return value.astimezone(timezone.utc) if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
+def _utc_epoch_ms(value: Any) -> int | None:
+    moment = _utc_datetime(value)
+    return int(moment.timestamp() * 1000) if moment else None
+
+
+def _recent_for_automatic_resend(message: dict[str, Any]) -> bool:
+    created = _utc_datetime(message.get("created_at"))
+    return created is not None and datetime.now(timezone.utc) - created < _AUTOMATIC_RESEND_WINDOW
+
 SUPPORTED_REACTION_EMOJIS: frozenset[str] = frozenset(
     {"👍", "❤️", "😂", "😮", "😢", "🙏"}
 )
@@ -1357,7 +1387,13 @@ class SupportService:
         return ticket, message
 
     async def _reconcile_delivery(self, ticket, message):
-        """Query saved bridge evidence only; never dispatch or infer failure."""
+        """Apply saved bridge evidence. Never dispatches anything itself.
+
+        Confirmed evidence marks the send SENT. Proof that it never reached
+        WhatsApp makes it an ordinary retry-safe failure (recent ones are
+        resent automatically by the held-reply loop). Anything else stays
+        unconfirmed until evidence arrives or it expires.
+        """
         line_id = str(ticket.get('business_phone_number_id') or '')
         if message.get('send_status') not in {'UNCERTAIN', 'DISPATCHING'}:
             return
@@ -1372,8 +1408,45 @@ class SupportService:
                 'message_id': evidence['message_id'], 'timestamp': evidence['timestamp'],
                 'sender_phone': str(ticket['whatsapp_phone']), 'client_message_id': message['transport_client_id'],
             })
+            return
+        proven = evidence['status'] == 'not_sent'
+        if evidence['status'] == 'unknown':
+            # The bridge never reserved it. That is final once no request can
+            # still start: it predates the running bridge process, or it is
+            # older than the longest send window.
+            started = message.get('delivery_started_at') or message.get('created_at')
+            bridge_started = evidence.get('bridge_started_at')
+            started_ms = _utc_epoch_ms(started) if started else None
+            proven = started_ms is not None and (
+                (isinstance(bridge_started, (int, float)) and started_ms < bridge_started)
+                or int(datetime.now(timezone.utc).timestamp() * 1000) - started_ms > _UNKNOWN_SEND_FINAL_MS)
+        if not proven:
+            return
+        # Only explicit "not sent" from the current bridge is resent
+        # automatically, and only while the conversation is still current.
+        recent = _recent_for_automatic_resend(message)
+        updated = await support_repository.resolve_delivery_not_sent(
+            int(message['id']), hold=evidence['status'] == 'not_sent' and recent)
+        if updated:
+            ticket_id = int(updated['ticket_id'])
+            logger.info('Unconfirmed send proven not sent: message_id=%s evidence=%s held=%s',
+                        updated['id'], evidence['status'], bool(updated.get('held_until')))
+            await publish_support_event('outbound_message', ticket_id=ticket_id, message_id=int(updated['id']),
+                                        message=_serialize_support_messages(ticket_id, [updated])[0])
+
+    async def expire_unconfirmed_deliveries(self) -> int:
+        expired = await support_repository.expire_unconfirmed_deliveries()
+        for row in expired:
+            ticket_id = int(row['ticket_id'])
+            await publish_support_event('outbound_message', ticket_id=ticket_id, message_id=int(row['id']),
+                                        message=_serialize_support_messages(ticket_id, [row])[0])
+        if expired:
+            logger.info('Unconfirmed sends marked not delivered: count=%s', len(expired))
+        return len(expired)
 
     async def reconcile_uncertain_deliveries(self, after_id=0):
+        if not after_id:
+            await self.expire_unconfirmed_deliveries()
         rows = await support_repository.list_delivery_reconciliation_candidates(after_id, limit=20)
         for row in rows:
             try:
@@ -1432,10 +1505,19 @@ class SupportService:
         except Exception as exc:
             raise SupportSendError('Delivery status could not be checked. No message was sent. Try again later.') from exc
         current = await support_repository.get_message(message_id)
-        confirmed = current.get('send_status') == 'SENT'
-        return {'message': _serialize_support_messages(ticket_id, [current])[0],
-                'notice': 'WhatsApp acceptance is confirmed.' if confirmed else
-                    'No acceptance confirmation is available. The original may still arrive. Nothing was resent.'}
+        status = current.get('send_status')
+        if status == 'SENT':
+            notice = 'WhatsApp acceptance is confirmed.'
+        elif status == 'FAILED' and current.get('held_until'):
+            notice = 'WhatsApp never received this message. It is sent again automatically once the number is ready.'
+        elif status == 'FAILED':
+            notice = 'WhatsApp never received this message. It is safe to send it again.'
+        elif status == 'NOT_DELIVERED':
+            notice = 'WhatsApp did not confirm this message within 24 hours. It most likely did not arrive.'
+        else:
+            notice = ('WhatsApp has not confirmed this message yet. It is checked automatically, and marked '
+                      'Not delivered if there is still no confirmation after 24 hours. Nothing was resent.')
+        return {'message': _serialize_support_messages(ticket_id, [current])[0], 'notice': notice}
 
     async def send_uncertain_copy(self, ticket_id, message_id, *, agent, accept_duplicate_risk=False):
         if accept_duplicate_risk is not True:
@@ -1455,7 +1537,7 @@ class SupportService:
         # Recheck available evidence before creating a customer-visible copy.
         await self.check_message_delivery(ticket_id, message_id, agent=agent)
         original = await support_repository.get_message(message_id)
-        if original['send_status'] != 'UNCERTAIN':
+        if original['send_status'] not in COPYABLE_DELIVERY_STATUSES:
             raise SupportConflictError('The original delivery is no longer uncertain. Refresh before sending.')
         kind = str(original.get('message_type') or 'text')
         if kind not in {'text', 'location'} | SUPPORT_MEDIA_MESSAGE_TYPES:

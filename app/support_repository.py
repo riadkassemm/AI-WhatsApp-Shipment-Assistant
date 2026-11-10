@@ -1712,7 +1712,7 @@ class SupportRepository(DashboardRepositoryMixin, DeliveryRepositoryMixin, ReadS
                         if existing_copy:
                             await conn.commit()
                             return existing_copy, False
-                        if original['send_status'] != 'UNCERTAIN':
+                        if original['send_status'] not in ('UNCERTAIN', 'NOT_DELIVERED'):
                             raise SupportConflictError('The original delivery is no longer uncertain. Refresh before sending.')
                         if not require_active or require_assignee_id != sender_id or sender_type != 'AGENT':
                             raise SupportConflictError('A new copy requires the assigned agent and an active conversation.')
