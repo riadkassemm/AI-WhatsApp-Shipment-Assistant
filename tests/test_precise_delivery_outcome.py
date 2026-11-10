@@ -157,11 +157,13 @@ def test_reconciliation_applies_each_kind_of_bridge_evidence(reconcile) -> None:
     # Proven not sent, but the conversation has moved on: staff decide.
     state = reconcile({"status": "not_sent", "bridge_started_at": now_ms}, created_at=utc(hours=2), delivery_started_at=utc(hours=2))
     assert state["resolved"][-1] == (9, False)
-    # Never reserved by the running bridge, sent before it started: final.
-    state = reconcile({"status": "unknown", "bridge_started_at": now_ms})
-    assert state["resolved"][-1] == (9, False)
     count = len(state["resolved"])
-    # Never reserved, but recent and the bridge was already running: it may still start.
+    # Never reserved, but sent before the running bridge started: its history
+    # may have been reset since, so this proves nothing (it expires instead).
+    for age in ({"seconds": 40}, {"hours": 5}):
+        assert len(reconcile({"status": "unknown", "bridge_started_at": now_ms},
+                             created_at=utc(**age), delivery_started_at=utc(**age))["resolved"]) == count
+    # Never reserved, sent while the bridge was running, but recent: it may still start.
     assert len(reconcile({"status": "unknown", "bridge_started_at": now_ms - 3_600_000})["resolved"]) == count
     # The same, once older than any send window: final.
     state = reconcile({"status": "unknown", "bridge_started_at": now_ms - 3_600_000}, created_at=utc(minutes=4), delivery_started_at=utc(minutes=4))
@@ -172,7 +174,7 @@ def test_reconciliation_applies_each_kind_of_bridge_evidence(reconcile) -> None:
         assert len(reconcile({"status": status, "on_wire": True, "bridge_started_at": 1})["resolved"]) == count
     reconcile({"status": "confirmed", "message_id": f"ld:{LINE}:X", "timestamp": now_ms})
     assert state["confirmed"] == [f"ld:{LINE}:X"]
-    assert state["events"].count("outbound_message") == 4
+    assert state["events"].count("outbound_message") == 3
 
 
 def test_each_reconciliation_pass_first_expires_old_unconfirmed_sends(monkeypatch) -> None:

@@ -1411,15 +1411,16 @@ class SupportService:
             return
         proven = evidence['status'] == 'not_sent'
         if evidence['status'] == 'unknown':
-            # The bridge never reserved it. That is final once no request can
-            # still start: it predates the running bridge process, or it is
-            # older than the longest send window.
+            # The running bridge never reserved it. That proves nothing about a
+            # send made before the bridge started: its saved history may have
+            # been reset or pruned since. For a send made while it was running,
+            # its records are complete and the start deadline means no request
+            # can still begin after the longest send window.
             started = message.get('delivery_started_at') or message.get('created_at')
             bridge_started = evidence.get('bridge_started_at')
             started_ms = _utc_epoch_ms(started) if started else None
-            proven = started_ms is not None and (
-                (isinstance(bridge_started, (int, float)) and started_ms < bridge_started)
-                or int(datetime.now(timezone.utc).timestamp() * 1000) - started_ms > _UNKNOWN_SEND_FINAL_MS)
+            proven = (started_ms is not None and isinstance(bridge_started, (int, float)) and started_ms >= bridge_started
+                      and int(datetime.now(timezone.utc).timestamp() * 1000) - started_ms > _UNKNOWN_SEND_FINAL_MS)
         if not proven:
             return
         # Only explicit "not sent" from the current bridge is resent
