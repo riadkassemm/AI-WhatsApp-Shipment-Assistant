@@ -142,7 +142,8 @@ class LinkedDeviceWhatsAppClient:
                     async for chunk in response.aiter_bytes():
                         received += len(chunk)
                         if received > max_bytes:
-                            raise _send_error("The linked-device bridge response exceeded the size limit.", uncertain=mutating)
+                            raise _send_error("The linked-device bridge response exceeded the size limit.", uncertain=mutating,
+                                              http_status=413)
                         chunks.append(chunk)
                     content = b"".join(chunks)
                     if not 200 <= response.status_code < 300:
@@ -279,7 +280,10 @@ class LinkedDeviceWhatsAppClient:
 
     @staticmethod
     def _media_limit() -> int:
-        return max(int(settings.support_image_max_bytes), int(settings.support_audio_max_bytes), int(settings.support_document_max_bytes), int(settings.support_sticker_max_bytes), int(settings.support_video_max_bytes))
+        # The largest per-type limit, never above the shared 32 MB cap that
+        # applies to staff uploads and customer media alike.
+        largest = max(int(settings.support_image_max_bytes), int(settings.support_audio_max_bytes), int(settings.support_document_max_bytes), int(settings.support_sticker_max_bytes), int(settings.support_video_max_bytes))
+        return min(largest, max(1, int(settings.support_upload_max_bytes)))
 
     async def check_media_storage(self, *, phone_number_id: str | None = None) -> None:
         """Check before the delivery layer reads/encodes an outgoing attachment."""
@@ -340,7 +344,11 @@ class LinkedDeviceWhatsAppClient:
                 sha256=base64.b64encode(hashlib.sha256(content).digest()).decode("ascii"),
             )
         except WhatsAppSendError as exc:
-            raise WhatsAppMediaError(str(exc), retryable=bool(getattr(exc, "retryable", False))) from exc
+            # 413: the bridge (MEDIA_TOO_LARGE) or this client refused a file
+            # above the media limit. Retrying cannot help.
+            too_large = getattr(exc, "http_status", None) == 413
+            raise WhatsAppMediaError(str(exc), retryable=bool(getattr(exc, "retryable", False)) and not too_large,
+                                     too_large=too_large) from exc
 
     async def check_number(self, phone: str, *, phone_number_id: str | None = None) -> dict:
         """Ask WhatsApp, through the linked device, whether ``phone`` has an account."""

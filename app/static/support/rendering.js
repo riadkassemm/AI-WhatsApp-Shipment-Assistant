@@ -1845,7 +1845,9 @@ function addMessage(container, m, extraClass = '', {allowReply = true} = {}) {
     } else {
       const unavailable = document.createElement('div');
       unavailable.className = 'media-unavailable';
-      unavailable.textContent = kind === 'image'
+      unavailable.textContent = m.media_too_large
+        ? 'This file is larger than ' + (m.media_limit_label || 'the size limit') + ', so it was not downloaded. Ask the customer to send a smaller file.'
+        : kind === 'image'
         ? 'Image is not available in support storage.'
         : kind === 'video'
           ? 'Video is not available in support storage.'

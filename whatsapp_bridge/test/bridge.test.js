@@ -84,7 +84,7 @@ test('configuration rejects weak secrets, nonnumeric lines, and public binds', (
   const config = readConfig(valid);
   assert.equal(config.host, '127.0.0.1');
   assert.equal(config.port, 3001);
-  assert.equal(config.maxMediaBytes, 192 * 1024 * 1024, 'incoming customer media keep the larger download limit');
+  assert.equal(config.maxMediaBytes, 32 * 1024 * 1024, 'customer media follow the same 32 MiB limit as uploads');
   assert.equal(config.maxUploadBytes, 32 * 1024 * 1024, 'every outgoing upload is capped at 32 MiB');
   assert.equal(config.lines[0].expected_phone, '');
   assert.throws(() => readConfig({ ...valid, WHATSAPP_LINKED_DEVICE_SECRET: 'short' }), /at least 32/);
@@ -1291,6 +1291,27 @@ test('media on an unresolvable WhatsApp host is downloaded through the default m
   bridge.downloadMediaMessage = failing;
   await assert.rejects(bridge.downloadMedia(LINE, imageId), /fetch failed/);
   assert.deepEqual(calls, [null]);
+});
+
+test('incoming media above the limit is refused before or during the download', async t => {
+  let downloads = 0;
+  const downloadMediaMessage = async () => { downloads++; return Readable.from([Buffer.alloc(600 * 1024), Buffer.alloc(600 * 1024)]); };
+  const { bridge, line, config } = await fixture(t, 'ack', { downloadMediaMessage });
+  config.maxMediaBytes = 1024 * 1024;
+  const receiveVideo = async (id, fileLength) => {
+    const video = { videoMessage: { mimetype: 'video/mp4', url: 'https://mmg.whatsapp.net/v/t62/video.enc', directPath: '/v/t62/video.enc', ...(fileLength === undefined ? {} : { fileLength }) } };
+    await bridge.receive(line, { ...original(id), message: video });
+    return bridge.outbox.data.entries.at(-1).event.payload.entry[0].changes[0].value.messages[0].video.id;
+  };
+  // WhatsApp declares the size: refused without any download.
+  const declared = await receiveVideo('PHONE-BIG-VIDEO', String(80 * 1024 * 1024));
+  await assert.rejects(bridge.downloadMedia(LINE, declared), error => error.code === 'MEDIA_TOO_LARGE' && error.status === 413);
+  assert.equal(downloads, 0);
+  // No declared size: the download stops once it passes the limit.
+  const undeclared = await receiveVideo('PHONE-UNSIZED-VIDEO');
+  await assert.rejects(bridge.downloadMedia(LINE, undeclared), error => error.code === 'MEDIA_TOO_LARGE');
+  assert.equal(downloads, 1);
+  assert.equal(line.store.data.media[undeclared].downloaded, false, 'nothing is stored');
 });
 
 test('number lookup confirms accounts but treats empty responses as inconclusive', async t => {

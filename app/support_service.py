@@ -25,7 +25,9 @@ from app.support_models import ALLOWED_TRANSITIONS, ACTIVE_TICKET_STATUSES, Hand
 from app.support_media import (
     SUPPORT_MEDIA_MESSAGE_TYPES,
     SupportMediaError,
+    SupportMediaTooLargeError,
     StoredSupportMedia,
+    format_media_limit,
     max_media_bytes,
     max_upload_bytes,
     media_extension,
@@ -439,7 +441,8 @@ def _serialize_support_messages(
             for field in ("body", "location_latitude", "location_longitude", "location_name", "location_address", "provider_media_id",
                           "provider_media_mime_type", "provider_media_filename", "error_message"):
                 safe_row[field] = None
-            for field in ("media_url", "media_filename", "media_mime_type", "media_size_bytes", "media_available", "media_cached"):
+            for field in ("media_url", "media_filename", "media_mime_type", "media_size_bytes", "media_available", "media_cached",
+                          "media_too_large", "media_limit_label"):
                 safe_row.pop(field, None)
             safe_row["reactions"] = []
         if isinstance(safe_row.get("body"), str):
@@ -457,10 +460,14 @@ def _serialize_support_messages(
             provider_media_filename = str(
                 safe_row.get("provider_media_filename") or ""
             ).strip()
-            recoverable = remote is not None or bool(provider_media_id)
+            too_large_limit = None if asset is not None else support_media_store.too_large_limit(ticket_id, message_id)
+            recoverable = (remote is not None or bool(provider_media_id)) and too_large_limit is None
             safe_row["media_kind"] = str(safe_row.get("message_type"))
             safe_row["media_available"] = asset is not None or recoverable
             safe_row["media_cached"] = asset is not None
+            if too_large_limit is not None:
+                safe_row["media_too_large"] = True
+                safe_row["media_limit_label"] = format_media_limit(too_large_limit)
             if asset is not None or recoverable:
                 media_url = f"/api/support/tickets/{ticket_id}/messages/{message_id}/media"
                 if media_context_ticket_id and int(media_context_ticket_id) != int(ticket_id):
@@ -1596,6 +1603,12 @@ class SupportService:
 
         if message_type not in SUPPORT_MEDIA_MESSAGE_TYPES:
             raise SupportMediaError("Unsupported inbound media type.")
+        # A file already found to be too large is never downloaded again.
+        rejected_limit = support_media_store.too_large_limit(ticket_id, message_id)
+        if rejected_limit is not None:
+            raise SupportMediaTooLargeError(rejected_limit)
+        # Customer media follows the same cap as staff uploads.
+        limit = max_upload_bytes(message_type)
 
         # Persist the provider reference before the network download. If Meta is
         # temporarily unavailable (or a local media file is later lost), the
@@ -1644,6 +1657,8 @@ class SupportService:
                 ),
             )
         except WhatsAppMediaError as exc:
+            if getattr(exc, "too_large", False):
+                await self._reject_too_large_media(ticket_id, message, message_type, limit)
             raise SupportMediaError(str(exc), retryable=exc.retryable) from exc
 
         downloaded_mime = str(downloaded.mime_type or "").strip()
@@ -1661,11 +1676,8 @@ class SupportService:
         else:
             raise SupportMediaError("WhatsApp returned an unsupported media format.")
         mime_type = normalize_mime_type(raw_mime_type)
-        limit = max_media_bytes(message_type)
         if len(downloaded.content) > limit:
-            raise SupportMediaError(
-                f"Inbound {message_type} exceeded the configured {limit // (1024 * 1024)} MB limit."
-            )
+            await self._reject_too_large_media(ticket_id, message, message_type, limit)
         stored = support_media_store.save(
             ticket_id=ticket_id,
             message_id=message_id,
@@ -1691,6 +1703,24 @@ class SupportService:
             message=_serialize_support_messages(ticket_id, [message])[0],
         )
         return stored
+
+    async def _reject_too_large_media(
+        self, ticket_id: int, message: dict[str, Any], message_type: str, limit: int
+    ) -> None:
+        """Record a customer file above the limit, tell the dashboard, and stop."""
+        message_id = int(message["id"])
+        support_media_store.mark_too_large(ticket_id, message_id, limit_bytes=limit)
+        logger.warning(
+            "Customer media above the size limit was not stored: ticket_id=%s message_id=%s type=%s limit_bytes=%s",
+            ticket_id, message_id, message_type, limit,
+        )
+        # The same event a stored file sends: the dashboard redraws the bubble
+        # from the message, which now says why the file is missing.
+        await publish_support_event(
+            "message_media_ready", ticket_id=ticket_id, message_id=message_id,
+            message=_serialize_support_messages(ticket_id, [message])[0],
+        )
+        raise SupportMediaTooLargeError(limit)
 
     async def get_ticket_media(
         self,

@@ -141,7 +141,7 @@ export function readConfig(env = process.env) {
     dataDir: path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..', env.WHATSAPP_LINKED_DEVICE_DATA_DIRECTORY ?? 'whatsapp_bridge/data'),
     // Incoming customer media (downloads) keep the larger limit; every outgoing
     // upload is capped at 32 MiB to bound the base64 request and its decode.
-    maxMediaBytes: 192 * 1024 * 1024, maxUploadBytes: 32 * 1024 * 1024, ackTimeoutMs: 20_000,
+    maxMediaBytes: 32 * 1024 * 1024, maxUploadBytes: 32 * 1024 * 1024, ackTimeoutMs: 20_000,
     storage: readStorageConfig(env),
     auth: readAuthConfig(env),
   };

@@ -24,11 +24,16 @@ class WhatsAppSendError(RuntimeError):
 
 
 class WhatsAppMediaError(RuntimeError):
-    """Media upload/download failed. ``retryable`` is safe for webhook retries."""
+    """Media upload/download failed. ``retryable`` is safe for webhook retries.
 
-    def __init__(self, message: str, *, retryable: bool) -> None:
+    ``too_large`` means the file is bigger than the support media limit. That is
+    final: downloading it again cannot succeed.
+    """
+
+    def __init__(self, message: str, *, retryable: bool, too_large: bool = False) -> None:
         super().__init__(message)
         self.retryable = retryable
+        self.too_large = too_large
 
 
 @dataclass(frozen=True)
@@ -393,6 +398,17 @@ class WhatsAppClient:
             media_url = metadata.get("url") if isinstance(metadata, dict) else None
             if not media_url:
                 raise WhatsAppMediaError("WhatsApp media URL was missing.", retryable=True)
+            # Meta reports the size before the download. Refuse a file above the
+            # support media limit without fetching it.
+            try:
+                declared_size = int(metadata.get("file_size"))
+            except (TypeError, ValueError):
+                declared_size = None
+            if declared_size is not None and declared_size > int(settings.support_upload_max_bytes):
+                raise WhatsAppMediaError(
+                    "WhatsApp media is larger than the support media limit.",
+                    retryable=False, too_large=True,
+                )
 
             try:
                 media_response = await client.get(str(media_url), headers=self._auth_headers)

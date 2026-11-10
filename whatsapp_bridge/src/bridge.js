@@ -59,6 +59,13 @@ function mediaUrlHost(message) {
   const media = content && MEDIA_TYPES.map(type => content[`${type}Message`]).find(Boolean);
   try { return media?.url ? new URL(media.url).host : null; } catch { return null; }
 }
+// The size WhatsApp declares for an incoming file, or null when unknown.
+function declaredMediaSize(message) {
+  const content = normalizeMessageContent(message?.message);
+  const media = content && MEDIA_TYPES.map(type => content[`${type}Message`]).find(Boolean);
+  const size = Number(media?.fileLength ?? NaN);
+  return Number.isFinite(size) && size >= 0 ? size : null;
+}
 const initialLine = () => ({ bound_phone: '', messages: {}, media: {}, operations: {}, enabled: false });
 // After a logout or a re-link, messages sent while the line was offline are
 // recovered from WhatsApp's recent history once it pairs again.
@@ -1790,6 +1797,9 @@ export class Bridge {
     const media = line.store.data.media[mediaId];
     if (!media) throw new BridgeError(404, 'UNKNOWN_MEDIA', 'Media was not captured by this linked-device line.');
     if (!media.downloaded) {
+      const tooLarge = () => new BridgeError(413, 'MEDIA_TOO_LARGE', `Incoming media exceeds the ${this.config.maxMediaBytes / (1024 * 1024)} MiB limit.`);
+      // Refuse a file WhatsApp already declares too large without downloading it.
+      if ((declaredMediaSize(media.message) ?? 0) > this.config.maxMediaBytes) throw tooLarge();
       const socket = this.connected(line);
       const download = options => this.downloadMediaMessage(media.message, 'stream', { ...options, options: { signal: AbortSignal.timeout(30_000) } }, { logger: silentLogger, reuploadRequest: socket.updateMediaMessage });
       let stream;
@@ -1812,7 +1822,7 @@ export class Bridge {
         size += chunk.length;
         if (size > this.config.maxMediaBytes) {
           stream.destroy();
-          throw new BridgeError(413, 'MEDIA_TOO_LARGE', `Incoming media exceeds the ${this.config.maxMediaBytes / (1024 * 1024)} MiB bridge limit.`);
+          throw tooLarge();
         }
         chunks.push(chunk);
       }
