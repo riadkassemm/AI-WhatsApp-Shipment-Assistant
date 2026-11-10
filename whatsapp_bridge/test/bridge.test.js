@@ -3067,3 +3067,31 @@ test('repeated failures before the wire on a connected number reconnect it', asy
   assert.equal(traces.some(entry => entry.event === 'send_path_reconnect'), true);
   assert.equal(JSON.stringify(traces).includes('attrs'), false, 'no provider message text in traces');
 });
+
+test('a quiet connection is pinged before a message goes onto it; a busy one is not', async t => {
+  const { bridge, line, socket } = await fixture(t);
+  const pings = () => socket.queries.filter(entry => entry.node.attrs?.xmlns === 'w:p').length;
+  await bridge.send(LINE, recoveryPayload('busy-line'));
+  assert.equal(pings(), 0, 'a connection that just spoke is not probed');
+  line.diagnostics.last_frame_at = Date.now() - 60_000;
+  line.session.readyAt = Date.now() - 60_000;
+  await bridge.send(LINE, recoveryPayload('quiet-line'));
+  assert.equal(pings(), 1);
+  assert.equal(socket.queries.at(-1).timeoutMs, 5_000);
+  assert.equal(socket.calls.length, 2, 'the healthy quiet connection still sends');
+});
+
+test('a quiet connection that does not answer the ping is reconnected and the message is not sent', async t => {
+  const { bridge, line, socket } = await fixture(t);
+  const traces = [];
+  bridge.log = entry => traces.push(entry);
+  line.diagnostics.last_frame_at = Date.now() - 60_000;
+  line.session.readyAt = Date.now() - 60_000;
+  socket.query = async (node, timeoutMs) => { socket.queries.push({ node, timeoutMs }); return undefined; };  // rc14 timeout
+  const payload = recoveryPayload('dead-line');
+  await assert.rejects(bridge.send(LINE, payload), error => error.code === 'NOT_CONNECTED' && error.delivery_uncertain === false);
+  assert.equal(socket.calls.length, 0, 'nothing was put on the dead connection');
+  assert.equal(line.session.ready, false, 'the connection is restarted');
+  assert.equal(bridge.deliveryStatus(LINE, { client_message_id: payload.client_message_id, phone: PHONE }).status, 'unknown');
+  assert.deepEqual(traces.filter(entry => entry.event === 'send_liveness_probe').map(entry => entry.alive), [false]);
+});

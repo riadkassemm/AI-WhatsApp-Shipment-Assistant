@@ -94,6 +94,9 @@ const SEND_START_MS = 25_000, MEDIA_SEND_START_MS = 85_000, MAX_SEND_START_MS = 
 // Repeated failures before the wire on a connected number mean its connection
 // is broken in a way the heartbeat does not see: reconnect it.
 const PRE_RELAY_FAILURE_LIMIT = 3, PRE_RELAY_FAILURE_WINDOW_MS = 5 * 60_000;
+// A connection silent this long is pinged before a message is put on it. The
+// keepalive runs every 30 s, so a dead socket can otherwise look connected.
+const LIVENESS_IDLE_MS = 15_000, LIVENESS_PROBE_MS = 5_000;
 const notSentError = (code, message, cause) => {
   const error = new BridgeError(503, code, message);
   error.delivery_uncertain = false;
@@ -1964,6 +1967,23 @@ export class Bridge {
     if (refusal) throw refusal;
     gate.relayStarted = true;
   }
+  // Probe a quiet connection before a message goes onto it. A dead one is
+  // reconnected and the message is refused as not sent; the API resends it.
+  async ensureLive(line, socket) {
+    const lastSign = Math.max(line.diagnostics?.last_frame_at ?? 0, line.session?.readyAt ?? 0);
+    if (Date.now() - lastSign < (this.config.livenessIdleMs ?? LIVENESS_IDLE_MS)) return;
+    const started = Date.now();
+    let alive = false;
+    try {
+      // rc14 query() may resolve undefined instead of rejecting on timeout.
+      alive = Boolean(await socket.query({ tag: 'iq', attrs: { to: 's.whatsapp.net', type: 'get', xmlns: 'w:p' },
+        content: [{ tag: 'ping', attrs: {} }] }, this.config.livenessProbeMs ?? LIVENESS_PROBE_MS));
+    } catch { alive = false; }
+    this.trace(line, 'send_liveness_probe', { alive, rtt_ms: Date.now() - started });
+    if (alive) return;
+    this.restartStaleSocket(line, socket);
+    throw notSentError('NOT_CONNECTED', 'The WhatsApp connection stopped responding. The message was not sent; it is sent again once reconnected.');
+  }
   notePreRelayFailure(line, socket, error) {
     // Refusals because the line is offline or busy say nothing new about it.
     if (['NOT_CONNECTED', 'SEND_DEADLINE_EXCEEDED', 'SEND_QUEUE_FULL'].includes(error?.code) || line.socket !== socket) return;
@@ -2036,6 +2056,7 @@ export class Bridge {
       } else throw new BridgeError(400, 'UNSUPPORTED_TYPE', 'This message type is not supported by the linked-device bridge.');
       const options = {};
       if (payload.context?.message_id) options.quoted = this.target(line, payload.context.message_id, phone, false).message;
+      await this.ensureLive(line, socket);
       this.connected(line, socket);
       this.storageMonitor.assertCanSubmit(id);
       const nativeId = generateMessageIDV2(socket.user?.id);
