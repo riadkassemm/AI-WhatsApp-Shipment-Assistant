@@ -1028,7 +1028,10 @@ def test_whatsapp_message_features_migration_is_additive_and_keeps_reply_locatio
 
 
 def test_latency_defaults_reduce_deliberate_wait_without_lowering_ai_reasoning() -> None:
-    from app.config import settings
+    from app.config import Settings
+
+    # Code defaults only: a developer's local .env must not change the result.
+    settings = Settings(_env_file=None)
 
     assert settings.whatsapp_message_burst_debounce_seconds <= 0.65
     assert settings.whatsapp_message_burst_max_wait_seconds <= 2.0

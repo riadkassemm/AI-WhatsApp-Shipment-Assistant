@@ -18,7 +18,9 @@ class Settings(BaseSettings):
     )
 
     # OpenAI
-    openai_api_key: str = ""
+    # repr=False keeps secrets out of repr(settings), which assertion
+    # failures and tracebacks print in full.
+    openai_api_key: str = Field(default="", repr=False)
     openai_model: str = "gpt-6-sol"
     openai_reasoning_effort: Literal["none", "low", "medium", "high", "xhigh", "max"] = "medium"
     openai_summarizer_reasoning_effort: Literal[
@@ -39,17 +41,17 @@ class Settings(BaseSettings):
     shipping_catalog_cache_seconds: int = 60
 
     # WhatsApp
-    whatsapp_token: str = ""
+    whatsapp_token: str = Field(default="", repr=False)
     whatsapp_phone_number_id: str = ""
-    whatsapp_verify_token: str = ""
+    whatsapp_verify_token: str = Field(default="", repr=False)
     whatsapp_api_version: str = "v20.0"
-    whatsapp_app_secret: str = ""
+    whatsapp_app_secret: str = Field(default="", repr=False)
     # Cloud remains the default; additional linked-device routes are opt-in.
     whatsapp_transport: Literal["cloud", "linked_device"] = "cloud"
     whatsapp_linked_device_enabled: bool = False
     whatsapp_linked_device_default_line_id: str = ""
     whatsapp_linked_device_url: str = "http://127.0.0.1:3001"
-    whatsapp_linked_device_secret: str = ""
+    whatsapp_linked_device_secret: str = Field(default="", repr=False)
     # Dashboard "Restart WhatsApp service" (Admins and Super Admins). Requires the
     # root path unit in deployment/production/bridge-restart/ on the server.
     whatsapp_bridge_restart_enabled: bool = False
@@ -92,12 +94,12 @@ class Settings(BaseSettings):
     db_port: int = 3307
     db_name: str = "mikexport"
     db_user: str = "whatsapp_bot"
-    db_password: str = ""
+    db_password: str = Field(default="", repr=False)
     shipping_db_schema: str = "shipping_db"
 
     # Human handoff notification. This is only a secondary alert; durable
     # support state lives in MariaDB.
-    human_handoff_webhook_url: str | None = None
+    human_handoff_webhook_url: str | None = Field(default=None, repr=False)
 
     # Support dashboard/API.
     support_ui_enabled: bool = True
@@ -118,9 +120,9 @@ class Settings(BaseSettings):
     # rest with the Fernet key below. Configure the redirect URI exactly in the
     # Google Cloud OAuth client (for example https://support.example.com/api/support/google-contacts/callback).
     google_contacts_client_id: str = ""
-    google_contacts_client_secret: str = ""
+    google_contacts_client_secret: str = Field(default="", repr=False)
     google_contacts_redirect_uri: str = ""
-    google_contacts_token_encryption_key: str = ""
+    google_contacts_token_encryption_key: str = Field(default="", repr=False)
 
     # Media exchanged while a human agent owns the WhatsApp conversation. Files
     # are kept outside the public web root and are served only through authenticated
@@ -134,8 +136,9 @@ class Settings(BaseSettings):
     support_audio_max_bytes: int = 16 * 1024 * 1024
     support_document_max_bytes: int = 25 * 1024 * 1024
     support_video_max_bytes: int = 192 * 1024 * 1024
-    # Ceiling for every staff upload (all media types, quick replies, saved
-    # attachments). Inbound customer media keeps the per-type limits above.
+    # Ceiling for every media file in both directions: staff uploads (all media
+    # types, quick replies, saved attachments) and inbound customer media. The
+    # effective limit per type is the smaller of this and the per-type value.
     support_upload_max_bytes: int = 32 * 1024 * 1024
     support_media_download_timeout_seconds: float = 20.0
     support_media_transcode_timeout_seconds: float = 30.0
@@ -167,7 +170,7 @@ class Settings(BaseSettings):
     client_auth_pending_secret_ttl_seconds: int = 5 * 60
 
     # Conversation
-    redis_url: str = "redis://localhost:6379/0"
+    redis_url: str = Field(default="redis://localhost:6379/0", repr=False)
     conversation_ttl_seconds: int = 259200
     shipping_quote_context_ttl_seconds: int = 30 * 60
     # Serialize all messages for one WhatsApp sender. This must be longer than
