@@ -1453,9 +1453,7 @@ function renderLineHealth(payload) {
   const unavailableOnly = storageAlert && storage.issues?.length && storage.issues.every(issue =>
     ['BRIDGE_UNAVAILABLE', 'MONITOR_UNAVAILABLE'].includes(issue.code));
   // Line problems are brief, self-hiding toasts (bottom right), shown once per
-  // problem and again after a page refresh while it lasts. The old persistent
-  // banner stays hidden.
-  $('lineAlertBanner').classList.toggle('hidden', true);
+  // problem and again after a page refresh while it lasts.
   let message = '', canAct = false;
   if (unavailableOnly) {
     message = 'WhatsApp status is unavailable.';
@@ -2732,7 +2730,6 @@ $('messagePreferencesBtn').addEventListener('click', openMessagePreferencesModal
 $('aiHeaderBtn').addEventListener('click', openAiSettingsModal);
 $('manageStaffBtn').addEventListener('click', openStaffModal);
 $('manageWhatsAppBtn').addEventListener('click', openWhatsAppModal);
-$('lineAlertActionBtn').addEventListener('click', openWhatsAppModal);
 $('googleContactsConnectBtn').addEventListener('click', connectGoogleContacts);
 $('importVcfContactsBtn').addEventListener('click', chooseVcfContactsFile);
 $('vcfContactsInput').addEventListener('change', importSelectedVcfContacts);

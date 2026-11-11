@@ -5,8 +5,10 @@ from app.support_repository import _SUPPORT_SCHEMA_MIGRATIONS, _missing_support_
 
 
 def add_base_schema(columns):
-    for table, required in _SUPPORT_SCHEMA_MIGRATIONS[0][1].items():
-        columns.setdefault(table, set()).update(required)
+    for path, required_tables in _SUPPORT_SCHEMA_MIGRATIONS:
+        if "20260825_support_base_schema" in path or "20260912_ai_control_settings" in path or "20260922_staff_message_preferences" in path:
+            for table, required in required_tables.items():
+                columns.setdefault(table, set()).update(required)
 
 
 def add_linked_device_schema(columns):
@@ -294,3 +296,22 @@ def test_support_schema_guard_requires_line_outage_columns():
     columns["support_ticket_messages"].add("held_until")
     columns.pop("support_deletion_audit")
     assert _missing_support_schema_migrations(columns) == ["migrations/20261031_line_outage_resilience.sql"]
+
+
+def test_support_schema_guard_requires_ai_control_and_staff_message_preferences():
+    def complete():
+        columns = {}
+        for _, tables in _SUPPORT_SCHEMA_MIGRATIONS:
+            for table, required in tables.items():
+                columns.setdefault(table, set()).update(required)
+        return columns
+
+    columns = complete()
+    columns.pop("ai_control_settings_audit")
+    assert _missing_support_schema_migrations(columns) == ["migrations/20260912_ai_control_settings.sql"]
+    columns = complete()
+    columns["ai_control_settings"].discard("schedule_timezone")
+    assert _missing_support_schema_migrations(columns) == ["migrations/20260912_ai_control_settings.sql"]
+    columns = complete()
+    columns["staff"].discard("custom_resolution_message")
+    assert _missing_support_schema_migrations(columns) == ["migrations/20260922_staff_message_preferences.sql"]

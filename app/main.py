@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import logging
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, HTTPException, Request, Response
 
 from app.ai_availability import EffectiveAIAvailability, ai_availability_service
 from app.ai_tools import NEEDS_VERIFIED_IDENTITY, dispatch_tool_call
@@ -1644,7 +1645,11 @@ async def verify_webhook(request: Request) -> Response:
     mode = params.get("hub.mode")
     token = params.get("hub.verify_token")
     challenge = params.get("hub.challenge")
-    if mode == "subscribe" and token == settings.whatsapp_verify_token:
+    expected = settings.whatsapp_verify_token
+    # An unset verify token must not match an empty hub.verify_token parameter.
+    if mode == "subscribe" and expected and token is not None and hmac.compare_digest(
+        token.encode("utf-8"), expected.encode("utf-8")
+    ):
         return Response(content=challenge, media_type="text/plain")
     return Response(status_code=403)
 

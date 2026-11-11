@@ -23,6 +23,10 @@ def verify_meta_signature(raw_body: bytes, signature_header: str | None) -> bool
     """
     if not signature_header or not signature_header.startswith("sha256="):
         return False
+    if not settings.whatsapp_app_secret:
+        # An HMAC keyed with an empty secret can be computed by anyone. Without
+        # a configured app secret no webhook POST can be trusted.
+        return False
 
     expected = hmac.new(
         key=settings.whatsapp_app_secret.encode("utf-8"),

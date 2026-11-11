@@ -505,21 +505,6 @@ class BaseConversationStore:
     ) -> None:
         raise NotImplementedError
 
-    async def set_mode(
-        self,
-        phone_number: str,
-        mode: Mode,
-    ) -> None:
-        conversation = await self.get_or_create(
-            phone_number
-        )
-
-        conversation.mode = mode
-
-        await self.save(
-            conversation
-        )
-
     async def authenticate(
         self,
         phone_number: str,
@@ -545,46 +530,6 @@ class BaseConversationStore:
         conversation.auth_state = "authenticated"
 
         await self.clear_pending_auth_password(phone_number)
-        await self.save(
-            conversation
-        )
-
-        return conversation
-
-    async def set_pending_auth_userid(
-        self,
-        phone_number: str,
-        userid: str,
-    ) -> Conversation:
-        conversation = await self.get_or_create(
-            phone_number
-        )
-
-        conversation.pending_auth_userid = str(
-            userid
-        )
-        conversation.auth_state = "awaiting_password"
-
-        await self.save(
-            conversation
-        )
-
-        return conversation
-
-    async def clear_pending_auth(
-        self,
-        phone_number: str,
-    ) -> Conversation:
-        conversation = await self.get_or_create(
-            phone_number
-        )
-
-        conversation.pending_auth_userid = None
-        conversation.auth_state = (
-            "authenticated" if conversation.verified_customer_id is not None else "guest"
-        )
-        await self.clear_pending_auth_password(phone_number)
-
         await self.save(
             conversation
         )

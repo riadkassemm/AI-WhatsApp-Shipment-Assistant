@@ -365,19 +365,6 @@ class StaffRepository:
                     (token_hash,),
                 )
 
-    async def revoke_all_staff_sessions(self, staff_id: int) -> None:
-        pool = await self._ensure_pool()
-        async with pool.acquire() as conn:
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    """
-                    UPDATE staff_sessions
-                    SET revoked_at = COALESCE(revoked_at, UTC_TIMESTAMP(6))
-                    WHERE staff_id = %s AND revoked_at IS NULL
-                    """,
-                    (int(staff_id),),
-                )
-
     async def _find_email_conflict(
         self,
         cur: Any,

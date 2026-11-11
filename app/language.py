@@ -176,27 +176,6 @@ def detect_communication_style(
     return detected
 
 
-def claim_greeting(style: str | None, agent_name: str | None) -> str:
-    name = (agent_name or "").strip()
-    who_en = f" I'm {name} from customer support." if name else " I'm from customer support."
-    who_fr = f" Je suis {name} du service client." if name else " Je suis du service client."
-    who_ar = f" أنا {name} من خدمة العملاء." if name else " أنا من خدمة العملاء."
-    who_leb = f" أنا {name} من خدمة الزباين." if name else " أنا من خدمة الزباين."
-    who_arabizi = f" Ana {name} men customer support." if name else " Ana men customer support."
-
-    if style == "fr":
-        return f"Bonjour !{who_fr} Je vais m'occuper de votre demande à partir d'ici."
-    if style == "ar":
-        return f"مرحباً!{who_ar} سأتولى مساعدتك من هنا."
-    if style == "leb_ar":
-        return f"أهلا!{who_leb} رح كمّل معك من هون."
-    if style == "leb_arabizi":
-        return f"Marhaba!{who_arabizi} Rah kammel ma3ak men hon."
-    if style == "mixed":
-        return f"Hi!{who_arabizi} Rah kammel ma3ak from here."
-    return f"Hi!{who_en} I'll be assisting you from here."
-
-
 def resolution_message(style: str | None) -> str:
     if style == "fr":
         return "Merci d'avoir échangé avec notre équipe. Votre demande de support est résolue, et l'assistance automatique est de nouveau disponible si vous avez besoin d'autre chose."

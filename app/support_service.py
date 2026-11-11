@@ -28,7 +28,6 @@ from app.support_media import (
     SupportMediaTooLargeError,
     StoredSupportMedia,
     format_media_limit,
-    max_media_bytes,
     max_upload_bytes,
     media_extension,
     media_kind_for_mime,

@@ -43,7 +43,7 @@ from app.staff_management import (
 )
 from app.support_events import event_stream
 from app.support_statistics import router as statistics_router
-from app.support_media import SupportMediaError, SupportMediaTooLargeError, max_media_bytes, max_upload_bytes
+from app.support_media import SupportMediaError, SupportMediaTooLargeError, max_upload_bytes
 from app.support_repository import SupportConflictError, SupportNotFoundError, SupportSchemaError
 from app.vcf_contacts import (
     MAX_VCF_IMPORT_BYTES,

@@ -181,9 +181,6 @@ class SupportMediaStore:
     def _message_dir(self, ticket_id: int, message_id: int) -> Path:
         return self._root / str(int(ticket_id)) / str(int(message_id))
 
-    def _metadata_path(self, ticket_id: int, message_id: int) -> Path:
-        return self._message_dir(ticket_id, message_id) / "metadata.json"
-
     def _remote_reference_path(self, ticket_id: int, message_id: int) -> Path:
         return self._message_dir(ticket_id, message_id) / "remote.json"
 

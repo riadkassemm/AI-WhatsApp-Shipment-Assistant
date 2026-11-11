@@ -1,18 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any
 
-
-TicketStatus = Literal[
-    "NEW",
-    "ASSIGNED",
-    "IN_PROGRESS",
-    "WAITING_CUSTOMER",
-    "WAITING_INTERNAL",
-    "RESOLVED",
-    "CLOSED",
-]
 
 ACTIVE_TICKET_STATUSES: tuple[str, ...] = (
     "NEW",

@@ -7,7 +7,7 @@ import logging
 from app.whatsapp_client import WhatsAppSendError
 
 
-# A 192 MiB attachment also needs its base64/JSON representation while uploading.
+# A large attachment also needs its base64/JSON representation while uploading.
 # Bound that allocation across concurrently claimed replies in this API process.
 # Deployment must budget separately for every API worker and incoming uploads.
 _media_upload_slot = asyncio.Semaphore(1)

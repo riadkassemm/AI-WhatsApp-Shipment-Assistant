@@ -188,11 +188,13 @@ def test_slow_health_probe_caches_from_completion_for_waiting_staff(monkeypatch)
 
 def test_storage_banner_warns_before_outage_without_suggesting_pairing():
     source = Path("app/static/support/actions.js").read_text()
+    # Toasts replaced the persistent banner; its markup must not come back.
+    assert "lineAlertBanner" not in Path("app/templates/support.html").read_text() and "lineAlertBanner" not in source
     helpers = source[source.index("const LINE_HEALTH_INTERVAL_MS"):source.index("function linkedDeviceAdditionStorageKey(")]
     script = r"""
 const assert = require('node:assert/strict');
 function element() {return {dataset: {}, textContent: '', classList: {hidden: true, toggle(_, value) {this.hidden = value}}}}
-const elements = {lineAlertBanner: element(), lineAlertText: element(), lineAlertActionBtn: element(), composerHelp: element()};
+const elements = {composerHelp: element()};
 const $ = id => elements[id], text = (node, value) => {node.textContent = value};
 const canLinkWhatsApp = () => true, sounds = [], notifyNewCustomerActivity = value => sounds.push(value);
 const toasts = [], notify = (message, type, onOpen) => toasts.push({message, type, action: Boolean(onOpen)});
@@ -201,7 +203,6 @@ const state = {lineAlertsSeen: new Set(), currentTicketData: {ticket: {business_
 const payload = {lines: [{line_id:'90020', name:'Saida Office', status:'connected', alert:false}],
   storage:{level:'warning', issues:[{line_id:'90020', name:'Saida Office', level:'warning', code:'COMPACTION_FAILED'}]}};
 renderLineHealth(payload); renderLineHealth(payload);
-assert.equal(elements.lineAlertBanner.classList.hidden, true, 'no persistent banner');
 assert.equal(toasts.length, 1, 'one brief toast for the same storage issue');
 assert.equal(toasts[0].message, 'WhatsApp storage needs attention for Saida Office.');
 assert.equal(toasts[0].type, 'error');
@@ -277,7 +278,7 @@ def test_banner_and_composer_explain_an_outage():
     script = r"""
 const assert = require('node:assert/strict');
 function element() {return {dataset: {}, textContent: '', classList: {hidden: true, toggle(_, value) {this.hidden = value}}}}
-const elements = {lineAlertBanner: element(), lineAlertText: element(), lineAlertActionBtn: element(), composerHelp: element()};
+const elements = {composerHelp: element()};
 const $ = id => elements[id];
 const text = (node, value) => {node.textContent = value};
 let staff = false;
@@ -290,7 +291,6 @@ const state = {authenticated: true, lineHealthAt: 0, lineAlertsSeen: new Set(),
 """ + helpers + r"""
 const down = {lines: [{line_id: '90020', name: 'Saida Office', status: 'logged_out', since: '2026-10-31T08:10:27Z', alert: true}]};
 renderLineHealth(down);
-assert.equal(elements.lineAlertBanner.classList.hidden, true, 'no persistent banner');
 assert.match(toasts[0].message, /^Saida Office needs relinking since .+\.$/);
 assert.equal(toasts[0].action, false, 'no settings shortcut without link rights');
 assert.deepEqual(sounds, [], 'nobody who cannot fix it is paged');

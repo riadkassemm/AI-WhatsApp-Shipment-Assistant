@@ -1,5 +1,22 @@
 """Unit helpers. Integration tests use their own real service fixture."""
+import os
+
 import pytest
+
+# Tests never talk to real providers. Environment variables outrank the
+# developer's .env, so setting them here, before any test imports app.config,
+# keeps real credentials out of the test process and out of failure output.
+os.environ.update({
+    "OPENAI_API_KEY": "unused-test-key",
+    "WHATSAPP_TOKEN": "unused-test-token",
+    "WHATSAPP_VERIFY_TOKEN": "",
+    "WHATSAPP_APP_SECRET": "",
+    "WHATSAPP_LINKED_DEVICE_SECRET": "",
+    "DB_PASSWORD": "",
+    "GOOGLE_CONTACTS_CLIENT_SECRET": "",
+    "GOOGLE_CONTACTS_TOKEN_ENCRYPTION_KEY": "",
+    "HUMAN_HANDOFF_WEBHOOK_URL": "",
+})
 
 
 @pytest.fixture

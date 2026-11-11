@@ -350,24 +350,6 @@ function updateQueueSummary(visibleCount = null) {
   text($('pageSummary'), !total ? '' : shown < total ? ('Showing ' + shown + ' of ' + total + ' · scroll for more') : ('Showing all ' + total));
 }
 
-function queueSearchText(ticket) {
-  return [
-    ticket.ticket_reference,
-    ticket.customer_name,
-    ticket.customer_userid,
-    ticket.whatsapp_phone,
-    ticket.ai_summary,
-    ticket.reason,
-    ticket.status,
-    ticket.tracking_reference,
-    ticket.requested_action,
-    ticket.current_assignee_name,
-    ticket.display_name,
-    ticket.business_display_phone_number,
-    ticket.business_phone_number_id
-  ].filter(Boolean).join(' ').toLocaleLowerCase();
-}
-
 function supportNumberAlias(item) {
   if (!item) return '';
   const direct = String(item.display_name || '').trim();
@@ -963,14 +945,6 @@ function messageActor(message) {
   const type = String(message.sender_type || message.role || '').toUpperCase();
   if (message.sender_name) return message.sender_name;
   return MESSAGE_ROLE_LABELS[type] || (type ? formatStatus(type) : 'Message');
-}
-
-function messageRole(message) {
-  const type = String(message.sender_type || message.role || '').toUpperCase();
-  if (type === 'CUSTOMER') return 'Customer';
-  if (type === 'AI') return 'AI assistant';
-  if (type === 'AGENT') return 'Agent reply';
-  return type ? formatStatus(type) : 'Message';
 }
 
 function messageClass(message) {

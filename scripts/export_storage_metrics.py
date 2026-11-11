@@ -17,14 +17,17 @@ def allocated(root: Path) -> tuple[int, int, int]:
         directories[:] = [name for name in directories if not (Path(directory) / name).is_symlink()]
         for name in files:
             info = (Path(directory) / name).lstat()
-            if not stat.S_ISREG(info.st_mode) or (info.st_dev, info.st_ino) in seen:
+            if not stat.S_ISREG(info.st_mode):
                 continue
-            seen.add((info.st_dev, info.st_ino))
-            total += info.st_blocks * 512
+            # Sizes are per name: a hard link listed first must not hide them.
             if name.endswith('.journal'):
                 journal = max(journal, info.st_size)
             if name.endswith('.snapshot'):
                 snapshot = max(snapshot, info.st_size)
+            if (info.st_dev, info.st_ino) in seen:
+                continue
+            seen.add((info.st_dev, info.st_ino))
+            total += info.st_blocks * 512
     return total, journal, snapshot
 
 

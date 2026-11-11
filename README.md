@@ -349,7 +349,8 @@ The following settings are documented by the cumulative build. Defaults are alre
 | `SUPPORT_STICKER_MAX_BYTES` | `512000` | Maximum WebP sticker size accepted by the support media pipeline. |
 | `SUPPORT_AUDIO_MAX_BYTES` | `16777216` | Maximum voice/audio size accepted by the support media pipeline. |
 | `SUPPORT_DOCUMENT_MAX_BYTES` | `26214400` | Maximum PDF size accepted by the support media pipeline. |
-| `SUPPORT_VIDEO_MAX_BYTES` | `16777216` | Maximum MP4/3GP video size accepted by the support media pipeline (WhatsApp's own limit is 16 MB). |
+| `SUPPORT_VIDEO_MAX_BYTES` | `201326592` | Per-type MP4/3GP video limit. The effective limit is the smaller of this and `SUPPORT_UPLOAD_MAX_BYTES`. |
+| `SUPPORT_UPLOAD_MAX_BYTES` | `33554432` | Ceiling (32 MB) for every media file, whether staff send it or a customer does. It caps each per-type limit above. |
 | `SUPPORT_MEDIA_DOWNLOAD_TIMEOUT_SECONDS` | `20` | Timeout for Meta media metadata/download and upload operations. |
 | `SUPPORT_MEDIA_TRANSCODE_TIMEOUT_SECONDS` | `30` | Maximum time allowed to convert a browser recording to Ogg/Opus. |
 | `SUPPORT_MEDIA_FFMPEG_PATH` | `ffmpeg` | ffmpeg executable used for voice-note conversion. |
@@ -399,7 +400,7 @@ mariadb -u <db-user> -p <database-name> \
 This baseline creates `staff`, `staff_sessions`, `support_tickets`,
 `support_ticket_messages`, and `support_ticket_events` only when absent. The
 existing customer and shipping tables belong to the business database. Apply
-`20260826_staff_email_uniqueness.sql` (or its Python helper) and the remaining
+`20260826_staff_email_uniqueness.sql` and the remaining
 support migrations in date order before starting the app. Existing populated
 support databases already containing these tables need no baseline change.
 
@@ -471,28 +472,15 @@ A direct catalog check should use the same host, port, username, and password as
 
 ### Staff email uniqueness
 
-Deploy the application code first, then run:
+The migration is `migrations/20260826_staff_email_uniqueness.sql`. Run it as an administrator, in stages rather than in one pass:
 
-```bash
-source venv/bin/activate
-python ensure_staff_email_uniqueness.py
-```
-
-When the table is clean, the script backfills `email_normalized` and ensures this invariant:
+1. Run its first statement (the `SELECT`). It lists accounts that share an email once case and surrounding spaces are ignored.
+2. If it returns rows, resolve those accounts in `/support` and run it again. Do not hard-delete staff rows, because historical records reference their IDs.
+3. When it returns no rows, run the remaining statements. They backfill `email_normalized` and add this invariant:
 
 ```sql
 UNIQUE KEY uq_staff_email_normalized (email_normalized)
 ```
-
-If duplicate rows already exist, the script stops without changing the table and prints their IDs. Resolve those records in `/support`, then run the script again. It intentionally does not hard-delete staff rows because historical records may reference their IDs.
-
-A reference migration is included at:
-
-```text
-migrations/20260826_staff_email_uniqueness.sql
-```
-
-The Python migration helper is preferred because it applies the same normalization rules as the application and checks for the exact single-column unique index.
 
 ## Validation
 
@@ -502,31 +490,15 @@ From the repository root:
 source venv/bin/activate
 ffmpeg -version | head -n 1
 python -m compileall -q app
-pytest -q
+python -m pytest --ignore=tests/integration
 ```
 
-Verify the live MariaDB catalog without making an OpenAI request:
+The shipping pipeline is covered by `tests/test_canonical_shipping_pipeline.py`, which needs no database. There is no script that checks the live MariaDB catalog; use the [acceptance tests](#acceptance-tests) for that.
+
+Check that MariaDB, Redis and the applied migrations are ready, without writing anything:
 
 ```bash
-python verify_canonical_shipping_pipeline.py
-```
-
-Expected output:
-
-```text
-OK: canonical English shipping fields, live catalogue lookup, Decimal pricing, context replacement, and style-safe rendering are ready.
-```
-
-An optional semantic-normalizer smoke test makes one OpenAI request:
-
-```bash
-python verify_canonical_shipping_pipeline.py --semantic-smoke
-```
-
-Run the staff email migration/check as part of deployment validation when the schema invariant has not already been installed:
-
-```bash
-python ensure_staff_email_uniqueness.py
+python scripts/check_runtime.py --schema
 ```
 
 Local compilation and tests do not replace a live WhatsApp and MariaDB acceptance test in the target environment.
@@ -553,10 +525,10 @@ Redis is required for persistent conversation state, queues, locking, and idempo
 Use a clean test conversation when validating quote context or the two-step authentication flow:
 
 ```bash
-redis-cli DEL "conversation:<CUSTOMER_WHATSAPP_NUMBER>"
+redis-cli DEL "conversation:<BUSINESS_LINE_ID>:<CUSTOMER_WHATSAPP_NUMBER>"
 ```
 
-Use the customer number in the same format supplied by Meta. Delete only the test conversation key; do not flush the production Redis database.
+The key includes the receiving business-line ID (the Meta `phone_number_id` or the linked-device line ID). Use the customer number in the same format supplied by Meta. Delete only the test conversation key; do not flush the production Redis database.
 
 ### Public price quote
 
@@ -733,7 +705,7 @@ Delete only the affected test conversation’s Redis key and repeat the full seq
 
 **Staff creation reports a duplicate email**
 
-Edit the existing account rather than creating another role-specific duplicate. Run `python ensure_staff_email_uniqueness.py` after resolving legacy conflicts.
+Edit the existing account rather than creating another role-specific duplicate. If the unique index is not installed yet, apply `migrations/20260826_staff_email_uniqueness.sql` after resolving legacy conflicts.
 
 **Semantic normalization is unavailable**
 
@@ -771,7 +743,7 @@ Install `ffmpeg` on the application host or set `SUPPORT_MEDIA_FFMPEG_PATH` to t
 | `app/support_image_editor.js` | Canvas overlay editor, text selection, undo/redo, and image export used by the support viewer. |
 | `tests/test_canonical_shipping_pipeline.py` | Canonical shipping-pipeline coverage. |
 | `migrations/20260825_support_base_schema.sql` | Recreates the original staff and support tables for a new database before additive migrations. |
-| `migrations/20260826_staff_email_uniqueness.sql` | Reference unique-email migration. |
+| `migrations/20260826_staff_email_uniqueness.sql` | Duplicate check, `email_normalized` backfill and unique-email index. |
 | `migrations/20260829_support_ticket_channels_and_transfers.sql` | Adds receiving WhatsApp business-number metadata/indexes used by multi-number ticket routing. |
 | `migrations/20260912_ai_control_settings.sql` | Creates persistent global AI controls and their audit history with backward-compatible AI-ON defaults. |
 | `migrations/20260912_support_media_recovery.sql` | Adds nullable provider media recovery metadata to support-ticket messages so inbound images/audio remain recoverable across restarts/instances. |
@@ -779,8 +751,7 @@ Install `ffmpeg` on the application host or set `SUPPORT_MEDIA_FFMPEG_PATH` to t
 | `migrations/20260922_forwarded_message_marker.sql` | Adds persistent forwarded-message provenance so history-origin forwards render with a Forwarded marker. |
 | `migrations/20260926_whatsapp_stickers_and_reactions.sql` | Adds durable, deduplicated current reaction state and removal tombstones for WhatsApp messages. |
 | `migrations/20260928_support_message_changes.sql` | Adds message edit/version/tombstone columns and per-staff visibility records. |
-| `ensure_staff_email_uniqueness.py` | Preferred staff email backfill and invariant installer. |
-| `verify_canonical_shipping_pipeline.py` | Live catalog verifier and optional semantic smoke test. |
+| `scripts/check_runtime.py` | Read-only readiness check for MariaDB, Redis and applied migrations. |
 
 ## Security notes
 
@@ -1034,7 +1005,7 @@ Edited images are sent as new WhatsApp media messages; their source image is unc
 
 Images can be copied to the clipboard from the message toolbar (**Copy image**), the image viewer, or the editor. The dashboard converts them to PNG, the format browsers accept for clipboard images, and copying needs HTTPS (or localhost).
 
-Customer videos (MP4/3GP, Cloud API and linked-device lines) are stored like other support media and play inline with seeking. The media endpoint supports HTTP range requests. Staff can attach and send MP4/3GP videos up to `SUPPORT_VIDEO_MAX_BYTES` with an optional caption, and forward them. Videos sent before this release were stored only as a text placeholder, without the file, so they cannot be played. Its working canvas is capped at 4096 pixels per side and 16 megapixels; exports are reduced to the configured image upload limit when possible. Text replies appear in the support timeline immediately while WhatsApp send status is pending. Human-owned inbound chats bypass the AI burst debounce and stream new messages directly into the timeline.
+Customer videos (MP4/3GP, Cloud API and linked-device lines) are stored like other support media and play inline with seeking. The media endpoint supports HTTP range requests. Staff can attach and send MP4/3GP videos up to the smaller of `SUPPORT_VIDEO_MAX_BYTES` and `SUPPORT_UPLOAD_MAX_BYTES` (32 MB by default) with an optional caption, and forward them. Videos sent before this release were stored only as a text placeholder, without the file, so they cannot be played. Its working canvas is capped at 4096 pixels per side and 16 megapixels; exports are reduced to the configured image upload limit when possible. Text replies appear in the support timeline immediately while WhatsApp send status is pending. Human-owned inbound chats bypass the AI burst debounce and stream new messages directly into the timeline.
 
 ## Shared customer conversation history
 
@@ -1150,8 +1121,11 @@ An empty expected phone value binds the line to the first account paired. To req
 
    ```bash
    npm ci --prefix whatsapp_bridge --include=optional --ignore-scripts
+   node whatsapp_bridge/scripts/patch-baileys-lifecycle.js
    npm start --prefix whatsapp_bridge
    ```
+
+   `--ignore-scripts` also skips this project's `postinstall`, so the second command applies the required Baileys patch. `npm start` refuses to run without it.
 
    For a local Linux setup with systemd, replace `npm start` with a persistent user service:
 
