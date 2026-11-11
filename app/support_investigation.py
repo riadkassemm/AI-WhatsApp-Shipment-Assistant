@@ -5,7 +5,7 @@ import json
 
 import aiomysql
 from fastapi import HTTPException
-from app.support_timing import LIFECYCLE_EVENTS, responsibility_periods, period_in_range, review_indicators, timing_summary, validate_current_projection
+from app.support_timing import LIFECYCLE_EVENTS, responsibility_periods, period_in_range, review_indicators, validate_current_projection
 from app.support_staff_names import attach_current_staff_names
 
 AUDIT_EVENTS = (*LIFECYCLE_EVENTS, 'CONVERSATION_VIEWED', 'INCOMING_MARKED_READ')
@@ -45,39 +45,6 @@ async def load_evidence(cur, tickets, as_of, *, include_messages=True, activity_
     for m in await cur.fetchall():
         messages[m['ticket_id']].append(m)
     return events, messages
-
-
-async def timing_report(cur, start, end, staff_ids):
-    await cur.execute('SELECT UTC_TIMESTAMP(6) AS now')
-    now = (await cur.fetchone())['now']
-    as_of = min(now, end)
-    samples = {str(i): ([], []) for i in staff_ids}
-    incomplete = 0
-    if start >= as_of:
-        return {key: timing_summary([], []) for key in samples}, timing_summary([], []), 0
-    before = None
-    while True:
-        tickets = await ticket_batch(cur, start, end, before)
-        if not tickets:
-            break
-        events, _ = await load_evidence(cur, tickets, as_of, include_messages=False)
-        for ticket in tickets:
-            result = responsibility_periods(events[ticket['id']], as_of)
-            if as_of == now:
-                validate_current_projection(result, ticket)
-            incomplete += bool(result['issues'] or not result['periods'])
-            for period in result['periods']:
-                if period['agent_id'] not in samples or not period_in_range(period, start, end):
-                    continue
-                handling, resolution = samples[period['agent_id']]
-                handling.append(period['seconds'])
-                if period['resolution_seconds'] is not None:
-                    resolution.append(period['resolution_seconds'])
-        before = tickets[-1]['id']
-    rows = {key: timing_summary(*values) for key, values in samples.items()}
-    totals = timing_summary([v for pair in samples.values() for v in pair[0]],
-                            [v for pair in samples.values() for v in pair[1]])
-    return rows, totals, incomplete
 
 
 class InvestigationRepository:

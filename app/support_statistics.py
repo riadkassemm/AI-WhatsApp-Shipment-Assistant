@@ -10,7 +10,7 @@ from uuid import UUID
 
 from app.support_auth import SupportAgent, get_current_agent, require_support_csrf
 from app.support_repository import support_repository
-from app.support_investigation import InvestigationRepository, timing_report
+from app.support_investigation import InvestigationRepository
 
 router = APIRouter(prefix="/statistics", tags=["support-statistics"])
 IDLE_SECONDS = 60
@@ -181,9 +181,6 @@ class StatisticsRepository:
                     await cur.execute("""SELECT MIN(created_at) AS since FROM support_ticket_events
                         WHERE event_type='TICKET_TRANSFERRED' AND actor_type='AGENT'""")
                     transfers_since = (await cur.fetchone())["since"]
-                    timing_rows, timing_totals, incomplete = await timing_report(cur, start, end, rows)
-                    for key, row in rows.items():
-                        row.update(timing_rows[key])
                 await conn.commit()
             except BaseException:
                 await conn.rollback()
@@ -196,7 +193,6 @@ class StatisticsRepository:
             row["rank"] = rank if row[rank_by] is not None else None
         stamp = lambda value: value.isoformat() + "Z" if value else None
         return {"agents": agents, "rows": ordered, "totals": {m: round(sum(r[m] for r in ordered), 3) for m in METRICS},
-                "timing_totals": timing_totals, "timing_incomplete_tickets": incomplete,
                 "rank_by": rank_by, "direction": "desc" if descending else "asc",
                 "activity_tracking_started_at": stamp(tracking), "ticket_history_since": stamp(tickets_since),
                 "message_history_since": stamp(messages_since), "transfer_history_since": stamp(transfers_since), "idle_timeout_seconds": IDLE_SECONDS}
@@ -217,7 +213,7 @@ async def activity_heartbeat(pulse: ActivityHeartbeat, agent: SupportAgent = Dep
 async def agent_statistics(
     start: date, end: date, timezone_name: str = "Asia/Beirut",
     agent_id: int | None = Query(default=None, ge=1),
-    rank_by: Literal["active_seconds", "tickets_claimed", "tickets_resolved", "messages_sent", "tickets_transferred", "tickets_received_by_transfer", "average_handling_seconds", "median_handling_seconds", "average_resolution_seconds", "median_resolution_seconds"] = "tickets_resolved",
+    rank_by: Literal["active_seconds", "tickets_claimed", "tickets_resolved", "messages_sent", "tickets_transferred", "tickets_received_by_transfer"] = "tickets_resolved",
     direction: Literal["asc", "desc"] = "desc",
     agent: SupportAgent = Depends(get_current_agent),
 ):

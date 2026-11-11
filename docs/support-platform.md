@@ -816,27 +816,23 @@ Invalid country codes still fail local validation. No schema migration is needed
 
 ### Responsibility timing and read-only investigation
 
-**Agent Statistics** now includes average/median handling time and resolver time,
-with the same dates, staff filter, sortable leaderboard and PDF export. These are
-elapsed clock durations (waiting/off-hours included), not active dashboard time.
-Hover a staff row for sample counts; unknown timing displays `—`.
+Agent Statistics no longer shows average or median handling and resolution times
+(removed 2026-11-11). The leaderboard, totals, staff review and PDF export show
+counts and active dashboard time only. The rules below still define the
+responsibility periods shown when investigating a ticket.
 
 - A claim assigns immediately; a transfer immediately stops the old owner's period
   and starts the recorded recipient's. Manager transfers credit the transfer actor
   in existing counts, but responsibility timing credits the recorded owners.
-- Every completed responsibility period ending within the selected dates is one
-  handling sample, even if it began before the range. Open periods are shown in
-  investigation but excluded from averages. Team averages/medians pool samples;
-  they are not averages of employee averages.
-- Resolver time is the final uninterrupted period owned by the resolving employee.
-  Earlier periods, including earlier periods of that same employee, remain separate
-  handling samples. A manager resolving another owner's ticket without reassignment
-  gets the existing resolution count but no invented resolver duration.
+- A completed period ends in the selected dates even if it began before the range.
+  Open periods are shown in investigation as ongoing.
+- A manager resolving another owner's ticket without reassignment gets the existing
+  resolution count; the owner's period ends with that resolution.
 - Resolution ends the cycle. Reopening starts another cycle, excluding the resolved
   gap. Customer-ticket reopen by Admin/Super Admin assigns that manager; eligible
   agents retain ownership. Staff chats begin assigned to their starter, reopen with
-  the replying staff member, and close separately: their periods count as handling,
-  not customer-ticket resolution samples. Cycle totals in investigation run from
+  the replying staff member, and close separately; their closure is not a
+  customer-ticket resolution. Cycle totals in investigation run from
   recorded initial claim/start/reopen through resolution across all transfers.
 - Timing is reconstructed from retained transactional lifecycle events, never from
   the ticket's overwritten `assigned_at`. Missing/inconsistent history is labeled

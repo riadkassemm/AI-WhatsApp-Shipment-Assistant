@@ -78,8 +78,6 @@ rows:[{id:7,name:'Alex',role:'agent',is_active:1,rank:1,active_seconds:7215,tick
 totals:{active_seconds:10815,tickets_claimed:20,tickets_resolved:16,messages_sent:73,tickets_transferred:7,tickets_received_by_transfer:7},
 rank_by:'tickets_resolved',direction:'desc',timezone:'Asia/Beirut',activity_tracking_started_at:'2026-10-23T00:00:00Z',
 transfer_history_since:'2026-09-01T00:00:00Z',ticket_history_since:'2026-09-01T00:00:00Z',message_history_since:'2026-09-01T00:00:00Z'};
-for(const row of report.rows)Object.assign(row,{average_handling_seconds:600,median_handling_seconds:480,average_resolution_seconds:900,median_resolution_seconds:720,handling_samples:12,resolution_samples:8});
-report.timing_totals={average_handling_seconds:600,median_handling_seconds:480,average_resolution_seconds:900,median_resolution_seconds:720};
 let resolvePending=null;
 const renderedInvestigation=[];
 function addMessage(container,message,mode){renderedInvestigation.push(mode);const p=document.createElement('p');p.textContent=message.body;container.append(p);}
@@ -133,12 +131,10 @@ for (const metric of ['tickets_transferred','tickets_received_by_transfer']) {
  check(calls.at(-1).includes('rank_by='+metric),'transfer ranking sent');
  check($('statisticsRanking').textContent.includes(statisticsMetrics[metric]),'transfer ranking label');
 }
-check($('statisticsRows').firstElementChild.children.length===12,'transfer and timing columns render');
-check($('statisticsTotals').children.length===10,'transfer and timing totals render');
-for(const metric of ['average_handling_seconds','median_resolution_seconds']){
- $('statisticsMetric').value=metric;await loadAgentStatistics();
- check($('statisticsRanking').textContent.includes(statisticsMetrics[metric]),'timing ranking uses selected criterion');
-}
+check($('statisticsRows').firstElementChild.children.length===8,'rank, staff and six count columns render');
+check($('statisticsTotals').children.length===6,'six totals render');
+for(const text of ['handling time','resolution time'])check(!$('agentStatisticsModal').textContent.toLowerCase().includes(text),'removed timing metric absent: '+text);
+check(![...$('statisticsMetric').options].some(option=>option.value.includes('handling')||option.value.includes('resolution_seconds')),'removed timing metrics cannot be ranked');
 state.ticketId=99;
 check($('statisticsAgentReview').classList.contains('hidden')&&!$('statisticsTicketRows').children.length,'no generic ticket list below ranking');
 $('statisticsStart').value='2020-01-01';
@@ -146,7 +142,8 @@ $('statisticsRows').querySelector('button').click();await Promise.resolve();awai
 check(calls.at(-1).includes('agent_id=7')&&calls.at(-1).includes('start='+appliedStart),'name click uses agent and applied dates, not unsaved filters');
 check($('statisticsOverview').classList.contains('hidden')&&!$('statisticsAgentReview').classList.contains('hidden'),'agent review replaces overview');
 check($('statisticsAgentTitle').textContent.includes('Alex'),'selected employee named');
-check($('statisticsAgentInsights').textContent.includes('48')&&$('statisticsAgentInsights').textContent.includes('0h 10m 0s'),'agent-specific counts and timing insights');
+check($('statisticsAgentInsights').textContent.includes('48')&&$('statisticsAgentInsights').textContent.includes('2h 0m 15s'),'agent-specific counts and active time');
+check(!$('statisticsAgentInsights').textContent.includes('handling')&&!$('statisticsAgentInsights').textContent.includes('Median'),'no timing insight cards');
 check($('statisticsTicketRows').textContent.includes('Resolved in under a minute')&&!$('statisticsTicketRows').textContent.includes('technical internal wording'),'review prompts are plain language');
 await browseStatisticsTickets(true);check(calls.at(-1).includes('before=42')&&calls.at(-1).includes('agent_id=7'),'ticket pagination preserves selected agent');
 await investigateStatisticsTicket(42);
@@ -238,7 +235,8 @@ def test_pdf_export_paginates_includes_filters_and_escapes_staff_names():
                      'Outbound messages sent', 'Highest first', '2026-10-01', '2026-10-23',
                      'Asia/Beirut', '1h 1m 1s', 'Deleted staff are excluded', 'Tickets transferred', 'Tickets received by transfer']:
         assert expected in ' '.join(text.split())
-    assert all('Rank' in page.extract_text() or 'Average handling time' in ' '.join(page.extract_text().split()) for page in reader.pages[:-1])
+    assert all('Rank' in page.extract_text() for page in reader.pages[:-1])
+    assert 'handling time' not in text.lower() and 'resolution time' not in text.lower()
     assert '&lt;' in display_text('<Admin>')
     assert display_text('محمد') != 'محمد'  # Arabic shaping and visual direction
     assert statistics_pdf({**report, 'rows': [{**row, 'name': 'محمد أحمد'}]}).startswith(b'%PDF-')
