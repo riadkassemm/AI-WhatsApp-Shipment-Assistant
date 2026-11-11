@@ -69,7 +69,8 @@ def main() -> None:
     if not (ROOT / ".env").is_file():
         raise RuntimeError("Configure the project's private .env first.")
     if not (ROOT / "whatsapp_bridge/node_modules/@whiskeysockets/baileys").is_dir():
-        raise RuntimeError("Run npm ci --prefix whatsapp_bridge --include=optional --ignore-scripts first.")
+        raise RuntimeError("Run npm ci --prefix whatsapp_bridge --include=optional --ignore-scripts, "
+                           "then node whatsapp_bridge/scripts/patch-baileys-lifecycle.js first.")
     subprocess.run(["systemctl", "--user", "show-environment"], check=True, stdout=subprocess.DEVNULL)
     config_root = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
     if not config_root.is_absolute():

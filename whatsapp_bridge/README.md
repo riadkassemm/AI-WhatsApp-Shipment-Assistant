@@ -9,9 +9,12 @@ Use Node.js 22 or newer (a maintained release is recommended). Run installation,
 ```sh
 cd whatsapp_bridge
 npm ci --include=optional --ignore-scripts
+node scripts/patch-baileys-lifecycle.js
 npm test
 npm start
 ```
+
+`--ignore-scripts` also skips this package's own `postinstall`, so apply the required Baileys patch with the second command. `npm start` verifies it and refuses to run without it.
 
 `npm start` reads the project's root `.env` without printing it. Configure these variables there:
 
@@ -86,7 +89,7 @@ Real edits and revocations arriving from the customer or the paired account's ot
 
 Callback delivery is durable and uses a 5-second timeout and exponential backoff capped at 60 seconds. A delayed callback does not prevent unrelated callbacks from being delivered. Transient failures retry for seven days. Permanent HTTP 4xx failures other than 429, and events exceeding the retry period, remain in the durable outbox dead-letter list (base JSON plus journal) for investigation. The status API reports `pending_callbacks` and `failed_callbacks` per line.
 
-The bridge accepts media up to 192 MiB so videos can use the dashboard's 192 MB limit. The application still enforces its separate image, audio, sticker, and document limits. It stores customer content privately and streams incoming downloads with a size limit. Confirmed deletion removes the original message payload, unreferenced attachment files and references, prior edit payloads, and superseded callbacks from the bridge. It retains native keys, operation IDs, fingerprints, and results needed for deduplication. File deletion is durable and resumes after a crash. The dashboard separately removes its database content and attachment cache.
+The bridge accepts media up to 32 MiB in both directions, matching the dashboard's `SUPPORT_UPLOAD_MAX_BYTES` cap. The application still enforces its separate image, audio, sticker, and document limits. It stores customer content privately and streams incoming downloads with a size limit. Confirmed deletion removes the original message payload, unreferenced attachment files and references, prior edit payloads, and superseded callbacks from the bridge. It retains native keys, operation IDs, fingerprints, and results needed for deduplication. File deletion is durable and resumes after a crash. The dashboard separately removes its database content and attachment cache.
 
 ## API
 

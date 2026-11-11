@@ -549,11 +549,11 @@ videos and PDFs, using the configured media size limits. Unsupported/empty files
 multiple-file drops, read-only conversations, message editing and active voice
 recordings are rejected. Dropping over an existing attachment does not replace it.
 
-Videos default to 192 MiB (201,326,592 bytes, displayed as 192 MB). Set
-`SUPPORT_VIDEO_MAX_BYTES=201326592` if an existing environment overrides the default.
-The API/dashboard and linked-device bridge must both be updated to enable this
-limit; earlier bridges cap attachments at 25 or 64 MiB. No database migration is
-needed. Image, audio, sticker, and document limits are unchanged.
+Every media file, sent by staff or received from a customer, is capped at
+`SUPPORT_UPLOAD_MAX_BYTES` (32 MB by default). The per-type settings still apply
+below that ceiling: `SUPPORT_VIDEO_MAX_BYTES` defaults to 192 MiB, so the 32 MB
+cap is the effective video limit. The linked-device bridge enforces the same
+fixed 32 MiB limit. No database migration is needed.
 
 In **Quick replies → PDF → New reply**, choose a **PDF file**. A saved PDF can
 have a title and a caption (up to 1024 characters); its caption may be empty.
