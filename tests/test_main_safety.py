@@ -372,3 +372,56 @@ def test_inbound_queue_preserves_media_metadata() -> None:
     assert restored.media_mime_type == "audio/ogg; codecs=opus"
     assert restored.media_sha256 == "sha"
     assert restored.is_voice is True
+
+
+def test_unrecorded_cloud_delivery_status_returns_503_so_meta_redelivers(monkeypatch):
+    from fastapi import HTTPException
+
+    async def unavailable(**_kwargs):
+        raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr(main.support_service, "apply_delivery_status", unavailable)
+    statuses = [{"id": "wamid.A", "status": "delivered", "timestamp": "1760000001", "recipient_id": "96171111111"}]
+    try:
+        asyncio.run(main._apply_cloud_delivery_statuses({"metadata": {"phone_number_id": "1234567890"}}, statuses))
+    except HTTPException as error:
+        assert error.status_code == 503
+    else:
+        raise AssertionError("an unrecorded receipt must not be acknowledged")
+
+
+def test_webhook_signature_fails_closed_without_an_app_secret(monkeypatch):
+    import hashlib
+    import hmac
+
+    from app import security
+
+    body = b'{"entry": []}'
+
+    def signature(secret: str) -> str:
+        return "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+
+    # With no secret configured, a signature anyone can compute must be refused.
+    monkeypatch.setattr(security.settings, "whatsapp_app_secret", "")
+    assert security.verify_meta_signature(body, signature("")) is False
+    monkeypatch.setattr(security.settings, "whatsapp_app_secret", "configured-app-secret")
+    assert security.verify_meta_signature(body, signature("configured-app-secret")) is True
+    assert security.verify_meta_signature(body, signature("")) is False
+    assert security.verify_meta_signature(body, None) is False
+
+
+def test_webhook_verification_requires_a_configured_matching_token(monkeypatch):
+    class _Request:
+        def __init__(self, **params):
+            self.query_params = params
+
+    def verify(**params):
+        return asyncio.run(main.verify_webhook(_Request(**params)))
+
+    monkeypatch.setattr(main.settings, "whatsapp_verify_token", "")
+    assert verify(**{"hub.mode": "subscribe", "hub.verify_token": "", "hub.challenge": "c"}).status_code == 403
+    monkeypatch.setattr(main.settings, "whatsapp_verify_token", "verify-token")
+    assert verify(**{"hub.mode": "subscribe", "hub.verify_token": "wrong", "hub.challenge": "c"}).status_code == 403
+    assert verify(**{"hub.mode": "subscribe", "hub.challenge": "c"}).status_code == 403
+    accepted = verify(**{"hub.mode": "subscribe", "hub.verify_token": "verify-token", "hub.challenge": "c"})
+    assert accepted.status_code == 200 and accepted.body == b"c"
