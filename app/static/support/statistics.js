@@ -2,8 +2,6 @@ const statisticsMetrics = {
   active_seconds: 'Active dashboard time', tickets_claimed: 'Tickets claimed',
   tickets_resolved: 'Tickets resolved', messages_sent: 'Outbound messages sent',
   tickets_transferred: 'Tickets transferred', tickets_received_by_transfer: 'Tickets received by transfer',
-  average_handling_seconds: 'Average handling time', median_handling_seconds: 'Median handling time',
-  average_resolution_seconds: 'Average resolution time', median_resolution_seconds: 'Median resolution time',
 };
 let statisticsRequest = 0;
 let statisticsAppliedQuery = null;
@@ -35,7 +33,7 @@ function renderAgentStatistics(report) {
   for (const [metric, label] of Object.entries(statisticsMetrics)) {
     const card = document.createElement('div');
     const title = document.createElement('span'); title.textContent = label;
-    const value = document.createElement('strong'); value.textContent = statisticsValue(metric, (report.totals[metric] ?? report.timing_totals?.[metric]));
+    const value = document.createElement('strong'); value.textContent = statisticsValue(metric, report.totals[metric]);
     card.append(title, value); $('statisticsTotals').append(card);
   }
   $('statisticsRanking').textContent = 'Ranked by ' + statisticsMetrics[report.rank_by] + ' · ' + (report.direction === 'desc' ? 'Highest first' : 'Lowest first') + ' · ' + report.timezone;
@@ -56,12 +54,10 @@ function renderAgentStatistics(report) {
     for (const value of Object.keys(statisticsMetrics).map(metric => statisticsValue(metric, row[metric]))) {
       const td = document.createElement('td'); td.textContent = value; tr.append(td);
     }
-    tr.title = (row.handling_samples || 0) + ' complete handling periods; ' + (row.resolution_samples || 0) + ' resolver periods';
     $('statisticsRows').append(tr);
   }
   const since = value => value ? new Date(value).toLocaleString(undefined, {timeZone: report.timezone}) : 'no retained records';
   $('statisticsCoverage').textContent = 'Active time is available from ' + since(report.activity_tracking_started_at) + '. Ticket records begin ' + since(report.ticket_history_since) + '; sent messages ' + since(report.message_history_since) + '; transfers ' + since(report.transfer_history_since) + '. Inactivity of 60 seconds or more is excluded from active time.';
-  $('statisticsCoverage').textContent += ' Timing averages use completed assignments ending in the selected dates. Ongoing assignments and time spent resolved are excluded. ' + (report.timing_incomplete_tickets || 0) + ' conversations have incomplete timing history; unavailable values appear as —.';
 }
 async function loadAgentStatistics() {
   if (!canViewAgentStatistics()) { clearAgentStatistics(); return; }
@@ -241,7 +237,7 @@ function clearStatisticsInvestigation() {
   investigationRequest += 1;
   investigationAgent = null; investigationTicket = null; investigationNext = null;
   investigationMessageBefore = null; investigationEventBefore = null;
-  for (const id of ['statisticsTicketRows','statisticsReviewNote','statisticsReviewStatus','statisticsAgentTitle','statisticsAgentDates','statisticsAgentInsights','statisticsAgentInsightNote','investigationPeriods','investigationEvents','investigationMessages','investigationTitle','investigationNotes','investigationStatus']) $(id).replaceChildren();
+  for (const id of ['statisticsTicketRows','statisticsReviewNote','statisticsReviewStatus','statisticsAgentTitle','statisticsAgentDates','statisticsAgentInsights','investigationPeriods','investigationEvents','investigationMessages','investigationTitle','investigationNotes','investigationStatus']) $(id).replaceChildren();
   for (const id of ['statisticsMoreTickets','statisticsAgentReview','statisticsInvestigation']) $(id).classList.add('hidden');
   $('statisticsOverview').classList.remove('hidden');
 }
@@ -258,16 +254,11 @@ async function openStatisticsAgent(row) {
   $('statisticsAgentTitle').textContent = row.name + ' · Performance review';
   const query = new URLSearchParams(statisticsAppliedQuery);
   $('statisticsAgentDates').textContent = query.get('start') + ' to ' + query.get('end') + ' · ' + query.get('timezone_name');
-  for (const [metric,label] of Object.entries(statisticsMetrics).filter(([metric]) => !metric.startsWith('median_'))) {
+  for (const [metric,label] of Object.entries(statisticsMetrics)) {
     const card = document.createElement('div');
     card.append(investigationElement('span', label), investigationElement('strong', statisticsValue(metric,row[metric])));
-    if (metric.startsWith('average_')) {
-      const median = metric.replace('average_', 'median_');
-      card.append(investigationElement('span', 'Median: ' + statisticsValue(median, row[median]), 'statistics-card-detail'));
-    }
     $('statisticsAgentInsights').append(card);
   }
-  $('statisticsAgentInsightNote').textContent = 'Timing is based on ' + (row.handling_samples || 0) + ' completed handling periods and ' + (row.resolution_samples || 0) + ' resolutions with a known start. Transfers stop the previous owner’s time. Ongoing and incomplete periods are excluded from averages.';
   investigationFocus('statisticsAgentTitle');
   await browseStatisticsTickets();
 }

@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta
 import json
 
-from app.support_timing import responsibility_periods, review_indicators, timing_summary
+from app.support_timing import responsibility_periods, review_indicators
 
 BASE = datetime(2026, 10, 1, 10)
 
@@ -31,7 +31,6 @@ def test_repeated_transfers_and_reopen_exclude_resolved_gap():
     assert [p['seconds'] for p in result['periods']] == [300,120,180,300]
     assert result['periods'][-1]['cycle_resolution_seconds'] == 300
     assert result['original_claimant_id'] == '7'
-    assert timing_summary([300,120,180,300], [180,300])['median_handling_seconds'] == 240
 
 
 def test_missing_history_does_not_invent_duration_and_manager_resolution_not_credited_to_owner():

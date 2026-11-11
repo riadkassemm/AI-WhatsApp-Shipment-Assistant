@@ -33,20 +33,19 @@ async def test_real_transfer_resolution_and_reopen_periods(infrastructure):
     await stamp_latest(sql,'TICKET_TRANSFERRED',BASE+timedelta(minutes=5))
     ticket, _ = await repo.resolve_ticket(41,agent_id='8',agent_name='Other')
     await stamp_latest(sql,'TICKET_RESOLVED',BASE+timedelta(minutes=15))
-    report = await stats.StatisticsRepository(repo).report(BASE,BASE+timedelta(days=1),None,'average_resolution_seconds',True)
+    report = await stats.StatisticsRepository(repo).report(BASE,BASE+timedelta(days=1),None,'tickets_resolved',True)
     by_id = {r['id']:r for r in report['rows']}
-    assert by_id[7]['average_handling_seconds'] == 300 and by_id[7]['average_resolution_seconds'] is None
-    assert by_id[8]['average_handling_seconds'] == 600 and by_id[8]['average_resolution_seconds'] == 600
+    assert by_id[8]['tickets_resolved'] == 1 and by_id[7]['tickets_transferred'] == 1
     assert report['rows'][0]['id'] == 8
-    assert report['timing_totals']['median_handling_seconds'] == 450
+    assert not any('handling' in key or 'resolution_seconds' in key for row in report['rows'] for key in row)
+    assert 'timing_totals' not in report
     # Real manager reopen takes ownership; preserves previous resolution and audit.
     await repo.reopen_customer_ticket(41,agent_id='8',agent_name='Other',supervisor=True,expected_resolved_at=ticket['resolved_at'])
     await stamp_latest(sql,'TICKET_REOPENED',BASE+timedelta(hours=2))
     await repo.resolve_ticket(41,agent_id='8',agent_name='Other')
     await stamp_latest(sql,'TICKET_RESOLVED',BASE+timedelta(hours=2,minutes=5))
-    report = await stats.StatisticsRepository(repo).report(BASE,BASE+timedelta(days=1),8,'median_resolution_seconds',False)
-    assert report['rows'][0]['resolution_samples'] == 2
-    assert report['rows'][0]['median_resolution_seconds'] == 450
+    report = await stats.StatisticsRepository(repo).report(BASE,BASE+timedelta(days=1),8,'tickets_resolved',False)
+    assert report['rows'][0]['tickets_resolved'] == 1  # counted once per staff member
     detail = await InvestigationRepository(stats.StatisticsRepository(repo)).investigate(41,MANAGER)
     assert [p['seconds'] for p in detail['periods']] == [300,600,300]
     assert detail['periods'][-1]['cycle_resolution_seconds'] == 300
@@ -141,7 +140,7 @@ async def test_confirmed_read_audit_attributes_original_sender_and_deduplicates(
 
 
 @pytest.mark.asyncio
-async def test_timing_cross_date_range_missing_history_and_indicator_filter(infrastructure):
+async def test_cross_date_range_resolution_and_indicator_filter(infrastructure):
     repo,sql,_=infrastructure
     await sql('UPDATE support_tickets SET created_at=%s',(BASE-timedelta(days=1),))
     for minute,kind in [(0,'TICKET_CLAIMED'),(1,'CONVERSATION_VIEWED'),(2,'CONVERSATION_VIEWED'),(3,'CONVERSATION_VIEWED')]:
@@ -152,9 +151,8 @@ async def test_timing_cross_date_range_missing_history_and_indicator_filter(infr
     assert result['items'][0]['flags'][0]['code']=='repeated_views_without_response'
     assert (await investigation.tickets(BASE,BASE+timedelta(hours=1),8,None,True))['items']==[]
     await sql("INSERT INTO support_ticket_events(ticket_id,event_type,actor_type,actor_id,created_at) VALUES (42,'TICKET_RESOLVED','AGENT','7',%s)",(BASE+timedelta(days=1),))
-    report=await stats.StatisticsRepository(repo).report(BASE+timedelta(days=1),BASE+timedelta(days=2),7,'average_handling_seconds',True)
-    assert report['rows'][0]['average_handling_seconds']==86400
-    assert report['rows'][0]['handling_samples']==1
+    report=await stats.StatisticsRepository(repo).report(BASE+timedelta(days=1),BASE+timedelta(days=2),7,'tickets_resolved',True)
+    assert report['rows'][0]['tickets_resolved']==1
     from pathlib import Path
     tracking=await sql('SELECT * FROM support_statistics_metadata')
     await sql(Path('migrations/20261025_statistics_investigation.sql').read_text())

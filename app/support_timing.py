@@ -1,9 +1,6 @@
 """Transfer-aware projections of retained ticket audit; never invent assignments."""
 import json
-from statistics import mean, median
 
-TIMING_METRICS = ('average_handling_seconds', 'median_handling_seconds',
-                  'average_resolution_seconds', 'median_resolution_seconds')
 LIFECYCLE_EVENTS = ('TICKET_CLAIMED', 'TICKET_TRANSFERRED', 'TICKET_RESOLVED',
                     'TICKET_REOPENED', 'CHAT_STARTED', 'CHAT_REOPENED', 'CHAT_CLOSED', 'STATUS_CHANGED',
                     'TICKET_RESTORED', 'CHAT_RESTORED')
@@ -94,12 +91,6 @@ def responsibility_periods(events, as_of):
 
 def period_in_range(period, start, end):
     return period['valid'] and period['ended_at'] is not None and start <= period['ended_at'] < end
-
-
-def timing_summary(handling, resolution):
-    return dict(zip(TIMING_METRICS, [round(fn(values), 3) if values else None
-                                   for values in (handling, resolution) for fn in (mean, median)]),
-                handling_samples=len(handling), resolution_samples=len(resolution))
 
 
 def review_indicators(periods, events, messages, start, end, staff_id=None):
