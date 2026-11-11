@@ -134,6 +134,20 @@ _SUPPORT_SCHEMA_MIGRATIONS: tuple[tuple[str, dict[str, set[str]]], ...] = (
         },
     ),
     (
+        "migrations/20260912_ai_control_settings.sql",
+        {
+            "ai_control_settings": {
+                "id", "control_mode", "manual_ai_enabled", "schedule_start_time",
+                "schedule_end_time", "schedule_timezone", "version",
+                "updated_by_staff_id", "updated_by_staff_name", "updated_at",
+            },
+            "ai_control_settings_audit": {
+                "settings_id", "action", "actor_staff_id", "actor_staff_name",
+                "old_configuration_json", "new_configuration_json", "created_at",
+            },
+        },
+    ),
+    (
         "migrations/20260912_support_media_recovery.sql",
         {
             "support_ticket_messages": {
@@ -152,6 +166,15 @@ _SUPPORT_SCHEMA_MIGRATIONS: tuple[tuple[str, dict[str, set[str]]], ...] = (
                 "location_name",
                 "location_address",
                 "provider_media_filename",
+            }
+        },
+    ),
+    (
+        "migrations/20260922_staff_message_preferences.sql",
+        {
+            "staff": {
+                "custom_greeting_message",
+                "custom_resolution_message",
             }
         },
     ),
