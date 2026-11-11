@@ -1,4 +1,10 @@
 -r requirements.txt
-pytest
+# Test-only packages. The runtime venv installs requirements.txt alone.
+pytest==9.1.1
+iniconfig==2.3.0
+packaging==26.3
+pluggy==1.6.0
+Pygments==2.21.0
+tomli==2.4.1
 pytest-asyncio
 pypdf==6.21.2
