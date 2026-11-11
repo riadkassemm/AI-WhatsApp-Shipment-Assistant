@@ -425,18 +425,6 @@ def detect_shipping_method_in_text(value: str | None) -> str | None:
     return matches[0][1]
 
 
-def canonical_shipping_place(value: str | None) -> str:
-    return _canonical(value, _PLACE_ALIASES)
-
-
-def canonical_shipping_goods(value: str | None) -> str:
-    return _canonical(value, _GOODS_ALIASES)
-
-
-def canonical_shipping_method(value: str | None) -> str:
-    return _canonical(value, _METHOD_ALIASES)
-
-
 def _extended_aliases(
     base: dict[str, str],
     catalogue_values: Iterable[str | None],

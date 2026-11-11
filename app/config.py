@@ -99,11 +99,6 @@ class Settings(BaseSettings):
     # support state lives in MariaDB.
     human_handoff_webhook_url: str | None = None
 
-    # Kept for backwards-compatible configuration parsing. Durable tickets do
-    # NOT auto-expire based on this value; an unresolved ticket remains human-
-    # controlled until an authorized agent explicitly resolves it.
-    human_mode_timeout_seconds: int = 1800
-
     # Support dashboard/API.
     support_ui_enabled: bool = True
     support_queue_poll_seconds: int = 30
@@ -145,12 +140,6 @@ class Settings(BaseSettings):
     support_media_download_timeout_seconds: float = 20.0
     support_media_transcode_timeout_seconds: float = 30.0
     support_media_ffmpeg_path: str = "ffmpeg"
-
-    # Legacy generic message-rate settings are retained for backwards-compatible
-    # environment parsing. OpenAI cost protection is enforced by the Redis-backed
-    # rolling AI-turn quotas below instead of returning retryable webhook 429s.
-    rate_limit_max_messages: int = 20
-    rate_limit_window_seconds: int = 60
 
     # OpenAI abuse / wallet protection. A "turn" is one customer request that is
     # allowed to enter an AI-backed path. Rapid WhatsApp messages are already grouped

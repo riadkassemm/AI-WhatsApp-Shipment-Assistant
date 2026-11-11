@@ -260,22 +260,3 @@ async def authenticate_customer(
     finally:
         if connection is not None:
             connection.close()
-
-
-async def resolve_customer(
-    userid: str | None = None,
-    password: str | None = None,
-) -> AuthenticatedCustomer | None:
-    """
-    Compatibility wrapper.
-
-    Authentication requires both userid and password.
-    """
-
-    if not userid or not password:
-        return None
-
-    return await authenticate_customer(
-        userid=userid,
-        password=password,
-    )

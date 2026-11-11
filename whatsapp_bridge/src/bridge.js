@@ -2047,44 +2047,6 @@ export class Bridge {
       if (staleConnectionError(error)) this.restartStaleSocket(line, socket);
     }
   }
-  // Diagnostic for the real-phone check of same-ID re-sends: sends one short
-  // text, then relays the identical message again with the same ID. Not
-  // recorded as a dashboard message. Loopback and bridge secret only.
-  async sameIdRetransmitTest(id, payload) {
-    const line = this.getLine(id);
-    const phone = phoneDigits(payload?.phone);
-    const text = typeof payload?.text === 'string' && payload.text.trim() ? payload.text.trim().slice(0, 200) : 'Delivery test';
-    const delayMs = Math.min(Math.max(Number(payload?.delay_ms) || 3_000, 0), 60_000);
-    return this.serialSend(line, async () => {
-      const socket = this.connected(line);
-      const jid = `${phone}@s.whatsapp.net`;
-      const nativeId = generateMessageIDV2(socket.user?.id);
-      const errors = [];
-      const observe = node => { if (node?.attrs?.id === nativeId && node.attrs.error) errors.push(String(node.attrs.error).slice(0, 16)); };
-      socket.ws.on('CB:ack,class:message', observe);
-      const attempts = [];
-      try {
-        let content;
-        for (const attempt of [1, 2]) {
-          if (attempt === 2) await new Promise(resolve => setTimeout(resolve, delayMs));
-          const waiter = line.ack.expect(nativeId, { deferred: true });
-          const started = Date.now();
-          try {
-            if (attempt === 1) content = (await this.awaitSubmission(socket.sendMessage(jid, { text, linkPreview: null }, { messageId: nativeId }), waiter)).message;
-            else await this.awaitSubmission(socket.relayMessage(jid, content, { messageId: nativeId }), waiter);
-            waiter.startTimer();
-            await waiter.promise;
-            attempts.push({ attempt, acknowledged: true, ms: Date.now() - started });
-          } catch (error) {
-            waiter.cancel();
-            attempts.push({ attempt, acknowledged: false, ms: Date.now() - started, cause: errorLabel(error) });
-          }
-        }
-      } finally { socket.ws.off('CB:ack,class:message', observe); }
-      this.trace(line, 'same_id_test', { native_id: nativeId, attempts: attempts.map(item => item.acknowledged), server_errors: errors });
-      return { message_id: wrapId(id, nativeId), attempts, server_errors: errors };
-    });
-  }
   notePreRelayFailure(line, socket, error) {
     // Refusals because the line is offline or busy say nothing new about it.
     if (['NOT_CONNECTED', 'SEND_DEADLINE_EXCEEDED', 'SEND_QUEUE_FULL'].includes(error?.code) || line.socket !== socket) return;

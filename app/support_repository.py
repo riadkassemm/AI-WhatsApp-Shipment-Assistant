@@ -396,12 +396,6 @@ class SupportRepository(DashboardRepositoryMixin, DeliveryRepositoryMixin, ReadS
             await self._pool.wait_closed()
             self._pool = None
 
-    async def _acquire(self):
-        if self._pool is None:
-            await self.connect()
-        assert self._pool is not None
-        return self._pool.acquire()
-
     async def get_ticket(self, ticket_id: int) -> dict[str, Any] | None:
         if self._pool is None:
             await self.connect()

@@ -185,10 +185,6 @@ follow-up offers after a request has been completed.
 """.strip()
 
 
-def model_name() -> str:
-    return settings.openai_model
-
-
 def reasoning_config() -> dict[str, str]:
     return {
         "effort": settings.openai_reasoning_effort,

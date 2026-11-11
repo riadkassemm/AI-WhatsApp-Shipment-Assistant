@@ -10,7 +10,6 @@ from uuid import UUID
 
 from app.support_auth import SupportAgent, get_current_agent, require_support_csrf
 from app.support_repository import support_repository
-from app.support_timing import TIMING_METRICS
 from app.support_investigation import InvestigationRepository, timing_report
 
 router = APIRouter(prefix="/statistics", tags=["support-statistics"])

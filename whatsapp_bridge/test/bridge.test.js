@@ -3156,14 +3156,3 @@ test('the relay hook keeps the exact content that left, for a later same-ID re-s
   const record = Object.values(line.store.data.messages).find(item => item.client_message_id === 'kept');
   assert.deepEqual(record.relay_message, content);
 });
-
-test('the same-ID diagnostic sends one text and relays it again with the same ID, without a dashboard record', async t => {
-  const { bridge, line, socket } = await fixture(t);
-  const result = await bridge.sameIdRetransmitTest(LINE, { phone: PHONE, text: 'Delivery test', delay_ms: 0 });
-  assert.deepEqual(result.attempts.map(item => item.acknowledged), [true, true]);
-  assert.equal(socket.calls.length, 2);
-  assert.equal(socket.calls[0].options.messageId, socket.calls[1].options.messageId);
-  assert.equal(result.message_id, wrapId(LINE, socket.calls[0].options.messageId));
-  assert.equal(line.store.data.messages[socket.calls[0].options.messageId], undefined);
-  assert.deepEqual(result.server_errors, []);
-});
