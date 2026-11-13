@@ -165,7 +165,8 @@ document.body.dataset.result='passed';
 def test_mobile_queue_tabs_reset_group_spacing():
     css = Path('app/static/support/support.css').read_text()
     tablet = css[css.index('@media (max-width: 1280px)'):css.index('@media (max-width: 1100px)')]
-    mobile = css[css.index('@media (max-width: 800px)'):css.index('@media (max-width: 520px)')]
+    start = css.index('@media (max-width: 800px)')
+    mobile = css[start:css.index('@media (max-width: 520px)', start)]
     rule = '.nav-group-label + .queue-nav-btn:not(:first-of-type)'
     assert rule + ' { margin-top: 8px; }' in tablet
     # The horizontal mobile tab row must not inherit the stacked-sidebar gap,
