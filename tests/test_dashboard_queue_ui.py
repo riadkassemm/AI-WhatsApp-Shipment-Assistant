@@ -160,3 +160,15 @@ document.body.dataset.result='passed';
     result = subprocess.run(command, capture_output=True, text=True, timeout=45)
     assert result.returncode == 0, result.stderr
     assert 'data-result="passed"' in result.stdout, result.stdout[result.stdout.find('<body'):][:700]
+
+
+def test_mobile_queue_tabs_reset_group_spacing():
+    css = Path('app/static/support/support.css').read_text()
+    tablet = css[css.index('@media (max-width: 1280px)'):css.index('@media (max-width: 1100px)')]
+    start = css.index('@media (max-width: 800px)')
+    mobile = css[start:css.index('@media (max-width: 520px)', start)]
+    rule = '.nav-group-label + .queue-nav-btn:not(:first-of-type)'
+    assert rule + ' { margin-top: 8px; }' in tablet
+    # The horizontal mobile tab row must not inherit the stacked-sidebar gap,
+    # otherwise the first "Browse" tab (Active) renders shorter than the rest.
+    assert rule + ' { margin-top: 0; }' in mobile

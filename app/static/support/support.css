@@ -1406,6 +1406,7 @@ body.column-resizing * { cursor: col-resize !important; }
   .queue-nav-btn { width: auto; min-width: max-content; min-height: 34px; display: inline-flex; justify-content: center; gap: 6px; padding: 6px 11px; border: 1px solid var(--border); border-radius: var(--radius-full); scroll-snap-align: start; }
   .queue-nav-btn.active { border-color: var(--primary); background: var(--primary-soft); color: var(--primary-text); box-shadow: none; }
   .queue-nav-btn.active::before { display: none; }
+  .nav-group-label + .queue-nav-btn:not(:first-of-type) { margin-top: 0; }
   .queue-nav-btn .icon { width: 16px; height: 16px; }
   .queue-nav-label { display: inline; }
   .queue-nav-count { position: static; min-width: 18px; height: 18px; font-size: 10px; }
