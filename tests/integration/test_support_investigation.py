@@ -50,6 +50,14 @@ async def test_real_transfer_resolution_and_reopen_periods(infrastructure):
     assert [p['seconds'] for p in detail['periods']] == [300,600,300]
     assert detail['periods'][-1]['cycle_resolution_seconds'] == 300
     assert detail['periods'][-1]['resolver_name'] == 'Other'
+    assert detail['first_claimed_at'] == BASE
+    assert detail['last_resolved_at'] == BASE+timedelta(hours=2,minutes=5)
+    # Transfer recipients have a handling start, not a fabricated second claim.
+    listed = await InvestigationRepository(stats.StatisticsRepository(repo)).tickets(
+        BASE, BASE+timedelta(days=1), 8, None, False)
+    item = next(item for item in listed['items'] if item['id'] == 41)
+    assert item['first_claimed_at'] == BASE
+    assert item['last_resolved_at'] == detail['last_resolved_at']
 
 
 @pytest.mark.asyncio
@@ -85,9 +93,12 @@ async def test_api_scope_idempotent_views_and_read_only_pagination(infrastructur
     asgi=httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=httpx.MockTransport(asgi.handle_async_request),base_url='http://test') as client:
         path='/api/support/statistics/tickets/42'
+        list_path='/api/support/statistics/tickets?start=2026-10-01&end=2026-10-01&agent_id=7'
         assert (await client.get(path)).status_code == 401
+        assert (await client.get(list_path)).status_code == 401
         client.cookies.set(settings.support_cookie_name,'token-1')
         assert (await client.get(path)).status_code == 403
+        assert (await client.get(list_path+'&review_indicator=fast_resolution')).status_code == 403
         payload={'request_id':str(uuid4())}
         assert (await client.post(path+'/view',json=payload)).status_code == 403
         client.headers['X-CSRF-Token']='csrf'
@@ -105,6 +116,11 @@ async def test_api_scope_idempotent_views_and_read_only_pagination(infrastructur
         before_messages=await sql('SELECT * FROM support_ticket_messages WHERE ticket_id=42')
         before_events=await sql('SELECT * FROM support_ticket_events WHERE ticket_id=42')
         client.cookies.set(settings.support_cookie_name,'token-3')
+        assert (await client.get(list_path+'&review_indicator=unknown')).status_code == 422
+        from typing import get_args
+        from app.support_timing import ReviewIndicator
+        for code in get_args(ReviewIndicator):
+            assert (await client.get(list_path+'&review_indicator='+code)).status_code == 200
         for role in ('supervisor','admin'):
             await sql('UPDATE staff SET role=%s WHERE id=8',(role,))
             response=await client.get(path)
@@ -149,6 +165,9 @@ async def test_cross_date_range_resolution_and_indicator_filter(infrastructure):
     result=await investigation.tickets(BASE,BASE+timedelta(hours=1),7,None,True)
     assert [i['id'] for i in result['items']]==[42]
     assert result['items'][0]['flags'][0]['code']=='repeated_views_without_response'
+    specific = await investigation.tickets(BASE,BASE+timedelta(hours=1),7,None,False,'repeated_views_without_response')
+    assert specific['items'] == result['items']
+    assert (await investigation.tickets(BASE,BASE+timedelta(hours=1),7,None,True,'fast_resolution'))['items'] == []
     assert (await investigation.tickets(BASE,BASE+timedelta(hours=1),8,None,True))['items']==[]
     await sql("INSERT INTO support_ticket_events(ticket_id,event_type,actor_type,actor_id,created_at) VALUES (42,'TICKET_RESOLVED','AGENT','7',%s)",(BASE+timedelta(days=1),))
     report=await stats.StatisticsRepository(repo).report(BASE+timedelta(days=1),BASE+timedelta(days=2),7,'tickets_resolved',True)
@@ -171,3 +190,85 @@ async def test_deleted_staff_excluded_from_review_and_future_window_empty(infras
     assert (await investigation.tickets(BASE,BASE+timedelta(hours=1),None,None,True))['items']==[]
     future=datetime(2099,1,1)
     assert (await investigation.tickets(future,future+timedelta(days=1),None,None,False))['items']==[]
+
+
+@pytest.mark.asyncio
+async def test_current_assignment_without_audit_includes_safe_report_and_unknown_dates(infrastructure):
+    repo, sql, _ = infrastructure
+    now = (await sql('SELECT UTC_TIMESTAMP(6) AS now'))[0]['now']
+    await sql("""UPDATE support_tickets SET ai_summary='Delivery issue password=synthetic-secret',
+        reason='Missing delivery',requested_action='Check shipment',assigned_at=%s WHERE id=42""", (now,))
+    investigation = InvestigationRepository(stats.StatisticsRepository(repo))
+    result = await investigation.tickets(now-timedelta(days=1),now+timedelta(days=1),7,None,False)
+    assert [item['id'] for item in result['items']] == [42]
+    ticket = result['items'][0]
+    assert 'synthetic-secret' not in ticket['ai_summary']
+    assert '[REDACTED]' in ticket['ai_summary']
+    assert ticket['reason'] == 'Missing delivery' and ticket['requested_action'] == 'Check shipment'
+    assert ticket['first_claimed_at'] is None and ticket['last_resolved_at'] is None
+    assert ticket['periods'] == [] and ticket['issues']
+    assert (await investigation.tickets(now-timedelta(days=1),now+timedelta(days=1),7,None,True))['items'] == []
+    # Current ownership must not be projected backwards into earlier report dates.
+    await sql('UPDATE support_tickets SET created_at=%s WHERE id=42', (now-timedelta(days=4),))
+    assert (await investigation.tickets(now-timedelta(days=3),now-timedelta(days=2),7,None,False))['items'] == []
+
+
+@pytest.mark.asyncio
+async def test_staff_indicator_pagination_reaches_matches_after_empty_candidate_page(infrastructure):
+    repo, sql, _ = infrastructure
+    await sql('UPDATE support_tickets SET created_at=%s', (BASE,))
+    for ticket_id in range(100, 151):
+        await sql("""INSERT INTO support_tickets
+            (id,ticket_reference,whatsapp_phone,reason,ai_summary,status,created_at,updated_at,last_activity_at)
+            VALUES (%s,%s,'155500000','test','test','RESOLVED',%s,%s,%s)""",
+            (ticket_id,f'TEST-{ticket_id}',BASE,BASE,BASE))
+    for kind in ('TICKET_CLAIMED','TICKET_RESOLVED'):
+        await sql("""INSERT INTO support_ticket_events(ticket_id,event_type,actor_type,actor_id,created_at)
+            VALUES (42,%s,'AGENT','7',%s)""", (kind,BASE))
+    investigation = InvestigationRepository(stats.StatisticsRepository(repo))
+    first = await investigation.tickets(BASE,BASE+timedelta(days=1),7,None,False,'fast_resolution')
+    assert first['items'] == [] and first['next_before'] == 101
+    second = await investigation.tickets(BASE,BASE+timedelta(days=1),7,first['next_before'],False,'fast_resolution')
+    assert [item['id'] for item in second['items']] == [42]
+    assert second['next_before'] is None
+    assert {flag['code'] for flag in second['items'][0]['flags']} == {
+        'fast_resolution','short_handling','resolved_without_response'}
+
+
+@pytest.mark.asyncio
+async def test_handoff_context_on_oldest_page_respects_hidden_and_deleted_messages(infrastructure):
+    repo, sql, _ = infrastructure
+    snapshot = {'recent_messages': [
+        {'role':'system','content':'Internal instructions'},
+        {'role':'tool','content':'Internal tool result'},
+        {'role':['malformed'],'content':'Invalid role'},
+        {'role':'user','content':'Earlier question password=synthetic-secret'},
+        {'role':'assistant','content':'Earlier AI reply'},
+        {'role':'user','content':'fixture 0'},
+    ]}
+    await sql('UPDATE support_tickets SET context_json=%s WHERE id=42', (json.dumps(snapshot),))
+    for n in range(101):
+        await sql("""INSERT INTO support_ticket_messages
+            (ticket_id,sender_type,direction,body,send_status,created_at,updated_at)
+            VALUES (42,'CUSTOMER','INBOUND',%s,'RECEIVED',UTC_TIMESTAMP(6),UTC_TIMESTAMP(6))""", (f'fixture {n}',))
+    investigation = InvestigationRepository(stats.StatisticsRepository(repo))
+    latest = await investigation.investigate(42,MANAGER)
+    assert latest['context_messages'] == [] and 'context_json' not in latest['ticket']
+    oldest = await investigation.investigate(42,MANAGER,before_message=latest['next_message_before'])
+    assert [m['content'] for m in oldest['context_messages']] == [
+        'Earlier question password: [REDACTED]', 'Earlier AI reply']
+    assert [m['body'] for m in oldest['messages']] == ['fixture 0']
+    assert oldest['next_message_before'] is None and not oldest['context_unavailable']
+    hidden_id = oldest['messages'][0]['id']
+    # Another user's hide does not remove context for this manager.
+    await sql('INSERT INTO support_message_user_deletions(message_id,user_id) VALUES (%s,%s)', (hidden_id,'7'))
+    assert (await investigation.investigate(42,MANAGER,before_message=latest['next_message_before']))['context_messages']
+    await sql('INSERT INTO support_message_user_deletions(message_id,user_id) VALUES (%s,%s)', (hidden_id,'8'))
+    hidden = await investigation.investigate(42,MANAGER,before_message=latest['next_message_before'])
+    assert hidden['messages'] == [] and hidden['context_messages'] == [] and hidden['context_unavailable']
+    assert 'context_json' not in hidden['ticket']
+    await sql('DELETE FROM support_message_user_deletions WHERE message_id=%s', (hidden_id,))
+    await sql('UPDATE support_ticket_messages SET deleted_for_everyone_at=UTC_TIMESTAMP(6) WHERE id=%s', (hidden_id,))
+    deleted = await investigation.investigate(42,MANAGER,before_message=latest['next_message_before'])
+    assert deleted['context_messages'] == [] and deleted['context_unavailable']
+    assert deleted['messages'][0]['body'] is None

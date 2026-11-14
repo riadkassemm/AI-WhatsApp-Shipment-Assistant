@@ -11,6 +11,7 @@ from uuid import UUID
 from app.support_auth import SupportAgent, get_current_agent, require_support_csrf
 from app.support_repository import support_repository
 from app.support_investigation import InvestigationRepository
+from app.support_timing import ReviewIndicator
 
 router = APIRouter(prefix="/statistics", tags=["support-statistics"])
 IDLE_SECONDS = 60
@@ -254,10 +255,12 @@ async def statistics_tickets(
     start: date, end: date, timezone_name: str = "Asia/Beirut",
     agent_id: int | None = Query(default=None, ge=1),
     before: int | None = Query(default=None, ge=1), flagged_only: bool = False,
+    review_indicator: ReviewIndicator | None = None,
     agent: SupportAgent = Depends(require_statistics_manager),
 ):
     lower, upper = date_bounds(start, end, timezone_name)
-    result = await InvestigationRepository(statistics_repository).tickets(lower, upper, agent_id, before, flagged_only)
+    result = await InvestigationRepository(statistics_repository).tickets(
+        lower, upper, agent_id, before, flagged_only, review_indicator)
     return investigation_payload(result)
 
 

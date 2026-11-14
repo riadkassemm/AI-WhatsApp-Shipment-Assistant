@@ -216,7 +216,7 @@ function investigationActivity(event) {
     case 'TICKET_CLOSED': return data.reason === 'whatsapp_line_removed' ? 'Archived when ' + actor + ' removed the WhatsApp number.' : actor + ' closed the ticket.';
     case 'TICKET_RESTORED': case 'CHAT_RESTORED': return 'Restored when ' + actor + ' linked the WhatsApp number again' + (data.restored_status ? ' (' + investigationLabel(data.restored_status).toLowerCase() + ').' : '.');
     case 'RETURNED_TO_AI': return 'Staff handling ended.';
-    case 'STATUS_CHANGED': return actor + ' changed the status' + (data.to ? ' to ' + investigationLabel(data.to).toLowerCase() : '') + '.';
+    case 'STATUS_CHANGED': return actor + ' changed the status' + (data.from ? ' from ' + investigationLabel(data.from).toLowerCase() : '') + (data.to ? ' to ' + investigationLabel(data.to).toLowerCase() : '') + '.';
     case 'CONVERSATION_VIEWED': return actor + ' opened the conversation.';
     case 'INCOMING_MARKED_READ': return data.mode === 'reply_sync' ? 'Customer message marked as read after ' + actor + ' replied.' : actor + ' marked a customer message as read.';
     case 'MESSAGE_FORWARDED': return actor + ' forwarded a message into this conversation.';
@@ -227,17 +227,40 @@ function investigationActivity(event) {
     default: return 'Additional conversation activity recorded.';
   }
 }
+const investigationIndicators = {
+  fast_resolution:'Resolved in under a minute',short_handling:'Handled for under 30 seconds',
+  resolved_without_response:'Resolved without a confirmed reply during this assignment',
+  repeated_views_without_response:'Opened repeatedly without replying',read_without_response:'Marked as read without a confirmed reply',
+  repeated_reads_without_response:'Repeated read actions without replying',frequent_transfers:'Transferred out at least three times',
+};
+for (const [code, label] of Object.entries(investigationIndicators)) $('statisticsReviewIndicator').add(new Option(label, code));
 function investigationFlag(flag) {
-  return {fast_resolution:'Resolved in under a minute',short_handling:'Handled for under 30 seconds',
-    resolved_without_response:'Resolved without a confirmed reply during this assignment',
-    repeated_views_without_response:'Opened repeatedly without replying',read_without_response:'Marked as read without a confirmed reply',
-    repeated_reads_without_response:'Repeated read actions without replying',frequent_transfers:'Transferred out at least three times'}[flag.code] || 'Activity worth reviewing';
+  return investigationIndicators[flag.code] || 'Activity worth reviewing';
+}
+function renderInvestigationReport(container, ticket, dates) {
+  container.replaceChildren();
+  container.append(investigationElement('h4', 'Ticket report'));
+  const report = investigationElement('p', ticket.ai_summary || ticket.reason || ticket.requested_action || 'No report recorded.', 'investigation-report-text');
+  report.dir = 'auto'; container.append(report);
+  const fields = document.createElement('dl'); fields.className = 'investigation-report-fields';
+  const entries = [
+    ['Reason', ticket.ai_summary && ticket.reason !== ticket.ai_summary ? ticket.reason : null],
+    ['Requested action', ticket.requested_action],
+    ['First claimed', investigationDate(dates.first_claimed_at, {timeStyle:'medium'})],
+    ['Last resolved', dates.last_resolved_at ? investigationDate(dates.last_resolved_at, {timeStyle:'medium'}) : 'No recorded resolution'],
+  ];
+  for (const [label, value] of entries) {
+    if (!value) continue;
+    const description = investigationElement('dd', value); description.dir = 'auto';
+    fields.append(investigationElement('dt', label), description);
+  }
+  container.append(fields);
 }
 function clearStatisticsInvestigation() {
   investigationRequest += 1;
   investigationAgent = null; investigationTicket = null; investigationNext = null;
   investigationMessageBefore = null; investigationEventBefore = null;
-  for (const id of ['statisticsTicketRows','statisticsReviewNote','statisticsReviewStatus','statisticsAgentTitle','statisticsAgentDates','statisticsAgentInsights','investigationPeriods','investigationEvents','investigationMessages','investigationTitle','investigationNotes','investigationStatus']) $(id).replaceChildren();
+  for (const id of ['statisticsTicketRows','statisticsReviewNote','statisticsReviewStatus','statisticsAgentTitle','statisticsAgentDates','statisticsAgentInsights','investigationPeriods','investigationEvents','investigationMessages','investigationTitle','investigationNotes','investigationStatus','investigationReport']) $(id).replaceChildren();
   for (const id of ['statisticsMoreTickets','statisticsAgentReview','statisticsInvestigation']) $(id).classList.add('hidden');
   $('statisticsOverview').classList.remove('hidden');
 }
@@ -250,6 +273,7 @@ async function openStatisticsAgent(row) {
   clearStatisticsInvestigation();
   investigationAgent = row;
   $('statisticsFlaggedOnly').checked = false;
+  $('statisticsReviewIndicator').value = '';
   $('statisticsOverview').classList.add('hidden'); $('statisticsAgentReview').classList.remove('hidden');
   $('statisticsAgentTitle').textContent = row.name + ' · Performance review';
   const query = new URLSearchParams(statisticsAppliedQuery);
@@ -284,10 +308,11 @@ function showInvestigationPanel(panel) {
 async function browseStatisticsTickets(more = false) {
   if (!canViewAgentStatistics() || !statisticsAppliedQuery || !investigationAgent) return;
   const request = ++investigationRequest;
-  if (!more) { $('statisticsTicketRows').replaceChildren(); investigationNext = null; }
+  if (!more) { $('statisticsTicketRows').replaceChildren(); investigationNext = null; $('statisticsMoreTickets').classList.add('hidden'); }
   const query = new URLSearchParams(statisticsAppliedQuery);
   query.delete('rank_by'); query.delete('direction'); query.set('agent_id', investigationAgent.id);
   query.set('flagged_only', String($('statisticsFlaggedOnly').checked));
+  if ($('statisticsReviewIndicator').value) query.set('review_indicator', $('statisticsReviewIndicator').value);
   if (more && investigationNext) query.set('before', investigationNext);
   $('statisticsMoreTickets').disabled = true;
   $('statisticsReviewStatus').textContent = 'Loading tickets…';
@@ -304,6 +329,14 @@ async function browseStatisticsTickets(more = false) {
       heading.append(button, investigationElement('span', investigationLabel(item.status), 'investigation-badge'));
       row.append(heading);
       if (item.current_assignee_name) row.append(investigationElement('p', (['RESOLVED','CLOSED'].includes(item.status) ? 'Last assigned to ' : 'Assigned to ') + item.current_assignee_name, 'form-note'));
+      const report = document.createElement('div'); report.className = 'investigation-report';
+      renderInvestigationReport(report, item, item); row.append(report);
+      for (const period of item.periods || []) {
+        if (String(period.agent_id) !== String(investigationAgent.id)) continue;
+        const start = {TICKET_CLAIMED:'Claimed',TICKET_TRANSFERRED:'Received by transfer',TICKET_REOPENED:'Reassigned on reopen',CHAT_STARTED:'Started',CHAT_REOPENED:'Reopened',TICKET_RESTORED:'Restored',CHAT_RESTORED:'Restored'}[period.start_event] || 'Assigned';
+        const end = {resolved:'Resolved',transferred:'Transferred',closed:'Closed',incomplete:'History incomplete'}[period.end_reason] || 'Ended';
+        row.append(investigationElement('p', investigationAgent.name + ': ' + start + ' ' + investigationDate(period.started_at, {timeStyle:'medium'}) + ' · ' + (period.ended_at ? end + ' ' + investigationDate(period.ended_at, {timeStyle:'medium'}) : (period.valid ? 'Ongoing' : 'End time unknown')) + ' · ' + (period.valid ? statisticsDuration(period.seconds) : 'Duration unavailable'), 'form-note'));
+      }
       const flags = [...new Set(item.flags.map(investigationFlag))];
       if (flags.length) {
         const list = document.createElement('ul'); list.className = 'investigation-flags';
@@ -316,7 +349,7 @@ async function browseStatisticsTickets(more = false) {
     investigationNext = page.next_before;
     $('statisticsMoreTickets').classList.toggle('hidden', !investigationNext);
     $('statisticsReviewStatus').textContent = page.items.length ? '' : (investigationNext ? 'No matches in this group. Load more conversations to continue.' : ($('statisticsTicketRows').children.length ? 'All matching conversations are shown.' : 'No matching conversations for these dates.'));
-    $('statisticsReviewNote').textContent = 'Conversations this staff member handled or took part in during the selected dates. Review indicators are prompts to look closer, not findings of misconduct.' + (page.activity_tracking_started_at ? ' Opening and read activity is available from ' + investigationDate(page.activity_tracking_started_at, {timeStyle:undefined}) + '.' : ' Earlier opening and read activity may be unavailable.');
+    $('statisticsReviewNote').textContent = 'Conversations assigned to, handled by or involving this staff member during the selected dates. Claim, resolution and handling dates use retained history through ' + investigationDate(page.as_of) + '; current status and reports may include later updates. Open a ticket for its complete retained history. Review indicators are prompts to look closer, not findings of misconduct.' + (page.activity_tracking_started_at ? ' Opening and read activity is available from ' + investigationDate(page.activity_tracking_started_at, {timeStyle:undefined}) + '.' : ' Earlier opening and read activity may be unavailable.');
   } catch (error) {
     if (investigationStillAllowed(request)) {
       if (error.status === 403) clearAgentStatistics();
@@ -346,7 +379,8 @@ async function investigateStatisticsTicket(ticketId, part = null) {
   if (!part) {
     investigationTicket = ticketId;
     investigationMessageBefore = null; investigationEventBefore = null;
-    for (const id of ['investigationPeriods','investigationEvents','investigationMessages','investigationTitle','investigationNotes']) $(id).replaceChildren();
+    for (const id of ['investigationPeriods','investigationEvents','investigationMessages','investigationTitle','investigationNotes','investigationReport']) $(id).replaceChildren();
+    for (const id of ['investigationOlderMessages','investigationOlderEvents']) $(id).classList.add('hidden');
     $('statisticsAgentReview').classList.add('hidden'); $('statisticsInvestigation').classList.remove('hidden');
     showInvestigationPanel('conversation');
     $('investigationTitle').textContent = 'Conversation review';
@@ -362,17 +396,27 @@ async function investigateStatisticsTicket(ticketId, part = null) {
     if (!investigationStillAllowed(request)) return;
     $('investigationTitle').textContent = (data.ticket.customer_name || data.ticket.whatsapp_phone || 'Customer') + ' · ' + data.ticket.ticket_reference;
     $('investigationNotes').textContent = investigationLabel(data.ticket.status) + ' · Originally claimed by ' + (data.original_claimant_name || 'staff not recorded') + '. Review only — opening this view leaves the conversation unchanged.' + (data.issues.length ? ' Some earlier history is incomplete, so not all handling times can be shown.' : '');
+    renderInvestigationReport($('investigationReport'), data.ticket, data);
     renderInvestigationPeriods(data);
     if (part !== 'events') {
       if (!part) $('investigationMessages').replaceChildren();
       const group = document.createElement('div');
+      if (data.context_messages?.length) {
+        group.append(investigationElement('p', 'Earlier AI conversation context · timestamps not recorded', 'form-note'));
+        for (const message of data.context_messages) {
+          const customer = message.role === 'user';
+          addMessage(group, {body:message.content, sender_type:customer ? 'CUSTOMER' : 'AI', direction:customer ? 'INBOUND' : 'OUTBOUND'}, 'investigation');
+          group.append(investigationElement('p', customer ? 'Customer' : 'Automated support', 'form-note investigation-message-meta'));
+        }
+      }
+      if (data.context_unavailable) group.append(investigationElement('p', 'Earlier AI context is unavailable because this conversation contains hidden or deleted messages.', 'form-note'));
       for (const message of data.messages) {
         addMessage(group, message, 'investigation');
         const sender = message.sender_type === 'CUSTOMER' ? 'Customer' : (message.sender_type === 'AGENT' ? (message.sender_name || 'Staff member') : 'Automated support');
         group.append(investigationElement('p', sender + ' · ' + investigationDate(message.created_at) + (message.direction === 'OUTBOUND' ? ' · ' + investigationLabel(message.send_status) : ''), 'form-note investigation-message-meta'));
       }
       group.querySelectorAll('.message-actions').forEach(element => element.remove());
-      if (!part && !data.messages.length) group.append(investigationElement('p', 'No messages are available.', 'form-note'));
+      if (!part && !data.messages.length && !data.context_messages?.length) group.append(investigationElement('p', 'No messages are available.', 'form-note'));
       $('investigationMessages').prepend(group);
       investigationMessageBefore = data.next_message_before;
       $('investigationOlderMessages').classList.toggle('hidden', !investigationMessageBefore);
@@ -405,6 +449,7 @@ $('statisticsBackToRanking').addEventListener('click', backToStatisticsRanking);
 $('investigationBackToAgent').addEventListener('click', backToStatisticsAgent);
 $('statisticsMoreTickets').addEventListener('click', () => browseStatisticsTickets(true));
 $('statisticsFlaggedOnly').addEventListener('change', () => browseStatisticsTickets());
+$('statisticsReviewIndicator').addEventListener('change', () => browseStatisticsTickets());
 $('investigationOlderMessages').addEventListener('click', () => investigateStatisticsTicket(investigationTicket, 'messages'));
 $('investigationOlderEvents').addEventListener('click', () => investigateStatisticsTicket(investigationTicket, 'events'));
 for (const button of document.querySelectorAll('[data-investigation-panel]')) button.addEventListener('click', () => showInvestigationPanel(button.dataset.investigationPanel));

@@ -843,15 +843,34 @@ Select a **staff member's name in the ranking table** to open their performance
 summary and tickets for the applied dates. This review includes their assignments,
 recorded activities and staff-sent messages, including manager replies to another
 employee's ticket. **Show review indicators only** narrows that employee's list;
-changing employees clears the previous selection. Back buttons preserve the
-ranking, dates and ticket list.
+the **Review Indicators** selector further filters by any existing indicator type.
+Filtering uses the same staff-scoped indicators and thresholds as the displayed
+prompts; choosing a type does not hide the ticket's other indicators. Changing
+employees clears both indicator selections. Back buttons preserve the ranking,
+dates, filters and ticket list.
+
+Each ticket shows its saved report (summary, reason and requested action), first
+recorded claim, latest recorded resolution and the selected staff member's handling
+periods. Times include seconds in the report timezone. Transfers and reopens are
+labeled separately from claims. A prior resolution remains visible on a reopened
+ticket; the current status and handling periods distinguish its new cycle.
+List timings use retained evidence through the selected end date (or now, if earlier);
+the saved report and status reflect the current ticket. Details include the full
+retained ticket history beyond the report date range. Current assignments without
+audit history remain discoverable when the range includes now, with unknown times;
+current ownership is never projected into historical dates. No new migration is
+required for these report fields or indicator filters.
 
 Open a ticket to switch between **Conversation**, **Activity timeline**, and
 **Who handled it**. Activity uses plain-language descriptions and staff names,
 never internal event codes, identifiers or JSON. Exact event times are available
 on hover; timestamps follow the report timezone. Earlier activity and messages
 have separate pagination. Unknown activity types remain visible as a generic
-activity entry instead of exposing raw details. Detailed counting/coverage notes
+activity entry instead of exposing raw details. The oldest message page also shows
+retained customer/AI handoff context without tool records or invented timestamps.
+Because that snapshot has no message IDs, it is withheld when the ticket contains
+globally deleted messages or messages hidden by the reviewing user, preventing
+deleted text from resurfacing through the snapshot. Detailed counting/coverage notes
 are collapsed under **How to read these statistics**. The presentation does not
 alter the retained audit or timing calculations. Message sender, creation time
 and delivery state remain visible. This manager-only GET path performs no

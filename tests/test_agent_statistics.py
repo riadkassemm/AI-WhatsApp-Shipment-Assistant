@@ -81,7 +81,7 @@ transfer_history_since:'2026-09-01T00:00:00Z',ticket_history_since:'2026-09-01T0
 let resolvePending=null;
 const renderedInvestigation=[];
 function addMessage(container,message,mode){renderedInvestigation.push(mode);const p=document.createElement('p');p.textContent=message.body;container.append(p);}
-const investigationDetail={ticket:{ticket_reference:'TEST-42',customer_name:'Example customer',status:'RESOLVED'},periods:[{agent_id:'7',agent_name:'Alex',started_at:'2026-10-23T10:00:00Z',ended_at:'2026-10-23T10:05:00Z',end_reason:'transferred',valid:true,seconds:300}],
+const investigationDetail={ticket:{ticket_reference:'TEST-42',customer_name:'Example customer',status:'RESOLVED',ai_summary:'A delayed delivery <img src=x onerror=alert(1)>',reason:'Delivery delayed',requested_action:'Contact courier'},first_claimed_at:'2026-10-23T10:00:00Z',last_resolved_at:'2026-10-23T10:15:00Z',periods:[{agent_id:'7',agent_name:'Alex',start_event:'TICKET_CLAIMED',started_at:'2026-10-23T10:00:00Z',ended_at:'2026-10-23T10:05:00Z',end_reason:'transferred',valid:true,seconds:300}],
  original_claimant_id:'7',original_claimant_name:'Alex',issues:[],messages:[{id:1,body:'Synthetic customer message',sender_type:'CUSTOMER',direction:'INBOUND',send_status:'RECEIVED',created_at:'2026-10-23T10:00:00Z'}],events:[
  {id:1,event_type:'TICKET_CREATED',actor_type:'SYSTEM',created_at:'2026-10-23T10:00:00Z',details_json:'{"reason":"AI_DISABLED_GLOBAL","source_whatsapp_message_id":"private-provider-id"}'},
  {id:2,event_type:'TICKET_CLAIMED',actor_type:'AGENT',actor_name:'Alex',created_at:'2026-10-23T10:00:30Z',details_json:'{}'},
@@ -92,7 +92,7 @@ async function api(path) {
  calls.push(path);
  if(resolvePending==='wait') return new Promise(resolve=>{resolvePending=resolve});
  if(path.startsWith('/api/support/statistics/tickets/'))return investigationDetail;
- if(path.startsWith('/api/support/statistics/tickets?'))return {items:[{id:42,ticket_reference:'TEST-42',customer_name:'Example customer',current_assignee_name:'Morgan',status:'RESOLVED',flags:[{code:'fast_resolution',explanation:'technical internal wording'}],issues:[]}],next_before:42,activity_tracking_started_at:'2026-10-25T10:00:00Z'};
+ if(path.startsWith('/api/support/statistics/tickets?'))return {items:[{...investigationDetail.ticket,id:42,current_assignee_name:'Morgan',first_claimed_at:investigationDetail.first_claimed_at,last_resolved_at:investigationDetail.last_resolved_at,periods:investigationDetail.periods,flags:[{code:'fast_resolution',explanation:'technical internal wording'}],issues:[]}],next_before:42,as_of:'2026-10-25T11:00:00Z',activity_tracking_started_at:'2026-10-25T10:00:00Z'};
  const query=new URL('http://test'+path).searchParams;
  return {...report,rank_by:query.get('rank_by'),direction:query.get('direction')};
 }
@@ -145,9 +145,16 @@ check($('statisticsAgentTitle').textContent.includes('Alex'),'selected employee 
 check($('statisticsAgentInsights').textContent.includes('48')&&$('statisticsAgentInsights').textContent.includes('2h 0m 15s'),'agent-specific counts and active time');
 check(!$('statisticsAgentInsights').textContent.includes('handling')&&!$('statisticsAgentInsights').textContent.includes('Median'),'no timing insight cards');
 check($('statisticsTicketRows').textContent.includes('Resolved in under a minute')&&!$('statisticsTicketRows').textContent.includes('technical internal wording'),'review prompts are plain language');
+for(const text of ['A delayed delivery','Contact courier','First claimed','Last resolved','Alex: Claimed','Transferred','0h 5m 0s'])check($('statisticsTicketRows').textContent.includes(text),'ticket report includes '+text);
+check($('statisticsTicketRows').textContent.includes(investigationDate(investigationDetail.first_claimed_at,{timeStyle:'medium'})),'claim timestamp uses report timezone with seconds');
+check($('statisticsTicketRows').textContent.includes(investigationDate(investigationDetail.last_resolved_at,{timeStyle:'medium'})),'resolution timestamp uses report timezone with seconds');
+check(!$('statisticsTicketRows').querySelector('img'),'ticket report renders untrusted text safely');
+check($('statisticsReviewIndicator').options.length===8,'all seven existing indicator types offered');
+for(const option of [...$('statisticsReviewIndicator').options].slice(1))check(option.textContent===investigationFlag({code:option.value}),'filter reuses indicator label');
 await browseStatisticsTickets(true);check(calls.at(-1).includes('before=42')&&calls.at(-1).includes('agent_id=7'),'ticket pagination preserves selected agent');
 await investigateStatisticsTicket(42);
 check(state.ticketId===99&&renderedInvestigation[0]==='investigation','investigation never opens operational ticket');
+check($('investigationReport').textContent.includes('Contact courier')&&!$('investigationReport').querySelector('img'),'detail shows safe ticket report');
 check($('investigationEvents').textContent.includes('Alex transferred the ticket to Morgan.')&&$('investigationPeriods').textContent.includes('Alex'),'plain-language transfer and responsibility shown');
 for(const text of ['Ticket opened for customer support.','Alex claimed the ticket.','Morgan resolved the ticket.','Staff handling ended.'])check($('investigationEvents').textContent.includes(text),'manager-readable event '+text);
 for(const text of ['TICKET_CREATED','AI_DISABLED_GLOBAL','private-provider-id','last_assignee_id','{}','INBOUND','CUSTOMER','RECEIVED'])check(!$('statisticsInvestigation').textContent.includes(text),'no developer detail '+text);
@@ -156,11 +163,17 @@ check(investigationActivity({event_type:'TICKET_TRANSFERRED',actor_id:'9',actor_
 check(investigationActivity({event_type:'TICKET_REOPENED',actor_id:'8',actor_name:'Morgan',details_json:'{"current_assignee_id":"8"}'}).includes('took responsibility'),'reopen ownership exception explained');
 check(!investigationActivity({event_type:'TICKET_REOPENED',details_json:'bad JSON'}).includes('took responsibility'),'missing owner not guessed');
 check(investigationActivity({event_type:'INCOMING_MARKED_READ',actor_name:'Alex',details_json:'{"mode":"reply_sync","reply_id":987}'}).includes('after Alex replied'),'automatic reads distinguished from manual action');
+check(investigationActivity({event_type:'STATUS_CHANGED',actor_name:'Alex',details_json:'{"from":"ASSIGNED","to":"IN_PROGRESS"}'})==='Alex changed the status from assigned to in progress.','status changes show both states');
 check(investigationActivity({event_type:'UNRECOGNIZED_CODE',details_json:'{"internal":"sensitive"}'})==='Additional conversation activity recorded.','unknown event remains readable without raw data');
 investigationDetail.events.push({event_type:'TICKET_CLAIMED',actor_name:'<img src=x onerror=alert(1)>',created_at:'2026-10-23T10:20:00Z'});
 document.querySelector('[data-investigation-panel="activity"]').click();
 check(!$('investigationActivityPanel').classList.contains('hidden')&&$('investigationConversationPanel').classList.contains('hidden'),'review section navigation');
 await investigateStatisticsTicket(42,'messages');check(calls.at(-1).includes('before_message=1'),'message pagination');
+investigationDetail.context_messages=[{role:'user',content:'Earlier customer question <img src=x>'},{role:'assistant',content:'Earlier automated reply'}];
+await investigateStatisticsTicket(42,'messages');
+check($('investigationMessages').textContent.indexOf('Earlier customer question')<$('investigationMessages').textContent.indexOf('Synthetic customer message'),'handoff context precedes ticket transcript');
+check(!$('investigationMessages').querySelector('img'),'handoff context renders safely');
+delete investigationDetail.context_messages;
 await investigateStatisticsTicket(42,'events');check(calls.at(-1).includes('before_event=1'),'audit pagination');
 check(!$('investigationEvents').querySelector('img'),'activity actor names rendered safely as text');
 investigationDetail.events.pop();
@@ -168,10 +181,24 @@ check(!calls.some(path=>path.includes('/view')||path.includes('/read')||path.sta
 $('investigationBackToAgent').click();
 check($('statisticsInvestigation').classList.contains('hidden')&&!$('statisticsAgentReview').classList.contains('hidden'),'back retains agent tickets');
 $('statisticsFlaggedOnly').checked=true;await browseStatisticsTickets();check(calls.at(-1).includes('flagged_only=true'),'review indicator filter');
+$('statisticsReviewIndicator').value='fast_resolution';$('statisticsReviewIndicator').dispatchEvent(new Event('change'));
+await Promise.resolve();await Promise.resolve();
+check(calls.at(-1).includes('review_indicator=fast_resolution')&&!calls.at(-1).includes('before='),'specific indicator starts a fresh page');
+await browseStatisticsTickets(true);check(calls.at(-1).includes('review_indicator=fast_resolution')&&calls.at(-1).includes('before=42'),'pagination preserves specific indicator');
+await investigateStatisticsTicket(42);backToStatisticsAgent();
+check($('statisticsReviewIndicator').value==='fast_resolution'&&$('statisticsFlaggedOnly').checked,'back preserves indicator filters');
+$('statisticsReviewIndicator').value='';await browseStatisticsTickets();
+check(!calls.at(-1).includes('review_indicator=')&&calls.at(-1).includes('flagged_only=true'),'clearing specific indicator preserves original filter');
+resolvePending='wait';const oldFilter=browseStatisticsTickets();
+const finishOldFilter=resolvePending;resolvePending=null;
+$('statisticsReviewIndicator').value='short_handling';await browseStatisticsTickets();
+finishOldFilter({items:[],next_before:null});await oldFilter;
+check($('statisticsTicketRows').children.length===1,'stale filter response cannot clear new results');
 $('statisticsBackToRanking').click();
 check(!$('statisticsOverview').classList.contains('hidden')&&document.activeElement.dataset.agentId==='7','back preserves ranking and keyboard focus');
 await openStatisticsAgent(report.rows[1]);check(calls.at(-1).includes('agent_id=8'),'different name overrides leaderboard staff filter');
 check($('statisticsAgentInsights').textContent.includes('25'),'insights switch with employee');
+check($('statisticsReviewIndicator').value===''&&!$('statisticsFlaggedOnly').checked,'changing employee resets both indicator filters');
 resolvePending='wait';const delayedTickets=browseStatisticsTickets();backToStatisticsRanking();resolvePending({items:[],next_before:null});await delayedTickets;
 check(!$('statisticsOverview').classList.contains('hidden')&&!$('statisticsTicketRows').children.length,'late ticket response cannot reopen agent review');
 resolvePending=null;await openStatisticsAgent(report.rows[0]);

@@ -1,5 +1,12 @@
 """Transfer-aware projections of retained ticket audit; never invent assignments."""
 import json
+from typing import Literal
+
+ReviewIndicator = Literal[
+    'fast_resolution', 'short_handling', 'resolved_without_response',
+    'repeated_views_without_response', 'read_without_response',
+    'repeated_reads_without_response', 'frequent_transfers',
+]
 
 LIFECYCLE_EVENTS = ('TICKET_CLAIMED', 'TICKET_TRANSFERRED', 'TICKET_RESOLVED',
                     'TICKET_REOPENED', 'CHAT_STARTED', 'CHAT_REOPENED', 'CHAT_CLOSED', 'STATUS_CHANGED',

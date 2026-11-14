@@ -823,6 +823,7 @@ __SUPPORT_STYLE__
         <div class="statistics-review-heading"><h3 id="statisticsAgentTitle" tabindex="-1"></h3><p class="form-note" id="statisticsAgentDates"></p></div>
         <div class="statistics-totals" id="statisticsAgentInsights"></div>
         <div class="section-title"><h4>Tickets and conversations</h4><label class="check-field"><input type="checkbox" id="statisticsFlaggedOnly"> Show review indicators only</label></div>
+        <div class="field statistics-indicator-filter"><label for="statisticsReviewIndicator">Review Indicators</label><select id="statisticsReviewIndicator"><option value="">All indicator types</option></select></div>
         <p class="form-note" id="statisticsReviewNote"></p>
         <div id="statisticsReviewStatus" role="status" aria-live="polite"></div>
         <div id="statisticsTicketRows"></div><button type="button" class="btn hidden" id="statisticsMoreTickets">More conversations</button>
@@ -831,6 +832,7 @@ __SUPPORT_STYLE__
         <button type="button" class="btn" id="investigationBackToAgent">← Back to staff tickets</button>
         <div class="statistics-review-heading"><h3 id="investigationTitle" tabindex="-1"></h3><p class="form-note" id="investigationNotes"></p></div>
         <div id="investigationStatus" role="status" aria-live="polite"></div>
+        <div id="investigationReport" class="investigation-report"></div>
         <div class="investigation-tabs" aria-label="Conversation review sections">
           <button type="button" class="btn" data-investigation-panel="conversation" aria-pressed="true" aria-controls="investigationConversationPanel">Conversation</button>
           <button type="button" class="btn" data-investigation-panel="activity" aria-pressed="false" aria-controls="investigationActivityPanel">Activity timeline</button>

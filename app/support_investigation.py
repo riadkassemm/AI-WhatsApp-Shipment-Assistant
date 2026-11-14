@@ -5,15 +5,22 @@ import json
 
 import aiomysql
 from fastapi import HTTPException
-from app.support_timing import LIFECYCLE_EVENTS, responsibility_periods, period_in_range, review_indicators, validate_current_projection
+from app.support_timing import LIFECYCLE_EVENTS, ReviewIndicator, responsibility_periods, review_indicators, validate_current_projection
 from app.support_staff_names import attach_current_staff_names
 
 AUDIT_EVENTS = (*LIFECYCLE_EVENTS, 'CONVERSATION_VIEWED', 'INCOMING_MARKED_READ')
 
 
+def ticket_report_dates(events: list[dict]) -> dict:
+    """Keep ticket milestones distinct from transfer/reopen assignment starts."""
+    claims = [e['created_at'] for e in events if e['event_type'] == 'TICKET_CLAIMED']
+    resolutions = [e['created_at'] for e in events if e['event_type'] == 'TICKET_RESOLVED']
+    return dict(first_claimed_at=min(claims, default=None), last_resolved_at=max(resolutions, default=None))
+
+
 async def ticket_batch(cur, start, end, before=None, limit=250):
     await cur.execute("""SELECT id,ticket_reference,customer_name,whatsapp_phone,status,active_key,conversation_origin,
-        current_assignee_id,current_assignee_name
+        current_assignee_id,current_assignee_name,ai_summary,reason,requested_action
         FROM support_tickets t WHERE t.id<%s AND t.created_at<%s AND
         (t.active_key IS NOT NULL OR t.updated_at>=%s OR EXISTS
          (SELECT 1 FROM support_ticket_events e WHERE e.ticket_id=t.id AND e.created_at>=%s AND e.created_at<%s))
@@ -51,7 +58,9 @@ class InvestigationRepository:
     def __init__(self, statistics):
         self.statistics = statistics
 
-    async def tickets(self, start, end, staff_id, before, flagged_only):
+    async def tickets(self, start, end, staff_id, before, flagged_only, review_indicator: ReviewIndicator | None = None):
+        from app.support_service import _safe_ticket_row
+
         pool = await self.statistics.pool()
         async with pool.acquire() as conn:
             await conn.begin()
@@ -73,19 +82,26 @@ class InvestigationRepository:
                         if as_of == now:
                             validate_current_projection(projection, ticket)
                         matching = [p for p in projection['periods'] if (staff_id is None or p['agent_id'] == str(staff_id))
-                                    and (period_in_range(p, start, end) or (p['ended_at'] is None and p['started_at'] < end))]
-                        acted = any(str(e.get('actor_id')) == str(staff_id) and start <= e['created_at'] < end for e in audit)
+                                    and p['started_at'] < end and (p['ended_at'] is None or p['ended_at'] >= start)]
+                        # Current ownership is authoritative even when its start audit
+                        # is missing. Do not infer ownership in a historical window.
+                        assigned_now = (as_of == now and ticket['active_key'] is not None
+                                        and str(ticket.get('current_assignee_id')) == str(staff_id))
+                        acted = any(e.get('actor_type') == 'AGENT' and str(e.get('actor_id')) == str(staff_id)
+                                    and start <= e['created_at'] < end for e in audit)
                         sent = any(str(m.get('sender_id')) == str(staff_id) and start <= m['sent_at'] < end
                                    for m in messages[ticket['id']])
-                        if staff_id is not None and not matching and not acted and not sent:
+                        if staff_id is not None and not matching and not assigned_now and not acted and not sent:
                             continue
                         flags = review_indicators(projection['periods'], audit, messages[ticket['id']], start, as_of, staff_id)
                         flags = [dict(flag, agent_name=names[flag['agent_id']]) for flag in flags if flag['agent_id'] in names]
                         if flagged_only and not flags:
                             continue
+                        if review_indicator and not any(flag['code'] == review_indicator for flag in flags):
+                            continue
                         if str(ticket.get('current_assignee_id')) in names:
                             ticket['current_assignee_name'] = names[str(ticket['current_assignee_id'])]
-                        result.append(dict(ticket, flags=flags, **projection))
+                        result.append(dict(_safe_ticket_row(ticket), flags=flags, **projection, **ticket_report_dates(audit)))
                     await cur.execute('SELECT ticket_activity_tracking_started_at FROM support_statistics_metadata WHERE id=1')
                     tracking = (await cur.fetchone())['ticket_activity_tracking_started_at']
                 await conn.commit()
@@ -97,7 +113,7 @@ class InvestigationRepository:
 
     async def investigate(self, ticket_id, agent, before_message=None, before_event=None):
         # Do not call ticket_detail: that operational path can enrich/update identity.
-        from app.support_service import _serialize_support_messages, _safe_ticket_row, _safe_context_value, _normalize_row
+        from app.support_service import _serialize_support_messages, _safe_ticket_row, _safe_context_value, _normalize_row, _decode_context
         pool = await self.statistics.pool()
         async with pool.acquire() as conn:
             await conn.begin()
@@ -115,6 +131,32 @@ class InvestigationRepository:
                         AND NOT EXISTS (SELECT 1 FROM support_message_user_deletions d WHERE d.message_id=m.id AND d.user_id=%s)
                         ORDER BY id DESC LIMIT 101""", (ticket_id, before_message or 9223372036854775807, agent.id))
                     messages = list(await cur.fetchall())
+                    # The handoff snapshot predates the ticket transcript. Show it
+                    # only at the oldest page, without tool data or raw context JSON.
+                    context_messages = []
+                    context_unavailable = False
+                    if len(messages) <= 100:
+                        recent = _decode_context(ticket).get('recent_messages')
+                        if isinstance(recent, list):
+                            context_messages = [dict(role=m['role'], content=m['content']) for m in recent
+                                                if isinstance(m, dict) and m.get('role') in ('user', 'assistant')
+                                                and isinstance(m.get('content'), str) and m['content']]
+                        if context_messages:
+                            # Snapshots have no stable message IDs; do not restore
+                            # hidden/deleted text from a snapshot we cannot reconcile.
+                            await cur.execute("""SELECT 1 FROM support_ticket_messages m WHERE ticket_id=%s
+                                AND (deleted_for_everyone_at IS NOT NULL OR EXISTS
+                                    (SELECT 1 FROM support_message_user_deletions d
+                                     WHERE d.message_id=m.id AND d.user_id=%s)) LIMIT 1""", (ticket_id, agent.id))
+                            context_unavailable = bool(await cur.fetchone())
+                            if context_unavailable:
+                                context_messages = []
+                            else:
+                                first_inbound = next((m for m in reversed(messages) if m['sender_type'] == 'CUSTOMER'
+                                                      and m['direction'] == 'INBOUND'), None)
+                                if (first_inbound and context_messages[-1]['role'] == 'user'
+                                        and context_messages[-1]['content'] == _safe_context_value(first_inbound.get('body'))):
+                                    context_messages.pop()
                     await cur.execute('SELECT * FROM support_ticket_events WHERE ticket_id=%s AND id<%s ORDER BY id DESC LIMIT 101',
                                       (ticket_id, before_event or 9223372036854775807))
                     events = list(await cur.fetchall())
@@ -129,7 +171,10 @@ class InvestigationRepository:
         for period in projection['periods']:
             period['agent_name'] = names.get(period['agent_id'], 'Former staff member')
             period['resolver_name'] = names.get(period['resolver_id'], 'Former staff member') if period.get('resolver_id') else None
-        return dict(ticket=_safe_ticket_row(ticket), **projection,
+        safe_ticket = _safe_ticket_row(ticket)
+        safe_ticket.pop('context_json', None)
+        return dict(ticket=safe_ticket, **projection, **ticket_report_dates(evidence[ticket_id]),
+                    context_messages=context_messages, context_unavailable=context_unavailable,
                     original_claimant_name=names.get(projection['original_claimant_id']),
                     messages=_serialize_support_messages(ticket_id, list(reversed(messages[:100]))),
                     events=[_safe_context_value(_normalize_row(e)) for e in reversed(events[:100])],
