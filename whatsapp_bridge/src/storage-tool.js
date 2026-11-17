@@ -23,7 +23,8 @@ export async function storageTool(command, directory, destination, {maintenance 
     if (evidence(entries.map(item => item.name), 'outbox.json')) files.push('outbox.json');
     for (const entry of entries) if (entry.isDirectory() && /^\d{5,64}$/.test(entry.name)) {
       const names = await readdir(path.join(directory, entry.name));
-      for (const name of ['state.json', 'auth.json']) {
+      // outbox.json: per-line process mode keeps each number's callbacks here.
+      for (const name of ['state.json', 'auth.json', 'outbox.json']) {
         if (evidence(names, name)) files.push(path.join(entry.name, name));
       }
     }
@@ -47,7 +48,9 @@ export async function storageTool(command, directory, destination, {maintenance 
     }
     if (command === 'export') {
       await mkdir(destination, {mode: 0o700});
-      await cp(directory, destination, {recursive: true, filter: source => !/\.(journal|snapshot|lock|tmp)$/.test(source)});
+      // Per-line worker sockets and locks are runtime-only.
+      await cp(directory, destination, {recursive: true, filter: source => !/\.(journal|snapshot|lock|tmp|sock)$/.test(source) &&
+        path.relative(directory, source) !== '.workers'});
       for (const state of states) await atomicWrite(path.join(destination, state.relative), state.data);
     }
     if (command === 'compact' || command === 'import') {

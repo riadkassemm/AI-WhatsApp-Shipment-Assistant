@@ -13,6 +13,8 @@ import { createSupervisorHost } from '../src/worker-ipc.js';
 import { readConfig, readLineWorkerConfig, readProcessMode, workerSocketPath } from '../src/config.js';
 import { coordinateCheckpoint, setCheckpointGate } from '../src/journal-maintenance.js';
 import { Bridge } from '../src/bridge.js';
+import { storageTool } from '../src/storage-tool.js';
+import net from 'node:net';
 
 const SECRET = 'a-test-secret-that-is-long-enough-123456';
 const FAKE_WORKER = fileURLToPath(new URL('../fixtures/fake-line-worker.mjs', import.meta.url));
@@ -491,4 +493,19 @@ test('worker-mode retired phones go through the supervisor', async t => {
   await bridge.adoptRetiredPhone(line);
   assert.equal(line.store.data.recover_since, 100_000 - 60_000);
   assert.deepEqual(host.calls.slice(-2).map(([method]) => method), ['retiredPhone', 'dropRetiredPhone']);
+});
+
+test('the offline storage tool validates per-number outboxes and exports without worker sockets', async t => {
+  const { root, dataDir } = await tempDir(t);
+  await mkdir(path.join(dataDir, '90001'), { mode: 0o700 });
+  await writeOutbox(path.join(dataDir, '90001', 'outbox.json'), { entries: [entry('90001', 'a')] });
+  await mkdir(path.join(dataDir, '.workers'), { mode: 0o700 });
+  const leftover = net.createServer();
+  await new Promise(resolve => leftover.listen(path.join(dataDir, '.workers', '90001.sock'), resolve));
+  t.after(() => new Promise(resolve => leftover.close(resolve)));
+  assert.equal((await storageTool('validate', dataDir)).stores, 1);
+  const destination = path.join(root, 'export');
+  await storageTool('export', dataDir, destination);
+  assert.deepEqual((await readOutbox(path.join(destination, '90001', 'outbox.json'))).entries.map(item => item.event.event_id), ['a']);
+  assert.equal(await exists(path.join(destination, '.workers')), false);
 });
