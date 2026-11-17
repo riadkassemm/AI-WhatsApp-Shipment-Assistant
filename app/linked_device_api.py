@@ -144,6 +144,9 @@ async def linked_device_status(agent: SupportAgent = Depends(get_current_agent))
             "recovery_category": item.get("recovery_category") if isinstance(item.get("recovery_category"), str) else None,
             "session_blocked": item.get("session_blocked") is True,
             "saved_login": item.get("saved_login") is True,
+            # Present only when the bridge runs each number in its own process.
+            "process_restartable": isinstance(item.get("process"), dict),
+            "process_state": item["process"].get("state") if isinstance(item.get("process"), dict) and isinstance(item["process"].get("state"), str) else None,
         })
     return {"configured": True, "lines": lines, "default_transport": settings.whatsapp_transport}
 
@@ -294,6 +297,20 @@ async def reset_linked_device_session(line_id: str, agent: SupportAgent = Depend
     except WhatsAppSendError as exc:
         raise _bridge_http_error(exc) from exc
     logger.info("Linked-device session reset: staff_id=%s line_id=%s", agent.id, line_id)
+    return await linked_device_status(agent)
+
+
+@router.post("/api/support/whatsapp-linked-device/lines/{line_id}/restart-process")
+async def restart_linked_device_process(line_id: str, agent: SupportAgent = Depends(require_support_csrf)) -> dict:
+    # Per-line bridge mode: stop and start only this number's process. Its saved
+    # session resumes; other numbers are not affected.
+    _require_manager(agent)
+    _require_line(line_id)
+    try:
+        await linked_device_client.restart_process(line_id)
+    except WhatsAppSendError as exc:
+        raise _bridge_http_error(exc) from exc
+    logger.info("Linked-device number process restart requested: staff_id=%s line_id=%s", agent.id, line_id)
     return await linked_device_status(agent)
 
 

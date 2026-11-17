@@ -1327,6 +1327,9 @@ function linkedDeviceRecoveryActions(line) {
   if (sessionBlocked && line.saved_login && line.status !== 'connected') actions.push({label: 'Resume session', primary: true,
     run: lineId => resumeLinkedDeviceSession(lineId),
     title: 'Continue from the saved login without the phone. Other numbers are not affected.'});
+  // Only when the bridge runs each number in its own process.
+  if (line.process_restartable) actions.push({label: 'Restart number', managersOnly: true, run: lineId => restartLinkedDeviceProcess(lineId),
+    title: 'Restart only this number\'s WhatsApp process. It reconnects with its saved session; other numbers are not affected.'});
   if (failing) actions.push({label: 'Reset session', managersOnly: true, run: lineId => resetLinkedDeviceSession(lineId),
     title: 'Clear this number\'s stuck session and pair it again with the same phone. Conversations are kept.'});
   if (sessionBlocked || line.status === 'error') actions.push({label: 'Force remove', managersOnly: true, run: lineId => forceRemoveLinkedDevice(lineId), danger: true,
@@ -1625,6 +1628,33 @@ async function reconnectLinkedDevice(lineId) {
   if (!canLinkWhatsApp() || state.linkedDeviceBusy) return;
   await runLinkedDeviceRecovery('/api/support/whatsapp-linked-device/lines/' + encodeURIComponent(lineId) + '/reconnect', {},
     'Reconnecting this number.');
+}
+
+async function restartLinkedDeviceProcess(lineId) {
+  if (!canManageWhatsApp() || state.linkedDeviceBusy) return;
+  const name = linkedDeviceName(lineId);
+  if (!(await confirmDialog({title: 'Restart ' + name + '?',
+    message: 'Only this number disconnects for a few seconds, then reconnects with its saved session: no phone needed. ' +
+      'Replies sent meanwhile wait and are delivered after it reconnects. Other numbers stay connected.',
+    confirmLabel: 'Restart number'}))) return;
+  notify('Restarting ' + name + '…');
+  const payload = await runLinkedDeviceRecovery('/api/support/whatsapp-linked-device/lines/' + encodeURIComponent(lineId) + '/restart-process', {}, null);
+  if (!payload) return;
+  // Report the outcome: wait until this number's process is back and connected.
+  const deadline = Date.now() + 90_000;
+  while (Date.now() < deadline) {
+    await new Promise(resolve => window.setTimeout(resolve, 3000));
+    try {
+      const status = await api('/api/support/whatsapp-linked-device/status');
+      if (state.activeModal === 'whatsappModal') renderLinkedDeviceStatus(status);
+      const line = (status.lines || []).find(item => String(item.line_id) === String(lineId));
+      if (line?.status === 'connected') { notify(name + ' restarted and connected.'); return; }
+      if (line?.session_blocked || line?.status === 'error' || line?.status === 'logged_out') {
+        notify(name + ' restarted but cannot connect. Check its status below.', 'error'); return;
+      }
+    } catch (_) { /* Keep waiting for the status. */ }
+  }
+  notify(name + ' is still reconnecting. Check again in a minute.', 'error');
 }
 
 async function resetLinkedDeviceSession(lineId) {
