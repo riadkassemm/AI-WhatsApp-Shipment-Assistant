@@ -2749,7 +2749,16 @@ class SupportService:
             identity = None
             try:
                 identity = await customer_directory.resolve(str(enriched.get("whatsapp_phone") or ""))
-                if identity.name and not enriched.get("customer_name"):
+                refresh_replica_identity = (
+                    settings.customer_users_replica_enabled
+                    and identity.source == "registered_user"
+                    and (
+                        enriched.get("customer_name") != identity.name
+                        or enriched.get("customer_id") != identity.user_id
+                        or enriched.get("customer_userid") != identity.userid
+                    )
+                )
+                if identity.name and (not enriched.get("customer_name") or refresh_replica_identity):
                     enriched = await support_repository.update_customer_identity(
                         ticket_id,
                         customer_name=identity.name,
@@ -2760,10 +2769,15 @@ class SupportService:
                 logger.exception("Could not enrich ticket customer identity: ticket_id=%s", ticket_id)
 
             shipment = None
-            if enriched.get("customer_id") and enriched.get("tracking_reference"):
+            # Use the freshly resolved identity for shipment ownership. Cached
+            # ticket IDs may belong to the previous customer database source.
+            shipment_customer_id = (
+                identity.user_id if identity and identity.source == "registered_user" else None
+            )
+            if shipment_customer_id and enriched.get("tracking_reference"):
                 try:
                     candidate = await shipment_client.track_shipment(
-                        customer_id=str(enriched["customer_id"]),
+                        customer_id=str(shipment_customer_id),
                         tracking_number=str(enriched["tracking_reference"]),
                     )
                     if candidate.get("found") is True and candidate.get("authorized") is True:

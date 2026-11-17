@@ -15,11 +15,63 @@ Use local administrator access for migrations. The bridge shares this environmen
 but does not open database connections. Preserve Redis, pairing state, callbacks,
 media, signing secrets, and cookies during migration.
 
-This is an **independent point-in-time copy**, not replication. New customers,
+By default this is an **independent point-in-time copy**, not replication. New customers,
 wallet changes, orders, shipment updates, and prices subsequently entered in the
 old business system will not arrive automatically. Chatbot order-mode/password
 updates now affect the local copy only. Any future synchronization requires a
-separate explicit design; neither app queries the old server during operation.
+separate explicit design. The optional users replica below replaces only customer
+identity/authentication reads; the other copied tables retain these limitations.
+
+## Optional live users replica
+
+Configure `CUSTOMER_USERS_DB_HOST`, `CUSTOMER_USERS_DB_PORT`,
+`CUSTOMER_USERS_DB_NAME`, `CUSTOMER_USERS_DB_USER`, and
+`CUSTOMER_USERS_DB_PASSWORD` in the private service environment. All four string
+values must be set together; leaving all four empty keeps the existing local
+users source. In production the replica is `127.0.0.1:3310`, schema `mikexport`.
+Use a dedicated application account granted **SELECT only on `mikexport.users`**,
+not the phpMyAdmin administrator account. Keep the port bound to loopback.
+
+Customer phone/name matching and customer credential verification then read the
+replica. The app does not write passwords or any other data to it, and an outage
+does not fall back to stale local credentials. Staff login, saved dashboard names,
+Google/VCF contacts, tickets, messages, wallets, orders, and rates remain on `DB_*`.
+Dashboard names deliberately continue to override registered account names;
+the account-name field shows the replica name. Opening a ticket refreshes its
+cached registered identity from the current lookup. Users replication does not make
+wallets or orders live.
+
+Replica identities use `replica:<id>` internally. Restored authenticated customer
+conversations from the previous source require a fresh login, including after a
+rollback. Ticket history and message delivery state are preserved. Historical
+wallet/order ownership is mapped from the replica user's UUID to exactly one
+local `users` row; local numeric IDs and account codes must never be used as a
+fallback. Missing or ambiguous mappings return an unavailable result instead of
+another customer's data. Keep the old local `users` table for this cross-reference.
+New replica users without a historical UUID match can log in and be recognized
+in support, but cannot access historical shipment data.
+
+Read-only production inspection on 2026-11-17 found 11,704 local users and
+13,082 replica users. Thirteen shared numeric IDs had different userids and UUIDs,
+and one local ID was absent from the replica. These counts are a snapshot, not
+an allowlist; the UUID guard applies on every protected data lookup.
+
+Before deployment, verify on DEV with a disposable replica fixture and a SELECT-only
+account: current and disabled logins, plaintext/bcrypt verification without writes,
+phone matching, saved contact edits, UUID collisions, customer session cutover,
+and replica outages. Review the diff, obtain commit/push/PR authorization, and get
+explicit DEV deployment approval per `AGENTS.md`. Production cutover requires a
+separate approval after DEV verification. Provision its SELECT-only account, set
+the five variables, and restart the API through the established release procedure.
+Leave the replication service, bridge sessions, and durable message state intact.
+Check replication health independently using the existing replica monitor.
+
+Rollback by restoring the prior release and private environment. Before returning
+to a release without replica-ID support, clear only customer authentication fields
+in stored conversations (preserve ticket/message/delivery state); such an old release
+cannot recognize the new identity namespace. A rollback that retains this code
+only needs the four string settings cleared: mismatched identities are invalidated
+when their conversations are loaded.
 
 ## Selected tables
 

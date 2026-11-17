@@ -30,6 +30,7 @@ from typing import Any, Literal
 from app.ai_config import CHATBOT_INSTRUCTIONS
 from app.client_chat_auth import AuthState, redact_sensitive_text
 from app.config import settings
+from app.customer_users import customer_identity_matches_source
 from app.security import safe_log_identifier
 
 logger = logging.getLogger("shipment-bot")
@@ -231,6 +232,19 @@ class Conversation:
                 data[timestamp_key] = float(raw_timestamp)
             except (TypeError, ValueError):
                 data[timestamp_key] = None
+
+        if data.get("verified_customer_id") is not None and not customer_identity_matches_source(
+            data["verified_customer_id"]
+        ):
+            # Switching credential stores requires a fresh login, including on
+            # rollback. Never reinterpret an old numeric ID in the new source.
+            for key in (
+                "verified_customer_id", "authenticated_userid", "authenticated_name",
+                "pending_auth_userid", "pending_request", "pending_tool_name",
+                "pending_tool_arguments",
+            ):
+                data[key] = None
+            data["auth_state"] = "guest"
 
         if data.get("verified_customer_id") is not None:
             data["auth_state"] = "authenticated"

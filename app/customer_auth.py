@@ -36,6 +36,7 @@ import bcrypt
 import aiomysql
 
 from app.config import settings
+from app.customer_users import customer_connection_options, customer_identity_id
 from app.security import safe_log_identifier
 
 
@@ -66,15 +67,7 @@ async def _get_db_connection():
     Create a MariaDB connection using application configuration.
     """
 
-    return await aiomysql.connect(
-        host=settings.db_host,
-        port=settings.db_port,
-        user=settings.db_user,
-        password=settings.db_password,
-        db=settings.db_name,
-        autocommit=True,
-        charset="utf8mb4",
-    )
+    return await aiomysql.connect(**customer_connection_options())
 
 
 async def authenticate_customer(
@@ -205,35 +198,32 @@ async def authenticate_customer(
                 )
                 return None
         else:
-            # Backwards-compatible plaintext account. On successful login, migrate
-            # that row to bcrypt immediately so plaintext storage disappears over
-            # time without changing the existing customer login flow.
+            # Backwards-compatible plaintext account. Only a local writable
+            # source may be upgraded here; replica passwords belong upstream.
             if password != stored_password:
                 logger.info(
                     "Customer authentication rejected: user_ref=%s",
                     safe_log_identifier(userid, "user"),
                 )
                 return None
-            try:
-                migrated_hash = await asyncio.to_thread(
-                    bcrypt.hashpw,
-                    password.encode("utf-8"),
-                    bcrypt.gensalt(rounds=12),
-                )
-                async with connection.cursor() as cursor:
-                    await cursor.execute(
-                        "UPDATE users SET password = %s WHERE id = %s AND password = %s",
-                        (migrated_hash.decode("utf-8"), user["id"], stored_password),
+            if not settings.customer_users_replica_enabled:
+                try:
+                    migrated_hash = await asyncio.to_thread(
+                        bcrypt.hashpw,
+                        password.encode("utf-8"),
+                        bcrypt.gensalt(rounds=12),
                     )
-            except Exception:
-                # Do not attach a DB exception traceback here: some drivers can include
-                # query parameter representations, and this UPDATE contains plaintext
-                # legacy credentials. Login remains compatible while operators still get
-                # a remediation signal.
-                logger.error("Could not migrate legacy customer password to bcrypt")
+                    async with connection.cursor() as cursor:
+                        await cursor.execute(
+                            "UPDATE users SET password = %s WHERE id = %s AND password = %s",
+                            (migrated_hash.decode("utf-8"), user["id"], stored_password),
+                        )
+                except Exception:
+                    # DB errors can include credential-bearing parameters.
+                    logger.error("Could not migrate legacy customer password to bcrypt")
 
         customer = AuthenticatedCustomer(
-            customer_id=str(user["id"]),
+            customer_id=customer_identity_id(user["id"]),
             userid=str(user["userid"]),
             name=user.get("name"),
         )

@@ -60,24 +60,33 @@ def _patch_media(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(support_service_module.support_media_store, "get_remote_reference", lambda *_args: None)
 
 
-def test_ticket_detail_loads_identity_messages_events_and_history_concurrently(monkeypatch) -> None:
+@pytest.mark.parametrize("cached_identity", [False, True])
+@pytest.mark.parametrize("replica_enabled", [False, True])
+def test_ticket_detail_loads_identity_messages_events_and_history_concurrently(
+    monkeypatch, cached_identity, replica_enabled,
+) -> None:
+    monkeypatch.setattr(
+        support_service_module.settings, "customer_users_db_host", "replica.invalid" if replica_enabled else "",
+    )
+    current_customer_id = "replica:900" if replica_enabled else "900"
+
     async def run() -> dict:
         arrive, started = _barrier(4)
-        current = _ticket()
+        current = _ticket(customer_name="Saved Name", customer_id="old-source-id") if cached_identity else _ticket()
 
         async def get_ticket(_ticket_id: int):
             return dict(current)
 
         async def resolve(_phone: str):
             await arrive("identity")
-            return SimpleNamespace(source="registered_user", name="Rana", user_id="900", userid="rana")
+            return SimpleNamespace(source="registered_user", name="Rana", user_id=current_customer_id, userid="rana")
 
         async def update_customer_identity(ticket_id: int, **fields):
             return {**current, "customer_name": fields["customer_name"], "customer_id": fields["customer_id"]}
 
         async def track_shipment(*, customer_id: str, tracking_number: str):
             # Shipment lookup must see the customer_id supplied by identity enrichment.
-            assert (customer_id, tracking_number) == ("900", "TRK-1")
+            assert (customer_id, tracking_number) == (current_customer_id, "TRK-1")
             return {"found": True, "authorized": True, "status": "In transit"}
 
         async def list_messages(ticket_id: int, *, limit: int = 100, before_id=None, user_id=None):
@@ -110,7 +119,7 @@ def test_ticket_detail_loads_identity_messages_events_and_history_concurrently(m
         return detail
 
     detail = asyncio.run(run())
-    assert detail["ticket"]["customer_name"] == "Rana"
+    assert detail["ticket"]["customer_name"] == ("Saved Name" if cached_identity and not replica_enabled else "Rana")
     assert detail["shipment"]["status"] == "In transit"
     assert detail["customer_identity"]["registered_user"] is True
     assert [message["id"] for message in detail["messages"]] == [520]
