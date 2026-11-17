@@ -41,8 +41,10 @@ export class StorageMonitor {
   }
 
   register(store, {lineId = null, kind}) {
+    // The outbox is shared (no line) in single-process mode and belongs to its
+    // number in per-line mode; auth and state always belong to a number.
     if (!['auth', 'state', 'outbox'].includes(kind) || (lineId !== null && !/^\d{5,32}$/.test(lineId)) ||
-        (kind === 'outbox') !== (lineId === null)) throw new Error('INVALID_STORAGE_SCOPE');
+        (kind !== 'outbox' && lineId === null)) throw new Error('INVALID_STORAGE_SCOPE');
     const key = `${lineId ?? 'shared'}:${kind}`;
     const previous = this.stores.get(key);
     if (previous?.store === store) return;

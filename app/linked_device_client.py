@@ -449,6 +449,12 @@ class LinkedDeviceWhatsAppClient:
         line = self._phone_number_id(phone_number_id)
         return await self._json_request("POST", f"/v1/lines/{line}/reset-session")
 
+    async def restart_process(self, phone_number_id: str) -> dict:
+        # Per-line bridge mode only. The bridge gives the process up to its stop
+        # timeout (80 s by default) to drain before it is killed and restarted.
+        line = self._phone_number_id(phone_number_id)
+        return await self._json_request("POST", f"/v1/lines/{line}/restart-process", timeout_seconds=100.0)
+
     async def force_remove(self, phone_number_id: str) -> dict:
         line = self._phone_number_id(phone_number_id)
         return await self._json_request("POST", f"/v1/lines/{line}/force-remove")

@@ -3,12 +3,12 @@ import crypto from 'node:crypto';
 import { BridgeError } from './config.js';
 import { safeStorageCode, errorLabel } from './journal-maintenance.js';
 
-function authorize(request, secret) {
+export function authorize(request, secret) {
   const expected = Buffer.from(`Bearer ${secret}`);
   const supplied = Buffer.from(request.headers.authorization ?? '');
   return supplied.length === expected.length && crypto.timingSafeEqual(supplied, expected);
 }
-async function readJson(request, limit) {
+export async function readJson(request, limit) {
   if (!/^application\/json(?:\s*;|$)/i.test(request.headers['content-type'] ?? '')) throw new BridgeError(415, 'JSON_REQUIRED', 'Send an application/json request.');
   const length = Number(request.headers['content-length'] ?? 0);
   if (length > limit) throw new BridgeError(413, 'REQUEST_TOO_LARGE', 'Request body exceeds the bridge limit.');

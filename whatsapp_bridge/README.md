@@ -37,7 +37,7 @@ Complete number removal uses an authenticated native `remove-companion-device` I
 
 Both processes must use the same `WHATSAPP_LINKED_DEVICE_DATA_DIRECTORY` so Python sees new registrations immediately. Preserve `lines.json` along with the saved sessions during backups and moves.
 
-The data directory resolves relative to the project root, regardless of the current working directory. It stores session credentials, native message keys, captured customer media, operation results, and a callback outbox. Active stores combine legacy JSON/snapshots with fsynced incremental journals; JSON files alone are no longer current. See [incremental storage operations and rollback](../docs/bridge-dashboard-performance.md). The process uses directory permissions `0700`, file permissions `0600`, atomic writes with filesystem synchronization, and one process lock. A clean restart preserves its linked session; an unclean exit requires checking the authentication recovery fences described below. Run one process per data directory.
+The data directory resolves relative to the project root, regardless of the current working directory. It stores session credentials, native message keys, captured customer media, operation results, and a callback outbox. Active stores combine legacy JSON/snapshots with fsynced incremental journals; JSON files alone are no longer current. See [incremental storage operations and rollback](../docs/bridge-dashboard-performance.md). The process uses directory permissions `0700`, file permissions `0600`, atomic writes with filesystem synchronization, and one process lock. A clean restart preserves its linked session; an unclean exit requires checking the authentication recovery fences described below. Run one bridge (or one per-line supervisor, see below) per data directory.
 
 ### Automatic storage maintenance
 
@@ -77,6 +77,23 @@ systemctl --user disable --now whatsapp-support-bridge.service
 
 For a server, adapt [whatsapp-bridge.service.example](whatsapp-bridge.service.example) to the deployment's user, project directory, and absolute Node binary path. Its `ProtectHome=true` setting requires the project and session data to be outside home directories. The example unit is not installed automatically.
 
+### One process per number (optional)
+
+By default one bridge process holds every number, so one number's freeze, crash or CPU-heavy sync (for example a large initial history sync) holds up all of them until the process restarts. Set `WHATSAPP_LINKED_DEVICE_PROCESS_MODE=per_line` to run each number in its own process:
+
+- `src/index.js` starts a small **supervisor** instead of the bridge. It keeps the same `WHATSAPP_LINKED_DEVICE_URL`, secret and `/v1` API, so Python, the dashboard and the systemd unit need no change. It holds the data-directory lock and is the only writer of `lines.json`, `retired-phones.json` and `line-phones.json` (the bound phone of each number).
+- Each number runs `src/line-worker.js`: the normal bridge code restricted to that number, with its own WhatsApp socket, journals, freeze watchdog and callback outbox (`<data>/<line>/outbox.json`). It holds a per-number lock under `<data>/.workers/` and serves the supervisor on the private socket `<data>/.workers/<line>.sock`.
+- The supervisor forwards `/v1/lines/<line>/…` to that number's process and merges `/v1/status`, `/v1/storage` and `/v1/health/*` into the single-process shape. Each line status gains a `process` object (`state`, `pid`, `restarts`, last exit).
+- A number whose process exits is restarted on its own after 1, 2, 5, 10, then 30 s (the counter resets after 2 minutes of uptime). Meanwhile its requests get HTTP 503 `LINE_PROCESS_UNAVAILABLE` with `delivery_uncertain:false`, so replies wait and retry. A request that the process already had when it died gets 502 `LINE_PROCESS_FAILED`, which is uncertain for POSTs. The other numbers keep sending and receiving.
+- Work that spans numbers goes through the supervisor: removal tombstones, retired phones, the "already linked to another line" check, and the storage checkpoint token, so at most one checkpoint runs across all processes, as in one process.
+- `POST /v1/lines/<line>/restart-process` restarts only that number's process. Force remove works even while a number's process is crash-looping: the supervisor stops it, then archives and tombstones the folder itself.
+
+Cost: each number's process uses about 140 MiB of resident memory while idle (measured with unpaired numbers; live sessions add their own state), plus about 90 MiB for the supervisor, against about 150 MiB for one process with every number. Logs from every process go to the same journal; supervisor events are `line_worker_started`, `line_worker_ready`, `line_worker_exited` (with `exit_code`/`signal` and `restart_in_ms`), `line_worker_stopped` and `line_worker_stop_timeout`.
+
+Switching modes is a restart with the new setting. The first `per_line` start splits the shared `outbox.json` into per-number outboxes; the first `single` start merges them back. Both moves copy first, then write a marker, then move the old files to `linked-device-archive/` beside the data directory, so a crash at any point is safe and nothing is deleted. Before rolling the code back to a release older than this feature, start this release once in `single` mode so pending callbacks return to the shared outbox (older releases ignore per-number outboxes and `.workers/`).
+
+systemd: keep the default `KillMode=control-group`. On stop, every process gets SIGTERM at once and drains in parallel; the supervisor waits for all of them. `WHATSAPP_LINKED_DEVICE_WORKER_STOP_TIMEOUT_MS` (default 80000) must stay below the unit's `TimeoutStopSec` (production 90 s). The dashboard's **Restart WhatsApp service** still restarts the whole unit; in this mode Admins also get a **Restart number** button per number, which calls `restart-process`.
+
 ## Message guarantees and limits
 
 Outbound IDs use `ld:<line_id>:<native_whatsapp_id>`. Original native keys are captured on every send or receive. Messages sent previously through Cloud API cannot be edited or recalled through this connection because their native keys are unavailable.
@@ -108,6 +125,7 @@ All endpoints require `Authorization: Bearer <WHATSAPP_LINKED_DEVICE_SECRET>`. A
 | `GET /v1/lines/:line/media/:media_id` | Authenticated bytes and MIME type |
 | `POST /v1/lines/:line/messages/:message_id/edit` | `{to,body,operation_id}`; ACK-confirmed original ID and native operation ID |
 | `POST /v1/lines/:line/messages/:message_id/delete` | `{to,operation_id}`; ACK-confirmed revoke |
+| `POST /v1/lines/:line/restart-process` | `per_line` mode only: restart this number's process; returns `{line_id,restarting:true,process}` |
 
 Statuses are `disconnected`, `connecting`, `qr`, `connected`, `logged_out`, and `error`. Status objects include `is_paired` so retained disconnected sessions can offer explicit unlinking, and `uncertain_sends` counts dashboard sends still awaiting confirmation. Number registration returns per-call `created:true` for a new number and `created:false` for a UUID retry. Complete removal is idempotent for tombstoned IDs, including after a crash during cleanup; a removed registration UUID cannot be reused. Callback events contain stable `event_id`, `type`, `line_id`, `display_phone_number`, and integer millisecond timestamps. `outgoing_message` events include the wrapped `message_id`, `from_me:true`, the chat counterpart's `sender_phone`, and a normalized `payload`. `outgoing_confirmation` events include the wrapped `message_id`, original `client_message_id`, counterpart's `sender_phone`, and `from_me:true`. `message_tombstone` events contain only the original wrapped `message_id`, customer `sender_phone`, `from_me:false`, original timestamp, and `deleted_timestamp`; they carry no message body or media. Mutation events include the wrapped original `message_id`, `from_me`, the chat counterpart's `sender_phone`, and edited `body`. App-initiated changes also include their `operation_id`.
 

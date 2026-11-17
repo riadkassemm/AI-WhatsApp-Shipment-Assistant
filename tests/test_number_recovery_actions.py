@@ -170,3 +170,66 @@ assert.deepEqual(managersOnly, ['Reset session', 'Force remove']);
     assert result.returncode == 0, result.stderr
     render = _HTML[_HTML.index("function renderLinkedDeviceStatus("): _HTML.index("async function loadLinkedDeviceStatus(")]
     assert "action.managersOnly ? !canManageWhatsApp() : !canLinkWhatsApp()" in render
+
+
+def test_restart_number_is_for_admins_and_reaches_only_that_number(bridge, monkeypatch) -> None:
+    from app.whatsapp_client import WhatsAppSendError
+    calls = []
+
+    async def restarted(line_id):
+        calls.append(line_id)
+        return {"line_id": line_id, "restarting": True}
+    monkeypatch.setattr(linked_device_api.linked_device_client, "restart_process", restarted)
+    with pytest.raises(HTTPException) as denied:
+        asyncio.run(linked_device_api.restart_linked_device_process("90052", STAFF))
+    assert denied.value.status_code == 403
+    assert calls == []
+    asyncio.run(linked_device_api.restart_linked_device_process("90052", ADMIN))
+    assert calls == ["90052"]
+    with pytest.raises(HTTPException) as unknown:
+        asyncio.run(linked_device_api.restart_linked_device_process("90099", ADMIN))
+    assert unknown.value.status_code == 404
+
+    async def single_process_bridge(line_id):
+        error = WhatsAppSendError("Unknown bridge endpoint.", delivery_uncertain=False)
+        error.http_status = 404
+        raise error
+    monkeypatch.setattr(linked_device_api.linked_device_client, "restart_process", single_process_bridge)
+    with pytest.raises(HTTPException) as unavailable:
+        asyncio.run(linked_device_api.restart_linked_device_process("90052", ADMIN))
+    assert unavailable.value.status_code == 503
+
+
+def test_status_marks_numbers_that_run_in_their_own_process(monkeypatch) -> None:
+    monkeypatch.setattr(linked_device_api.settings, "whatsapp_linked_device_secret", "s" * 40)
+    monkeypatch.setattr(linked_device_api, "configured_linked_device_lines", lambda: {"90054": "", "90055": ""})
+    monkeypatch.setattr(linked_device_api, "get_transport", lambda line_id: "linked_device")
+
+    async def bridge_status():
+        return {"lines": [{"line_id": "90054", "status": "connected", "is_paired": True, "process": {"state": "ready", "pid": 7}},
+                          {"line_id": "90055", "status": "connected", "is_paired": True}]}
+    monkeypatch.setattr(linked_device_api.linked_device_client, "get_status", bridge_status)
+    lines = asyncio.run(linked_device_api.linked_device_status(ADMIN))["lines"]
+    assert [(line["process_restartable"], line["process_state"]) for line in lines] == [(True, "ready"), (False, None)]
+    assert "pid" not in str(lines), "process IDs stay inside the bridge"
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is unavailable")
+def test_restart_number_appears_only_in_per_line_mode_and_only_for_admins() -> None:
+    code = _HTML[_HTML.index("const BLOCKED_CATEGORIES"): _HTML.index("async function loadLinkedDeviceStatus(")]
+    script = r"""
+const assert = require('node:assert/strict');
+""" + code + r"""
+const labels = line => linkedDeviceRecoveryActions(line).map(action => action.label);
+assert.deepEqual(labels({status: 'connected', is_paired: true}), ['Reconnect'], 'single-process bridge: no restart');
+assert.deepEqual(labels({status: 'connected', is_paired: true, process_restartable: true}), ['Reconnect', 'Restart number']);
+assert.deepEqual(labels({status: 'disconnected', is_paired: true, process_restartable: true, process_state: 'backoff'}), ['Reconnect', 'Restart number']);
+assert.deepEqual(labels({status: 'error', session_blocked: true, saved_login: true, process_restartable: true}),
+  ['Resume session', 'Restart number', 'Reset session', 'Force remove']);
+const restart = linkedDeviceRecoveryActions({status: 'connected', process_restartable: true}).find(action => action.label === 'Restart number');
+assert.equal(restart.managersOnly, true);
+assert.notEqual(restart.danger, true);
+"""
+    result = subprocess.run(["node", "-e", script], text=True, capture_output=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    assert "/restart-process" in _HTML

@@ -39,10 +39,16 @@ export function errorLabel(error) {
 }
 
 // At most one checkpoint worker and extra materialized store in this process.
-// Stores waiting here retain ordinary independent write queues.
+// Stores waiting here retain ordinary independent write queues. In per-line
+// process mode each number's worker also holds the supervisor's token, so the
+// whole bridge still runs at most one checkpoint at a time (memory bound).
 let checkpointTail = Promise.resolve();
+let checkpointGate = action => action();
+export function setCheckpointGate(gate) {
+  checkpointGate = typeof gate === 'function' ? gate : (action => action());
+}
 export function coordinateCheckpoint(action) {
-  const task = checkpointTail.then(action);
+  const task = checkpointTail.then(() => checkpointGate(action));
   checkpointTail = task.catch(() => {});
   return task;
 }

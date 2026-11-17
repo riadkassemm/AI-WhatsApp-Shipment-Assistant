@@ -1109,7 +1109,7 @@ WHATSAPP_LINKED_DEVICE_TIMEOUT_SECONDS=30
 WHATSAPP_LINKED_DEVICE_DATA_DIRECTORY=./var/whatsapp-linked-device
 ```
 
-An empty expected phone value binds the line to the first account paired. To require a specific test number, replace the empty string with its international digits, for example `"96170123456"`. The bridge remembers the paired number and rejects a different account until it is explicitly unlinked. Session credentials, message keys, pending callbacks, and media are persisted privately under the configured data directory; preserve this directory across restarts. Run one bridge process per data directory.
+An empty expected phone value binds the line to the first account paired. To require a specific test number, replace the empty string with its international digits, for example `"96170123456"`. The bridge remembers the paired number and rejects a different account until it is explicitly unlinked. Session credentials, message keys, pending callbacks, and media are persisted privately under the configured data directory; preserve this directory across restarts. Run one bridge process per data directory. To isolate numbers from each other, set `WHATSAPP_LINKED_DEVICE_PROCESS_MODE=per_line`: the same bridge URL then runs each number in its own process (see [the bridge README](whatsapp_bridge/README.md#one-process-per-number-optional)).
 
 1. Apply the additive migration against the application's existing MariaDB database:
 
