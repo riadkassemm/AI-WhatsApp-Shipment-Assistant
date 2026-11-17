@@ -63,9 +63,9 @@ async def customer_databases(monkeypatch):
             id INT PRIMARY KEY, user_id INT, ballance INT, ballancet VARCHAR(10)
         )""")
         await execute(f"INSERT INTO `{main_db}`.user_wallet VALUES (1,7,999,'USD'),(2,42,12,'USD')")
-        await execute(f"CREATE USER '{reader}'@'%' IDENTIFIED BY %s", (password,))
+        await execute("CREATE USER %s@%s IDENTIFIED BY %s", (reader, "%", password))
         created_reader = True
-        await execute(f"GRANT SELECT ON `{replica_db}`.users TO '{reader}'@'%'")
+        await execute(f"GRANT SELECT ON `{replica_db}`.users TO %s@%s", (reader, "%"))
         reader_options = {**options, "user": reader, "password": password, "db": replica_db}
         for key, value in {
             "customer_users_db_host": "127.0.0.1",
@@ -91,7 +91,7 @@ async def customer_databases(monkeypatch):
             main_pool.close()
             await main_pool.wait_closed()
         if created_reader:
-            await execute(f"DROP USER '{reader}'@'%'")
+            await execute("DROP USER %s@%s", (reader, "%"))
         for database in created_databases:
             await execute(f"DROP DATABASE `{database}`")
         admin.close()
