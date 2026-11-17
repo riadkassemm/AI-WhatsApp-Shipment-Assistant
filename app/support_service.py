@@ -51,6 +51,7 @@ from app.support_repository import (
 from app.phone_numbers import PhoneNumberError, region_for_number, to_whatsapp_digits
 from app.whatsapp_client import IncomingWhatsAppMessage, WhatsAppMediaError, get_transport, is_linked_device_message, linked_device_client, whatsapp_client
 from app.whatsapp_registry import whatsapp_registry_service
+from app.whatsapp_outreach import text_fingerprint, whatsapp_outreach_guard
 
 
 logger = logging.getLogger("shipment-bot")
@@ -1964,7 +1965,8 @@ class SupportService:
         return await whatsapp_registry_service.list_enabled_numbers(agent)
 
     async def _whatsapp_number_for_line(
-        self, raw_phone: str, *, line_id: str, line_display_phone: str | None
+        self, raw_phone: str, *, line_id: str, line_display_phone: str | None,
+        outreach_fingerprint: str | None = None,
     ) -> str:
         """International digits for a staff-entered number on one WhatsApp line.
 
@@ -1972,11 +1974,21 @@ class SupportService:
         A positive linked-device lookup can canonicalize the phone. Incomplete
         lookups cannot establish that a number is unregistered; the normal send
         pipeline remains responsible for confirmed delivery/failure handling.
+
+        With an outreach fingerprint the chat counts against the number's chat
+        limits first, so a refused chat never asks WhatsApp about the number.
         """
         try:
             phone = to_whatsapp_digits(raw_phone, default_region=region_for_number(line_display_phone))
         except PhoneNumberError as exc:
             raise SupportValidationError(str(exc)) from exc
+        if outreach_fingerprint is not None:
+            await whatsapp_outreach_guard.reserve(
+                line_id=line_id,
+                recipient_phone=phone,
+                fingerprint=outreach_fingerprint,
+                limits=await whatsapp_registry_service.outreach_limits(line_id),
+            )
         if get_transport(line_id) != "linked_device":
             return phone
         try:
@@ -2020,7 +2032,10 @@ class SupportService:
         line_rows = await whatsapp_registry_service.list_enabled_numbers(agent)
         line = next((item for item in line_rows if str(item.get("phone_number_id")) == line_id), None)
         display = (line or {}).get("display_phone_number")
-        phone = await self._whatsapp_number_for_line(phone_number, line_id=line_id, line_display_phone=display)
+        phone = await self._whatsapp_number_for_line(
+            phone_number, line_id=line_id, line_display_phone=display,
+            outreach_fingerprint=text_fingerprint(message_body),
+        )
 
         identity = await customer_directory.resolve(phone)
         name = str(customer_name or "").strip() or identity.name
@@ -2367,9 +2382,12 @@ class SupportService:
             raise SupportValidationError("The source conversation does not have a WhatsApp business line.")
         if not await whatsapp_registry_service.is_number_enabled(line_id):
             raise SupportConflictError("The source WhatsApp business line is disabled.")
+        source_text = str(source.get("body") or "").strip()
         phone = await self._whatsapp_number_for_line(
             phone_number, line_id=line_id,
             line_display_phone=str(source_ticket.get("business_display_phone_number") or "") or None,
+            # Forwarding the same text or file to many new contacts is a broadcast too.
+            outreach_fingerprint=text_fingerprint(source_text) if source_text else f"message:{source_message_id}",
         )
         if phone == normalize_phone(str(source_ticket.get("whatsapp_phone") or "")):
             raise SupportValidationError("Choose a different contact to forward this message to.")

@@ -1104,6 +1104,7 @@ function renderWhatsAppRegistry(payload) {
     meta.append(createMetaChip(item.is_enabled ? 'Active in app' : 'Not active', item.is_enabled ? 'check-circle' : 'clock'));
     if (item.quality_rating) meta.append(createMetaChip('Quality ' + item.quality_rating, 'activity'));
     if (!item.provider_present) meta.append(createMetaChip(item.source === 'LINKED_DEVICE' ? 'Connection not configured' : 'Missing from latest Meta sync', 'alert'));
+    if (item.is_enabled && item.outreach) meta.append(...outreachChips(item.outreach));
     copy.append(title, subtitle, meta);
 
     const actions = document.createElement('div');
@@ -1116,6 +1117,17 @@ function renderWhatsAppRegistry(payload) {
     rename.setAttribute('aria-label', (item.display_name ? 'Edit name for ' : 'Rename ') + supportNumberRaw(item));
     rename.onclick = () => openWhatsAppNumberNameEditor(item, row, rename);
     actions.append(rename);
+    // Chat limits: Admins and Super Admins only. There is no per-message override.
+    if (canManageWhatsApp() && item.outreach) {
+      const limits = document.createElement('button');
+      limits.type = 'button';
+      limits.className = 'btn small';
+      limits.disabled = state.whatsappBusy || state.linkedDeviceBusy;
+      limits.textContent = 'Chat limits';
+      limits.setAttribute('aria-label', 'Chat limits for ' + supportNumberRaw(item));
+      limits.onclick = () => openOutreachLimitsEditor(item, row, limits);
+      actions.append(limits);
+    }
 
     const action = document.createElement('button');
     action.type = 'button';
@@ -1146,6 +1158,97 @@ function renderWhatsAppRegistry(payload) {
     numberContainer.append(row);
   }
   if (state.linkedDeviceStatus) renderLinkedDeviceStatus(state.linkedDeviceStatus);
+}
+
+// Chats staff started today on this number, against today's limit. A new
+// number has a lower limit until its new-number period ends.
+function outreachChips(outreach) {
+  const chips = [];
+  const limit = Number(outreach.limit_today);
+  const used = outreach.used_today;
+  const label = used === null || used === undefined
+    ? 'New chats today: unknown of ' + limit
+    : 'New chats today: ' + used + ' of ' + limit;
+  const full = typeof used === 'number' && used >= limit;
+  const chip = createMetaChip(label, full ? 'alert' : 'activity');
+  chip.title = 'Chats staff started today (Start chat and Forward to a new contact). Replies to customers who write in are not limited.'
+    + ' The same text can go to at most ' + outreach.same_text_limit + ' customers a day.';
+  chips.push(chip);
+  if (outreach.new_number && outreach.new_number_until) {
+    const until = new Date(outreach.new_number_until).toLocaleDateString([], {day: 'numeric', month: 'short'});
+    chips.push(createMetaChip('New number until ' + until, 'clock'));
+  }
+  return chips;
+}
+
+function openOutreachLimitsEditor(item, row, button) {
+  if (!canManageWhatsApp() || state.whatsappBusy || state.linkedDeviceBusy || row.querySelector('.whatsapp-limits-editor')) return;
+  const outreach = item.outreach || {};
+  const defaults = outreach.defaults || {};
+  const custom = outreach.custom || {};
+  const editor = document.createElement('form');
+  editor.className = 'whatsapp-name-editor whatsapp-limits-editor';
+  const fields = [
+    ['daily_limit', 'New chats per day'],
+    ['new_number_daily_limit', 'New chats per day while the number is new'],
+    ['same_text_limit', 'Customers who can receive the same text per day'],
+  ];
+  const inputs = {};
+  for (const [name, caption] of fields) {
+    const field = document.createElement('label');
+    field.className = 'field';
+    const span = document.createElement('span');
+    span.textContent = caption;
+    const input = document.createElement('input');
+    input.type = 'number'; input.min = '0'; input.max = '500'; input.step = '1';
+    input.inputMode = 'numeric';
+    input.placeholder = 'Default ' + defaults[name];
+    input.value = custom[name] === null || custom[name] === undefined ? '' : String(custom[name]);
+    field.append(span, input);
+    editor.append(field);
+    inputs[name] = input;
+  }
+  const save = document.createElement('button');
+  save.type = 'submit'; save.className = 'btn small primary'; save.textContent = 'Save limits';
+  const cancel = document.createElement('button');
+  cancel.type = 'button'; cancel.className = 'btn small'; cancel.textContent = 'Cancel';
+  cancel.onclick = () => { editor.remove(); button.disabled = false; button.focus(); };
+  const hint = document.createElement('span');
+  hint.className = 'field-hint';
+  hint.textContent = 'Leave a box blank to use the default. 0 stops new chats on this number. Customers who write in can always be answered.';
+  editor.onsubmit = event => {
+    event.preventDefault();
+    if (!editor.reportValidity()) return;
+    const values = {};
+    for (const [name] of fields) {
+      const raw = inputs[name].value.trim();
+      values[name] = raw === '' ? null : Number(raw);
+    }
+    saveOutreachLimits(item.phone_number_id, values, save);
+  };
+  editor.append(save, cancel, hint);
+  row.append(editor);
+  button.disabled = true;
+  inputs.daily_limit.focus();
+}
+
+async function saveOutreachLimits(phoneNumberId, values, button) {
+  if (!canManageWhatsApp() || state.whatsappBusy || state.linkedDeviceBusy) return;
+  state.whatsappBusy = true;
+  clearWhatsAppFeedback();
+  setButtonBusy(button, true, 'Saving…');
+  try {
+    const payload = await api('/api/support/whatsapp-numbers/' + encodeURIComponent(phoneNumberId) + '/outreach-limits',
+      {method: 'PUT', body: JSON.stringify(values)});
+    renderWhatsAppRegistry(payload);
+    showWhatsAppFeedback('whatsappSuccess', 'Chat limits saved.');
+  } catch (error) {
+    showWhatsAppFeedback('whatsappError', error.message);
+  } finally {
+    state.whatsappBusy = false;
+    if (button.isConnected) setButtonBusy(button, false);
+    if (state.whatsappRegistry) renderWhatsAppRegistry(state.whatsappRegistry);
+  }
 }
 
 function openWhatsAppNumberNameEditor(item, row, button) {
@@ -1257,7 +1360,10 @@ function renderLinkedDeviceStatus(payload) {
     status.textContent = line.recovery_category === 'storage_failure' ? 'Storage recovery required'
       : ['authentication_failure', 'session_conflict', 'protocol_failure'].includes(line.recovery_category) ? 'Temporarily unavailable · administrator review required'
       : line.status === 'disconnected' && line.is_paired ? 'Reconnecting…' : labels[line.status] || 'Not paired';
-    if (line.session_blocked) {
+    if (isRestrictedByWhatsApp(line)) {
+      status.classList.add('linked-device-restricted');
+      status.textContent = 'Restricted by WhatsApp · Do not reconnect. Open WhatsApp on this number\'s phone: if it shows a restriction or ban, tap Request a review and tell IT.';
+    } else if (line.session_blocked) {
       status.textContent = line.saved_login
         ? 'Session blocked after an interrupted update · Resume session continues from the saved login (no phone needed)'
         : 'Session blocked · An Admin must reset the session, then pair it with the phone';
@@ -1317,7 +1423,23 @@ function renderLinkedDeviceStatus(payload) {
 // session for every staff role; Reset session and Force remove for Admins and
 // Super Admins. The server archives files; nothing is deleted.
 const BLOCKED_CATEGORIES = ['storage_failure', 'authentication_failure', 'session_conflict', 'protocol_failure'];
+
+// WhatsApp answers 403 (the bridge's authentication_failure) when it has
+// restricted or banned the account. Reconnecting cannot fix that and repeated
+// logins can make it worse, so the usual recovery buttons are not offered.
+function isRestrictedByWhatsApp(line) {
+  return line.status !== 'connected' && line.recovery_category === 'authentication_failure';
+}
+
 function linkedDeviceRecoveryActions(line) {
+  if (isRestrictedByWhatsApp(line)) {
+    return [
+      {label: 'Reconnect after review', managersOnly: true, run: lineId => reconnectRestrictedLinkedDevice(lineId),
+        title: 'Only after WhatsApp lifted the restriction and works normally on the phone.'},
+      {label: 'Force remove', managersOnly: true, run: lineId => forceRemoveLinkedDevice(lineId), danger: true,
+        title: 'Remove this number from the app. Conversations are kept.'},
+    ];
+  }
   const sessionBlocked = Boolean(line.session_blocked);
   const failing = line.status !== 'connected' && (sessionBlocked || line.status === 'error' || BLOCKED_CATEGORIES.includes(line.recovery_category));
   const actions = [];
@@ -1345,6 +1467,7 @@ function alertLinkedDeviceProblems(lines) {
   const current = new Set();
   for (const line of lines) {
     const problem = line.recovery_category === 'storage_failure' ? 'needs storage recovery'
+      : isRestrictedByWhatsApp(line) ? 'restricted by WhatsApp. Check the phone; do not reconnect'
       : line.status === 'error' ? 'connection failed'
       : line.status === 'logged_out' ? 'was logged out by WhatsApp' : null;
     if (!problem) continue;
@@ -1628,6 +1751,16 @@ async function reconnectLinkedDevice(lineId) {
   if (!canLinkWhatsApp() || state.linkedDeviceBusy) return;
   await runLinkedDeviceRecovery('/api/support/whatsapp-linked-device/lines/' + encodeURIComponent(lineId) + '/reconnect', {},
     'Reconnecting this number.');
+}
+
+async function reconnectRestrictedLinkedDevice(lineId) {
+  if (!canManageWhatsApp() || state.linkedDeviceBusy) return;
+  const name = linkedDeviceName(lineId);
+  if (!(await confirmDialog({title: 'Reconnect ' + name + '?',
+    message: 'WhatsApp restricted this number. Reconnect only after WhatsApp lifted the restriction and the app works normally on the phone. ' +
+      'Repeated attempts while it is restricted can make the restriction longer.',
+    confirmLabel: 'Reconnect after review', tone: 'danger'}))) return;
+  await reconnectLinkedDevice(lineId);
 }
 
 async function restartLinkedDeviceProcess(lineId) {

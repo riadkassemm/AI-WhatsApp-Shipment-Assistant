@@ -144,6 +144,15 @@ def test_start_chat_refuses_a_number_that_is_not_on_whatsapp_before_creating_any
     monkeypatch.setattr(support_service_module, "get_transport", lambda _line: "linked_device")
     monkeypatch.setattr(support_service_module.linked_device_client, "check_number", lookup)
     monkeypatch.setattr(support_service_module.support_repository, "create_staff_chat", create)
+
+    async def limits(_line):
+        return None
+
+    async def reserve(**_kwargs):
+        return 1
+
+    monkeypatch.setattr(registry, "outreach_limits", limits)
+    monkeypatch.setattr(support_service_module.whatsapp_outreach_guard, "reserve", reserve)
     with pytest.raises(SupportValidationError, match="not on WhatsApp"):
         asyncio.run(SupportService().start_chat(agent=AGENT, phone_number="035 12345", business_phone_number_id="90012", body="Hello"))
     assert created == []

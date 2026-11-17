@@ -25,6 +25,12 @@ def visible_message_fixture(monkeypatch):
         "app.support_service.support_repository.find_contact_forward",
         AsyncMock(return_value=None),
     )
+    # Chat limits are covered in test_whatsapp_outreach.py.
+    monkeypatch.setattr(
+        "app.support_service.whatsapp_registry_service.outreach_limits",
+        AsyncMock(return_value=None),
+    )
+    monkeypatch.setattr("app.support_service.whatsapp_outreach_guard.reserve", AsyncMock(return_value=1))
 
 
 @pytest.mark.asyncio

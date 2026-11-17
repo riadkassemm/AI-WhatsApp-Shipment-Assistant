@@ -1,6 +1,6 @@
 """Contact forwards reuse active threads without granting general chat access."""
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import ANY, AsyncMock
 
 import httpx
 import pytest
@@ -203,6 +203,7 @@ async def test_contact_forward_resolves_only_source_line(infrastructure, monkeyp
     assert await repo.get_ticket(41) == other_line
     service.support_service._whatsapp_number_for_line.assert_awaited_once_with(
         PHONE, line_id='90005', line_display_phone=None,
+        outreach_fingerprint=ANY,  # chat limits: tests/test_whatsapp_outreach.py
     )
 
 

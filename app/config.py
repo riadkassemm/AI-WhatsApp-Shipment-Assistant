@@ -204,6 +204,16 @@ class Settings(BaseSettings):
     # send a second customer-facing reply after an uncertain provider outcome.
     outbound_reply_dedupe_ttl_seconds: int = 7 * 24 * 60 * 60
 
+    # Outreach guard: staff-started chats per WhatsApp number per local day.
+    # WhatsApp restricts numbers that send the same text to many people who
+    # never wrote first, especially new numbers. Admins can change the three
+    # limits per number in the dashboard; these are the defaults.
+    whatsapp_outreach_daily_limit: int = Field(default=10, ge=0, le=500)
+    whatsapp_outreach_new_number_daily_limit: int = Field(default=5, ge=0, le=500)
+    whatsapp_outreach_same_text_limit: int = Field(default=5, ge=0, le=500)
+    whatsapp_outreach_new_number_days: int = Field(default=14, ge=0, le=365)
+    whatsapp_outreach_timezone: str = "Asia/Beirut"
+
     # History
     max_conversation_messages: int = 30
     summarizer_model: str = "gpt-6-luna"

@@ -54,12 +54,13 @@ assert.equal(region.children.length, before + 1, 'clearing an error shows nothin
 
 def test_number_problems_alert_once_per_page_and_again_after_a_change() -> None:
     function = _HTML[_HTML.index("function alertLinkedDeviceProblems("): _HTML.index("async function loadLinkedDeviceStatus(")]
+    restricted = _HTML[_HTML.index("function isRestrictedByWhatsApp("): _HTML.index("function linkedDeviceRecoveryActions(")]
     _run(r"""
 const assert = require('node:assert/strict');
 const state = {whatsappRegistry: {numbers: [{phone_number_id: '90052', display_name: 'Export'}]}};
 const shown = [];
 const notify = (message, type) => shown.push([message, type]);
-""" + function + r"""
+""" + restricted + function + r"""
 const failed = [{line_id: '90052', status: 'error'}, {line_id: '90047', status: 'connected'}];
 alertLinkedDeviceProblems(failed);
 assert.deepEqual(shown, [['Export: connection failed.', 'error']]);
@@ -70,4 +71,7 @@ alertLinkedDeviceProblems(failed);
 assert.equal(shown.length, 2, 'a problem that comes back alerts again');
 alertLinkedDeviceProblems([{line_id: '90056', status: 'disconnected', recovery_category: 'storage_failure'}]);
 assert.deepEqual(shown.at(-1), ['90056: needs storage recovery.', 'error']);
+alertLinkedDeviceProblems([{line_id: '90065', status: 'error', recovery_category: 'authentication_failure'}]);
+assert.deepEqual(shown.at(-1), ['90065: restricted by WhatsApp. Check the phone; do not reconnect.', 'error'],
+  'a 403 is named as a WhatsApp restriction, not a generic failure');
 """)

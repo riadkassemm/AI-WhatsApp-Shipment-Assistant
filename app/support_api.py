@@ -62,6 +62,7 @@ from app.whatsapp_registry import (
     WhatsAppRegistryValidationError,
     whatsapp_registry_service,
 )
+from app.whatsapp_outreach import OutreachLimitError, OutreachUnavailableError
 from app.support_service import (
     SupportForbiddenError,
     SupportSendError,
@@ -260,7 +261,21 @@ class WhatsAppNumberNameRequest(BaseModel):
     display_name: str | None = Field(..., max_length=80)
 
 
+class WhatsAppNumberOutreachLimitsRequest(BaseModel):
+    """Chat limits for one number; null restores the server default."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    daily_limit: int | None = Field(..., ge=0, le=500, strict=True)
+    new_number_daily_limit: int | None = Field(..., ge=0, le=500, strict=True)
+    same_text_limit: int | None = Field(..., ge=0, le=500, strict=True)
+
+
 def _translate_error(exc: Exception) -> HTTPException:
+    if isinstance(exc, OutreachLimitError):
+        return HTTPException(status_code=429, detail=str(exc))
+    if isinstance(exc, OutreachUnavailableError):
+        return HTTPException(status_code=503, detail=str(exc))
     if isinstance(exc, AIControlForbiddenError):
         return HTTPException(status_code=403, detail=str(exc))
     if isinstance(exc, AIControlConflictError):
@@ -725,6 +740,20 @@ async def update_whatsapp_number_name(
     try:
         return await whatsapp_registry_service.set_number_display_name(
             agent, phone_number_id, payload.display_name
+        )
+    except Exception as exc:
+        raise _translate_error(exc) from exc
+
+
+@router.put("/whatsapp-numbers/{phone_number_id}/outreach-limits")
+async def update_whatsapp_number_outreach_limits(
+    phone_number_id: str,
+    payload: WhatsAppNumberOutreachLimitsRequest,
+    agent: SupportAgent = Depends(require_support_csrf),
+) -> dict:
+    try:
+        return await whatsapp_registry_service.set_outreach_limits(
+            agent, phone_number_id, payload.model_dump()
         )
     except Exception as exc:
         raise _translate_error(exc) from exc
