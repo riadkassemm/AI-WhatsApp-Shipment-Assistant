@@ -55,7 +55,7 @@ from app.security import (
 )
 from app.support_api import router as support_api_router
 from app.support_repository import SupportConflictError
-from app.support_media import SUPPORT_MEDIA_MESSAGE_TYPES, SupportMediaError
+from app.support_media import SUPPORT_MEDIA_MESSAGE_TYPES, SupportMediaError, document_label
 from app.support_models import ACTIVE_TICKET_STATUSES, HandoffRequest
 from app.support_service import sanitize_support_text, support_service
 from app.support_contacts import format_shared_contacts
@@ -1672,7 +1672,7 @@ def _human_inbound_body(
     if incoming.message_type == "document" and incoming.media_id:
         caption = sanitize_support_text(incoming.media_caption).strip()
         filename = sanitize_support_text(incoming.media_filename).strip()
-        return caption or filename or "PDF document"
+        return caption or filename or document_label(incoming.media_mime_type)
     if incoming.message_type == "location":
         name = sanitize_support_text(incoming.location_name).strip()
         address = sanitize_support_text(incoming.location_address).strip()
@@ -2274,7 +2274,7 @@ async def _process_incoming_message(
     # =========================================================
 
     # The customer-service application supports WhatsApp images, videos, audio/voice,
-    # PDFs, and customer locations for human agents, but the AI pipeline does not
+    # PDF/Excel documents, and customer locations for human agents, but the AI pipeline does not
     # currently process those message types. Route them into the existing human pipeline
     # before evaluating AI availability. The media is then downloaded and attached
     # to the durable ticket so staff can view/play it in the support dashboard.
@@ -2295,7 +2295,7 @@ async def _process_incoming_message(
             if incoming.message_type == "video"
             else "sticker"
             if incoming.message_type == "sticker"
-            else "PDF document"
+            else "document"
             if incoming.message_type == "document"
             else "location"
             if incoming.message_type == "location"

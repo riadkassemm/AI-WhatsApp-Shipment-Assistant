@@ -103,7 +103,7 @@ function renderMediaDraft() {
       : draft.kind === 'sticker'
         ? (draft.file.name || 'WhatsApp sticker')
       : draft.kind === 'document'
-        ? (draft.file.name || 'PDF document')
+        ? (draft.file.name || documentLabel(draft.file.type))
         : (draft.file.name || 'Voice note ready');
     const size = document.createElement('div');
     size.className = 'media-draft-size';
@@ -141,7 +141,7 @@ function renderMediaDraft() {
   }
   const captionable = state.pendingMediaItems.some(item => ['image', 'document', 'video'].includes(item.kind));
   $('message').maxLength = captionable ? 1024 : 4096;
-  $('message').placeholder = captionable ? 'Caption for first image, video or PDF (optional)' : 'Attachments ready to send';
+  $('message').placeholder = captionable ? 'Caption for first image, video or document (optional)' : 'Attachments ready to send';
   text($('composerHelp'), state.pendingMediaItems.length + ' attachment(s). Review before sending. Each is sent separately in order.');
   updateComposerCount();
   updateComposerControls();
@@ -224,7 +224,7 @@ function updateComposerControls() {
   }
   const label = $('sendBtn').querySelector('.send-label');
   if (label) label.textContent = state.editTarget ? 'Save' : draft
-    ? (state.pendingMediaItems.length > 1 ? 'Send ' + state.pendingMediaItems.length + ' attachments' : draft.kind === 'image' ? 'Send image' : draft.kind === 'video' ? 'Send video' : draft.kind === 'sticker' ? 'Send sticker' : draft.kind === 'document' ? 'Send PDF' : 'Send voice')
+    ? (state.pendingMediaItems.length > 1 ? 'Send ' + state.pendingMediaItems.length + ' attachments' : draft.kind === 'image' ? 'Send image' : draft.kind === 'video' ? 'Send video' : draft.kind === 'sticker' ? 'Send sticker' : draft.kind === 'document' ? (isSpreadsheetMime(draft.file.type) ? 'Send spreadsheet' : 'Send PDF') : 'Send voice')
     : 'Send';
 }
 
@@ -403,18 +403,22 @@ function canAttachToComposer() {
 function attachComposerFile(file) {
   if (!canAttachToComposer()) { showError('Open a conversation you can reply to before attaching a file.'); return false; }
   const types = {'jpg':'image/jpeg', 'jpeg':'image/jpeg', 'png':'image/png', 'webp':'image/webp',
-    'pdf':'application/pdf', 'mp4':'video/mp4', '3gp':'video/3gpp',
+    'pdf':'application/pdf', 'xlsx':'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    'xls':'application/vnd.ms-excel', 'mp4':'video/mp4', '3gp':'video/3gpp',
     'mp3':'audio/mpeg', 'm4a':'audio/mp4', 'aac':'audio/aac', 'amr':'audio/amr', 'ogg':'audio/ogg', 'opus':'audio/ogg'};
   if (['audio/opus', 'audio/x-opus+ogg'].includes(file.type)) file = new File([file], file.name, {type:'audio/ogg'});
-  if (!file.type || file.type === 'application/octet-stream') {
-    const type = types[String(file.name || '').split('.').pop().toLowerCase()];
+  // Untyped files use their extension. Some systems label .xlsx (a ZIP container) as ZIP.
+  const extension = String(file.name || '').split('.').pop().toLowerCase();
+  if (!file.type || file.type === 'application/octet-stream'
+      || (extension === 'xlsx' && ['application/zip', 'application/x-zip-compressed'].includes(file.type))) {
+    const type = types[extension];
     if (type) file = new File([file], file.name, {type});
   }
   if (!Object.values(types).includes(file.type)) {
-    showError('Use JPEG/PNG, WebP, MP4/3GP, PDF, or supported audio (MP3/M4A/AAC/AMR/OGG/OPUS).'); return false;
+    showError('Use JPEG/PNG, WebP, MP4/3GP, PDF, Excel (XLSX/XLS), or supported audio (MP3/M4A/AAC/AMR/OGG/OPUS).'); return false;
   }
   if (!file.size) { showError('This file is empty.'); return false; }
-  const kind = file.type === 'application/pdf' ? 'document' : file.type === 'image/webp' ? 'sticker' : file.type.startsWith('video/') ? 'video' : file.type.startsWith('audio/') ? 'audio' : 'image';
+  const kind = [types.pdf, types.xlsx, types.xls].includes(file.type) ? 'document' : file.type === 'image/webp' ? 'sticker' : file.type.startsWith('video/') ? 'video' : file.type.startsWith('audio/') ? 'audio' : 'image';
   const limits = {image: Number('__IMAGE_MAX_BYTES__'), document: Number('__DOCUMENT_MAX_BYTES__'), sticker: Number('__STICKER_MAX_BYTES__'), video: VIDEO_MAX_BYTES, audio: Number('__AUDIO_MAX_BYTES__')};
   if (file.size > limits[kind]) { showError('This file exceeds the ' + formatBytes(limits[kind]) + ' limit.'); return false; }
   if (!setPendingMedia(kind, file)) return false;

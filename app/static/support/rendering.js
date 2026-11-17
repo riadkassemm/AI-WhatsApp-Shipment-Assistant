@@ -962,7 +962,7 @@ function messagePreview(message) {
   if (kind === 'video') return 'Video';
   if (kind === 'sticker') return 'Sticker';
   if (kind === 'audio') return 'Voice note';
-  if (kind === 'document') return message.media_filename || 'PDF document';
+  if (kind === 'document') return message.media_filename || documentLabel(message.media_mime_type);
   if (kind === 'location') return message.location_name || message.location_address || 'Location';
   const body = String(message.body || message.content || '').trim();
   return body || 'Message';
@@ -973,7 +973,7 @@ function messageTextForCopy(message) {
   const body = String(message.body || message.content || '');
   if (!body.trim()) return '';
   const kind = String(message.media_kind || message.message_type || '').toLowerCase();
-  const defaultMediaLabel = ['Image', 'Video', 'Sticker', 'Voice note', 'Audio message', 'PDF document', 'Location'].includes(body);
+  const defaultMediaLabel = ['Image', 'Video', 'Sticker', 'Voice note', 'Audio message', 'PDF document', 'Excel spreadsheet', 'Location'].includes(body);
   return (message.media_url || kind === 'location') && defaultMediaLabel ? '' : body;
 }
 
@@ -1790,16 +1790,29 @@ function addMessage(container, m, extraClass = '', {allowReply = true} = {}) {
         card.append(createIcon('file'));
         const copy = document.createElement('div');
         copy.className = 'document-card-copy';
+        const spreadsheet = isSpreadsheetMime(m.media_mime_type);
+        const label = documentLabel(m.media_mime_type);
         const name = document.createElement('strong');
-        name.textContent = m.media_filename || 'PDF document';
+        name.textContent = m.media_filename || label;
         const description = document.createElement('span');
-        description.textContent = 'PDF attachment';
+        description.textContent = spreadsheet ? 'Excel attachment' : 'PDF attachment';
         copy.append(name, description);
-        const view = document.createElement('button');
-        view.type = 'button';
-        view.className = 'btn small';
-        view.textContent = 'View PDF';
-        view.onclick = () => openMediaViewer({kind: 'document', src: m.media_url, title: m.media_filename || 'PDF document', subtitle: 'WhatsApp document'});
+        let view;
+        if (spreadsheet) {
+          // Browsers cannot preview a workbook, so offer it as a download.
+          view = document.createElement('a');
+          view.className = 'btn small';
+          view.href = m.media_url;
+          view.download = m.media_filename || 'spreadsheet';
+          view.textContent = 'Download';
+          view.setAttribute('aria-label', 'Download ' + (m.media_filename || label));
+        } else {
+          view = document.createElement('button');
+          view.type = 'button';
+          view.className = 'btn small';
+          view.textContent = 'View PDF';
+          view.onclick = () => openMediaViewer({kind: 'document', src: m.media_url, title: m.media_filename || label, subtitle: 'WhatsApp document'});
+        }
         card.append(copy, view);
         media.append(card);
       } else {
@@ -1828,7 +1841,7 @@ function addMessage(container, m, extraClass = '', {allowReply = true} = {}) {
         : kind === 'sticker'
           ? 'Sticker is not available in support storage.'
         : kind === 'document'
-          ? 'PDF is not available in support storage.'
+          ? (isSpreadsheetMime(m.media_mime_type) ? 'Spreadsheet' : 'PDF') + ' is not available in support storage.'
           : 'Voice note is not available in support storage.';
       media.append(unavailable);
     }

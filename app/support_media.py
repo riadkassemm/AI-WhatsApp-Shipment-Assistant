@@ -23,8 +23,18 @@ IMAGE_MIME_EXTENSIONS: dict[str, str] = {
 STICKER_MIME_EXTENSIONS: dict[str, str] = {
     "image/webp": ".webp",
 }
+XLSX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+XLS_MIME_TYPE = "application/vnd.ms-excel"
+# Excel workbooks. WhatsApp (Cloud API and linked devices) sends and receives
+# both as ordinary documents. Macro-enabled workbooks (.xlsm) are deliberately
+# not accepted.
+SPREADSHEET_MIME_EXTENSIONS: dict[str, str] = {
+    XLSX_MIME_TYPE: ".xlsx",
+    XLS_MIME_TYPE: ".xls",
+}
 DOCUMENT_MIME_EXTENSIONS: dict[str, str] = {
     "application/pdf": ".pdf",
+    **SPREADSHEET_MIME_EXTENSIONS,
 }
 # WhatsApp delivers and accepts MP4 (H.264/AAC) and 3GPP videos.
 VIDEO_MIME_EXTENSIONS: dict[str, str] = {
@@ -106,8 +116,46 @@ def normalize_mime_type(value: str | None) -> str:
         "audio/x-m4a": "audio/mp4",
         "audio/opus": "audio/ogg",
         "audio/x-opus+ogg": "audio/ogg",
+        "application/excel": XLS_MIME_TYPE,
+        "application/x-excel": XLS_MIME_TYPE,
+        "application/x-msexcel": XLS_MIME_TYPE,
+        "application/msexcel": XLS_MIME_TYPE,
     }
     return aliases.get(normalized, normalized)
+
+
+# Some senders label a workbook with a generic type. A spreadsheet is then
+# recognised only by its file extension together with its file signature.
+_GENERIC_DOCUMENT_MIME_TYPES: frozenset[str] = frozenset({
+    "", "application/octet-stream", "application/zip", "application/x-zip-compressed",
+    "application/x-ole-storage", "application/cdfv2",
+})
+_ZIP_SIGNATURE = b"PK\x03\x04"
+_OLE2_SIGNATURE = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+
+
+def is_spreadsheet_mime(value: str | None) -> bool:
+    return normalize_mime_type(value) in SPREADSHEET_MIME_EXTENSIONS
+
+
+def has_spreadsheet_signature(content: bytes) -> bool:
+    """True for a ZIP (.xlsx) or OLE2 (.xls, or a password-protected .xlsx) file."""
+    head = bytes(content[:8])
+    return head.startswith(_ZIP_SIGNATURE) or head == _OLE2_SIGNATURE
+
+
+def spreadsheet_mime_for_file(mime_type: str | None, filename: str | None, content: bytes) -> str | None:
+    """The Excel MIME type for a generically labelled workbook, otherwise None."""
+    if normalize_mime_type(mime_type) not in _GENERIC_DOCUMENT_MIME_TYPES:
+        return None
+    suffix = Path(str(filename or "")).suffix.lower()
+    mime = next((m for m, ext in SPREADSHEET_MIME_EXTENSIONS.items() if ext == suffix), None)
+    return mime if mime and has_spreadsheet_signature(content) else None
+
+
+def document_label(mime_type: str | None) -> str:
+    """A short, human description used when a document has no file name."""
+    return "Excel spreadsheet" if is_spreadsheet_mime(mime_type) else "PDF document"
 
 
 def media_kind_for_mime(value: str | None, *, allow_browser_audio: bool = False) -> str | None:

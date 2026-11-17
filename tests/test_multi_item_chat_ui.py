@@ -12,6 +12,8 @@ def test_multi_item_queue_forwarding_and_image_quick_replies(tmp_path):
     assert browser, 'Install Chromium for UI regressions'
     # Shipped send-queue/persistence helpers (loaded after state.js in production).
     delivery = _ASSETS['delivery-state.js']
+    state_js = _ASSETS['state.js']
+    documents = state_js[state_js.index('const SPREADSHEET_MIME_TYPES = '):state_js.index('function cookie(')]
     media = _ASSETS['media.js']
     rendering = _ASSETS['rendering.js']
     message_render = rendering[rendering.index('function addMessage('):rendering.index('// Compact message toolbar:')]
@@ -115,7 +117,7 @@ document.body.dataset.multiItemTest='passed';
 })().catch(error=>{document.body.dataset.multiItemTest='FAILED: '+error.message});
 '''
     html = _configure(_TEMPLATE.replace('__SUPPORT_THEME__', '').replace('__SUPPORT_STYLE__', '<style>'+_ASSETS['support.css']+'</style>')
-                      .replace('__SUPPORT_SCRIPTS__', '<script>'+setup+delivery+media+quick+selection+message_render+assertions+'</script>'))
+                      .replace('__SUPPORT_SCRIPTS__', '<script>'+setup+documents+delivery+media+quick+selection+message_render+assertions+'</script>'))
     if os.environ.get('SUPPORT_MULTI_SCREENSHOT_VIEW') == 'images': html=html.replace('<html ', '<html data-capture="images" ',1)
     page = tmp_path/'multi-items.html'; page.write_text(html)
     command = [browser, '--headless', '--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage', '--disable-background-networking',

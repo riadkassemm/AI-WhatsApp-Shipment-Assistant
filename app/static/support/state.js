@@ -247,6 +247,17 @@ function setIcon(button, name) {
   if (use) use.setAttribute('href', '#icon-' + name);
 }
 
+// Documents are PDFs or Excel workbooks; the MIME type tells them apart.
+const SPREADSHEET_MIME_TYPES = ['application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'application/vnd.ms-excel'];
+
+function isSpreadsheetMime(mime) {
+  return SPREADSHEET_MIME_TYPES.includes(String(mime || '').split(';')[0].trim().toLowerCase());
+}
+
+function documentLabel(mime) {
+  return isSpreadsheetMime(mime) ? 'Excel spreadsheet' : 'PDF document';
+}
+
 function cookie(name) {
   return document.cookie.split(';').map(value => value.trim()).find(value => value.startsWith(name + '='))?.slice(name.length + 1) || '';
 }

@@ -10,6 +10,8 @@ def test_reply_navigation_browser(tmp_path):
     browser = shutil.which(os.environ.get('SUPPORT_TEST_BROWSER', 'chromium'))
     assert browser, 'Install Chromium for UI regressions'
     rendering = _ASSETS['rendering.js']
+    state_js = _ASSETS['state.js']
+    documents = state_js[state_js.index('const SPREADSHEET_MIME_TYPES = '):state_js.index('function cookie(')]
     navigation = rendering[rendering.index('// Quote navigation leaves'):rendering.index('function applyMediaZoom(')]
     merge = rendering[rendering.index('function mergeTimelineMessages('):rendering.index('function changeCachedMessage(')]
     add_message = rendering[rendering.index('function addMessage('):rendering.index('// Compact message toolbar:')]
@@ -43,7 +45,7 @@ function renderConversation(data){
  for(const m of data.messages||[])addMessage(c,m);
 }
 function deferred(){let resolve;const promise=new Promise(r=>resolve=r);return {promise,resolve};}
-''' + _ASSETS['delivery-state.js'] + merge + selection + navigation + add_message + history + r'''
+''' + documents + _ASSETS['delivery-state.js'] + merge + selection + navigation + add_message + history + r'''
 (async()=>{
 const c=$('conversation');
 // Exercise the actual shared renderer for each supported original AND reply type.

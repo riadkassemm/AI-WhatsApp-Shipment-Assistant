@@ -27,11 +27,15 @@ from app.support_media import (
     SupportMediaError,
     SupportMediaTooLargeError,
     StoredSupportMedia,
+    document_label,
     format_media_limit,
+    has_spreadsheet_signature,
+    is_spreadsheet_mime,
     max_upload_bytes,
     media_extension,
     media_kind_for_mime,
     normalize_mime_type,
+    spreadsheet_mime_for_file,
     support_media_store,
 )
 from app.quick_reply_media import quick_reply_media_store
@@ -1755,6 +1759,14 @@ class SupportService:
             # the concrete supported type. Use that trusted webhook metadata as
             # the validation fallback rather than discarding otherwise valid media.
             raw_mime_type = expected_mime
+        elif message_type == "document" and (
+            spreadsheet_mime := spreadsheet_mime_for_file(downloaded_mime, filename, downloaded.content)
+            or spreadsheet_mime_for_file(expected_mime, filename, downloaded.content)
+        ):
+            # Some WhatsApp clients label an Excel workbook as a generic binary
+            # or ZIP file. Accept it only when both its .xlsx/.xls name and its
+            # file signature identify it.
+            raw_mime_type = spreadsheet_mime
         else:
             raise SupportMediaError("WhatsApp returned an unsupported media format.")
         mime_type = normalize_mime_type(raw_mime_type)
@@ -1776,7 +1788,7 @@ class SupportService:
                     if message_type == "sticker"
                     else "customer-voice-note"
                     if message_type == "audio"
-                    else "customer-document.pdf"
+                    else "customer-document" + media_extension(raw_mime_type or mime_type)
                 )
             ),
         )
@@ -2259,7 +2271,7 @@ class SupportService:
             asset = await self.get_ticket_media(source_ticket_id, source_message_id, agent)
             content = await asyncio.to_thread(asset.path.read_bytes)
             body = str(source.get("body") or "").strip()
-            caption = "" if body in {"Image", "Video", "Sticker", "Voice note", "Audio message", "PDF document"} else body
+            caption = "" if body in {"Image", "Video", "Sticker", "Voice note", "Audio message", "PDF document", "Excel spreadsheet"} else body
             forwarded = await self.send_agent_media(
                 destination_ticket_id,
                 agent=agent,
@@ -2530,7 +2542,7 @@ class SupportService:
             if not preview and message_type == "location":
                 preview = location_name or location_address or "Shared location"
             elif not preview and message_type == "document":
-                preview = filename or "PDF document"
+                preview = filename or document_label(item.get("provider_media_mime_type"))
             elif not preview and message_type == "image":
                 preview = "Image"
             elif not preview and message_type == "video":
@@ -3828,7 +3840,7 @@ class SupportService:
     ) -> dict[str, Any]:
         media_type = str(media_type or "").lower().strip()
         if media_type not in SUPPORT_MEDIA_MESSAGE_TYPES:
-            raise SupportValidationError("Only images, videos, stickers, voice notes, and PDF documents are supported.")
+            raise SupportValidationError("Only images, videos, stickers, voice notes, PDF documents, and Excel spreadsheets are supported.")
         if not client_message_id or len(client_message_id) > 191:
             raise SupportValidationError("A valid client_message_id is required.")
 
@@ -3904,16 +3916,22 @@ class SupportService:
             body = "Voice note" if send_as_voice else "Audio message"
         else:
             if media_kind_for_mime(normalized_mime) != "document":
-                raise SupportValidationError("Only PDF documents are supported.")
+                raise SupportValidationError("Only PDF documents and Excel spreadsheets (.xlsx, .xls) are supported.")
+            label = document_label(normalized_mime)
             if not content:
-                raise SupportValidationError("The PDF document is empty.")
+                raise SupportValidationError(f"The {label} is empty.")
             if len(content) > max_upload_bytes("document"):
-                raise SupportValidationError("The PDF document is too large.")
+                raise SupportValidationError(f"The {label} is too large.")
+            if is_spreadsheet_mime(normalized_mime) and not has_spreadsheet_signature(content):
+                raise SupportValidationError(
+                    "This file is not a valid Excel workbook. Save it again in Excel as .xlsx and retry."
+                )
             prepared = content
-            prepared_mime = "application/pdf"
-            prepared_filename = sanitize_support_text(filename).strip()[:180] or "document.pdf"
-            if not prepared_filename.lower().endswith(".pdf"):
-                prepared_filename += ".pdf"
+            prepared_mime = normalized_mime
+            extension = media_extension(normalized_mime)
+            prepared_filename = sanitize_support_text(filename).strip()[:180] or "document" + extension
+            if not prepared_filename.lower().endswith(extension):
+                prepared_filename += extension
             safe_caption = str(caption).strip()[:1024] if caption else ""
             body = safe_caption or prepared_filename
 
