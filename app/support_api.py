@@ -43,7 +43,7 @@ from app.staff_management import (
 )
 from app.support_events import event_stream
 from app.support_statistics import router as statistics_router
-from app.support_media import SupportMediaError, SupportMediaTooLargeError, max_upload_bytes
+from app.support_media import SupportMediaError, SupportMediaTooLargeError, is_spreadsheet_mime, max_upload_bytes
 from app.support_repository import SupportConflictError, SupportNotFoundError, SupportSchemaError
 from app.vcf_contacts import (
     MAX_VCF_IMPORT_BYTES,
@@ -1491,9 +1491,14 @@ async def ticket_message_media(
         )
     except Exception as exc:
         raise _translate_error(exc) from exc
+    # Browsers cannot preview a workbook, so it is always downloaded under its
+    # own name. PDFs and other media keep rendering inline in the dashboard.
+    download = is_spreadsheet_mime(asset.mime_type)
     return FileResponse(
         path=asset.path,
         media_type=asset.mime_type,
+        filename=asset.filename if download else None,
+        content_disposition_type="attachment",
         headers={
             "Cache-Control": "no-store",
             "X-Content-Type-Options": "nosniff",

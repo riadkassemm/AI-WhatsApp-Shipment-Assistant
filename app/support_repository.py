@@ -2860,7 +2860,7 @@ class SupportRepository(DashboardRepositoryMixin, DeliveryRepositoryMixin, ReadS
                         'message' AS result_type,
                         m.id AS message_id, m.ticket_id, m.sender_type, m.sender_id, m.sender_name,
                         m.direction, m.message_type, m.body, m.location_name,
-                        m.location_address, m.provider_media_filename, m.created_at,
+                        m.location_address, m.provider_media_filename, m.provider_media_mime_type, m.created_at,
                         t.ticket_reference, t.customer_name, t.customer_userid,
                         t.whatsapp_phone, t.status, t.conversation_origin,
                         t.business_display_phone_number, t.business_phone_number_id,
