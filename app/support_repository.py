@@ -287,6 +287,8 @@ _SUPPORT_SCHEMA_MIGRATIONS: tuple[tuple[str, dict[str, set[str]]], ...] = (
         "support_deletion_audit": {"ticket_id", "ticket_reference", "conversation_origin", "status", "business_phone_number_id",
                                    "message_count", "deleted_by_staff_id", "deleted_by_name", "deleted_at"},
     }),
+    ("migrations/20261117_whatsapp_outreach_limits.sql", {"whatsapp_phone_numbers": {
+        "outreach_daily_limit", "outreach_new_number_daily_limit", "outreach_same_text_limit"}}),
 )
 
 MAX_QUICK_REPLIES_PER_STAFF = 200

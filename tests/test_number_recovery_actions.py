@@ -95,6 +95,27 @@ assert.equal(linkedDeviceRecoveryActions({status: 'error'}).find(action => actio
     assert result.returncode == 0, result.stderr
 
 
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is unavailable")
+def test_a_number_restricted_by_whatsapp_offers_no_retry_buttons() -> None:
+    # WhatsApp's 403 (authentication_failure) means a restriction or ban. On
+    # 2026-11-17 staff retried Tripoli five times; none of that can help.
+    code = _HTML[_HTML.index("const BLOCKED_CATEGORIES"): _HTML.index("async function loadLinkedDeviceStatus(")]
+    script = r"""
+const assert = require('node:assert/strict');
+""" + code + r"""
+const restricted = {status: 'error', is_paired: true, process_restartable: true, saved_login: true,
+  recovery_category: 'authentication_failure'};
+const actions = linkedDeviceRecoveryActions(restricted);
+assert.deepEqual(actions.map(action => action.label), ['Reconnect after review', 'Force remove']);
+assert.ok(actions.every(action => action.managersOnly), 'agents get no recovery button for a restricted number');
+assert.equal(isRestrictedByWhatsApp({...restricted, status: 'connected'}), false, 'a number that reconnected is not restricted');
+assert.deepEqual(linkedDeviceRecoveryActions({...restricted, status: 'connected'}).map(action => action.label),
+  ['Reconnect', 'Restart number']);
+"""
+    result = subprocess.run(["node", "-e", script], text=True, capture_output=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+
+
 def test_resume_is_for_all_staff_and_keeps_the_bridge_guidance_as_409(bridge, monkeypatch) -> None:
     from app.whatsapp_client import WhatsAppSendError
     with pytest.raises(HTTPException) as denied:

@@ -14,6 +14,14 @@ from app.whatsapp_relink import adopt_retired_history, removal_details
 from app.config import removed_linked_device_line_ids, settings
 from app.support_auth import SupportAgent
 from app.whatsapp_client import configured_linked_device_lines, get_transport, linked_device_client
+from app.whatsapp_outreach import (
+    LIMIT_COLUMNS,
+    MAX_LIMIT,
+    OutreachLimits,
+    default_limits,
+    resolve_limits,
+    whatsapp_outreach_guard,
+)
 
 
 logger = logging.getLogger("shipment-bot")
@@ -470,6 +478,15 @@ class WhatsAppRegistryService:
             raise WhatsAppRegistrySchemaError(
                 "WhatsApp number removal is not installed. Apply migrations/20261023_removed_meta_numbers.sql."
             )
+        columns = await self.repository.fetch_all(
+            """SELECT COLUMN_NAME AS column_name FROM INFORMATION_SCHEMA.COLUMNS
+               WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s AND COLUMN_NAME IN (%s, %s, %s)""",
+            (settings.db_name, "whatsapp_phone_numbers", *LIMIT_COLUMNS.values()),
+        )
+        if len({str(row.get("column_name") or "") for row in columns}) < len(LIMIT_COLUMNS):
+            raise WhatsAppRegistrySchemaError(
+                "WhatsApp chat limits are not installed. Apply migrations/20261117_whatsapp_outreach_limits.sql."
+            )
 
     async def _seed_legacy_number(self) -> None:
         phone_id = str(settings.whatsapp_phone_number_id or "").strip()
@@ -626,6 +643,21 @@ class WhatsAppRegistryService:
         }
 
     @staticmethod
+    def _outreach_payload(row: dict[str, Any], used_today: int | None) -> dict[str, Any]:
+        limits = resolve_limits(row)
+        return {
+            "used_today": used_today,
+            "limit_today": limits.limit_today,
+            "new_number": limits.new_number,
+            "new_number_until": _utc_isoformat(limits.new_number_until) if limits.new_number else None,
+            "daily_limit": limits.daily_limit,
+            "new_number_daily_limit": limits.new_number_daily_limit,
+            "same_text_limit": limits.same_text_limit,
+            "custom": dict(limits.custom),
+            "defaults": default_limits(),
+        }
+
+    @staticmethod
     def _normalize_number(row: dict[str, Any]) -> dict[str, Any]:
         return {
             "phone_number_id": str(row.get("phone_number_id") or ""),
@@ -657,18 +689,93 @@ class WhatsAppRegistryService:
             """
             SELECT phone_number_id, waba_id, display_phone_number, display_name, verified_name,
                    quality_rating, is_enabled, provider_present, source,
-                   last_synced_at, created_at, updated_at
+                   last_synced_at, created_at, updated_at,
+                   outreach_daily_limit, outreach_new_number_daily_limit, outreach_same_text_limit
             FROM whatsapp_phone_numbers
             WHERE removed_at IS NULL
             ORDER BY is_enabled DESC, COALESCE(display_phone_number, phone_number_id)
             """
         )
         removed_ids = removed_linked_device_line_ids()
+        visible = [row for row in numbers
+                   if not (row.get("source") == "LINKED_DEVICE" and not row.get("provider_present") and str(row.get("phone_number_id")) in removed_ids)]
+        usage = await whatsapp_outreach_guard.used_today([str(row.get("phone_number_id") or "") for row in visible])
         return {
             "accounts": [self._normalize_account(row) for row in accounts],
-            "numbers": [self._normalize_number(row) for row in numbers
-                        if not (row.get("source") == "LINKED_DEVICE" and not row.get("provider_present") and str(row.get("phone_number_id")) in removed_ids)],
+            "numbers": [
+                {**self._normalize_number(row),
+                 "outreach": self._outreach_payload(row, usage.get(str(row.get("phone_number_id") or "")))}
+                for row in visible
+            ],
         }
+
+    async def outreach_limits(self, phone_number_id: str) -> OutreachLimits:
+        """Effective chat limits for one number (server defaults if unknown)."""
+        row = await self.repository.fetch_one(
+            """
+            SELECT created_at, outreach_daily_limit, outreach_new_number_daily_limit, outreach_same_text_limit
+            FROM whatsapp_phone_numbers
+            WHERE phone_number_id = %s
+            LIMIT 1
+            """,
+            (str(phone_number_id),),
+        )
+        return resolve_limits(row)
+
+    async def set_outreach_limits(
+        self,
+        agent: SupportAgent,
+        phone_number_id: str,
+        limits: dict[str, int | None],
+    ) -> dict[str, Any]:
+        """Admins and Super Admins set a number's chat limits; None = default."""
+        self._require_manager(agent)
+        phone_number_id = _clean_id(phone_number_id, label="phone-number ID")
+        values: dict[str, int | None] = {}
+        for name in LIMIT_COLUMNS:
+            value = limits.get(name)
+            if value is not None and (isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= MAX_LIMIT):
+                raise WhatsAppRegistryValidationError(f"Each chat limit must be a whole number from 0 to {MAX_LIMIT}.")
+            values[name] = value
+        await self._ensure_schema()
+        row = await self.repository.fetch_one(
+            """
+            SELECT phone_number_id, waba_id, source, provider_present, removed_at,
+                   outreach_daily_limit, outreach_new_number_daily_limit, outreach_same_text_limit
+            FROM whatsapp_phone_numbers
+            WHERE phone_number_id = %s
+            LIMIT 1
+            """,
+            (phone_number_id,),
+        )
+        if not row or row.get("removed_at") or (row.get("source") == "LINKED_DEVICE" and not row.get("provider_present")):
+            raise WhatsAppRegistryValidationError("This WhatsApp number is not available in the app.")
+        before = {name: row.get(column) for name, column in LIMIT_COLUMNS.items()}
+        if before == values:
+            return await self.list_payload(agent)
+        changed = await self.repository.execute(
+            f"""
+            UPDATE whatsapp_phone_numbers
+            SET {", ".join(f"{column} = %s" for column in LIMIT_COLUMNS.values())}, updated_by_staff_id = %s
+            WHERE phone_number_id = %s AND removed_at IS NULL
+            """,
+            (*values.values(), int(agent.id), phone_number_id),
+        )
+        if not changed:
+            raise WhatsAppRegistryConflictError("This saved number changed or was removed. Refresh the list.")
+        await self._audit(
+            action="WHATSAPP_OUTREACH_LIMITS_CHANGED",
+            actor_staff_id=int(agent.id),
+            waba_id=str(row.get("waba_id") or "") or None,
+            phone_number_id=phone_number_id,
+            details={"from": before, "to": values},
+        )
+        logger.info(
+            "WhatsApp chat limits changed: actor_staff_id=%s phone_number_id=%s",
+            agent.id,
+            phone_number_id,
+        )
+        return await self.list_payload(agent)
 
     async def set_number_display_name(
         self,

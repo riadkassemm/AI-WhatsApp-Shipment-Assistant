@@ -23,7 +23,7 @@ from app.whatsapp_registry import (
     WhatsAppRegistryService,
     WhatsAppRegistryValidationError,
 )
-from app import support_ui
+from app import support_ui, whatsapp_registry
 
 
 class FakeRepository:
@@ -45,6 +45,7 @@ class FakeRepository:
         self.audit_actions: list[str] = []
         self.has_display_name_column = True
         self.has_removed_at_column = True
+        self.has_outreach_columns = True
 
     async def fetch_all(self, query, params=()):
         if "INFORMATION_SCHEMA.TABLES" in query:
@@ -54,6 +55,8 @@ class FakeRepository:
                 {"table_name": "whatsapp_integration_audit"},
             ]
         if "INFORMATION_SCHEMA.COLUMNS" in query:
+            if "COLUMN_NAME IN" in query:
+                return [{"column_name": name} for name in params[2:]] if self.has_outreach_columns else []
             if params[-1] == 'removed_at':
                 return [{'column_name': 'removed_at'}] if self.has_removed_at_column else []
             return [{"column_name": "display_name"}] if self.has_display_name_column else []
@@ -75,12 +78,24 @@ class FakeRepository:
             self.number["is_enabled"] = bool(params[0])
         if "UPDATE whatsapp_phone_numbers" in query and "SET display_name" in query:
             self.number["display_name"] = params[0]
+        if "UPDATE whatsapp_phone_numbers" in query and "SET outreach_daily_limit" in query:
+            self.number.update(outreach_daily_limit=params[0], outreach_new_number_daily_limit=params[1],
+                               outreach_same_text_limit=params[2])
         if "INSERT INTO whatsapp_integration_audit" in query:
             self.audit_actions.append(str(params[0]))
         return 1
 
     async def persist_sync(self, **kwargs):
         self.persisted = kwargs
+
+
+@pytest.fixture(autouse=True)
+def no_outreach_counter(monkeypatch):
+    # The numbers list shows today's staff-started chats; no Redis in unit tests.
+    async def used_today(line_ids):
+        return {str(line_id): 0 for line_id in line_ids}
+
+    monkeypatch.setattr(whatsapp_registry.whatsapp_outreach_guard, "used_today", used_today)
 
 
 def actor(role: str) -> SupportAgent:
