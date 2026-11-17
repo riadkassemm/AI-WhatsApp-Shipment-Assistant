@@ -20,6 +20,7 @@ from typing import Any, Iterable
 import aiomysql
 
 from app.config import settings
+from app.customer_users import customer_identity_matches_source, customer_users
 
 
 class ShipmentDBError(Exception):
@@ -1363,22 +1364,55 @@ class ShipmentClient:
     # CUSTOMER / SHIPMENT DATA
     # ------------------------------------------------------------------
 
+    async def _customer_account(self, customer_id: str) -> dict[str, Any]:
+        if not customer_identity_matches_source(customer_id):
+            raise ShipmentDBError("Customer identity source changed. Please sign in again.")
+        if settings.customer_users_replica_enabled:
+            try:
+                user = await customer_users.get_by_identity(customer_id)
+            except Exception:
+                raise ShipmentDBError("Customer account lookup is temporarily unavailable.") from None
+        else:
+            user = await self._fetchone(
+                "SELECT id, userid, name, mobile, email FROM users WHERE id = %s LIMIT 1",
+                (customer_id,),
+            )
+        if not user:
+            raise ShipmentDBError("Customer account not found.")
+        return user
+
+    async def _local_customer_id(
+        self, customer_id: str, *, account: dict[str, Any] | None = None,
+    ) -> str:
+        if not customer_identity_matches_source(customer_id):
+            raise ShipmentDBError("Customer identity source changed. Please sign in again.")
+        if not settings.customer_users_replica_enabled:
+            return customer_id
+        account = account if account is not None else await self._customer_account(customer_id)
+        # Orders and wallets are still historical local copies. UUID is the
+        # cross-source identity; numeric IDs and account codes have collisions.
+        uuid = str(account.get("uuid") or "").strip()
+        if not uuid:
+            raise ShipmentDBError("Historical shipment data is unavailable for this customer.")
+        matches = await self._fetchall(
+            """
+            SELECT id
+            FROM users
+            WHERE uuid = %s
+            LIMIT 2
+            """,
+            (uuid,),
+        )
+        if len(matches) != 1:
+            raise ShipmentDBError("Historical shipment data is unavailable for this customer.")
+        return str(matches[0]["id"])
+
     async def get_customer_balance(
         self,
         customer_id: str,
     ) -> dict[str, Any]:
-        user = await self._fetchone(
-            """
-            SELECT id, userid, name, mobile, email
-            FROM users
-            WHERE id = %s
-            LIMIT 1
-            """,
-            (customer_id,),
-        )
-
-        if not user:
-            raise ShipmentDBError("Customer account not found.")
+        user = await self._customer_account(customer_id)
+        local_customer_id = await self._local_customer_id(customer_id, account=user)
 
         wallet = await self._fetchone(
             """
@@ -1388,11 +1422,11 @@ class ShipmentClient:
             ORDER BY id DESC
             LIMIT 1
             """,
-            (customer_id,),
+            (local_customer_id,),
         )
 
         return {
-            "customer_id": str(user["id"]),
+            "customer_id": customer_id,
             "userid": user["userid"],
             "name": user["name"],
             "balance": wallet["ballance"] if wallet else 0,
@@ -1404,6 +1438,7 @@ class ShipmentClient:
         customer_id: str,
         tracking_number: str,
     ) -> dict[str, Any]:
+        local_customer_id = await self._local_customer_id(customer_id)
         row = await self._fetchone(
             """
             SELECT
@@ -1420,7 +1455,7 @@ class ShipmentClient:
             ORDER BY o.id DESC
             LIMIT 1
             """,
-            (customer_id, tracking_number, tracking_number, tracking_number),
+            (local_customer_id, tracking_number, tracking_number, tracking_number),
         )
 
         if not row:
@@ -1497,6 +1532,7 @@ class ShipmentClient:
     ) -> dict[str, Any]:
         """Return a compact, ownership-scoped shipment list for ambiguity resolution."""
         limit = max(1, min(int(limit), 20))
+        local_customer_id = await self._local_customer_id(customer_id)
         rows = await self._fetchall(
             f"""
             SELECT
@@ -1509,7 +1545,7 @@ class ShipmentClient:
             ORDER BY o.id DESC
             LIMIT {limit}
             """,
-            (customer_id,),
+            (local_customer_id,),
         )
         return {
             "found": bool(rows),
@@ -1550,6 +1586,7 @@ class ShipmentClient:
             raise ShipmentDBError("Invalid shipment mode. Use pickup or delivery.")
 
         new_pod = mode_map[mode]
+        local_customer_id = await self._local_customer_id(customer_id)
 
         existing = await self._fetchone(
             """
@@ -1560,7 +1597,7 @@ class ShipmentClient:
             ORDER BY o.id DESC
             LIMIT 1
             """,
-            (customer_id, tracking_number),
+            (local_customer_id, tracking_number),
         )
 
         if not existing:
@@ -1588,7 +1625,7 @@ class ShipmentClient:
             SET o.pod = %s
             WHERE u.id = %s AND o.trackid = %s
             """,
-            (new_pod, customer_id, tracking_number),
+            (new_pod, local_customer_id, tracking_number),
         )
 
         return {

@@ -5,7 +5,7 @@ import re
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -96,6 +96,30 @@ class Settings(BaseSettings):
     db_user: str = "whatsapp_bot"
     db_password: str = Field(default="", repr=False)
     shipping_db_schema: str = "shipping_db"
+
+    # Optional, SELECT-only customer source. Support tables and shipment copies
+    # continue to use DB_*. All four strings must be set to enable the replica.
+    customer_users_db_host: str = ""
+    customer_users_db_port: int = Field(default=3310, ge=1, le=65535)
+    customer_users_db_name: str = ""
+    customer_users_db_user: str = ""
+    customer_users_db_password: str = Field(default="", repr=False)
+
+    @model_validator(mode="after")
+    def validate_customer_users_database(self) -> "Settings":
+        values = (
+            self.customer_users_db_host,
+            self.customer_users_db_name,
+            self.customer_users_db_user,
+            self.customer_users_db_password,
+        )
+        if any(values) and not all(value.strip() for value in values):
+            raise ValueError("Set all CUSTOMER_USERS_DB_HOST/NAME/USER/PASSWORD values together.")
+        return self
+
+    @property
+    def customer_users_replica_enabled(self) -> bool:
+        return bool(self.customer_users_db_host)
 
     # Human handoff notification. This is only a secondary alert; durable
     # support state lives in MariaDB.

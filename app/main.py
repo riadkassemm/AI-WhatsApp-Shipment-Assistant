@@ -20,6 +20,7 @@ from app.customer_reply_guard import (
     validate_customer_reply,
 )
 from app.customer_auth import CustomerAuthenticationUnavailable, authenticate_customer
+from app.customer_users import customer_users
 from app.client_chat_auth import (
     CredentialExtraction,
     extract_credentials,
@@ -148,6 +149,7 @@ async def _lifespan(_app: FastAPI):
                     await reconciliation
                 except asyncio.CancelledError:
                     pass
+            await customer_users.close()
 
 
 app = FastAPI(title="AI Shipment Assistant - WhatsApp Backend", lifespan=_lifespan)

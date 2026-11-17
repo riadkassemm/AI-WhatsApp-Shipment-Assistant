@@ -8,6 +8,7 @@ from typing import Any
 import aiomysql
 
 from app.config import settings
+from app.customer_users import customer_identity_id, customer_users
 
 
 _PHONE_NON_DIGIT = re.compile(r"\D+")
@@ -104,7 +105,10 @@ class CustomerDirectory:
         if not normalized:
             return None
         expr = self._mobile_sql()
-        rows = await self._fetchall(
+        fetch_users = (
+            customer_users.fetch_all if settings.customer_users_replica_enabled else self._fetchall
+        )
+        rows = await fetch_users(
             f"""
             SELECT id, userid, name, mobile
             FROM users
@@ -125,7 +129,7 @@ class CustomerDirectory:
         # exactly one user, preventing an ambiguous phone match from naming the
         # wrong customer.
         suffix = normalized[-8:]
-        candidates = await self._fetchall(
+        candidates = await fetch_users(
             f"""
             SELECT id, userid, name, mobile
             FROM users
@@ -202,7 +206,7 @@ class CustomerDirectory:
                 source="registered_user",
                 phone=normalized,
                 name=dashboard_name or account_name,
-                user_id=str(user.get("id")) if user.get("id") is not None else None,
+                user_id=customer_identity_id(user["id"]) if user.get("id") is not None else None,
                 userid=str(user.get("userid")) if user.get("userid") is not None else None,
                 contact_id=int(contact["id"]) if contact else None,
                 contact_key=f"manual:{int(contact['id'])}" if contact else None,
