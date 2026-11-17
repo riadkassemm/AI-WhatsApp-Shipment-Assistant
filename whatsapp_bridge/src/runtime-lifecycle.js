@@ -1,8 +1,10 @@
+import { unlink } from 'node:fs/promises';
+
 // Own process resources before awaiting them. Signals close the same owner even
 // while imports, the directory lock, journal replay, or listen are in flight.
 export function createRuntime({prepare, process: processOwner = process, logger = console,
   shutdownTimeoutMs = 30_000}) {
-  let bridge, server, release, startPromise, serverClose;
+  let bridge, server, release, startPromise, serverClose, onReady;
   let stopping = false, failed = false, deadline, finish;
   const done = new Promise(resolve => { finish = resolve; });
   const report = (event, error) => {
@@ -29,6 +31,8 @@ export function createRuntime({prepare, process: processOwner = process, logger 
     // The diagnostic deadline leaves five seconds before DEV's systemd limit.
     // It never releases a live owner's lock or reports incomplete cleanup as
     // success. Stalled kernel I/O may still require systemd's forced stop.
+    // The per-line supervisor waits for every worker's own drain, so it
+    // reports a missed deadline later than a single process does.
     deadline = setTimeout(() => {
       failed = true;
       processOwner.exitCode = 1;
@@ -86,6 +90,8 @@ export function createRuntime({prepare, process: processOwner = process, logger 
       const dependencies = await prepare();
       if (stopping) return;
       const {config, acquireDataDirectory, createBridge, createServer} = dependencies;
+      if (Number.isSafeInteger(dependencies.shutdownTimeoutMs)) shutdownTimeoutMs = dependencies.shutdownTimeoutMs;
+      onReady = dependencies.onReady;
       release = await acquireDataDirectory(config.dataDir, {
         // A crashed bridge's lock is taken over at once instead of after 30 s.
         onReclaimed: () => report('data_directory_lock_reclaimed'),
@@ -119,14 +125,20 @@ export function createRuntime({prepare, process: processOwner = process, logger 
         server.once('error', onError);
         server.once('close', onClose);
         server.once('listening', onListening);
-        try { server.listen(config.port, config.host); }
-        catch (error) { onError(error); }
+        // A per-line worker serves its supervisor on a private unix socket. The
+        // lock taken above proves any existing socket file is left over.
+        const listen = config.socketPath
+          ? unlink(config.socketPath).catch(error => { if (error.code !== 'ENOENT') throw error; }).then(() => server.listen(config.socketPath))
+          : Promise.resolve().then(() => server.listen(config.port, config.host));
+        listen.catch(onError);
       });
       if (stopping) return;
       await bridge.initialize();
       if (stopping) return;
       bridge.startWorkers();
-      logger.info(`WhatsApp linked-device bridge listening on ${config.host}:${config.port}`);
+      if (config.socketPath) logger.info(`WhatsApp linked-device line ${config.worker?.lineId ?? ''} worker ready`);
+      else logger.info(`WhatsApp linked-device bridge listening on ${config.host}:${config.port}`);
+      onReady?.(bridge);
     })();
     // Do not await stop from inside startup: stop owns startup's settlement.
     startPromise.catch(error => {

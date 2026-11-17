@@ -4,7 +4,7 @@ import crypto from 'node:crypto';
 import makeWASocket, { Browsers, DisconnectReason, downloadMediaMessage, normalizeMessageContent, proto, generateMessageIDV2, initAuthCreds, DEFAULT_CONNECTION_CONFIG } from '@whiskeysockets/baileys';
 import pino from 'pino';
 import QRCode from 'qrcode';
-import { BridgeError, phoneDigits, wrapId, unwrapId, validateLineManifest, UUID_PATTERN, MANIFEST_MAX_BYTES } from './config.js';
+import { BridgeError, phoneDigits, wrapId, unwrapId, validateLineManifest, tombstoneManifest, UUID_PATTERN, MANIFEST_MAX_BYTES } from './config.js';
 import { FileStore, createAuth, resumeAfterUncleanExit, authFailureDiskCode } from './storage.js';
 import { JournalStore, encode, readJournal } from './journal-store.js';
 import { safeStorageCode, errorLabel, isStorageFailure } from './journal-maintenance.js';
@@ -14,6 +14,7 @@ import { AckTracker } from './ack.js';
 import { inboundEvent, outgoingEvent, outgoingConfirmationEvent, messageTombstoneEvent, messageStatusEvent, mutationEvent, textBody, millis, eventId, disconnectReason, MEDIA_TYPES, RECEIPT_STATUSES, RECEIPT_RANK } from './events.js';
 import { preserveNativeMutationMetadata } from './native-events.js';
 import { classifyDisconnect, reconnectDelay, newConnectionDiagnostics, observeHeartbeat, EventLoopDiagnostics } from './connection-diagnostics.js';
+import { mergeLineOutboxes } from './outbox-migration.js';
 
 const silentLogger = pino({ level: 'silent' });
 const DEFAULT_MEDIA_HOST = 'mmg.whatsapp.net';
@@ -109,6 +110,14 @@ const notSentError = (code, message, cause) => {
 const transientConnectionError = error => ['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'ENETUNREACH', 'EHOSTUNREACH', 'EAI_AGAIN', 'ENOTFOUND']
   .includes(error?.code) || [408, 428, 500, 502, 503, 504].includes(error?.output?.statusCode);
 
+// A per-line worker never writes lines.json or the shared outbox (the
+// supervisor owns them). This in-memory stand-in keeps the FileStore/JournalStore
+// surface the rest of the class uses.
+function memoryStore(data) {
+  return { data, filename: null, update: async change => change(data), flush: async () => {},
+    stopMaintenance: async () => {}, close: async () => {} };
+}
+
 export class Bridge {
   constructor(config, dependencies = {}) {
     this.config = config;
@@ -135,6 +144,9 @@ export class Bridge {
     this.callbackWakeups = new Set();
     this.reconnectSlots = new Map();
     this.random = dependencies.random ?? Math.random;
+    // Per-line process mode: config.worker names this process's only number and
+    // host reaches the supervisor (lines.json, retired phones, phone claims).
+    this.host = dependencies.host ?? null;
     this.eventLoop = new EventLoopDiagnostics();
     this.onError = dependencies.onError ?? (error => this.log({component: 'whatsapp_bridge',
       event: 'operation_failed', code: errorLabel(error),
@@ -159,10 +171,24 @@ export class Bridge {
   async initializeOnce({ autoConnect = true } = {}) {
     this.assertRunning();
     this.startupPhase = 'storage_replay';
-    this.outbox = await this.loadStore(path.join(this.config.dataDir, 'outbox.json'), () => ({ entries: [], dead_letters: [] }), 'outbox');
-    this.manifest = await this.loadFile(path.join(this.config.dataDir, 'lines.json'), () => ({ version: 1, lines: {}, requests: {} }));
-    // Phones of removed lines and when they went offline, so linking one again recovers the gap.
-    this.retiredPhones = await this.loadFile(path.join(this.config.dataDir, 'retired-phones.json'), () => ({ version: 1, phones: {} }));
+    const worker = this.config.worker;
+    if (worker) {
+      // This number's callbacks live in its own folder; the supervisor decided
+      // that the line is active and owns every cross-line file.
+      const directory = path.join(this.config.dataDir, worker.lineId);
+      await mkdir(directory, { recursive: true, mode: 0o700 });
+      this.outbox = await this.loadStore(path.join(directory, 'outbox.json'), () => ({ entries: [], dead_letters: [] }), 'outbox', { line_id: worker.lineId });
+      this.manifest = memoryStore({ version: 1, lines: { [worker.lineId]: worker.expectedPhone }, requests: {}, removed_line_ids: [], removed_request_ids: [] });
+      this.retiredPhones = null;
+    } else {
+      // Pending callbacks left in per-line outboxes by per-line mode come back first.
+      await mergeLineOutboxes(this.config.dataDir, { log: this.log });
+      this.assertRunning();
+      this.outbox = await this.loadStore(path.join(this.config.dataDir, 'outbox.json'), () => ({ entries: [], dead_letters: [] }), 'outbox');
+      this.manifest = await this.loadFile(path.join(this.config.dataDir, 'lines.json'), () => ({ version: 1, lines: {}, requests: {} }));
+      // Phones of removed lines and when they went offline, so linking one again recovers the gap.
+      this.retiredPhones = await this.loadFile(path.join(this.config.dataDir, 'retired-phones.json'), () => ({ version: 1, phones: {} }));
+    }
     const manifest = validateLineManifest(this.manifest.data);
     // Confirmed removal tombstones also form a durable cleanup work queue.
     // Repeating the precise numeric directory/outbox purge is safe after a crash.
@@ -171,11 +197,11 @@ export class Bridge {
       try { await this.purgeRemovedLine(id); }
       catch (error) { this.onError(error); }
     }
-    const definitions = new Map(this.config.lines
+    const definitions = worker ? new Map([[worker.lineId, { line_id: worker.lineId, expected_phone: worker.expectedPhone }]]) : new Map(this.config.lines
       .filter(line => !manifest.removed_line_ids.includes(line.line_id) &&
         !(line.line_id === this.config.fallbackLineId && (Object.keys(manifest.lines).length || manifest.removed_line_ids.length)))
       .map(line => [line.line_id, line]));
-    for (const [id, expected] of Object.entries(manifest.lines)) {
+    if (!worker) for (const [id, expected] of Object.entries(manifest.lines)) {
       if (definitions.has(id) && definitions.get(id).expected_phone !== expected) throw new Error('The linked-device manifest conflicts with a configured line.');
       definitions.set(id, { line_id: id, expected_phone: expected });
     }
@@ -341,6 +367,7 @@ export class Bridge {
     } catch (error) { if (!this.stopping) error.bridgePersistenceFailure = true; throw error; }
   }
   async addLine(payload) {
+    if (this.config.worker) throw new BridgeError(409, 'REGISTRATION_IN_SUPERVISOR', 'Numbers are registered by the bridge supervisor.');
     if (!payload || typeof payload.request_id !== 'string' || !UUID_PATTERN.test(payload.request_id)) throw new BridgeError(400, 'INVALID_REQUEST_ID', 'A UUID registration request ID is required.');
     const requestId = payload.request_id.toLowerCase();
     if (payload.expected_phone !== undefined && typeof payload.expected_phone !== 'string') throw new BridgeError(400, 'INVALID_PHONE', 'Expected phone must be an international phone string or empty.');
@@ -435,19 +462,7 @@ export class Bridge {
         await this.retirePhone(line);
         // Only a remote-confirmed removal (or an unpaired line) enters the
         // durable tombstones. They suppress ENV/fallback routes on every restart.
-        await this.manifest.update(data => {
-          data.removed_line_ids ??= [];
-          data.removed_request_ids ??= [];
-          if (!data.removed_line_ids.includes(id)) data.removed_line_ids.push(id);
-          delete data.lines[id];
-          for (const [requestId, request] of Object.entries(data.requests ?? {})) {
-            if (request.line_id === id) {
-              delete data.requests[requestId];
-              if (!data.removed_request_ids.includes(requestId)) data.removed_request_ids.push(requestId);
-            }
-          }
-          validateLineManifest(data);
-        });
+        await this.tombstoneLine(id);
         await this.closeStore(line.auth?.store);
         await this.closeStore(line.store);
         this.storageMonitor.unregister(id);
@@ -474,6 +489,21 @@ export class Bridge {
     });
     this.registrationTail = task.catch(() => {});
     return task;
+  }
+  // Durable removal tombstone. Only a remote-confirmed (or forced) removal gets
+  // here; tombstones suppress ENV/fallback routes on every restart.
+  async tombstoneLine(id) {
+    // In per-line mode the supervisor writes lines.json; mirror it locally so
+    // enqueue() and repeated calls see the removal too.
+    if (this.host) await this.host.call('tombstone', { line_id: id });
+    await this.manifest.update(data => tombstoneManifest(data, id));
+  }
+  // A worker's outbox lives inside the folder that is about to be deleted or
+  // archived: close it first and keep an empty in-memory one for shutdown.
+  async detachLineOutbox() {
+    const outbox = this.outbox;
+    this.outbox = memoryStore({ entries: [], dead_letters: [] });
+    await this.closeStore(outbox);
   }
   // ---- Admin recovery actions (dashboard). None deletes data: files move to
   // linked-device-archive/<timestamp>-<action>-<line>/ beside the data dir.
@@ -627,22 +657,11 @@ export class Bridge {
           await this.closeStore(line.store).catch(error => { if (!line.store.failed) throw error; });
         }
         const archive = this.archiveDirectory('remove', id);
+        if (this.config.worker) await this.detachLineOutbox();
         await mkdir(path.dirname(archive), {recursive: true, mode: 0o700});
         await rename(line.directory, archive);
         await this.syncDirectory(this.config.dataDir);
-        await this.manifest.update(data => {
-          data.removed_line_ids ??= [];
-          data.removed_request_ids ??= [];
-          if (!data.removed_line_ids.includes(id)) data.removed_line_ids.push(id);
-          delete data.lines[id];
-          for (const [requestId, request] of Object.entries(data.requests ?? {})) {
-            if (request.line_id === id) {
-              delete data.requests[requestId];
-              if (!data.removed_request_ids.includes(requestId)) data.removed_request_ids.push(requestId);
-            }
-          }
-          validateLineManifest(data);
-        });
+        await this.tombstoneLine(id);
         await this.outbox.update(data => {
           data.entries = data.entries.filter(item => item.event.line_id !== id);
           data.dead_letters = (data.dead_letters ?? []).filter(item => item.event.line_id !== id);
@@ -707,6 +726,11 @@ export class Bridge {
   }
   async purgeRemovedLine(id) {
     if (!/^\d{5,32}$/.test(id)) throw new Error('Invalid removal cleanup line ID.');
+    if (this.config.worker) {
+      await this.detachLineOutbox();
+      await rm(path.join(this.config.dataDir, id), { recursive: true, force: true });
+      return;
+    }
     await this.outbox.update(data => {
       data.entries = data.entries.filter(item => item.event.line_id !== id);
       data.dead_letters = (data.dead_letters ?? []).filter(item => item.event.line_id !== id);
@@ -1110,7 +1134,27 @@ export class Bridge {
       }
       const existingOwner = [...this.lines.values()].find(other => other.line_id !== line.line_id && other.store?.data?.bound_phone === ownPhone);
       const reservedOwner = this.phoneReservations.get(ownPhone);
-      if (existingOwner || (reservedOwner && reservedOwner !== line.line_id)) {
+      // Per-line mode: the other numbers live in other processes. The
+      // supervisor checks their bound phones and reserves this one for us.
+      let claim = null;
+      if (this.host) {
+        claim = await this.host.call('claimPhone', { phone: ownPhone }, { timeoutMs: 60_000 })
+          .catch(() => ({ owned_elsewhere: false, unavailable: true }));
+        if (claim.unavailable || line.session !== session || session.closed) {
+          if (!claim.unavailable) this.host.call('settlePhone', { phone: ownPhone, bound: false }).catch(() => {});
+          if (line.session !== session) return;
+          // Not a duplicate, only unverifiable now: retry later, keep the session.
+          session.dispose();
+          line.ack.close();
+          line.socket = null;
+          line.status = 'disconnected';
+          line.error = 'Could not confirm that this WhatsApp number is not linked to another line. Retrying shortly.';
+          socket.end(new Error('Phone ownership check unavailable'));
+          this.scheduleReconnect(line);
+          return;
+        }
+      }
+      if (existingOwner || (reservedOwner && reservedOwner !== line.line_id) || claim?.owned_elsewhere) {
         line.status = 'error';
         line.error = 'This WhatsApp number is already linked to another line. Unlink this device and pair a different number.';
         await line.store.update(data => { data.enabled = false; });
@@ -1126,8 +1170,12 @@ export class Bridge {
       // Reserve before awaiting disk writes, so simultaneous pairings cannot
       // both bind one physical account and produce duplicate inbound threads.
       this.phoneReservations.set(ownPhone, line.line_id);
-      try { await line.store.update(data => { data.bound_phone = ownPhone; }); }
-      finally { if (this.phoneReservations.get(ownPhone) === line.line_id) this.phoneReservations.delete(ownPhone); }
+      let bound = false;
+      try { await line.store.update(data => { data.bound_phone = ownPhone; }); bound = true; }
+      finally {
+        if (this.phoneReservations.get(ownPhone) === line.line_id) this.phoneReservations.delete(ownPhone);
+        if (claim) this.host.call('settlePhone', { phone: ownPhone, bound }).catch(this.onError);
+      }
       if (line.session !== session || session.closed || socket.ws.isOpen !== true || this.stopping) return;
       line.display_phone_number = ownPhone;
       session.ready = true;
@@ -1599,6 +1647,7 @@ export class Bridge {
     const phone = knownPhone(line.store.data.bound_phone || line.display_phone_number);
     if (!phone) return;
     const offlineSince = line.store.data.recover_since ?? (line.status === 'connected' ? Date.now() : line.disconnectedSince ?? Date.now());
+    if (this.host) return this.host.call('retirePhone', { phone, offline_since: offlineSince });
     await this.retiredPhones.update(data => {
       const cutoff = Date.now() - RETIRED_PHONE_MS;
       for (const [known, entry] of Object.entries(data.phones)) if (!(entry?.removed_at > cutoff)) delete data.phones[known];
@@ -1609,10 +1658,12 @@ export class Bridge {
     // The second socket of a fresh pairing already knows its phone, before
     // WhatsApp sends history. A line that was paired before is not a re-link.
     const own = knownPhone(line.auth.state.creds.me?.id?.split('@')[0]?.split(':')[0]);
-    const entry = own && !line.store.data.bound_phone && !line.store.data.recover_since ? this.retiredPhones?.data.phones[own] : null;
+    const candidate = own && !line.store.data.bound_phone && !line.store.data.recover_since;
+    const entry = !candidate ? null : this.host ? await this.host.call('retiredPhone', { phone: own }) : this.retiredPhones?.data.phones[own];
     if (!entry || !(entry.removed_at > Date.now() - RETIRED_PHONE_MS)) return;
     await line.store.update(data => { data.recover_since = entry.offline_since - RECOVERY_MARGIN_MS; delete data.recover_until; });
-    await this.retiredPhones.update(data => { delete data.phones[own]; });
+    if (this.host) await this.host.call('dropRetiredPhone', { phone: own });
+    else await this.retiredPhones.update(data => { delete data.phones[own]; });
   }
   async recoverHistory(line, messages) {
     const since = line.store.data.recover_since;

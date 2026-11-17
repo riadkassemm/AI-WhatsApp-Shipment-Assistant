@@ -37,6 +37,21 @@ export function validateLineManifest(value) {
   return { version: 1, lines, requests, removed_line_ids: [...new Set(removed)], removed_request_ids: [...new Set(removedRequests.map(id => id.toLowerCase()))] };
 }
 
+// Remove a number from the active manifest and record its tombstones.
+export function tombstoneManifest(data, id) {
+  data.removed_line_ids ??= [];
+  data.removed_request_ids ??= [];
+  if (!data.removed_line_ids.includes(id)) data.removed_line_ids.push(id);
+  delete data.lines[id];
+  for (const [requestId, request] of Object.entries(data.requests ?? {})) {
+    if (request.line_id === id) {
+      delete data.requests[requestId];
+      if (!data.removed_request_ids.includes(requestId)) data.removed_request_ids.push(requestId);
+    }
+  }
+  validateLineManifest(data);
+}
+
 export function phoneDigits(value, allowEmpty = false) {
   const raw = String(value ?? '').trim();
   if (!raw && allowEmpty) return '';
@@ -113,6 +128,47 @@ export function readAuthConfig(env = process.env) {
   return { drainTimeoutMs, reconnectDrainTimeoutMs, resumeAfterUncleanExit: resume === 'true' };
 }
 
+// single: one process holds every number (the original layout).
+// per_line: a supervisor keeps the HTTP API, lines.json and retired phones and
+// runs each number in its own worker process (see supervisor.js), so a frozen,
+// crashing or CPU-bound number cannot stop the others.
+export const PROCESS_MODES = Object.freeze(['single', 'per_line']);
+export function readProcessMode(env = process.env) {
+  const mode = env.WHATSAPP_LINKED_DEVICE_PROCESS_MODE || 'single';
+  if (!PROCESS_MODES.includes(mode)) throw new Error('WHATSAPP_LINKED_DEVICE_PROCESS_MODE must be single or per_line.');
+  return mode;
+}
+
+export function readWorkerConfig(env = process.env) {
+  const number = (name, fallback, minimum) => {
+    const raw = env[name];
+    const value = raw === undefined || raw === '' ? fallback : Number(raw);
+    if (!Number.isSafeInteger(value) || value < minimum) throw new Error(`${name} must be an integer of at least ${minimum}.`);
+    return value;
+  };
+  return {
+    // Graceful stop of one worker (removal, restart, shutdown) before SIGKILL.
+    // Below production's TimeoutStopSec=90 so the supervisor itself can finish.
+    stopTimeoutMs: number('WHATSAPP_LINKED_DEVICE_WORKER_STOP_TIMEOUT_MS', 80_000, 5_000),
+    // A new number's worker must finish loading its empty storage within this.
+    startTimeoutMs: number('WHATSAPP_LINKED_DEVICE_WORKER_START_TIMEOUT_MS', 120_000, 5_000),
+    // How long the supervisor waits for one worker's /v1/status. Below the
+    // 3 s timeout of the runtime metrics collector, so one frozen worker
+    // cannot hide the status of every other number.
+    statusTimeoutMs: number('WHATSAPP_LINKED_DEVICE_WORKER_STATUS_TIMEOUT_MS', 2_000, 500),
+  };
+}
+
+// Worker sockets live beside the line folders, never inside them: archiving or
+// purging a number's folder must not depend on the socket's lifetime.
+export function workerSocketPath(dataDir, lineId) {
+  if (!/^\d{5,32}$/.test(lineId)) throw new Error('Invalid linked-device line ID.');
+  const socketPath = path.join(dataDir, '.workers', `${lineId}.sock`);
+  // sockaddr_un.sun_path is 108 bytes on Linux, including the terminator.
+  if (Buffer.byteLength(socketPath) > 100) throw new Error('WHATSAPP_LINKED_DEVICE_DATA_DIRECTORY is too long for per-line worker sockets (keep it under 70 characters).');
+  return socketPath;
+}
+
 export function readConfig(env = process.env) {
   const secret = env.WHATSAPP_LINKED_DEVICE_SECRET ?? '';
   if (secret.length < 32) throw new Error('WHATSAPP_LINKED_DEVICE_SECRET must contain at least 32 characters.');
@@ -147,7 +203,20 @@ export function readConfig(env = process.env) {
     sameIdRetry: env.WHATSAPP_LINKED_DEVICE_SAME_ID_RETRY === 'true',
     storage: readStorageConfig(env),
     auth: readAuthConfig(env),
+    processMode: readProcessMode(env),
+    workers: readWorkerConfig(env),
   };
+}
+
+// The supervisor starts each worker with its number in these two variables.
+export function readLineWorkerConfig(env = process.env) {
+  const base = readConfig(env);
+  const lineId = env.WHATSAPP_LINKED_DEVICE_WORKER_LINE_ID ?? '';
+  if (!/^\d{5,32}$/.test(lineId)) throw new Error('WHATSAPP_LINKED_DEVICE_WORKER_LINE_ID must be a numeric line ID.');
+  const expectedPhone = phoneDigits(env.WHATSAPP_LINKED_DEVICE_WORKER_EXPECTED_PHONE ?? '', true);
+  return { ...base, lines: [{ line_id: lineId, expected_phone: expectedPhone }], fallbackLineId: undefined,
+    worker: { lineId, expectedPhone, lockPath: path.join(base.dataDir, '.workers', lineId) },
+    socketPath: workerSocketPath(base.dataDir, lineId) };
 }
 
 export function wrapId(lineId, nativeId) {
