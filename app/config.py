@@ -29,6 +29,11 @@ class Settings(BaseSettings):
     ai_agent_v2_enabled: bool = False
     ai_agent_model: str = "gpt-6-luna"
     ai_agent_reasoning_effort: Literal["none", "low"] = "none"
+    ai_agent_step_up_model: str = "gpt-6.2-sol"
+    ai_agent_step_up_reasoning_effort: Literal["none", "low"] = "low"
+    ai_agent_transcription_model: str = "gpt-transcribe"
+    ai_agent_media_max_bytes: int = Field(default=10_000_000, ge=1, le=25_000_000)
+    ai_agent_audio_max_seconds: int = Field(default=300, ge=1, le=1800)
     # Separate SELECT-only business replica. Never fall back to the historical DB.
     ai_business_db_host: str = ""
     ai_business_db_port: int = Field(default=3306, ge=1, le=65535)

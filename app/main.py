@@ -2665,16 +2665,11 @@ async def _process_incoming_message(
     # HIGH-PRIORITY HUMAN MEDIA ROUTING / AI AVAILABILITY
     # =========================================================
 
-    # The customer-service application supports WhatsApp images, videos, audio/voice,
-    # PDF/Excel documents, and customer locations for human agents, but the AI pipeline does not
-    # currently process those message types. Route them into the existing human pipeline
-    # before evaluating AI availability. The media is then downloaded and attached
-    # to the durable ticket so staff can view/play it in the support dashboard.
-    #
-    # Meta marks push-to-talk voice notes as type=audio with audio.voice=true; that
-    # flag only selects the more specific handoff reason/status. No transcription,
-    # image analysis, semantic normalization, or other AI call is attempted.
-    if incoming.message_type in SUPPORT_MEDIA_MESSAGE_TYPES | {"location", "contacts"}:
+    # V2 images/audio continue through availability and the started-turn boundary.
+    # Other media and the legacy pipeline retain the existing human route. Media
+    # is durably captured for staff before any provider work begins.
+    agent_media = settings.ai_agent_v2_enabled and incoming.message_type in {"image", "audio"} and bool(incoming.media_id)
+    if incoming.message_type in SUPPORT_MEDIA_MESSAGE_TYPES | {"location", "contacts"} and not agent_media:
         is_voice_note = incoming.message_type == "audio" and incoming.is_voice
         media_label = (
             "shared contact"
@@ -2812,7 +2807,7 @@ async def _process_incoming_message(
     # UNSUPPORTED NON-TEXT
     # =========================================================
 
-    if incoming.text is None:
+    if incoming.text is None and not agent_media:
         return _json_response(
             200,
             {
@@ -2820,7 +2815,7 @@ async def _process_incoming_message(
             },
         )
 
-    text = incoming.text
+    text = incoming.text or incoming.media_caption or ""
 
     # =========================================================
     # AI TICKET
@@ -2963,7 +2958,7 @@ async def _ai_ticket_for_turn(
                 logger.info(
                     "AI ticket opened: customer_ref=%s ticket_id=%s", customer_ref, ai_ticket["id"],
                 )
-        await support_service.route_human_inbound(
+        stored_message = await support_service.route_human_inbound(
             ticket=ai_ticket,
             body=_human_inbound_body(incoming, parsed_auth),
             whatsapp_message_id=incoming.message_id,
@@ -2973,12 +2968,19 @@ async def _ai_ticket_for_turn(
             current_language=conversation.current_language,
             communication_style=conversation.communication_style,
         )
+        if settings.ai_agent_v2_enabled and incoming.message_type in {"image", "audio"} and incoming.media_id:
+            await support_service.capture_inbound_media(
+                ticket=ai_ticket, message=stored_message[0], media_id=incoming.media_id,
+                message_type=incoming.message_type, expected_mime_type=incoming.media_mime_type,
+                filename=incoming.media_filename,
+            )
         await support_service.reconcile_conversation_mode(conversation, ai_ticket)
     except SupportConflictError:
         logger.info("AI ticket changed before the turn: customer_ref=%s", customer_ref)
         return None, _json_response(503, {"status": "support_state_changed"})
-    except Exception:
-        logger.exception("AI ticket unavailable; nothing was started: customer_ref=%s", customer_ref)
+    except Exception as exc:
+        logger.error("AI ticket unavailable; nothing was started: customer_ref=%s error_type=%s",
+                     customer_ref, type(exc).__name__)
         return None, _json_response(503, {"status": "support_state_unavailable"})
     return ai_ticket, None
 
@@ -3035,9 +3037,11 @@ async def _run_agent_turn(
         if not decision.allowed:
             outcome = AgentOutcome(reason_code="AI_RATE_LIMITED")
         else:
+            media_options = {"media_type": incoming.message_type} if incoming.message_type in {"image", "audio"} else {}
             outcome = await agent_service.run(
                 ticket=ticket, style=conversation.communication_style or "en",
                 source_message_id=incoming.message_id,
+                **media_options,
             )
     if outcome.reply is not None:
         await _ensure_automated_reply_allowed(incoming.business_phone_number_id)

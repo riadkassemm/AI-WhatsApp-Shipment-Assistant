@@ -140,8 +140,10 @@ and excludes internal notes, deleted messages, unsent drafts and later queued
 messages. It does not load Redis history or earlier tickets. Approved knowledge
 and tool definitions form a stable prompt prefix. One metered structured call
 returns a reply, tool request, or escalation. A failed output/guard/fact check
-allows one fresh repair; SDK retries are disabled. Both calls use the shared
-budget gateway. Customer text and prior replies are never factual evidence.
+allows one review by `AI_AGENT_STEP_UP_MODEL=gpt-6.2-sol` (reasoning `low`);
+low confidence or multiple issues can also request that single review. There is
+never a third response call, and SDK retries are disabled. Complaints/disputes
+always go to staff. Both calls use the shared budget gateway. Customer text and prior replies are never factual evidence.
 The lexical fact check compares values with authoritative evidence; it is not
 a semantic correctness guarantee and does not replace the pre-pilot benchmark.
 
@@ -149,14 +151,44 @@ Read-only tools use a separately configured replica with explicit freshness and
 ownership checks; see [the business adapter contract](ai-business-data.md).
 Common results use deterministic renderers. Missing/stale data and identity
 refusals hand over to staff. Business changes always require staff.
-Media still hands over to staff, and password attempts do not resume legacy
-login. Replies reuse the AI availability recheck, ticket ownership fence and
+With v2 enabled, audio is transcribed once with `gpt-transcribe`, and images
+are included in the same structured response call. Other media still goes to
+staff. Password attempts do not resume legacy login. Replies reuse the AI availability recheck, ticket ownership fence and
 message-id idempotency, and persist `awaiting_customer`. Escalations carry a
 bounded reason code and a generic staff summary, never model diagnostics.
-No schema migration is needed for this core. An approved rollout is still
-required; for rollback, leave/set `AI_AGENT_V2_ENABLED=false` in the approved
+The additive `20261122_ai_media_annotations.sql` migration is required before
+an approved rollout; for rollback, leave/set `AI_AGENT_V2_ENABLED=false` in the approved
 release configuration to select the legacy pipeline. This does not enable AI
 globally or on any WhatsApp number.
+
+### Agent media annotations
+
+Apply the media annotation migration only as part of an approved deployment.
+Transcripts and image notes are stored once on their original inbound message,
+shown to staff as AI annotations, and reused as untrusted context in later turns.
+They never become evidence for business facts. Deleted messages exclude these
+annotations from both the staff response and model context. The dashboard uses
+plain text rendering for annotations.
+
+Audio requires local `ffprobe`; unreadable/unknown duration, unsupported formats,
+files over `AI_AGENT_MEDIA_MAX_BYTES` (10 MB by default), or recordings over
+`AI_AGENT_AUDIO_MAX_SECONDS` (300 by default) hand off. Transcription requires a
+verified positive per-minute price. Voice language is detected from the cached
+transcript. Images use low-detail input; image notes are observations that may be
+wrong, so they cannot establish identity, balances, or shipment status. Both
+media types go through AI availability and the durable started-turn marker.
+No provider call is replayed after an uncertain outcome.
+
+Media itself is uploaded to the configured provider for analysis. Textual
+annotations are credential-masked before reuse; this does not imply that raw
+audio or pixels can be redacted by the text masker. No media payload or model
+output is logged. No real customer media is used in tests.
+
+The API shapes follow the official [file transcription guide](https://developers.openai.com/api/docs/guides/speech-to-text)
+and [image input guide](https://developers.openai.com/api/docs/guides/images-vision?api-mode=responses).
+Model availability and verified prices remain deployment prerequisites.
+
+![Synthetic staff view with AI media annotations](screenshots/ai-media-annotations.png)
 
 ## AI knowledge base
 

@@ -340,3 +340,51 @@ def test_identity_is_rechecked_after_provider_call(agent, monkeypatch):
     agent.state["responses"] = [response({"kind": "tool_call", "name": "get_customer_balance", "arguments_json": "{}"})]
     assert asyncio.run(agent.run()).reason_code == "IDENTITY_VERIFICATION_REQUIRED"
     assert len(agent.calls) == 1 and levels == []
+
+
+@pytest.mark.parametrize('reason', ['AI_UNCERTAIN', 'AI_LOW_CONFIDENCE', 'MULTIPLE_ISSUES'])
+def test_defined_review_triggers_use_one_stronger_model(agent, reason):
+    agent.state['responses'] = [response({'kind': 'escalate', 'reason_code': reason}), response()]
+    assert asyncio.run(agent.run()).reply
+    assert [call['model'] for call in agent.calls] == ['gpt-6-luna', 'gpt-6.2-sol']
+    assert agent.calls[1]['reasoning'] == {'effort': 'low'}
+    assert [meter['tier'] for meter in agent.meters] == ['primary', 'step_up']
+
+
+def test_stronger_model_uncertainty_never_causes_third_call(agent):
+    agent.state['responses'] = [response({'kind': 'escalate', 'reason_code': 'AI_LOW_CONFIDENCE'})] * 2
+    assert asyncio.run(agent.run()).reason_code == 'AI_LOW_CONFIDENCE'
+    assert len(agent.calls) == 2
+
+
+def test_complaint_always_goes_to_human(agent):
+    agent.state['responses'] = [response({'kind': 'escalate', 'reason_code': 'COMPLAINT_DISPUTE'})]
+    assert asyncio.run(agent.run()).reason_code == 'COMPLAINT_DISPUTE'
+    assert len(agent.calls) == 1
+
+
+def test_image_in_same_call_and_notes_cached_once(agent, monkeypatch):
+    from app.agent.media import PreparedMedia
+    saved = []
+
+    async def prepare(*args):
+        return PreparedMedia(101, 'data:image/png;base64,c3ludGhldGlj')
+
+    async def save(ticket, media, notes, repository):
+        saved.append((media.message_id, notes))
+
+    monkeypatch.setattr(core, 'prepare_media', prepare)
+    monkeypatch.setattr(core, 'save_image_notes', save)
+    def image_response(action):
+        return SimpleNamespace(status='completed', output=[{'type': 'message', 'content': [{
+            'type': 'output_text', 'text': json.dumps({'action': action, 'media_notes': 'A parcel box.'}),
+        }]}])
+    agent.state['responses'] = [image_response(reply('It costs $999.').model_dump()), image_response(reply().model_dump())]
+    assert asyncio.run(agent.run(media_type='image')).reply
+    assert saved == [(101, 'A parcel box.')]
+    assert len(agent.calls) == 2
+    for request, meter in zip(agent.calls, agent.meters):
+        content = request['input'][0]['content']
+        assert content[1]['type'] == 'input_image'
+        assert request['text']['format']['schema'] == core.IMAGE_DECISION_SCHEMA
+        assert meter['images'] == 1 and 'base64' not in json.dumps(meter['input_payload'])

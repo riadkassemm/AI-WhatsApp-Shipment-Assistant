@@ -1907,6 +1907,13 @@ function addMessage(container, m, extraClass = '', {allowReply = true} = {}) {
 
   const meta = document.createElement('div');
   meta.className = 'message-meta';
+  if (m.ai_media_text && !m.deleted_for_everyone_at) {
+    const annotation = document.createElement('div');
+    annotation.className = 'message-body';
+    annotation.dir = 'auto';
+    annotation.textContent = (m.ai_media_kind === 'transcript' ? 'AI transcript: ' : 'AI image notes: ') + m.ai_media_text;
+    bubble.append(annotation);
+  }
   if (m.replacement_for_message_id) {
     const replacement = document.createElement('span');
     replacement.className = 'muted';
@@ -2282,7 +2289,7 @@ function addDateDivider(container, value) {
 function timelineSignature(data) {
   const messageSignature = message => [
     message.id, message.sender_name, message.reply_to?.sender_name, message.updated_at, message.send_status, message.delivery_status, message.error_message, message.held_until,
-    message.media_available, message.body, message.version, message.edited_at,
+    message.media_available, message.body, message.version, message.edited_at, message.ai_media_text,
     message.deleted_for_everyone_at, message.can_edit, message.can_delete_for_everyone,
     (message.reactions || []).map(reaction => [reaction.id, reaction.emoji, reaction.reactor_type, reaction.reactor_name, reaction.updated_at])
   ];

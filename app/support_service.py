@@ -492,7 +492,8 @@ def _serialize_support_messages(
             # Do not expose cached media, captions, locations, or reactions through
             # the ticket detail and reply-preview paths after global deletion.
             for field in ("body", "location_latitude", "location_longitude", "location_name", "location_address", "provider_media_id",
-                          "provider_media_mime_type", "provider_media_filename", "error_message"):
+                          "provider_media_mime_type", "provider_media_filename", "error_message",
+                          "ai_media_text", "ai_media_kind", "ai_media_processed_at"):
                 safe_row[field] = None
             for field in ("media_url", "media_filename", "media_mime_type", "media_size_bytes", "media_available", "media_cached",
                           "media_too_large", "media_limit_label"):

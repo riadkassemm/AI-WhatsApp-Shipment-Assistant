@@ -10,6 +10,7 @@ Reason = Literal[
     "CHANGE_REQUIRES_HUMAN", "IDENTITY_VERIFICATION_REQUIRED",
     "BUSINESS_DATA_UNAVAILABLE", "BUSINESS_DATA_STALE", "KNOWLEDGE_UNAVAILABLE",
     "CUSTOMER_REQUESTED_HUMAN", "AI_UNCERTAIN", "AI_TOOL_UNAVAILABLE",
+    "AI_LOW_CONFIDENCE", "MULTIPLE_ISSUES", "COMPLAINT_DISPUTE",
 ]
 
 
@@ -42,3 +43,10 @@ class Decision(StrictModel):
 
 
 DECISION_SCHEMA = Decision.model_json_schema()
+
+
+class ImageDecision(Decision):
+    media_notes: str = Field(min_length=1, max_length=2000)
+
+
+IMAGE_DECISION_SCHEMA = ImageDecision.model_json_schema()

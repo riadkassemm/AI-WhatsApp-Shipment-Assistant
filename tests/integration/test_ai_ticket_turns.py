@@ -304,3 +304,59 @@ async def test_agent_context_query_excludes_notes_deleted_unsent_future_and_othe
     for i in range(20):
         await add(f'bounded {i}')
     assert len(await repo.list_ai_context_messages(41, source_message_id=None)) == 13
+
+
+@pytest.mark.asyncio
+async def test_v2_image_reaches_same_call_and_notes_are_visible(v2_turns, monkeypatch):
+    from app.agent import media
+    from app.support_media import StoredSupportMedia
+    from pathlib import Path
+    from tempfile import TemporaryDirectory
+    env = v2_turns
+    with TemporaryDirectory() as directory:
+        path = Path(directory) / 'synthetic.png'
+        path.write_bytes(b'synthetic image')
+
+        async def capture(**kwargs):
+            return None
+
+        async def image_call(prefix, tail, **kwargs):
+            env.prompts.append(tail)
+            return SimpleNamespace(status='completed', output=[{'type': 'message', 'content': [{
+                'type': 'output_text', 'text': json.dumps({'action': env.action, 'media_notes': 'A sealed parcel.'}),
+            }]}])
+
+        monkeypatch.setattr(service.support_service, 'capture_inbound_media', capture)
+        monkeypatch.setattr(media.support_media_store, 'get', lambda ticket, message: StoredSupportMedia(
+            ticket_id=ticket, message_id=message, path=path, mime_type='image/png', size_bytes=path.stat().st_size, filename='synthetic.png'))
+        from app.agent import core
+        monkeypatch.setattr(core.agent_service, '_call', image_call)
+        assert (await env.deliver('wamid.image', None, message_type='image', media_id='synthetic'))[1]['status'] == 'agent_replied'
+        ticket = await env.only_ticket()
+        rows = await env.sql("SELECT * FROM support_ticket_messages WHERE whatsapp_message_id='wamid.image'")
+        row = rows[0]
+        assert row['ai_media_text'] == 'A sealed parcel.' and row['ai_media_kind'] == 'image_notes'
+        assert env.prompts[0]['_image_url'].startswith('data:image/png;base64,')
+        assert not await env.repo.save_ai_media_annotation(ticket['id'], row['id'], kind='image_notes', text='overwrite')
+        assert not await env.repo.save_ai_media_annotation(999, row['id'], kind='image_notes', text='other ticket')
+        context = await env.repo.list_ai_context_messages(ticket['id'], source_message_id=None)
+        assert context[0]['ai_media_text'] == 'A sealed parcel.'
+        await env.sql("UPDATE support_ticket_messages SET deleted_for_everyone_at=UTC_TIMESTAMP() WHERE id=%s", (row['id'],))
+        deleted = (await env.sql('SELECT * FROM support_ticket_messages WHERE id=%s', (row['id'],)))[0]
+        visible = service._serialize_support_messages(ticket['id'], [deleted])[0]
+        assert visible['ai_media_text'] is None
+        assert len(await env.repo.list_ai_context_messages(ticket['id'], source_message_id=None)) == 1
+
+
+@pytest.mark.asyncio
+async def test_v2_disabled_audio_makes_no_transcription_call(v2_turns, monkeypatch):
+    env = v2_turns
+    async def disabled(**kwargs):
+        return SimpleNamespace(effective_ai_enabled=False, effective_reason='LINE_AI_DISABLED',
+                               configuration=SimpleNamespace(control_mode='manual'))
+    async def capture(**kwargs):
+        return None
+    monkeypatch.setattr(main.ai_availability_service, 'get_effective_ai_availability', disabled)
+    monkeypatch.setattr(service.support_service, 'capture_inbound_media', capture)
+    result = await env.deliver('wamid.audio', None, message_type='audio', media_id='synthetic', is_voice=True)
+    assert result[1]['status'] == 'handed_off_ai_disabled' and env.prompts == []
