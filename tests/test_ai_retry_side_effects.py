@@ -284,3 +284,8 @@ def test_in_memory_marker_contract():
         assert not await store.inbound_turn_started(["b"])
         assert not await store.inbound_turn_started([])
     asyncio.run(run())
+
+
+import pytest  # noqa: E402
+# Turn-logic tests: automated turns get an in-memory AI ticket (see conftest).
+pytestmark = pytest.mark.usefixtures("fake_ai_ticket")

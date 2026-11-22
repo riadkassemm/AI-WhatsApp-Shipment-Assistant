@@ -277,3 +277,8 @@ def test_shipping_topic_switch_clears_stale_login_and_processes_new_request(monk
         assert sent == ["Hayde l shipping options."]
 
     asyncio.run(run())
+
+
+import pytest  # noqa: E402
+# Turn-logic tests: automated turns get an in-memory AI ticket (see conftest).
+pytestmark = pytest.mark.usefixtures("fake_ai_ticket")

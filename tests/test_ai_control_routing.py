@@ -1186,3 +1186,7 @@ def test_ai_handoff_sends_no_message_to_customer(monkeypatch) -> None:
         assert sent == []
 
     asyncio.run(run())
+
+
+# Turn-logic tests: automated turns get an in-memory AI ticket (see conftest).
+pytestmark = pytest.mark.usefixtures("fake_ai_ticket")

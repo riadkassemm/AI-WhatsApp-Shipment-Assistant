@@ -1,5 +1,6 @@
 """Unit helpers. Integration tests use their own real service fixture."""
 import os
+from types import SimpleNamespace
 
 import pytest
 
@@ -44,3 +45,46 @@ def outbound_unit(monkeypatch, tmp_path):
     install(support_repository)
     monkeypatch.setattr(support_media_store, '_root', tmp_path)
     return install
+
+
+@pytest.fixture
+def fake_ai_ticket(monkeypatch):
+    """Give automated turns an in-memory AI ticket (Step 3b).
+
+    For tests about turn logic rather than tickets: the turn gets a ticket
+    without touching MariaDB, and each AI reply goes straight to whatever
+    ``app.main.whatsapp_client`` the test installed, once per inbound message,
+    as the real fenced delivery path does. Returns the list of stored replies.
+    """
+    import app.main as main
+    from app.support_repository import SupportConflictError
+
+    replies = []
+    state = {"handled_by_ai": True}
+
+    async def ticket_for_turn(*, conversation, incoming, parsed_auth, ai_ticket):
+        ticket = ai_ticket or {
+            "id": 1, "handling_mode": "AI", "whatsapp_phone": conversation.phone_number,
+            "business_phone_number_id": conversation.business_phone_number_id,
+        }
+        return ticket, None
+
+    async def send_ai_reply(ticket, *, body, source_message_id, awaiting_customer=False):
+        if not state["handled_by_ai"]:
+            raise SupportConflictError("The AI assistant no longer handles this conversation.")
+        if source_message_id and any(row["source_message_id"] == source_message_id for row in replies):
+            return next(row for row in replies if row["source_message_id"] == source_message_id)
+        line = ticket.get("business_phone_number_id")
+        kwargs = {"phone_number_id": line} if line else {}
+        response = await main.whatsapp_client.send_text(to=ticket["whatsapp_phone"], body=body, **kwargs)
+        messages = response.get("messages") if isinstance(response, dict) else None
+        row = {
+            "source_message_id": source_message_id, "body": body, "send_status": "SENT",
+            "whatsapp_message_id": (messages[0].get("id") if messages else None),
+        }
+        replies.append(row)
+        return row
+
+    monkeypatch.setattr(main, "_ai_ticket_for_turn", ticket_for_turn)
+    monkeypatch.setattr(main.support_service, "send_ai_reply", send_ai_reply)
+    return SimpleNamespace(replies=replies, state=state)
