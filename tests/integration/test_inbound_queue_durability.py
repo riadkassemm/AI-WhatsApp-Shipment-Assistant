@@ -118,3 +118,28 @@ def test_drain_gate_never_waits_for_queue_or_lease_expiry(isolated_redis):
     client.set("conversation:processing:fixture", "processing:test", ex=1)
     with pytest.raises(RuntimeError, match="INBOUND_DRAIN_UNRESOLVED"):
         require_drained(client, 10, sleep=lambda _: pytest.fail("Must abort without waiting for expiry"))
+
+
+def test_turn_started_marker_is_durable_hashed_and_expires(isolated_redis):
+    client, url = isolated_redis
+    async def run():
+        first = RedisConversationStore(url, 3600)
+        try:
+            assert not await first.inbound_turn_started(["wamid.t1", "wamid.t2"])
+            await first.mark_inbound_turn_started(["wamid.t1", "wamid.t2", ""])
+        finally:
+            await first._client.aclose()
+        # A new client (for example after an API restart) still sees the marker.
+        second = RedisConversationStore(url, 3600)
+        try:
+            assert await second.inbound_turn_started(["wamid.other", "wamid.t2"])
+            assert not await second.inbound_turn_started(["wamid.other"])
+            assert not await second.inbound_turn_started([])
+        finally:
+            await second._client.aclose()
+        keys = [key.decode() for key in client.scan_iter(match="whatsapp:inbound-turn:*")]
+        assert len(keys) == 2
+        # Keys never contain the raw WhatsApp message ID, and they expire.
+        assert all("wamid" not in key for key in keys)
+        assert all(0 < client.ttl(key) <= 7 * 24 * 60 * 60 for key in keys)
+    asyncio.run(run())

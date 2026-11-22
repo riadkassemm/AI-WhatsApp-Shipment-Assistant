@@ -324,6 +324,11 @@ def _inbound_message_key(
     return f"whatsapp:inbound:{message_id}"
 
 
+def _inbound_turn_key(message_id: str) -> str:
+    digest = hashlib.sha256(message_id.encode("utf-8")).hexdigest()
+    return f"whatsapp:inbound-turn:{digest}"
+
+
 def _inbound_revoked_key(message_id: str) -> str:
     digest = hashlib.sha256(message_id.encode("utf-8")).hexdigest()
     return f"whatsapp:inbound-revoked:{digest}"
@@ -422,6 +427,17 @@ class BaseConversationStore:
         raise NotImplementedError
 
     async def is_inbound_revoked(self, message_id: str) -> bool:
+        raise NotImplementedError
+
+    async def mark_inbound_turn_started(self, message_ids: list[str]) -> None:
+        """Record that an automated turn began for these inbound messages.
+
+        Once set, a retried delivery of any of them must never re-run the turn
+        (authentication, quotes, quota or OpenAI); it is handed to human support.
+        """
+        raise NotImplementedError
+
+    async def inbound_turn_started(self, message_ids: list[str]) -> bool:
         raise NotImplementedError
 
     async def claim_conversation_processing(
@@ -607,6 +623,7 @@ class InMemoryConversationStore(
         self._pending_inbound_work: dict[str, list[dict[str, Any]]] = {}
         self._inflight_inbound_work: dict[str, list[dict[str, Any]]] = {}
         self._revoked_inbound: dict[str, float] = {}
+        self._started_turns: dict[str, float] = {}
 
         # Short-lived password-first auth values. These never enter Conversation
         # JSON/history and are popped immediately when the missing userid arrives.
@@ -768,6 +785,16 @@ class InMemoryConversationStore(
             return True
         self._revoked_inbound.pop(message_id, None)
         return False
+
+    async def mark_inbound_turn_started(self, message_ids: list[str]) -> None:
+        expires_at = time.monotonic() + INBOUND_COMPLETED_TTL_SECONDS
+        for message_id in message_ids:
+            if message_id:
+                self._started_turns[message_id] = expires_at
+
+    async def inbound_turn_started(self, message_ids: list[str]) -> bool:
+        now = time.monotonic()
+        return any(self._started_turns.get(message_id, 0) > now for message_id in message_ids if message_id)
 
 
     @staticmethod
@@ -1347,6 +1374,19 @@ class RedisConversationStore(
 
     async def is_inbound_revoked(self, message_id: str) -> bool:
         return bool(await self._client.exists(_inbound_revoked_key(message_id)))
+
+    async def mark_inbound_turn_started(self, message_ids: list[str]) -> None:
+        keys = [_inbound_turn_key(message_id) for message_id in message_ids if message_id]
+        if not keys:
+            return
+        pipeline = self._client.pipeline(transaction=True)
+        for key in keys:
+            pipeline.set(key, "1", ex=INBOUND_COMPLETED_TTL_SECONDS)
+        await pipeline.execute()
+
+    async def inbound_turn_started(self, message_ids: list[str]) -> bool:
+        keys = [_inbound_turn_key(message_id) for message_id in message_ids if message_id]
+        return bool(keys) and bool(await self._client.exists(*keys))
 
 
 def _build_store() -> BaseConversationStore:
