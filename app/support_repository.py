@@ -2766,6 +2766,36 @@ class SupportRepository(DashboardRepositoryMixin, DeliveryRepositoryMixin, ReadS
                 await conn.rollback()
                 raise
 
+    async def list_ai_context_messages(
+        self, ticket_id: int, *, source_message_id: str | None,
+    ) -> list[dict[str, Any]]:
+        """Only customer text and sent AI replies, bounded to this ticket/turn.
+
+        Never expose internal staff notes, deleted text, pending/failed drafts,
+        other tickets, or later customer messages queued behind this turn.
+        """
+        if self._pool is None:
+            await self.connect()
+        assert self._pool is not None
+        async with self._pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(
+                    """SELECT sender_type, body, whatsapp_message_id
+                    FROM support_ticket_messages
+                    WHERE ticket_id = %s AND deleted_for_everyone_at IS NULL
+                      AND message_type = 'text'
+                      AND ((sender_type = 'CUSTOMER' AND direction = 'INBOUND')
+                           OR (sender_type = 'AI' AND direction = 'OUTBOUND' AND send_status = 'SENT'))
+                      AND (%s IS NULL OR id <= (
+                          SELECT source.id FROM support_ticket_messages source
+                          WHERE source.ticket_id = %s AND source.whatsapp_message_id = %s LIMIT 1))
+                    ORDER BY id DESC LIMIT 13""",
+                    (ticket_id, source_message_id, ticket_id, source_message_id),
+                )
+                rows = list(await cur.fetchall())
+        rows.reverse()
+        return rows
+
     async def list_messages(
         self,
         ticket_id: int,
