@@ -192,6 +192,7 @@ const state = {
   deleteTarget: null,
   imageEditor: null,
   unassignedSnapshot: null,
+  aiIdentity: null,
   lastInboundByTicket: {},
   localMessages: new Map(),
   realtimeMessages: new Map(),

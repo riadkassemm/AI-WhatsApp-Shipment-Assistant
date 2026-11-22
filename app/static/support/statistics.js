@@ -218,6 +218,8 @@ function investigationActivity(event) {
     case 'RETURNED_TO_AI': return 'Staff handling ended.';
     case 'AI_ESCALATED': return 'The AI assistant handed the conversation to staff' + (data.reason_code ? ' (' + aiEscalationLabel(data.reason_code).toLowerCase() + ').' : '.');
     case 'AI_TAKEN_OVER': return actor + ' took the conversation over from the AI assistant.';
+    case 'AI_IDENTITY_VERIFIED': return actor + ' verified the customer for the AI assistant.';
+    case 'AI_IDENTITY_REVOKED': return actor + ' removed the customer\'s AI verification.';
     case 'STATUS_CHANGED': return actor + ' changed the status' + (data.to ? ' to ' + investigationLabel(data.to).toLowerCase() : '') + '.';
     case 'CONVERSATION_VIEWED': return actor + ' opened the conversation.';
     case 'INCOMING_MARKED_READ': return data.mode === 'reply_sync' ? 'Customer message marked as read after ' + actor + ' replied.' : actor + ' marked a customer message as read.';

@@ -18,6 +18,7 @@ function clearTicketWorkspace() {
   cancelMessageEdit(false);
   state.ticketId = null;
   state.currentTicketData = null;
+  state.aiIdentity = null;
   state.currentConversationOrigin = null;
   state.previousTicketHistory = [];
   state.previousTicketHistoryHasMore = false;
@@ -2239,6 +2240,10 @@ function addEvent(container, event) {
     label = 'Handed to staff by AI' + (details.reason_code ? ': ' + aiEscalationLabel(details.reason_code) : '');
   } else if (event.event_type === 'AI_TAKEN_OVER') {
     label = 'Taken over from AI';
+  } else if (event.event_type === 'AI_IDENTITY_VERIFIED') {
+    label = 'Customer verified for AI' + (details.valid_days ? ' (' + details.valid_days + ' days)' : '');
+  } else if (event.event_type === 'AI_IDENTITY_REVOKED') {
+    label = 'AI verification removed';
   } else if (event.event_type === 'TICKET_RESOLVED' && event.actor_type === 'AI') {
     const hours = Number(details.quiet_minutes || 0) / 60;
     label = 'Resolved by AI' + (hours ? ' (no messages for ' + (hours === 1 ? '1 hour' : Number(hours.toFixed(1)) + ' hours') + ')' : '');
@@ -2847,7 +2852,114 @@ function contextValue(value) {
   return String(value);
 }
 
-const CONTEXT_CARD_ICONS = {Customer: 'user', Escalation: 'alert', 'AI summary': 'activity', 'AI assistant': 'sparkles', 'AI cost (estimate)': 'activity', Shipment: 'truck', Ticket: 'tag', Chat: 'message'};
+const CONTEXT_CARD_ICONS = {Customer: 'user', Escalation: 'alert', 'AI summary': 'activity', 'AI assistant': 'sparkles', 'AI cost (estimate)': 'activity', 'AI identity': 'shield', Shipment: 'truck', Ticket: 'tag', Chat: 'message'};
+const AI_IDENTITY_LEVELS = {
+  L0: 'Unknown: the AI shares public information only (rates, policies).',
+  L1: 'Phone matched: the AI may share orders, tracking and shipments of this account.',
+  L2: 'Verified by staff: the AI may also share wallet, payment and account details.'
+};
+const AI_IDENTITY_REASONS = {
+  NO_MATCH: 'No customer account uses this WhatsApp number.',
+  SHARED_NUMBER: 'Several customer accounts use this number.',
+  INACTIVE_ACCOUNT: 'The matching customer account is inactive.',
+  LOOKUP_UNAVAILABLE: 'Customer accounts could not be checked right now.'
+};
+
+// The AI identity card loads once per opened ticket (and after verify/revoke);
+// background refreshes re-render it from this cache.
+function renderAiIdentityCard(slot, ticket) {
+  slot.replaceChildren();
+  const cached = state.aiIdentity && String(state.aiIdentity.ticketId) === String(ticket.id) ? state.aiIdentity.data : null;
+  if (!cached) {
+    appendContextCard(slot, 'AI identity', [['Level', 'Checking…']]);
+    return;
+  }
+  const verification = cached.verification || null;
+  appendContextCard(slot, 'AI identity', [
+    ['Level', cached.level + ' · ' + (AI_IDENTITY_LEVELS[cached.level] || '')],
+    ['Why', AI_IDENTITY_REASONS[cached.reason] || null],
+    ['Account', cached.customer_userid || null, 'code'],
+    ['Verified by', verification ? (verification.verified_by_staff_name || 'Staff') + ' · ' + fmt(verification.verified_at) : null],
+    ['Expires', verification ? fmt(verification.expires_at) : null]
+  ]);
+  const card = slot.lastElementChild;
+  const actions = document.createElement('div');
+  actions.className = 'context-card-actions';
+  if (cached.can_verify) {
+    const verify = document.createElement('button');
+    verify.type = 'button';
+    verify.className = 'btn small';
+    verify.append(createIcon('shield', 'icon icon-sm'), document.createTextNode(cached.level === 'L2' ? 'Verify again' : 'Verify customer for AI'));
+    verify.onclick = () => verifyAiIdentity(ticket);
+    actions.append(verify);
+  }
+  if (cached.can_revoke) {
+    const revoke = document.createElement('button');
+    revoke.type = 'button';
+    revoke.className = 'btn small ghost';
+    revoke.textContent = 'Remove verification';
+    revoke.onclick = () => revokeAiIdentity(ticket);
+    actions.append(revoke);
+  }
+  if (actions.childElementCount && card) card.append(actions);
+}
+
+async function loadAiIdentity(ticketId, {force = false} = {}) {
+  if (!force && state.aiIdentity && String(state.aiIdentity.ticketId) === String(ticketId)) return;
+  state.aiIdentity = {ticketId, data: null};
+  let data = null;
+  try {
+    data = await api('/api/support/tickets/' + ticketId + '/ai-identity');
+  } catch (_) {
+    data = {level: 'L0', reason: 'LOOKUP_UNAVAILABLE'};
+  }
+  if (!state.aiIdentity || String(state.aiIdentity.ticketId) !== String(ticketId)) return;
+  state.aiIdentity = {ticketId, data};
+  const slot = $('aiIdentitySlot');
+  const ticket = state.currentTicketData?.ticket;
+  if (slot && ticket && String(ticket.id) === String(ticketId)) renderAiIdentityCard(slot, ticket);
+}
+
+async function verifyAiIdentity(ticket) {
+  const days = state.aiIdentity?.data?.verification_days || 30;
+  const userid = await promptDialog({
+    title: 'Verify customer for AI',
+    message: 'Only continue after confirming this customer\'s identity with the usual process. The AI may then share wallet, payment and account details with this WhatsApp number for ' + days + ' days.',
+    label: 'Customer User ID',
+    value: ticket.customer_userid || state.aiIdentity?.data?.customer_userid || '',
+    confirmLabel: 'I verified this customer'
+  });
+  if (userid === null || !String(userid).trim()) return;
+  try {
+    const data = await api('/api/support/tickets/' + ticket.id + '/ai-identity/verify', {
+      method: 'POST', body: JSON.stringify({userid: String(userid).trim(), confirmed: true})
+    });
+    state.aiIdentity = {ticketId: ticket.id, data};
+    notify('Customer verified for AI until ' + fmt(data.verification?.expires_at) + '.');
+    const slot = $('aiIdentitySlot');
+    if (slot) renderAiIdentityCard(slot, ticket);
+  } catch (error) {
+    notify(error.message, 'error');
+  }
+}
+
+async function revokeAiIdentity(ticket) {
+  const ok = await confirmDialog({
+    title: 'Remove AI verification?',
+    message: 'The AI will stop sharing wallet, payment and account details with this WhatsApp number.',
+    confirmLabel: 'Remove verification', tone: 'danger'
+  });
+  if (!ok) return;
+  try {
+    const data = await api('/api/support/tickets/' + ticket.id + '/ai-identity/revoke', {method: 'POST'});
+    state.aiIdentity = {ticketId: ticket.id, data};
+    notify('AI verification removed.');
+    const slot = $('aiIdentitySlot');
+    if (slot) renderAiIdentityCard(slot, ticket);
+  } catch (error) {
+    notify(error.message, 'error');
+  }
+}
 
 function appendContextCard(container, title, entries, {summary = false} = {}) {
   const card = document.createElement('section');
@@ -2978,6 +3090,11 @@ function renderContext(ticket, context, shipment, identity = null, permissions =
       ]);
     }
     if (ticket.ai_summary) appendContextCard(container, 'AI summary', [['Summary', ticket.ai_summary]], {summary: true});
+    const identitySlot = document.createElement('div');
+    identitySlot.id = 'aiIdentitySlot';
+    container.append(identitySlot);
+    renderAiIdentityCard(identitySlot, ticket);
+    loadAiIdentity(ticket.id).catch(() => {});
     const aiUsage = state.currentTicketData?.ai_usage;
     if (aiUsage && Number(aiUsage.requests) > 0) {
       appendContextCard(container, 'AI cost (estimate)', [

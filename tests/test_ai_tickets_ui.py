@@ -35,7 +35,7 @@ const permissions={can_operate:true,can_reply:false,can_forward:true,can_transfe
 const detail=(ticket,extra)=>({ticket,context:{},shipment:null,messages:ticket.id===501?messages:[],messages_has_more:false,
   events:extra.events||[],customer_identity:{source:'guest',name:ticket.customer_name},previous_ticket_history:[],
   previous_ticket_history_has_more:false,ai_usage:extra.ai_usage||null,permissions:{...permissions,...extra.permissions}});
-window.takeOvers=[];
+window.takeOvers=[];window.verifications=[];
 const nativeFetch=window.fetch.bind(window);
 window.fetch=async(url,options={})=>{
   const parsed=new URL(url,location.origin),path=parsed.pathname;
@@ -52,6 +52,14 @@ window.fetch=async(url,options={})=>{
     events:[{id:9,event_type:'AI_ESCALATED',actor_type:'AI',actor_name:'AI assistant',created_at:'2026-11-22T08:06:00',
       details_json:'{"reason_code":"IDENTITY_VERIFICATION_REQUIRED"}'}]}));
   if(path==='/api/support/tickets/501/take-over'&&options.method==='POST'){takeOvers.push(path);return reply({changed:true});}
+  if(path==='/api/support/tickets/501/ai-identity') return reply({level:'L1',reason:'PHONE_MATCH',customer_userid:'cust-501',
+    can_verify:true,can_revoke:false,verification_days:30,verification:null});
+  if(path==='/api/support/tickets/501/ai-identity/verify'&&options.method==='POST'){
+    verifications.push(JSON.parse(options.body));
+    return reply({level:'L2',reason:'STAFF_VERIFIED',customer_userid:'cust-501',can_verify:true,can_revoke:true,verification_days:30,
+      verification:{id:1,verified_at:'2026-11-22T09:00:00+00:00',expires_at:'2026-12-22T09:00:00+00:00',verified_by_staff_name:'Demo Admin'}});
+  }
+  if(/^\/api\/support\/tickets\/\d+\/ai-identity$/.test(path)) return reply({level:'L0',reason:'NO_MATCH',can_verify:false,can_revoke:false});
   return nativeFetch(url,options);
 };
 </script>'''
@@ -77,6 +85,17 @@ CHECKS = r'''<script>
   check(context.includes('The AI assistant is answering this conversation'),'AI assistant card missing');
   check(context.includes('AI cost (estimate)') && context.includes('$0.0042'),'Per-ticket AI cost missing');
   check($('conversation').textContent.includes('Your parcel is in Beirut.'),'AI message missing from the timeline');
+  const waitFor=async(test,message)=>{for(let i=0;i<100&&!test();i++) await new Promise(r=>setTimeout(r,20)); check(test(),message);};
+  await waitFor(()=>$('aiIdentitySlot').textContent.includes('Phone matched'),'AI identity card missing');
+  const verifyButton=[...$('aiIdentitySlot').querySelectorAll('button')].find(b=>b.textContent.includes('Verify customer for AI'));
+  check(verifyButton,'Verify button missing');
+  verifyButton.click();
+  await waitFor(()=>!$('confirmModal').classList.contains('hidden') && $('confirmInput').value==='cust-501','Verify dialog missing');
+  $('confirmAcceptBtn').click();
+  await waitFor(()=>verifications.length===1,'Verification not sent');
+  check(verifications[0].userid==='cust-501' && verifications[0].confirmed===true,'Wrong verification request');
+  await waitFor(()=>$('aiIdentitySlot').textContent.includes('Verified by staff'),'Card did not show L2');
+  check($('aiIdentitySlot').textContent.includes('Remove verification'),'Remove action missing');
   if(location.search.includes('preview=1')) return;
 
   // AI conversations never alert staff; an escalation does.
