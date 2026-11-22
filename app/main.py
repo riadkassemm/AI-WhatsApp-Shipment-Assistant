@@ -54,7 +54,7 @@ from app.security import (
     verify_meta_signature,
 )
 from app.support_api import router as support_api_router
-from app.support_repository import SupportConflictError
+from app.support_repository import SupportConflictError, support_repository
 from app.support_media import SUPPORT_MEDIA_MESSAGE_TYPES, SupportMediaError, document_label
 from app.support_models import ACTIVE_TICKET_STATUSES, HandoffRequest
 from app.support_service import sanitize_support_text, support_service
@@ -78,6 +78,8 @@ logging.basicConfig(level=settings.log_level)
 logger = logging.getLogger("shipment-bot")
 
 _idle_ticket_sweeper: asyncio.Task | None = None
+_inbound_queue_sweeper: asyncio.Task | None = None
+_dependency_health_cache: tuple[float, bool] | None = None
 _inbound_tasks: set[asyncio.Task] = set()
 _inbound_stopping = False
 
@@ -127,6 +129,78 @@ async def _stop_idle_ticket_sweeper() -> None:
             pass
 
 
+async def _sweep_inbound_queues_once() -> int:
+    """Drive every queue that still holds work, e.g. after a failed webhook.
+
+    Without this, a message whose processing failed waited for the same
+    customer's next message or a provider retry, and could expire meanwhile.
+    """
+    heads = await conversation_store.scan_inbound_queue_heads()
+    routes: set[str] = set()
+    for head in heads:
+        incoming = _incoming_from_queued_item(head)
+        if incoming is not None:
+            routes.add(_conversation_route_key(incoming))
+    if not routes:
+        return 0
+    limit = asyncio.Semaphore(max(1, int(settings.inbound_sweep_concurrency)))
+
+    async def drive(route: str) -> None:
+        async with limit:
+            if _inbound_stopping:
+                return
+            try:
+                await _drive_inbound_queue(route)
+            except RuntimeError as exc:
+                level = logging.INFO if str(exc) == "INBOUND_RECOVERY_REQUIRED" else logging.WARNING
+                logger.log(
+                    level,
+                    "Inbound sweep could not drive queue: customer_ref=%s reason=%s",
+                    safe_log_identifier(route, "wa"),
+                    str(exc)[:64],
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Inbound sweep could not drive queue: customer_ref=%s error_type=%s",
+                    safe_log_identifier(route, "wa"),
+                    type(exc).__name__,
+                )
+
+    await asyncio.gather(*(drive(route) for route in sorted(routes)))
+    return len(routes)
+
+
+async def _sweep_inbound_queues_forever() -> None:
+    interval = max(5, int(settings.inbound_sweep_interval_seconds))
+    while True:
+        await asyncio.sleep(interval)
+        if _inbound_stopping:
+            continue
+        try:
+            await _sweep_inbound_queues_once()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("Inbound queue sweep failed: error_type=%s", type(exc).__name__)
+
+
+async def _start_inbound_queue_sweeper() -> None:
+    global _inbound_queue_sweeper
+    if int(settings.inbound_sweep_interval_seconds) > 0 and _inbound_queue_sweeper is None:
+        _inbound_queue_sweeper = asyncio.create_task(_sweep_inbound_queues_forever())
+
+
+async def _stop_inbound_queue_sweeper() -> None:
+    global _inbound_queue_sweeper
+    task, _inbound_queue_sweeper = _inbound_queue_sweeper, None
+    if task is not None:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
     global _inbound_stopping
@@ -134,10 +208,13 @@ async def _lifespan(_app: FastAPI):
     from app.support_delivery_reconciliation import reconcile_deliveries_forever
     reconciliation = asyncio.create_task(reconcile_deliveries_forever(support_service)) if settings.support_ui_enabled else None
     await _start_idle_ticket_sweeper()
+    await _start_inbound_queue_sweeper()
     try:
         yield
     finally:
         _inbound_stopping = True
+        # Stop starting new drives before waiting for the ones in progress.
+        await _stop_inbound_queue_sweeper()
         # Uvicorn may already have cancelled request handlers. Their shielded
         # workers still own durable reservations and must finish before exit.
         try:
@@ -289,6 +366,9 @@ def _queued_inbound_item(
         "reaction_emoji": incoming.reaction_emoji,
         "contacts": incoming.contacts,
         "claim_token": claim_token,
+        # When this server accepted the message. A message accepted in time but
+        # delayed by our own retries is never dropped as "expired".
+        "enqueued_at": int(time.time()),
     }
 
 
@@ -403,6 +483,117 @@ def _response_is_retryable(response: Response) -> bool:
     return response.status_code == 429 or response.status_code >= 500
 
 
+def _response_status(response: Response | None) -> str:
+    try:
+        return str(json.loads(response.body).get("status") or "")[:64]  # type: ignore[union-attr]
+    except Exception:
+        return ""
+
+
+def _delayed_by_us(item: dict) -> bool:
+    """Accepted while fresh, but now past the freshness cutoff because of our retries."""
+    max_age = max(0, int(settings.whatsapp_max_inbound_age_seconds))
+    sent = _inbound_timestamp(item.get("timestamp"))
+    accepted = _inbound_timestamp(item.get("enqueued_at"))
+    if not max_age or sent is None or accepted is None:
+        return False
+    return _inbound_expired(item.get("timestamp")) and accepted - sent <= max_age
+
+
+def _safe_mode_reason(item: dict) -> str | None:
+    """Why a queued message must go to human support without AI, if it must.
+
+    Safe mode applies to work that was abandoned and recovered, that already
+    failed repeatedly, or that our own retries delayed past the freshness cutoff.
+    """
+    if item.get("recovered"):
+        return "INBOUND_RECOVERED"
+    if int(item.get("attempts") or 0) >= max(1, int(settings.inbound_safe_mode_attempts)):
+        return "INBOUND_PROCESSING_FAILED"
+    if _delayed_by_us(item):
+        return "INBOUND_DELAYED_PROCESSING"
+    return None
+
+
+async def _inbound_dependencies_healthy() -> bool:
+    """Whether Redis and MariaDB answer right now (cached for 10 seconds).
+
+    Failures are counted toward safe mode / dead-lettering only while both are
+    healthy, so a dependency outage never parks customer messages.
+    """
+    global _dependency_health_cache
+    now = time.monotonic()
+    if _dependency_health_cache is not None and now - _dependency_health_cache[0] < 10:
+        return _dependency_health_cache[1]
+    healthy = True
+    try:
+        await asyncio.wait_for(conversation_store.ping(), timeout=3)
+        await asyncio.wait_for(support_repository.ping(), timeout=3)
+    except Exception:
+        healthy = False
+    _dependency_health_cache = (now, healthy)
+    return healthy
+
+
+async def _note_inbound_failure(items: list[dict], response: Response | None) -> bool:
+    """Count one failed attempt per item and schedule its retry with backoff."""
+    healthy = await _inbound_dependencies_healthy()
+    now = time.time()
+    status = _response_status(response)
+    max_backoff = max(1, int(settings.inbound_retry_max_backoff_seconds))
+    for item in items:
+        attempts = int(item.get("attempts") or 0)
+        if healthy:
+            attempts += 1
+            item["attempts"] = attempts
+            item.setdefault("first_failed_at", now)
+        item["retry_after"] = now + min(2 ** min(max(attempts, 1), 16), max_backoff)
+        item["last_failure_status"] = status
+    return healthy
+
+
+def _should_dead_letter(item: dict, *, healthy: bool) -> bool:
+    if not healthy:
+        return False
+    attempts = int(item.get("attempts") or 0)
+    first_failed = float(item.get("first_failed_at") or time.time())
+    return (
+        attempts >= max(1, int(settings.inbound_dead_letter_attempts))
+        and time.time() - first_failed >= max(0, int(settings.inbound_dead_letter_min_age_seconds))
+    )
+
+
+async def _dead_letter_inbound_item(phone_number: str, item: dict) -> None:
+    await conversation_store.dead_letter_incoming_work(
+        phone_number, item, str(item.get("last_failure_status") or "repeated_failure"),
+    )
+    # Reason labels and identifiers only: the payload may hold customer text.
+    logger.error(
+        "Inbound message moved to dead-letter list after repeated failures: "
+        "customer_ref=%s message_id=%s attempts=%s last_status=%s",
+        safe_log_identifier(phone_number, "wa"),
+        item.get("message_id"),
+        item.get("attempts"),
+        item.get("last_failure_status"),
+    )
+
+
+async def _requeue_after_failure(
+    phone_number: str,
+    items: list[dict],
+    response: Response | None,
+) -> None:
+    """Count the failure, park items that keep failing, requeue the rest in order."""
+    healthy = await _note_inbound_failure(items, response)
+    remaining: list[dict] = []
+    for item in items:
+        if _should_dead_letter(item, healthy=healthy):
+            await _dead_letter_inbound_item(phone_number, item)
+        else:
+            remaining.append(item)
+    await _requeue_inbound_items_front(phone_number, remaining)
+
+
 async def _complete_queued_inbound_items(phone_number: str, items: list[dict]) -> None:
     for item in items:
         incoming = _incoming_from_queued_item(item)
@@ -507,8 +698,10 @@ async def _process_inbound_burst(phone_number: str, items: list[dict]) -> Respon
             if await _is_inbound_revoked(str(item.get("message_id") or ""))
         ]
     except Exception:
+        response = _json_response(503, {"status": "revocation_state_unavailable"})
+        await _note_inbound_failure(items, response)
         await _requeue_inbound_items_front(phone_number, items)
-        return _json_response(503, {"status": "revocation_state_unavailable"})
+        return response
     if revoked:
         await _complete_queued_inbound_items(phone_number, revoked)
         revoked_ids = {id(item) for item in revoked}
@@ -532,7 +725,11 @@ async def _process_inbound_burst(phone_number: str, items: list[dict]) -> Respon
     combined_ai_availability: EffectiveAIAvailability | None = None
     # A late message may belong to a ticket that has since closed; it must keep
     # its own identity and send time instead of being merged into an AI turn.
-    if active_ticket is None and not any(_inbound_expired(item.get("timestamp")) for item in items):
+    if (
+        active_ticket is None
+        and not any(_inbound_expired(item.get("timestamp")) for item in items)
+        and not any(_safe_mode_reason(item) for item in items)
+    ):
         candidate = _combine_inbound_burst(items)
         if candidate is not None:
             # Do not collapse several original WhatsApp messages into one synthetic
@@ -566,7 +763,7 @@ async def _process_inbound_burst(phone_number: str, items: list[dict]) -> Respon
             ),
         )
         if _response_is_retryable(response):
-            await _requeue_inbound_items_front(phone_number, items)
+            await _requeue_after_failure(phone_number, items, response)
             return response
         await _complete_queued_inbound_items(phone_number, items)
         return response
@@ -576,8 +773,17 @@ async def _process_inbound_burst(phone_number: str, items: list[dict]) -> Respon
         if incoming is None:
             await _complete_queued_inbound_items(phone_number, [item])
             continue
-        response = await _process_incoming_message(incoming)
+        safe_mode_reason = _safe_mode_reason(item)
+        if safe_mode_reason is not None:
+            response = await _process_incoming_message(incoming, safe_mode_reason=safe_mode_reason)
+        else:
+            response = await _process_incoming_message(incoming)
         if _response_is_retryable(response):
+            healthy = await _note_inbound_failure([item], response)
+            if _should_dead_letter(item, healthy=healthy):
+                # Only this message is parked; the customer's later messages continue.
+                await _dead_letter_inbound_item(phone_number, item)
+                continue
             await _requeue_inbound_items_front(phone_number, items[index:])
             return response
         await _complete_queued_inbound_items(phone_number, [item])
@@ -601,6 +807,13 @@ async def _drain_inbound_queue(
 
         if await conversation_store.pending_incoming_work_count(phone_number) <= 0:
             return last_response
+
+        # A message that just failed waits for its backoff; it stays at the head so
+        # the customer's messages keep their order. The sweeper retries it later.
+        peek = getattr(conversation_store, "peek_incoming_work", None)
+        head = await peek(phone_number) if callable(peek) else None
+        if head is not None and float(head.get("retry_after") or 0) > time.time():
+            return _json_response(200, {"status": "queued_for_retry"})
 
         items = await _collect_inbound_burst(phone_number, claim_token)
         if not items:
@@ -641,8 +854,26 @@ async def _drive_owned_inbound_queue(
                 return None
 
         if await conversation_store.inflight_incoming_work_count(phone_number):
-            await conversation_store.release_conversation_processing(phone_number, claim_token)
-            raise RuntimeError("INBOUND_RECOVERY_REQUIRED")
+            # The lock is granted only when the reserved work is older than the
+            # recovery grace period (its owner crashed, lost its lease or hit the
+            # shutdown deadline). Requeue it for human support - never for AI.
+            recover = getattr(conversation_store, "recover_inflight_incoming_work", None)
+            recovered = 0
+            try:
+                if callable(recover):
+                    recovered = await recover(phone_number, claim_token)
+                still_reserved = await conversation_store.inflight_incoming_work_count(phone_number)
+            except Exception:
+                await conversation_store.release_conversation_processing(phone_number, claim_token)
+                raise
+            if recovered <= 0 or still_reserved:
+                await conversation_store.release_conversation_processing(phone_number, claim_token)
+                raise RuntimeError("INBOUND_RECOVERY_REQUIRED")
+            logger.warning(
+                "Recovered abandoned inbound work for human support: customer_ref=%s count=%d",
+                safe_log_identifier(phone_number, "wa"),
+                recovered,
+            )
         owner = asyncio.current_task()
 
         async def keep_lease():
@@ -668,7 +899,7 @@ async def _drive_owned_inbound_queue(
                 claim_token,
             )
 
-        if _response_is_retryable(response):
+        if _response_is_retryable(response) or _response_status(response) == "queued_for_retry":
             return response
 
         # A webhook can enqueue after our final empty check but just before the lock
@@ -1938,6 +2169,7 @@ async def _process_incoming_message(
     *,
     ai_availability_snapshot: EffectiveAIAvailability | None = None,
     burst_message_ids: tuple[str, ...] | None = None,
+    safe_mode_reason: str | None = None,
 ) -> Response:
     """
     Process one uniquely claimed inbound WhatsApp message.
@@ -2005,6 +2237,10 @@ async def _process_incoming_message(
         delayed = await _record_delayed_support_message(incoming, conversation)
         if delayed is not None:
             return delayed
+        if safe_mode_reason is not None:
+            # Accepted in time but delayed by our own retries or recovery: never
+            # drop it. It continues below to human support, without AI.
+            stale_reason = None
     if stale_reason is not None:
         logger.warning(
             "Stale inbound WhatsApp message ignored: "
@@ -2345,6 +2581,32 @@ async def _process_incoming_message(
                 if incoming.message_type == "location"
                 else "handed_off_media"
             ),
+        )
+
+    # =========================================================
+    # SAFE MODE: RECOVERED / REPEATEDLY FAILING / SELF-DELAYED WORK
+    # =========================================================
+    # Such a message may already have been partly handled, or the automated path
+    # is what keeps failing. It goes to human support, never to AI, and the
+    # handoff is idempotent by WhatsApp message ID.
+    if safe_mode_reason is not None:
+        logger.warning(
+            "Inbound message routed to human support in safe mode: customer_ref=%s "
+            "message_id=%s reason=%s",
+            customer_ref,
+            incoming.message_id,
+            safe_mode_reason,
+        )
+        return await _handoff_incoming_without_ai(
+            conversation=conversation,
+            incoming=incoming,
+            parsed_auth=parsed_auth,
+            reason=safe_mode_reason,
+            summary=(
+                "This message could not be processed normally (recovered, repeatedly "
+                "failing or delayed). It was routed to human support without AI."
+            ),
+            status_name="handed_off_safe_mode",
         )
 
     # Persistent MariaDB settings are the deployment-wide source of truth. This

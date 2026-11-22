@@ -335,7 +335,17 @@ def test_retryable_burst_is_requeued_without_losing_claim() -> None:
             # The original idempotency claim is intentionally retained while queued.
             assert await store.claim_incoming_message("wamid.retry") is None
 
-            second = await main._drive_inbound_queue(phone)
+            # The failed message now waits for its retry backoff at the queue head.
+            waiting = await main._drive_inbound_queue(phone)
+            assert waiting is not None and json.loads(waiting.body)["status"] == "queued_for_retry"
+            assert calls == 1
+
+            real_time = main.time.time
+            main.time.time = lambda: real_time() + 600  # type: ignore[assignment]
+            try:
+                second = await main._drive_inbound_queue(phone)
+            finally:
+                main.time.time = real_time  # type: ignore[assignment]
         finally:
             main.conversation_store = original_store
             main._process_incoming_message = original_process  # type: ignore[assignment]
