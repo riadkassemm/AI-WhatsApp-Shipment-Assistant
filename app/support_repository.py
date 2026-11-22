@@ -342,6 +342,12 @@ _SUPPORT_SCHEMA_MIGRATIONS: tuple[tuple[str, dict[str, set[str]]], ...] = (
         "customer_ai_verification_audit": {"verification_id", "whatsapp_phone", "action", "reason", "actor_type",
                                            "actor_staff_id", "created_at"},
     }),
+    ("migrations/20261122_ai_knowledge_base.sql", {
+        "ai_kb_articles": {"intent_key", "version", "status", "title", "approved_policy", "data_needed", "escalate_when",
+                           "examples_json", "observed_practice", "source", "source_ticket_ids", "approved_by_staff_id",
+                           "approved_at", "retired_at", "row_version"},
+        "ai_kb_audit": {"article_id", "intent_key", "action", "actor_staff_id", "created_at"},
+    }),
     ("migrations/20261122_ai_usage_budget.sql", {
         "ai_model_prices": {"id", "model_prefix", "input_per_million", "cached_input_per_million",
                             "output_per_million", "audio_per_minute", "batch_factor", "effective_from",

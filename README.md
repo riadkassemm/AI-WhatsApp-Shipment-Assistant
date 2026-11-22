@@ -480,6 +480,15 @@ Historical tickets are never sent in live AI requests. The offline tools live in
 - **`app/knowledge/deidentify.py`** replaces personal data with stable per-ticket placeholders before any historical text is used: secrets → `<SECRET>`, then `<EMAIL_n>`, `<URL_n>`, `<AMOUNT_n>`, `<NAME_n>` (names supplied by the caller), `<PHONE_n>` and `<ID_n>`. Media placeholders such as `[image]` are kept, and so are Arabizi words with digits. The code is deterministic; no model is called.
 - **`scripts/profile_support_tickets.py`** produces a counts-only profile: volumes, statuses, languages and styles, reason codes, messages per ticket, media share, resolution and first-reply times. It runs in a `READ ONLY` transaction. Every row is `(section, key, count)`, and free-text reasons are reported only as `(free text)`. Run it with `--run` (the database in `.env`), or with `--sql` piped to `mysql --batch` and then `--parse`. Keep the output outside this public repository.
 
+### AI knowledge base
+
+The AI's company knowledge is one short article per customer topic (`app/ai_knowledge.py`, migration `20261122_ai_knowledge_base.sql`). Admins and Super Admins manage it in **AI Assistant → Knowledge**.
+
+- **Article contents:** the approved answer, the data needed, when to hand over to staff, optional example replies per writing style, and "observed practice". Observed practice is what agents actually did; it is for reviewers only and is never shown to the AI.
+- **Only approved articles reach the AI.** They are built into the cached prompt prefix by `prompt_text()`, in a stable order so prompt caching keeps working. The tab shows the estimated size against the 15k-token budget.
+- **Approved articles are never edited in place.** **Revise** opens a new draft version, and approving it retires the old one. A draft that still contains de-identification placeholders (`<AMOUNT_1>`, `<PHONE_1>` and so on) cannot be approved.
+- **Every change is audited** in `ai_kb_audit`. API: `GET/POST /api/support/ai-knowledge`, `GET/PUT /api/support/ai-knowledge/{id}`, and `POST …/{id}/revise|approve|retire`.
+
 ## Database setup
 
 ### Core support tables

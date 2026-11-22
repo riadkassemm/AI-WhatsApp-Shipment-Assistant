@@ -127,6 +127,23 @@ and `20261122_ai_usage_ticket_index.sql` (index for per-ticket cost).
 
 ![AI ticket with synthetic data](screenshots/ai-tickets-dashboard.png)
 
+## AI knowledge base
+
+**AI Assistant → Knowledge** (Admins and Super Admins) lists the topic articles
+the AI may use, with the number of approved topics and the estimated prompt size.
+
+- Open a draft to edit the approved answer, the data needed, when to hand over to
+  staff, and example replies (one per line: `style | customer message | reply`).
+- **Approve** makes a draft the active answer for its topic and retires the
+  previous version.
+- Approved articles are read-only. **Revise** opens a new draft version, and
+  **Retire** stops the AI using an article.
+- Drafts written by the drafting tool show how many de-identified tickets they
+  came from. They must have every placeholder such as `<AMOUNT_1>` replaced
+  before they can be approved.
+
+Migration: `20261122_ai_knowledge_base.sql`.
+
 ## Reopening resolved customer tickets
 
 The resolved ticket's **Reopen ticket** button is available to its last assignee
