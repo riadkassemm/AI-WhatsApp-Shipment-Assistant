@@ -445,6 +445,17 @@ Every billable OpenAI call goes through `app/ai_usage.py` (migration `20261122_a
 
 The dashboard for this data (Usage & Costs tab, price verification, budget editing) follows in the next step.
 
+### AI tickets
+
+Every conversation the AI assistant handles is a support ticket (migration `20261122_support_ai_tickets.sql`, apply before restarting the API):
+
+- **Handling mode.** `support_tickets.handling_mode` is `AI` or `HUMAN`; every existing ticket is `HUMAN`. An AI ticket is listed only in the **AI Tickets** queue (`GET /api/support/tickets?view=ai`), never in Unassigned, Active, Mine, Watching or Waiting. Once resolved it appears in History like any other ticket.
+- **AI replies** are stored as `sender_type='AI'` (sender name "AI assistant") and sent through the same delivery path as staff replies, at most once per inbound WhatsApp message (`client_message_id = ai-reply:<wamid>`).
+- **Send-time fence.** An AI reply is stored only while the ticket is AI-handled and dispatched only if that is still true under the ticket row lock at send time. A takeover or escalation cancels AI replies that have not started dispatching (`FAILED`, not retryable).
+- **Take over** (`POST /api/support/tickets/{id}/take-over`, any staff member) moves the ticket to `HUMAN`, assigns it to the caller and records `AI_TAKEN_OVER` and `TICKET_CLAIMED`. Claim, status changes, resolve and dashboard replies are refused while the AI handles a ticket.
+- **Escalation** moves the ticket to `HUMAN` in Unassigned with `ai_escalation_reason` (a code such as `IDENTITY_VERIFICATION_REQUIRED`) and the AI summary, and records `AI_ESCALATED` (actor `AI`). A human handoff for a customer who already has an AI ticket escalates that ticket instead of opening a second one. A reply typed in the linked WhatsApp app also stops the AI (`STAFF_REPLIED_IN_WHATSAPP_APP`).
+- **Auto-resolve.** An AI ticket is resolved without a customer message after `SUPPORT_AI_TICKET_QUIET_RESOLVE_MINUTES` (default 120, `0` disables) with no message since the AI's last reply, provided the AI is not waiting for an answer and nothing is still being sent. The event `TICKET_RESOLVED` has actor type `AI`, so it never counts as agent work. The background check shares `SUPPORT_IDLE_TICKET_SWEEP_SECONDS` with the phone-app rule.
+
 ## Database setup
 
 ### Core support tables

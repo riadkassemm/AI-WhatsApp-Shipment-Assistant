@@ -1330,7 +1330,7 @@ async def forward_ticket_message_to_contact(
 async def list_tickets(
     view: str = Query(
         default="unassigned",
-        pattern="^(unassigned|mine|watching|active|waiting|chats|history)$",
+        pattern="^(ai|unassigned|mine|watching|active|waiting|chats|history)$",
     ),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=30, ge=1, le=500),
@@ -1517,6 +1517,18 @@ async def claim_ticket(
 ) -> dict:
     try:
         return await support_service.claim(ticket_id, agent)
+    except Exception as exc:
+        raise _translate_error(exc) from exc
+
+
+@router.post("/tickets/{ticket_id}/take-over")
+async def take_over_ai_ticket(
+    ticket_id: int,
+    agent: SupportAgent = Depends(require_support_csrf),
+) -> dict:
+    """Take an AI-handled conversation over: the AI stops and the caller owns it."""
+    try:
+        return await support_service.take_over(ticket_id, agent)
     except Exception as exc:
         raise _translate_error(exc) from exc
 

@@ -54,14 +54,15 @@ def _idle_ticket_ids(minutes: int = 120) -> list[int]:
     database = sqlite3.connect(":memory:")
     database.execute(
         "CREATE TABLE support_tickets (id INTEGER, conversation_origin TEXT, status TEXT, active_key TEXT, "
-        "current_assignee_id TEXT, created_at TEXT)"
+        "current_assignee_id TEXT, created_at TEXT, handling_mode TEXT NOT NULL DEFAULT 'HUMAN')"
     )
     database.execute(
         "CREATE TABLE support_ticket_messages (ticket_id INTEGER, direction TEXT, sender_type TEXT, "
         "sender_id TEXT, created_at TEXT)"
     )
     database.executemany(
-        "INSERT INTO support_tickets VALUES (?, ?, 'NEW', ?, ?, ?)",
+        "INSERT INTO support_tickets (id, conversation_origin, status, active_key, current_assignee_id, created_at)"
+        " VALUES (?, ?, 'NEW', ?, ?, ?)",
         [
             (1, "CUSTOMER", "line:1", None, _ago(300)),  # answered in the app, quiet for 3 hours
             (2, "CUSTOMER", "line:2", None, _ago(300)),  # answered in the app, customer wrote 30 min ago
@@ -71,8 +72,10 @@ def _idle_ticket_ids(minutes: int = 120) -> list[int]:
             (6, "STAFF", "line:6", None, _ago(300)),  # staff-started chat
             (7, "CUSTOMER", None, None, _ago(300)),  # already closed
             (8, "CUSTOMER", "line:8", None, _ago(30)),  # ticket itself is new
+            (9, "CUSTOMER", "line:9", None, _ago(300)),  # AI ticket (its own quiet rule applies)
         ],
     )
+    database.execute("UPDATE support_tickets SET handling_mode = 'AI' WHERE id = 9")
     old, recent = _ago(180), _ago(30)
     database.executemany(
         "INSERT INTO support_ticket_messages VALUES (?, ?, ?, ?, ?)",
@@ -89,6 +92,7 @@ def _idle_ticket_ids(minutes: int = 120) -> list[int]:
             (6, "OUTBOUND", "AGENT", None, old),
             (7, "OUTBOUND", "AGENT", None, old),
             (8, "OUTBOUND", "AGENT", None, _ago(200)),
+            (9, "OUTBOUND", "AGENT", None, old),
         ],
     )
     sql = (
@@ -295,12 +299,21 @@ def test_sweeper_keeps_running_after_a_failed_sweep(monkeypatch: pytest.MonkeyPa
     async def no_wait(_seconds: float) -> None:
         return None
 
+    ai_sweeps: list[int] = []
+
+    async def ai_sweep() -> int:
+        ai_sweeps.append(1)
+        return 0
+
     monkeypatch.setattr(main.support_service, "auto_resolve_idle_phone_app_tickets", sweep)
+    monkeypatch.setattr(main.support_service, "auto_resolve_idle_ai_tickets", ai_sweep)
     monkeypatch.setattr(main.asyncio, "sleep", no_wait)
 
     with pytest.raises(asyncio.CancelledError):
         asyncio.run(main._sweep_idle_tickets_forever())
     assert len(sweeps) == 3
+    # A failed phone-app sweep does not skip the AI ticket sweep.
+    assert len(ai_sweeps) == 2
 
 
 def test_sweeper_starts_and_stops_with_the_app(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -312,6 +325,7 @@ def test_sweeper_starts_and_stops_with_the_app(monkeypatch: pytest.MonkeyPatch) 
 
     async def lifecycle(minutes: int) -> bool:
         monkeypatch.setattr(main.settings, "support_phone_app_idle_resolve_minutes", minutes)
+        monkeypatch.setattr(main.settings, "support_ai_ticket_quiet_resolve_minutes", minutes)
         await main._start_idle_ticket_sweeper()
         running = main._idle_ticket_sweeper is not None
         await asyncio.sleep(0)

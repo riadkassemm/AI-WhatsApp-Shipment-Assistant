@@ -17,6 +17,16 @@ NOT_DELIVERED_ERROR = 'Not delivered: WhatsApp did not confirm this message with
 NOT_DELIVERED_COPIED_ERROR = 'Not delivered: WhatsApp did not confirm this message within 24 hours. A new copy was sent.'
 
 
+def _ai_may_send(ticket: dict) -> bool:
+    """The send-time fence for AI replies, evaluated under the ticket row lock.
+
+    Only an active ticket still handled by the AI may dispatch an AI reply; a
+    takeover, escalation or resolution committed first wins.
+    """
+    return (str(ticket.get('handling_mode') or 'HUMAN') == 'AI' and bool(ticket.get('active_key'))
+            and ticket.get('status') in ('NEW', 'ASSIGNED', 'IN_PROGRESS', 'WAITING_CUSTOMER', 'WAITING_INTERNAL'))
+
+
 class DeliveryRepositoryMixin:
     async def get_delivery_replacement(self, ticket_id: int, message_id: int):
         if self._pool is None:
@@ -157,12 +167,14 @@ class DeliveryRepositoryMixin:
                                        AND forwarded_from_ticket_id > 0 AND forwarded_from_message_id > 0
                                        AND BINARY client_message_id LIKE CONCAT(
                                            'contact-forward:', forwarded_from_ticket_id, ':',
-                                           forwarded_from_message_id, ':_%%')))))
+                                           forwarded_from_message_id, ':_%%'))))
+                               OR (sender_type = 'AI' AND %s))
                     """, (token, message_id, retry, DELIVERY_LEASE_MINUTES, retry, expected_token,
                           ticket['current_assignee_id'], bool(ticket['active_key']) and ticket['status'] in
                           ('ASSIGNED', 'IN_PROGRESS', 'WAITING_CUSTOMER', 'WAITING_INTERNAL'),
                           bool(ticket['active_key']) and ticket['status'] in
-                          ('NEW', 'ASSIGNED', 'IN_PROGRESS', 'WAITING_CUSTOMER', 'WAITING_INTERNAL')))
+                          ('NEW', 'ASSIGNED', 'IN_PROGRESS', 'WAITING_CUSTOMER', 'WAITING_INTERNAL'),
+                          _ai_may_send(ticket)))
                     claimed = cur.rowcount == 1
                     if claimed and prior and prior.get('whatsapp_message_id'):
                         await cur.execute("""INSERT INTO support_ticket_events
@@ -203,12 +215,14 @@ class DeliveryRepositoryMixin:
                                        AND forwarded_from_ticket_id > 0 AND forwarded_from_message_id > 0
                                        AND BINARY client_message_id LIKE CONCAT(
                                            'contact-forward:', forwarded_from_ticket_id, ':',
-                                           forwarded_from_message_id, ':_%%')))))
+                                           forwarded_from_message_id, ':_%%'))))
+                               OR (sender_type = 'AI' AND %s))
                     """, (message_id, token, DELIVERY_LEASE_MINUTES, ticket['current_assignee_id'],
                           bool(ticket['active_key']) and ticket['status'] in
                           ('ASSIGNED', 'IN_PROGRESS', 'WAITING_CUSTOMER', 'WAITING_INTERNAL'),
                           bool(ticket['active_key']) and ticket['status'] in
-                          ('NEW', 'ASSIGNED', 'IN_PROGRESS', 'WAITING_CUSTOMER', 'WAITING_INTERNAL')))
+                          ('NEW', 'ASSIGNED', 'IN_PROGRESS', 'WAITING_CUSTOMER', 'WAITING_INTERNAL'),
+                          _ai_may_send(ticket)))
                     changed = cur.rowcount == 1
                 await conn.commit()
             except BaseException:

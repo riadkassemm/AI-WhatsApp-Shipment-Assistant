@@ -154,6 +154,10 @@ class Settings(BaseSettings):
     # this many minutes without a message in either direction (0 disables).
     support_phone_app_idle_resolve_minutes: int = 120
     support_idle_ticket_sweep_seconds: int = 60
+    # An AI ticket is resolved automatically after this many minutes without a
+    # customer message since the AI's last reply, unless the AI is waiting for an
+    # answer. 0 disables it.
+    support_ai_ticket_quiet_resolve_minutes: int = 120
     support_cookie_name: str = "support_session"
     support_csrf_cookie_name: str = "support_csrf"
     support_cookie_secure: bool = True
