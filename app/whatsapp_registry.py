@@ -416,6 +416,9 @@ class WhatsAppRegistryRepository(RegistryMutationMixin):
 whatsapp_registry_repository = WhatsAppRegistryRepository()
 
 
+AI_COLUMNS = ("ai_enabled", "ai_updated_by_staff_id", "ai_updated_at")
+
+
 class WhatsAppRegistryService:
     def __init__(self, repository: WhatsAppRegistryRepository | None = None) -> None:
         self.repository = repository or whatsapp_registry_repository
@@ -486,6 +489,15 @@ class WhatsAppRegistryService:
         if len({str(row.get("column_name") or "") for row in columns}) < len(LIMIT_COLUMNS):
             raise WhatsAppRegistrySchemaError(
                 "WhatsApp chat limits are not installed. Apply migrations/20261117_whatsapp_outreach_limits.sql."
+            )
+        columns = await self.repository.fetch_all(
+            """SELECT COLUMN_NAME AS column_name FROM INFORMATION_SCHEMA.COLUMNS
+               WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s AND COLUMN_NAME IN (%s, %s, %s)""",
+            (settings.db_name, "whatsapp_phone_numbers", *AI_COLUMNS),
+        )
+        if len({str(row.get("column_name") or "") for row in columns}) < len(AI_COLUMNS):
+            raise WhatsAppRegistrySchemaError(
+                "The per-number AI switch is not installed. Apply migrations/20261122_whatsapp_number_ai_enabled.sql."
             )
 
     async def _seed_legacy_number(self) -> None:
@@ -667,6 +679,8 @@ class WhatsAppRegistryService:
             "verified_name": row.get("verified_name"),
             "quality_rating": row.get("quality_rating"),
             "is_enabled": bool(row.get("is_enabled")),
+            "ai_enabled": bool(row.get("ai_enabled")),
+            "ai_updated_at": _utc_isoformat(row.get("ai_updated_at")),
             "provider_present": bool(row.get("provider_present")),
             "source": row.get("source"),
             "last_synced_at": _utc_isoformat(row.get("last_synced_at")),
@@ -690,7 +704,8 @@ class WhatsAppRegistryService:
             SELECT phone_number_id, waba_id, display_phone_number, display_name, verified_name,
                    quality_rating, is_enabled, provider_present, source,
                    last_synced_at, created_at, updated_at,
-                   outreach_daily_limit, outreach_new_number_daily_limit, outreach_same_text_limit
+                   outreach_daily_limit, outreach_new_number_daily_limit, outreach_same_text_limit,
+                   ai_enabled, ai_updated_at
             FROM whatsapp_phone_numbers
             WHERE removed_at IS NULL
             ORDER BY is_enabled DESC, COALESCE(display_phone_number, phone_number_id)
@@ -708,6 +723,106 @@ class WhatsAppRegistryService:
                 for row in visible
             ],
         }
+
+    async def set_number_ai_enabled(
+        self,
+        agent: SupportAgent,
+        phone_number_id: str,
+        enabled: bool,
+    ) -> dict[str, Any]:
+        """Admins and Super Admins switch AI on or off for one WhatsApp number.
+
+        The change is read from MariaDB on every inbound message and again just
+        before every automated reply, so it applies on all instances at once and
+        an AI reply still in progress on a disabled number is never sent.
+        """
+        self._require_manager(agent)
+        phone_number_id = _clean_id(phone_number_id, label="phone-number ID")
+        if not isinstance(enabled, bool):
+            raise WhatsAppRegistryValidationError("Choose ON or OFF for this number's AI.")
+        await self._ensure_schema()
+        row = await self.repository.fetch_one(
+            """
+            SELECT phone_number_id, waba_id, source, provider_present, removed_at, ai_enabled
+            FROM whatsapp_phone_numbers
+            WHERE phone_number_id = %s
+            LIMIT 1
+            """,
+            (phone_number_id,),
+        )
+        if not row or row.get("removed_at") or (row.get("source") == "LINKED_DEVICE" and not row.get("provider_present")):
+            raise WhatsAppRegistryValidationError("This WhatsApp number is not available in the app.")
+        before = bool(row.get("ai_enabled"))
+        if before == enabled:
+            return await self.list_payload(agent)
+        changed = await self.repository.execute(
+            """
+            UPDATE whatsapp_phone_numbers
+            SET ai_enabled = %s, ai_updated_by_staff_id = %s, ai_updated_at = UTC_TIMESTAMP(6)
+            WHERE phone_number_id = %s AND removed_at IS NULL
+            """,
+            (1 if enabled else 0, int(agent.id), phone_number_id),
+        )
+        if not changed:
+            raise WhatsAppRegistryConflictError("This saved number was permanently removed from the app.")
+        await self._audit(
+            action="AI_ENABLED" if enabled else "AI_DISABLED",
+            actor_staff_id=int(agent.id),
+            waba_id=str(row.get("waba_id") or "") or None,
+            phone_number_id=phone_number_id,
+            details={"before": before, "after": enabled},
+        )
+        logger.info(
+            "Per-number AI changed: actor_staff_id=%s phone_number_id=%s enabled=%s",
+            agent.id, phone_number_id, enabled,
+        )
+        return await self.list_payload(agent)
+
+    async def set_all_numbers_ai_enabled(self, agent: SupportAgent, enabled: bool) -> dict[str, Any]:
+        """Enable AI on every number active in the app, or disable it everywhere.
+
+        "Disable all" covers every saved number, including ones not currently
+        active in the app, so none can start answering when re-added.
+        """
+        self._require_manager(agent)
+        if not isinstance(enabled, bool):
+            raise WhatsAppRegistryValidationError("Choose ON or OFF for all numbers.")
+        await self._ensure_schema()
+        eligible = (
+            "removed_at IS NULL AND is_enabled = 1 AND NOT (source = 'LINKED_DEVICE' AND provider_present = 0)"
+            if enabled else "removed_at IS NULL"
+        )
+        rows = await self.repository.fetch_all(
+            f"""
+            SELECT phone_number_id, waba_id
+            FROM whatsapp_phone_numbers
+            WHERE {eligible} AND ai_enabled <> %s
+            """,
+            (1 if enabled else 0,),
+        )
+        for row in rows:
+            phone_number_id = str(row.get("phone_number_id") or "")
+            changed = await self.repository.execute(
+                f"""
+                UPDATE whatsapp_phone_numbers
+                SET ai_enabled = %s, ai_updated_by_staff_id = %s, ai_updated_at = UTC_TIMESTAMP(6)
+                WHERE phone_number_id = %s AND {eligible} AND ai_enabled <> %s
+                """,
+                (1 if enabled else 0, int(agent.id), phone_number_id, 1 if enabled else 0),
+            )
+            if changed:
+                await self._audit(
+                    action="AI_BULK_ENABLED" if enabled else "AI_BULK_DISABLED",
+                    actor_staff_id=int(agent.id),
+                    waba_id=str(row.get("waba_id") or "") or None,
+                    phone_number_id=phone_number_id,
+                    details={"before": not enabled, "after": enabled},
+                )
+        logger.info(
+            "AI changed for all numbers: actor_staff_id=%s enabled=%s numbers=%d",
+            agent.id, enabled, len(rows),
+        )
+        return await self.list_payload(agent)
 
     async def outreach_limits(self, phone_number_id: str) -> OutreachLimits:
         """Effective chat limits for one number (server defaults if unknown)."""

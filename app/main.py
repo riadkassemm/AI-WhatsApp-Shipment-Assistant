@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import hmac
 import json
 import logging
@@ -736,7 +737,9 @@ async def _process_inbound_burst(phone_number: str, items: list[dict]) -> Respon
             # turn while AI is globally unavailable. Human support must retain each
             # original inbound message ID in its durable timeline.
             try:
-                availability = await ai_availability_service.get_effective_ai_availability()
+                availability = await ai_availability_service.get_effective_ai_availability(
+                    line_id=candidate.business_phone_number_id,
+                )
             except Exception:
                 availability = None
                 logger.exception(
@@ -912,6 +915,45 @@ async def _drive_owned_inbound_queue(
             return response
 
 
+class AutomatedReplySuppressed(Exception):
+    """An automated reply was not sent because AI is no longer allowed."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+# Set while an automated (AI/auth/quote) turn runs. Holds the receiving number
+# and, if a reply was suppressed, why. Outside a turn it is None, so direct
+# callers of the send helpers are unaffected.
+_automated_turn: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
+    "automated_turn", default=None,
+)
+
+
+async def _ensure_automated_reply_allowed(phone_number_id: str | None) -> None:
+    """Re-check AI availability for this number right before an automated send.
+
+    Switching AI off (globally or for this number) while a turn is in progress
+    must stop its reply. The turn then hands the message to human support.
+    """
+    turn = _automated_turn.get()
+    if turn is None:
+        return
+    try:
+        availability = await ai_availability_service.get_effective_ai_availability(
+            line_id=phone_number_id or turn.get("line_id"),
+        )
+    except Exception:
+        reason = "AI_AVAILABILITY_UNAVAILABLE"
+    else:
+        if availability.effective_ai_enabled:
+            return
+        reason = "AI_DISABLED_DURING_TURN"
+    turn["suppressed"] = reason
+    raise AutomatedReplySuppressed(reason)
+
+
 def _reply_idempotency_key(source_message_id: str) -> str:
     return f"primary-customer-reply:{source_message_id}"
 
@@ -931,6 +973,8 @@ async def _send_text_once(
     phone_number_id: str | None = None,
 ) -> dict:
     """Attempt at most one primary customer reply per inbound WhatsApp ID."""
+    await _ensure_automated_reply_allowed(phone_number_id)
+
     async def _provider_send() -> dict:
         if phone_number_id:
             return await whatsapp_client.send_text(
@@ -1146,6 +1190,8 @@ async def _send_and_record(
     *,
     source_message_id: str | None,
 ) -> None:
+    # Check before recording the reply, so a suppressed reply never enters history.
+    await _ensure_automated_reply_allowed(conversation.business_phone_number_id)
     safe_body = redact_sensitive_text(body)
     conversation.messages.append({"role": "assistant", "content": safe_body})
     await conversation_store.save(conversation)
@@ -2618,7 +2664,9 @@ async def _process_incoming_message(
         ai_availability = (
             ai_availability_snapshot
             if ai_availability_snapshot is not None
-            else await ai_availability_service.get_effective_ai_availability()
+            else await ai_availability_service.get_effective_ai_availability(
+                line_id=incoming.business_phone_number_id,
+            )
         )
     except Exception:
         logger.exception(
@@ -2629,8 +2677,9 @@ async def _process_incoming_message(
         return _json_response(503, {"status": "ai_availability_unavailable"})
 
     if not ai_availability.effective_ai_enabled:
+        line_disabled = ai_availability.effective_reason == "LINE_AI_DISABLED"
         logger.info(
-            "AI unavailable globally - handing conversation to human: customer_ref=%s "
+            "AI unavailable - handing conversation to human: customer_ref=%s "
             "message_id=%s control_mode=%s effective_reason=%s",
             customer_ref,
             incoming.message_id,
@@ -2641,9 +2690,11 @@ async def _process_incoming_message(
             conversation=conversation,
             incoming=incoming,
             parsed_auth=parsed_auth,
-            reason="AI_DISABLED_GLOBAL",
+            reason="AI_DISABLED_LINE" if line_disabled else "AI_DISABLED_GLOBAL",
             summary=(
-                "AI assistant is globally unavailable for this inbound message "
+                "AI is switched off for this WhatsApp number."
+                if line_disabled
+                else "AI assistant is globally unavailable for this inbound message "
                 f"({ai_availability.effective_reason})."
             ),
             status_name="handed_off_ai_disabled",
@@ -2701,6 +2752,8 @@ async def _process_incoming_message(
         return _json_response(503, {"status": "turn_state_unavailable"})
 
     failure_reason = "AI_TURN_FAILED"
+    turn_state: dict = {"line_id": incoming.business_phone_number_id, "suppressed": None}
+    turn_token = _automated_turn.set(turn_state)
     try:
         response = await _run_started_turn(
             conversation=conversation,
@@ -2724,8 +2777,20 @@ async def _process_incoming_message(
             type(exc).__name__,
         )
         response = None
+    finally:
+        _automated_turn.reset(turn_token)
 
-    if response is not None and not _response_is_retryable(response):
+    if turn_state.get("suppressed"):
+        # AI was switched off (or its state was unreadable) mid-turn: no reply was
+        # sent, so human support takes this message even if the turn "succeeded".
+        failure_reason = str(turn_state["suppressed"])
+        logger.warning(
+            "Automated reply suppressed mid-turn: customer_ref=%s message_id=%s reason=%s",
+            customer_ref,
+            incoming.message_id,
+            failure_reason,
+        )
+    elif response is not None and not _response_is_retryable(response):
         return response
 
     # The turn may already have replied, consumed quota or called OpenAI, so it is

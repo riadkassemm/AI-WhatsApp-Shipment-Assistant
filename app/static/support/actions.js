@@ -849,8 +849,116 @@ const AI_REASON_LABELS = {
   MANUAL_ON: 'Manual control is ON',
   MANUAL_OFF: 'Manual control is OFF',
   WITHIN_SCHEDULE: 'Within scheduled AI hours',
-  OUTSIDE_SCHEDULE: 'Outside scheduled AI hours'
+  OUTSIDE_SCHEDULE: 'Outside scheduled AI hours',
+  LINE_AI_DISABLED: 'AI is off for this WhatsApp number'
 };
+
+// Numbers active in the app, with their per-number AI switch.
+function aiNumberLabel(number) {
+  return number.display_name || (number.display_phone_number ? '+' + String(number.display_phone_number).replace(/^\+/, '') : number.phone_number_id);
+}
+
+function renderAiNumbers(numbers) {
+  const list = $('aiNumbersList');
+  const editable = canManageAiSettings();
+  const active = (numbers || []).filter(number => number.is_enabled);
+  state.aiNumbers = active;
+  $('aiNumbersBulkActions').classList.toggle('hidden', !editable || !active.length);
+  list.replaceChildren();
+  if (!active.length) {
+    const empty = document.createElement('div');
+    empty.className = 'muted';
+    empty.textContent = 'No WhatsApp numbers are active in the app yet.';
+    list.append(empty);
+    return;
+  }
+  for (const number of active) {
+    const on = Boolean(number.ai_enabled);
+    const row = document.createElement('div');
+    row.className = 'ai-number-row' + (on ? ' on' : '');
+    const copy = document.createElement('div');
+    copy.className = 'ai-number-copy';
+    const name = document.createElement('strong');
+    name.textContent = aiNumberLabel(number);
+    const meta = document.createElement('span');
+    meta.textContent = (number.source === 'LINKED_DEVICE' ? 'Linked device' : 'Meta Cloud') + ' · AI ' + (on ? 'ON' : 'OFF');
+    copy.append(name, meta);
+    const toggle = document.createElement('button');
+    toggle.type = 'button';
+    toggle.className = 'ai-switch';
+    toggle.setAttribute('role', 'switch');
+    toggle.setAttribute('aria-checked', on ? 'true' : 'false');
+    toggle.setAttribute('aria-label', 'AI for ' + aiNumberLabel(number));
+    toggle.dataset.aiNumber = number.phone_number_id;
+    toggle.disabled = !editable;
+    if (!editable) toggle.title = 'Only Super Admins and Admins can change this.';
+    toggle.addEventListener('click', () => setNumberAi(number, !on, toggle));
+    row.append(copy, toggle);
+    list.append(row);
+  }
+}
+
+async function loadAiNumbers() {
+  try {
+    const payload = await api('/api/support/whatsapp-numbers');
+    renderAiNumbers(payload?.numbers || []);
+  } catch (error) {
+    const list = $('aiNumbersList');
+    list.replaceChildren();
+    const failed = document.createElement('div');
+    failed.className = 'muted';
+    failed.textContent = 'WhatsApp numbers could not be loaded: ' + (error.message || 'unknown error');
+    list.append(failed);
+  }
+}
+
+async function setNumberAi(number, enabled, toggle) {
+  if (!canManageAiSettings() || state.aiNumbersBusy) return;
+  state.aiNumbersBusy = true;
+  toggle.disabled = true;
+  try {
+    const payload = await api('/api/support/whatsapp-numbers/' + encodeURIComponent(number.phone_number_id) + '/ai', {
+      method: 'PUT', body: JSON.stringify({enabled})
+    });
+    renderAiNumbers(payload?.numbers || []);
+    notify('AI ' + (enabled ? 'enabled' : 'disabled') + ' for ' + aiNumberLabel(number) + '.');
+    try { await loadAiSettings(); } catch (_) {}
+  } catch (error) {
+    showAiSettingsError(error.message);
+    toggle.disabled = false;
+  } finally {
+    state.aiNumbersBusy = false;
+  }
+}
+
+async function setAllNumbersAi(enabled) {
+  if (!canManageAiSettings() || state.aiNumbersBusy) return;
+  const confirmed = await confirmDialog({
+    title: enabled ? 'Enable AI on all numbers?' : 'Disable AI on all numbers?',
+    message: enabled
+      ? 'AI will answer customers on every WhatsApp number active in the app whenever the setting above is ON.'
+      : 'AI will stop answering on every WhatsApp number. Customers are handled by human agents.',
+    confirmLabel: enabled ? 'Enable all' : 'Disable all',
+    tone: enabled ? 'success' : 'danger'
+  });
+  if (!confirmed) return;
+  state.aiNumbersBusy = true;
+  const button = $(enabled ? 'aiEnableAllBtn' : 'aiDisableAllBtn');
+  setButtonBusy(button, true, 'Saving…');
+  try {
+    const payload = await api('/api/support/whatsapp-numbers/ai', {
+      method: 'PUT', body: JSON.stringify({enabled, scope: 'all'})
+    });
+    renderAiNumbers(payload?.numbers || []);
+    notify(enabled ? 'AI enabled on all active numbers.' : 'AI disabled on all numbers.');
+    try { await loadAiSettings(); } catch (_) {}
+  } catch (error) {
+    showAiSettingsError(error.message);
+  } finally {
+    state.aiNumbersBusy = false;
+    setButtonBusy(button, false);
+  }
+}
 
 function showAiSettingsError(message) {
   $('aiSettingsError').style.display = 'none';
@@ -945,7 +1053,12 @@ function renderAiSettings(settings) {
   const status = $('aiEffectiveStatus');
   status.textContent = enabled ? 'ON' : 'OFF';
   status.classList.toggle('off', !enabled);
-  text($('aiEffectiveReason'), AI_REASON_LABELS[settings?.effective_reason] || settings?.effective_reason || 'Current status unavailable');
+  const reasonLabel = AI_REASON_LABELS[settings?.effective_reason] || settings?.effective_reason || 'Current status unavailable';
+  const lineCount = Number(settings?.ai_enabled_line_count);
+  const lineNote = Number.isFinite(lineCount)
+    ? ' · AI is on for ' + lineCount + (lineCount === 1 ? ' number' : ' numbers')
+    : '';
+  text($('aiEffectiveReason'), reasonLabel + lineNote);
 
   const mode = settings?.control_mode === 'SCHEDULED' ? 'SCHEDULED' : 'MANUAL';
   $('aiModeManual').checked = mode === 'MANUAL';
@@ -985,6 +1098,7 @@ async function openAiSettingsModal() {
   openDialog('aiSettingsModal', 'aiModeManual');
   state.aiSettingsBusy = true;
   setButtonBusy($('saveAiSettingsBtn'), true, 'Loading…');
+  loadAiNumbers();
   try {
     await loadAiSettings();
   } catch (error) {
@@ -3006,6 +3120,8 @@ $('customResolutionMessage').addEventListener('input', updateMessagePreferenceCo
 $('closeAiSettingsBtn').addEventListener('click', closeAiSettingsModal);
 $('cancelAiSettingsBtn').addEventListener('click', closeAiSettingsModal);
 $('aiSettingsForm').addEventListener('submit', saveAiSettings);
+$('aiEnableAllBtn').addEventListener('click', () => setAllNumbersAi(true));
+$('aiDisableAllBtn').addEventListener('click', () => setAllNumbersAi(false));
 $('aiModeManual').addEventListener('change', syncAiSettingsFields);
 $('aiModeScheduled').addEventListener('change', syncAiSettingsFields);
 

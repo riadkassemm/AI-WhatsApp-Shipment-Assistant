@@ -232,7 +232,7 @@ def _drain_burst(monkeypatch, ages):
         async def no_active(*_args, **_kwargs):
             return None
 
-        async def ai_enabled():
+        async def ai_enabled(**_kwargs):
             return types.SimpleNamespace(effective_ai_enabled=True)
         monkeypatch.setattr(main.support_service, "get_active_ticket", no_active)
         monkeypatch.setattr(main.ai_availability_service, "get_effective_ai_availability", ai_enabled)
