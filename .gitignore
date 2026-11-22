@@ -223,3 +223,11 @@ data/support_media/
 # Linked-device bridge dependencies and sensitive session/customer data.
 node_modules/
 whatsapp_bridge/data/
+
+# Private held-out evaluation data and model outputs (never publish).
+gold.jsonl
+gold.labels.jsonl
+cases.jsonl
+redteam.jsonl
+redteam.labels.jsonl
+benchmark-output/

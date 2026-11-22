@@ -27,7 +27,7 @@ def reply(text="How can I help?", **kwargs):
 def response(action=None, **kwargs):
     return SimpleNamespace(status=kwargs.pop("status", "completed"), output=[{
         "type": "message", "phase": kwargs.pop("phase", "final_answer"),
-        "content": [{"type": "output_text", "text": json.dumps({"action": action or reply().model_dump()})}],
+        "content": [{"type": "output_text", "text": json.dumps({"intent": "greeting", "action": action or reply().model_dump()})}],
     }], **kwargs)
 
 
@@ -381,7 +381,7 @@ def test_image_in_same_call_and_notes_cached_once(agent, monkeypatch):
     monkeypatch.setattr(core, 'save_image_notes', save)
     def image_response(action):
         return SimpleNamespace(status='completed', output=[{'type': 'message', 'content': [{
-            'type': 'output_text', 'text': json.dumps({'action': action, 'media_notes': 'A parcel box.'}),
+            'type': 'output_text', 'text': json.dumps({'intent': 'greeting', 'action': action, 'media_notes': 'A parcel box.'}),
         }]}])
     agent.state['responses'] = [image_response(reply('It costs $999.').model_dump()), image_response(reply().model_dump())]
     assert asyncio.run(agent.run(media_type='image')).reply
@@ -392,3 +392,23 @@ def test_image_in_same_call_and_notes_cached_once(agent, monkeypatch):
         assert content[1]['type'] == 'input_image'
         assert request['text']['format']['schema'] == core.IMAGE_DECISION_SCHEMA
         assert meter['images'] == 1 and 'base64' not in json.dumps(meter['input_payload'])
+
+
+def test_single_model_benchmark_has_one_call_and_explicit_intent(agent):
+    agent.state['responses'] = [response({'kind': 'escalate', 'reason_code': 'AI_LOW_CONFIDENCE'})]
+    service = core.AgentService(model='gpt-6.1-terra', reasoning_effort='low', step_up=False, usage_purpose='eval')
+    outcome = asyncio.run(service.run(ticket={'id': 47, 'whatsapp_phone': 'benchmark'},
+                                      style='en', source_message_id='in.1'))
+    assert outcome.intent == 'greeting' and outcome.reason_code == 'AI_LOW_CONFIDENCE'
+    assert len(agent.calls) == 1
+    assert agent.calls[0]['model'] == 'gpt-6.1-terra'
+    assert agent.calls[0]['reasoning']['effort'] == 'low'
+    assert agent.meters[0]['purpose'] == 'eval'
+
+
+def test_single_model_benchmark_does_not_repair_rejected_reply(agent):
+    agent.state['responses'] = [response(reply('Your balance is $999').model_dump())]
+    service = core.AgentService(step_up=False)
+    outcome = asyncio.run(service.run(ticket={'id': 47, 'whatsapp_phone': 'benchmark'},
+                                      style='en', source_message_id='in.1'))
+    assert outcome.reason_code == 'AI_REPLY_VALIDATION_FAILED' and len(agent.calls) == 1
