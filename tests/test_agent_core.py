@@ -33,7 +33,7 @@ def response(action=None, **kwargs):
 
 @pytest.fixture
 def agent(monkeypatch):
-    calls, metered, options, reads = [], [], [], []
+    calls, metered, options, reads, failures = [], [], [], [], []
     state = {"responses": [response()], "knowledge": "Standard parcels take 5 days.",
              "rows": [{"sender_type": "CUSTOMER", "body": "Hello", "whatsapp_message_id": "in.1"}]}
 
@@ -55,6 +55,10 @@ def agent(monkeypatch):
     async def get_client(*args):
         return client
 
+    async def report_failure(exc):
+        failures.append(type(exc).__name__)
+        return "provider_error"
+
     async def meter(**kwargs):
         metered.append(kwargs)
         if state.get("blocked"):
@@ -72,6 +76,7 @@ def agent(monkeypatch):
         return state["rows"]
 
     monkeypatch.setattr(core.ai_provider_service, "get_client", get_client)
+    monkeypatch.setattr(core.ai_provider_service, "report_failure", report_failure)
     monkeypatch.setattr(core.ai_usage_service, "metered", meter)
     monkeypatch.setattr(core.customer_ai_identity_service, "resolve_or_unknown", identity)
     monkeypatch.setattr(core.ai_knowledge_service, "prompt_text", knowledge)
@@ -81,7 +86,8 @@ def agent(monkeypatch):
         return await core.agent_service.run(ticket={"id": 47, "whatsapp_phone": "15550000000"},
                                            style="en", source_message_id="in.1", **kwargs)
 
-    return SimpleNamespace(state=state, calls=calls, meters=metered, options=options, reads=reads, run=run)
+    return SimpleNamespace(state=state, calls=calls, meters=metered, options=options,
+                           reads=reads, failures=failures, run=run)
 
 
 def test_single_structured_metered_call_with_private_identity_and_stable_prefix(agent):
@@ -103,7 +109,7 @@ def test_one_repair_then_escalation_with_no_echo_of_unsafe_draft(agent):
     outcome = asyncio.run(agent.run())
     assert outcome.reason_code == "AI_REPLY_VALIDATION_FAILED"
     assert len(agent.calls) == 2
-    assert [meter["purpose"] for meter in agent.meters] == ["agent", "repair"]
+    assert [meter["purpose"] for meter in agent.meters] == ["turn", "repair"]
     assert agent.calls[0]["instructions"] == agent.calls[1]["instructions"]
     assert "999" not in json.dumps(agent.calls[1])
 
@@ -129,12 +135,14 @@ def test_budget_and_unverified_pricing_block_before_call(agent, reason):
     agent.state["blocked"] = reason
     assert asyncio.run(agent.run()).reason_code == reason
     assert agent.calls == []
+    assert agent.failures == []
 
 
 def test_provider_failure_is_never_retried_or_logged(agent, caplog):
     agent.state["responses"] = [RuntimeError("private-provider-body")]
     assert asyncio.run(agent.run()).reason_code == "AI_AGENT_UNAVAILABLE"
     assert len(agent.calls) == 1 and "private-provider-body" not in caplog.text
+    assert agent.failures == ["RuntimeError"]
 
 
 @pytest.mark.parametrize("bad", [

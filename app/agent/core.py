@@ -105,10 +105,17 @@ class AgentService:
             "max_output_tokens": 1600,
             "store": False,
         }
+        async def provider_call():
+            try:
+                return await client.responses.create(**request)
+            except Exception as exc:
+                await ai_provider_service.report_failure(exc)
+                raise
+
         return await ai_usage_service.metered(
-            purpose="repair" if repair else "agent", tier="primary", model=settings.ai_agent_model,
+            purpose="repair" if repair else "turn", tier="primary", model=settings.ai_agent_model,
             input_payload=request, max_output_tokens=1600,
-            call=lambda: client.responses.create(**request),
+            call=provider_call,
         )
 
     async def _run(self, *, ticket: dict, style: str, source_message_id: str | None,
