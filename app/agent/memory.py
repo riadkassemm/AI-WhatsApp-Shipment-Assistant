@@ -9,6 +9,7 @@ from app.agent.business_data import BusinessDataError
 from app.agent.context import masked_messages
 from app.agent.contracts import DECISION_SCHEMA, Reply
 from app.agent.guard import reply_violations
+from app.agent.trace import record_guard
 from app.ai_provider import ai_provider_service
 from app.ai_usage import ai_usage_service
 from app.client_chat_auth import redact_sensitive_text
@@ -63,8 +64,9 @@ async def summarize(previous: str, rows: list[dict], style: str) -> str:
                                             input_payload=request, max_output_tokens=1000, call=call)
     action = parse_response(response).action
     evidence = (previous, *(message["text"] for message in messages))
-    if (not isinstance(action, Reply) or len(action.text) > 1800
-            or reply_violations(action, style=style, evidence=evidence)):
+    violations = reply_violations(action, style=style, evidence=evidence) if isinstance(action, Reply) else ('invalid_structured_output',)
+    record_guard('summary', violations)
+    if not isinstance(action, Reply) or len(action.text) > 1800 or violations:
         raise BusinessDataError("AI_MEMORY_UNAVAILABLE")
     return redact_sensitive_text(action.text)
 

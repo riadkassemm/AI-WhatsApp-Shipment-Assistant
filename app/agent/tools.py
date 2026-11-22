@@ -5,6 +5,7 @@ from pydantic import Field, ValidationError
 
 from app.agent.business_data import BusinessDataError, BusinessResult, business_data_source, fresh_timestamp
 from app.agent.contracts import Reply, StrictModel, ToolCall
+from app.agent.trace import record_guard, record_tool
 from app.client_chat_auth import redact_sensitive_text
 from app.customer_ai_identity import AIIdentity
 from app.customer_reply_guard import render_authoritative_tool_result, render_business_result, validate_customer_reply
@@ -60,13 +61,16 @@ def render_result(result: BusinessResult, style: str) -> Reply:
     if text is None:
         text = render_business_result(result.tool, result.payload, style)
     if not text or not validate_customer_reply(text, style).safe or redact_sensitive_text(text) != text:
+        record_guard("tool", ("rejected",))
         raise BusinessDataError()
+    record_guard("tool", ())
     return Reply(kind="reply", text=text, language=style, facts_used=[],
                  awaiting_customer=result.tool == "get_customer_shipments")
 
 
 async def execute_tool(action: ToolCall, identity: AIIdentity, *, ticket: dict, style: str,
                        current_text: str = "", repository=None) -> Reply:
+    record_tool(action.name, {*REGISTRY, "update_shipment_mode"})
     if action.name == "update_shipment_mode":
         raise BusinessDataError("CHANGE_REQUIRES_HUMAN")
     spec = REGISTRY.get(action.name)

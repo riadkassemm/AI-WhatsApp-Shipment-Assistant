@@ -225,13 +225,13 @@ class AIUsageRepository:
             INSERT INTO ai_usage_events (
                 reservation_id, created_at, purpose, tier, requested_model, modalities,
                 estimate_micros, cost_micros, price_id, cost_basis, outcome,
-                phone_number_id, ticket_id, batch_id, budget_day, budget_month
+                phone_number_id, ticket_id, batch_id, budget_day, budget_month, agent_turn_id
             ) VALUES (%s, UTC_TIMESTAMP(6), %s, %s, %s, %s, %s, %s, %s, 'reserved_estimate', 'pending',
-                      %s, %s, %s, %s, %s)
+                      %s, %s, %s, %s, %s, %s)
             """,
             (row["reservation_id"], row["purpose"], row["tier"], row["requested_model"], row["modalities"],
              row["estimate_micros"], row["estimate_micros"], row["price_id"],
-             row["phone_number_id"], row["ticket_id"], row["batch_id"], row["budget_day"], row["budget_month"]),
+             row["phone_number_id"], row["ticket_id"], row["batch_id"], row["budget_day"], row["budget_month"], row.get("agent_turn_id")),
         )
 
     async def settle(self, reservation_id: str, values: dict[str, Any]) -> bool:
@@ -991,6 +991,7 @@ class AIUsageService:
                 "requested_model": model[:100], "modalities": modalities[:32], "estimate_micros": estimate,
                 "price_id": price.id, "phone_number_id": scope.get("phone_number_id"),
                 "ticket_id": scope.get("ticket_id"), "batch_id": scope.get("batch_id"),
+                "agent_turn_id": scope.get("agent_turn_id"),
                 "budget_day": day, "budget_month": month,
             })
         except Exception as exc:

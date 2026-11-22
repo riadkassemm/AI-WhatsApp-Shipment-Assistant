@@ -201,12 +201,15 @@ def v2_turns(turns, monkeypatch):
         before = turns.replies.get('before_reply')
         if before:
             await before()
-        action = {**turns.action, 'language': tail['language_style']}
+        action = dict(turns.action)
+        if action['kind'] == 'reply':
+            action['language'] = tail['language_style']
         return SimpleNamespace(status='completed', output=[{
             'type': 'message', 'content': [{'type': 'output_text', 'text': json.dumps({'action': action})}],
         }])
 
     monkeypatch.setattr(main.settings, 'ai_agent_v2_enabled', True)
+    monkeypatch.setattr(main, 'support_repository', turns.repo)
     monkeypatch.setattr(service, 'staff_repository', auth.staff_repository)
     monkeypatch.setattr(core, 'support_repository', turns.repo)
     monkeypatch.setattr(core.ai_knowledge_service, 'prompt_text', knowledge)
@@ -225,6 +228,10 @@ async def test_v2_records_reply_and_awaiting_customer(v2_turns):
     rows = await env.messages(ticket['id'])
     assert rows[-1]['sender_type'] == 'AI' and rows[-1]['send_status'] == 'SENT'
     assert env.ai_calls == []
+
+    traces = await env.sql('SELECT * FROM ai_agent_turns WHERE ticket_id=%s', (ticket['id'],))
+    assert len(traces) == 1 and traces[0]['outcome'] == 'replied' and traces[0]['finished_at']
+    assert json.loads(traces[0]['guards_json']) == [{'stage': 'reply', 'verdicts': ['pass']}]
 
 
 @pytest.mark.asyncio
@@ -360,3 +367,16 @@ async def test_v2_disabled_audio_makes_no_transcription_call(v2_turns, monkeypat
     monkeypatch.setattr(service.support_service, 'capture_inbound_media', capture)
     result = await env.deliver('wamid.audio', None, message_type='audio', media_id='synthetic', is_voice=True)
     assert result[1]['status'] == 'handed_off_ai_disabled' and env.prompts == []
+
+
+@pytest.mark.asyncio
+async def test_v2_escalation_is_traced_without_reply_payload(v2_turns):
+    env = v2_turns
+    env.action = {'kind': 'escalate', 'reason_code': 'COMPLAINT_DISPUTE'}
+    assert (await env.deliver('wamid.complaint', 'I want to make a complaint'))[1]['status'] == 'agent_escalated'
+    ticket = await env.only_ticket()
+    traces = await env.sql('SELECT * FROM ai_agent_turns WHERE ticket_id=%s', (ticket['id'],))
+    assert len(traces) == 1 and traces[0]['outcome'] == 'escalated'
+    assert traces[0]['reason_code'] == 'COMPLAINT_DISPUTE'
+    assert 'I want to make a complaint' not in json.dumps(traces, default=str)
+    assert len(env.prompts) == 1 and env.sent == []

@@ -60,6 +60,12 @@ def fake_ai_ticket(monkeypatch):
     from app.support_repository import SupportConflictError
 
     replies = []
+    async def trace_begin(*args, **kwargs):
+        return True
+    async def trace_finish(*args, **kwargs):
+        return None
+    monkeypatch.setattr(main.support_repository, 'begin_agent_trace', trace_begin)
+    monkeypatch.setattr(main.support_repository, 'finish_agent_trace', trace_finish)
     state = {"handled_by_ai": True}
 
     async def ticket_for_turn(*, conversation, incoming, parsed_auth, ai_ticket):
