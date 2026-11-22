@@ -72,6 +72,8 @@ def test_take_over_route_and_ai_queue_view_are_registered() -> None:
 
 def test_quiet_resolve_defaults_to_two_hours() -> None:
     assert Settings.model_fields["support_ai_ticket_quiet_resolve_minutes"].default == 120
+    # Owner decision 2026-11-22: an unanswered AI question closes after 24 hours.
+    assert Settings.model_fields["support_ai_ticket_unanswered_resolve_minutes"].default == 1440
 
 
 def test_an_ai_ticket_keeps_the_conversation_in_ai_mode(monkeypatch: pytest.MonkeyPatch) -> None:

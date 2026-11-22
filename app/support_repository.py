@@ -52,23 +52,25 @@ _IDLE_PHONE_APP_TICKET = f"""
 
 
 # An AI-handled ticket that went quiet: the AI's last reply was sent at least the
-# quiet window ago, the AI is not waiting for an answer, the customer has not
-# written since, nothing was exchanged inside the window and no outbound message
-# is still being sent. Takes the quiet minutes twice.
-_IDLE_AI_TICKET = """
+# window ago, the customer has not written since, nothing was exchanged inside
+# the window and no outbound message is still being sent. The window is the
+# quiet window, or the longer unanswered window when the AI asked the customer
+# something (0 = such tickets never close). Takes (unanswered, quiet) twice.
+_AI_TICKET_WINDOW = "IF(support_tickets.ai_awaiting_customer = 1, %s, %s)"
+_IDLE_AI_TICKET = f"""
     support_tickets.handling_mode = 'AI'
     AND support_tickets.status = 'NEW'
     AND support_tickets.current_assignee_id IS NULL
     AND support_tickets.active_key IS NOT NULL
-    AND support_tickets.ai_awaiting_customer = 0
+    AND {_AI_TICKET_WINDOW} > 0
     AND support_tickets.ai_last_reply_at IS NOT NULL
-    AND support_tickets.ai_last_reply_at < UTC_TIMESTAMP(6) - INTERVAL %s MINUTE
+    AND support_tickets.ai_last_reply_at < UTC_TIMESTAMP(6) - INTERVAL {_AI_TICKET_WINDOW} MINUTE
     AND NOT EXISTS (
         SELECT 1
         FROM support_ticket_messages quiet_message
         WHERE quiet_message.ticket_id = support_tickets.id
           AND (
-                quiet_message.created_at >= UTC_TIMESTAMP(6) - INTERVAL %s MINUTE
+                quiet_message.created_at >= UTC_TIMESTAMP(6) - INTERVAL {_AI_TICKET_WINDOW} MINUTE
                 OR (quiet_message.direction = 'INBOUND'
                     AND quiet_message.created_at > support_tickets.ai_last_reply_at)
                 OR (quiet_message.direction = 'OUTBOUND'
@@ -81,6 +83,11 @@ AI_ACTOR_NAME = "AI assistant"
 HANDLING_MODES = ("AI", "HUMAN")
 AI_TICKET_TAKEN_OVER_ERROR = "Not sent: a staff member took over before the AI reply was sent."
 AI_TICKET_ESCALATED_ERROR = "Not sent: the conversation was handed to human support before the AI reply was sent."
+
+
+def _ai_window_args(quiet_minutes: int, unanswered_minutes: int) -> tuple[int, ...]:
+    """Parameters for the three _AI_TICKET_WINDOW placeholders in _IDLE_AI_TICKET."""
+    return (max(0, unanswered_minutes), max(0, quiet_minutes)) * 3
 
 
 def auto_resolve_actor_name(idle_minutes: int) -> str:
@@ -3785,7 +3792,9 @@ class SupportRepository(DashboardRepositoryMixin, DeliveryRepositoryMixin, ReadS
             await conn.commit()
         return changed
 
-    async def list_idle_ai_tickets(self, *, quiet_minutes: int, limit: int = 50) -> list[int]:
+    async def list_idle_ai_tickets(
+        self, *, quiet_minutes: int, unanswered_minutes: int = 0, limit: int = 50,
+    ) -> list[int]:
         """IDs of AI tickets that have been quiet since the AI's last reply."""
         if self._pool is None:
             await self.connect()
@@ -3794,12 +3803,12 @@ class SupportRepository(DashboardRepositoryMixin, DeliveryRepositoryMixin, ReadS
             async with conn.cursor(aiomysql.DictCursor) as cur:
                 await cur.execute(
                     f"SELECT id FROM support_tickets WHERE {_IDLE_AI_TICKET} ORDER BY id LIMIT %s",
-                    (quiet_minutes, quiet_minutes, limit),
+                    (*_ai_window_args(quiet_minutes, unanswered_minutes), limit),
                 )
                 return [int(row["id"]) for row in await cur.fetchall()]
 
     async def auto_resolve_idle_ai_ticket(
-        self, ticket_id: int, *, quiet_minutes: int,
+        self, ticket_id: int, *, quiet_minutes: int, unanswered_minutes: int = 0,
     ) -> dict[str, Any] | None:
         """Resolve one quiet AI ticket, rechecking every condition under the row lock.
 
@@ -3809,20 +3818,25 @@ class SupportRepository(DashboardRepositoryMixin, DeliveryRepositoryMixin, ReadS
         if self._pool is None:
             await self.connect()
         assert self._pool is not None
-        details = json.dumps({
-            "reason": "ai_quiet", "quiet_minutes": quiet_minutes, "previous_status": "NEW",
-        })
+
         async with self._pool.acquire() as conn:
             await conn.begin()
             try:
                 async with conn.cursor(aiomysql.DictCursor) as cur:
                     await cur.execute(
-                        f"SELECT id FROM support_tickets WHERE id = %s AND {_IDLE_AI_TICKET} FOR UPDATE",
-                        (ticket_id, quiet_minutes, quiet_minutes),
+                        f"SELECT id, ai_awaiting_customer FROM support_tickets WHERE id = %s AND {_IDLE_AI_TICKET} FOR UPDATE",
+                        (ticket_id, *_ai_window_args(quiet_minutes, unanswered_minutes)),
                     )
-                    if not await cur.fetchone():
+                    row = await cur.fetchone()
+                    if not row:
                         await conn.rollback()
                         return None
+                    unanswered = bool(row.get("ai_awaiting_customer"))
+                    details = json.dumps({
+                        "reason": "ai_unanswered" if unanswered else "ai_quiet",
+                        "quiet_minutes": unanswered_minutes if unanswered else quiet_minutes,
+                        "previous_status": "NEW",
+                    })
                     await cur.execute(
                         """
                         UPDATE support_tickets

@@ -4492,16 +4492,21 @@ class SupportService:
     async def auto_resolve_idle_ai_tickets(self) -> int:
         """Resolve AI tickets that went quiet after the AI's last reply.
 
-        No message is sent to the customer. Returns how many were resolved.
+        2 hours by default; 24 hours when the AI asked the customer something
+        and is waiting for the answer. No message is sent to the customer.
+        Returns how many were resolved.
         """
-        quiet_minutes = settings.support_ai_ticket_quiet_resolve_minutes
-        if quiet_minutes <= 0:
+        quiet_minutes = max(0, settings.support_ai_ticket_quiet_resolve_minutes)
+        unanswered_minutes = max(0, settings.support_ai_ticket_unanswered_resolve_minutes)
+        if quiet_minutes <= 0 and unanswered_minutes <= 0:
             return 0
         resolved_count = 0
-        for ticket_id in await support_repository.list_idle_ai_tickets(quiet_minutes=quiet_minutes):
+        for ticket_id in await support_repository.list_idle_ai_tickets(
+            quiet_minutes=quiet_minutes, unanswered_minutes=unanswered_minutes,
+        ):
             try:
                 resolved = await support_repository.auto_resolve_idle_ai_ticket(
-                    ticket_id, quiet_minutes=quiet_minutes,
+                    ticket_id, quiet_minutes=quiet_minutes, unanswered_minutes=unanswered_minutes,
                 )
             except Exception:
                 logger.exception("Quiet AI ticket could not be resolved: ticket_id=%s", ticket_id)

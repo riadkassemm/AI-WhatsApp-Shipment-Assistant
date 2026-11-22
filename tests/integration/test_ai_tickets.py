@@ -367,3 +367,35 @@ async def test_ticket_detail_offers_take_over_and_admin_cost(service_env, monkey
     await env.service.take_over(ticket['id'], AGENT)
     taken = await env.service.ticket_detail(ticket['id'], AGENT)
     assert taken['permissions']['can_take_over'] is False and taken['permissions']['can_reply'] is True
+
+
+@pytest.mark.asyncio
+async def test_unanswered_ai_question_closes_after_24_hours(service_env, monkeypatch):
+    from app.config import settings
+    env = service_env
+    monkeypatch.setattr(settings, 'support_ai_ticket_quiet_resolve_minutes', 120)
+    monkeypatch.setattr(settings, 'support_ai_ticket_unanswered_resolve_minutes', 1440)
+    ticket = await _open_ai_ticket(env)
+    await env.service.send_ai_reply(ticket, body='What is your order number?', source_message_id='wamid.in.1',
+                                    awaiting_customer=True)
+    # Two hours is not enough while the AI waits for an answer.
+    await _age_ai_ticket(env.sql, ticket['id'], 300)
+    assert await env.service.auto_resolve_idle_ai_tickets() == 0
+    await _age_ai_ticket(env.sql, ticket['id'], 1441)
+    assert await env.service.auto_resolve_idle_ai_tickets() == 1
+    event = (await env.sql("SELECT actor_type, details_json FROM support_ticket_events WHERE ticket_id=%s ORDER BY id DESC LIMIT 1",
+                           (ticket['id'],)))[0]
+    assert event['actor_type'] == 'AI'
+    assert '"reason": "ai_unanswered"' in event['details_json'] and '"quiet_minutes": 1440' in event['details_json']
+
+
+@pytest.mark.asyncio
+async def test_unanswered_window_zero_keeps_waiting_tickets_open(service_env, monkeypatch):
+    from app.config import settings
+    env = service_env
+    monkeypatch.setattr(settings, 'support_ai_ticket_quiet_resolve_minutes', 120)
+    monkeypatch.setattr(settings, 'support_ai_ticket_unanswered_resolve_minutes', 0)
+    waiting = await _open_ai_ticket(env)
+    await env.service.send_ai_reply(waiting, body='Which city?', source_message_id='wamid.in.1', awaiting_customer=True)
+    await _age_ai_ticket(env.sql, waiting['id'], 5000)
+    assert await env.service.auto_resolve_idle_ai_tickets() == 0

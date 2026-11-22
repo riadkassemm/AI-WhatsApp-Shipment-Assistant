@@ -125,6 +125,7 @@ async def _start_idle_ticket_sweeper() -> None:
     enabled = (
         settings.support_phone_app_idle_resolve_minutes > 0
         or settings.support_ai_ticket_quiet_resolve_minutes > 0
+        or settings.support_ai_ticket_unanswered_resolve_minutes > 0
     )
     if enabled and _idle_ticket_sweeper is None:
         _idle_ticket_sweeper = asyncio.create_task(_sweep_idle_tickets_forever())

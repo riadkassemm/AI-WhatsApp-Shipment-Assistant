@@ -326,6 +326,7 @@ def test_sweeper_starts_and_stops_with_the_app(monkeypatch: pytest.MonkeyPatch) 
     async def lifecycle(minutes: int) -> bool:
         monkeypatch.setattr(main.settings, "support_phone_app_idle_resolve_minutes", minutes)
         monkeypatch.setattr(main.settings, "support_ai_ticket_quiet_resolve_minutes", minutes)
+        monkeypatch.setattr(main.settings, "support_ai_ticket_unanswered_resolve_minutes", minutes)
         await main._start_idle_ticket_sweeper()
         running = main._idle_ticket_sweeper is not None
         await asyncio.sleep(0)
