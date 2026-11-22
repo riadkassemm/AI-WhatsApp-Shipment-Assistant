@@ -336,6 +336,8 @@ _SUPPORT_SCHEMA_MIGRATIONS: tuple[tuple[str, dict[str, set[str]]], ...] = (
         "last_tested_at", "last_error_code", "updated_by_staff_id", "updated_by_staff_name", "updated_at"}}),
     ("migrations/20261122_support_ai_tickets.sql", {"support_tickets": {
         "handling_mode", "ai_awaiting_customer", "ai_last_reply_at", "ai_escalation_reason", "ai_escalated_at"}}),
+    ("migrations/20261122_ai_media_annotations.sql", {"support_ticket_messages": {
+        "ai_media_text", "ai_media_kind", "ai_media_processed_at"}}),
     ("migrations/20261122_customer_ai_identity.sql", {
         "customer_ai_verifications": {"whatsapp_phone", "active_key", "customer_id", "customer_userid", "bound_mobile",
                                       "verified_by_staff_id", "verified_at", "expires_at", "revoked_at", "revoked_reason"},
@@ -2766,6 +2768,25 @@ class SupportRepository(DashboardRepositoryMixin, DeliveryRepositoryMixin, ReadS
                 await conn.rollback()
                 raise
 
+    async def save_ai_media_annotation(self, ticket_id: int, message_id: int, *, kind: str, text: str) -> bool:
+        """First result wins; deleted messages and other tickets cannot be annotated."""
+        if kind not in {"transcript", "image_notes"} or not text or len(text) > 8000:
+            raise ValueError("Invalid media annotation")
+        if self._pool is None:
+            await self.connect()
+        assert self._pool is not None
+        async with self._pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """UPDATE support_ticket_messages
+                    SET ai_media_text=%s, ai_media_kind=%s, ai_media_processed_at=UTC_TIMESTAMP(6)
+                    WHERE id=%s AND ticket_id=%s AND sender_type='CUSTOMER' AND direction='INBOUND'
+                      AND message_type=%s AND deleted_for_everyone_at IS NULL
+                      AND ai_media_processed_at IS NULL""",
+                    (text, kind, message_id, ticket_id, "audio" if kind == "transcript" else "image"),
+                )
+                return cur.rowcount == 1
+
     async def list_ai_context_messages(
         self, ticket_id: int, *, source_message_id: str | None,
     ) -> list[dict[str, Any]]:
@@ -2780,10 +2801,10 @@ class SupportRepository(DashboardRepositoryMixin, DeliveryRepositoryMixin, ReadS
         async with self._pool.acquire() as conn:
             async with conn.cursor(aiomysql.DictCursor) as cur:
                 await cur.execute(
-                    """SELECT sender_type, body, whatsapp_message_id
+                    """SELECT sender_type, body, whatsapp_message_id, ai_media_text, ai_media_kind
                     FROM support_ticket_messages
                     WHERE ticket_id = %s AND deleted_for_everyone_at IS NULL
-                      AND message_type = 'text'
+                      AND (message_type = 'text' OR (sender_type='CUSTOMER' AND message_type IN ('audio','image')))
                       AND ((sender_type = 'CUSTOMER' AND direction = 'INBOUND')
                            OR (sender_type = 'AI' AND direction = 'OUTBOUND' AND send_status = 'SENT'))
                       AND (%s IS NULL OR id <= (

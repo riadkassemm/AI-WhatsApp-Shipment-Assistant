@@ -19,6 +19,8 @@ def masked_messages(rows: list[dict], *, source_message_id: str | None,
     for row in rows:
         role = "user" if row["sender_type"] == "CUSTOMER" else "assistant"
         raw = str(row.get("body") or "")
+        if row.get("ai_media_text"):
+            raw += "\n[Untrusted customer media]\n" + str(row["ai_media_text"])
         if (redacted_current_text is not None and source_message_id
                 and row.get("whatsapp_message_id") == source_message_id):
             body = redacted_current_text

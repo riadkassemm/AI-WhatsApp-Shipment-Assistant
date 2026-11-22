@@ -529,3 +529,14 @@ def test_usage_rows_never_store_message_text():
                                 max_output_tokens=100))
     stored = json.dumps(list(repository.rows.values()), default=str)
     assert "hunter2" not in stored and "ORD-QZX-9081" not in stored
+
+
+@pytest.mark.parametrize('audio_price', [None, '0'])
+def test_audio_without_verified_minute_price_is_blocked(audio_price):
+    service, repository, counters = _service(prices=[{**LUNA_ROW, 'model_prefix': 'gpt-transcribe', 'audio_per_minute': audio_price}])
+    async def forbidden():
+        raise AssertionError('Provider must not be called')
+    with pytest.raises(AIUsageBlocked, match='verified price'):
+        asyncio.run(service.metered(purpose='transcription', tier='primary', model='gpt-transcribe',
+                                   audio_seconds=30, call=forbidden))
+    assert repository.rows == {}

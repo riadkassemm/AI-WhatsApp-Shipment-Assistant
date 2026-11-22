@@ -29,7 +29,11 @@ const messages=[
   {id:1,ticket_id:501,sender_type:'CUSTOMER',direction:'INBOUND',message_type:'text',body:'Where is my parcel?',
    created_at:'2026-11-22T08:04:00',send_status:'RECEIVED'},
   {id:2,ticket_id:501,sender_type:'AI',sender_name:'AI assistant',direction:'OUTBOUND',message_type:'text',
-   body:'Your parcel is in Beirut.',created_at:'2026-11-22T08:05:00',send_status:'SENT'}];
+   body:'Your parcel is in Beirut.',created_at:'2026-11-22T08:05:00',send_status:'SENT'},
+  {id:3,ticket_id:501,sender_type:'CUSTOMER',direction:'INBOUND',message_type:'audio',body:'Voice note',
+   ai_media_kind:'transcript',ai_media_text:'Where is my parcel?',created_at:'2026-11-22T08:06:00',send_status:'RECEIVED'},
+  {id:4,ticket_id:501,sender_type:'CUSTOMER',direction:'INBOUND',message_type:'image',body:'Parcel photo',
+   ai_media_kind:'image_notes',ai_media_text:'A sealed parcel with a shipping label.',created_at:'2026-11-22T08:07:00',send_status:'RECEIVED'}];
 const permissions={can_operate:true,can_reply:false,can_forward:true,can_transfer:false,can_claim:false,
   can_take_over:false,can_reopen:false,can_delete_history:false,can_delete_chat:false,is_read_only_observer:false,is_supervisor:true};
 const detail=(ticket,extra)=>({ticket,context:{},shipment:null,messages:ticket.id===501?messages:[],messages_has_more:false,
@@ -74,6 +78,15 @@ CHECKS = r'''<script>
   check($('queue').textContent.includes('AI answering'),'AI chip missing from the AI queue');
 
   await openTicket(501);
+  check($('conversation').textContent.includes('AI transcript: Where is my parcel?'),'Transcript missing');
+  check($('conversation').textContent.includes('AI image notes: A sealed parcel'),'Image notes missing');
+  const probe=document.createElement('div');
+  addMessage(probe,{...messages[3],ai_media_text:'<img src=x onerror=alert(1)>'});
+  check(probe.textContent.includes('<img src=x'),'Media notes were not escaped');
+  check(!probe.querySelector('img[src="x"]'),'Media notes executed as HTML');
+  const deletedProbe=document.createElement('div');
+  addMessage(deletedProbe,{...messages[3],deleted_for_everyone_at:'2026-11-22T08:08:00'});
+  check(!deletedProbe.textContent.includes('A sealed parcel'),'Deleted media notes exposed');
   const banner=$('readOnlyBanner');
   check(!banner.classList.contains('hidden') && banner.textContent.includes('AI assistant is answering'),'AI banner missing');
   const actions=$('actions').textContent;

@@ -944,7 +944,7 @@ class AIUsageService:
         # verified snapshot, including when the provider returns a dated model.
         price_rows = await self.repository.verified_prices()
         price = self._matching_price(model, price_rows)
-        if price is None:
+        if price is None or (audio_seconds is not None and (price.audio_per_minute is None or price.audio_per_minute <= 0)):
             raise AIUsageBlocked(
                 "AI_MODEL_PRICING_UNCONFIGURED",
                 f"No verified price is configured for model {model}; AI calls to it are blocked.",
