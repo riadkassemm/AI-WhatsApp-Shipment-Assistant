@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, Awaitable, Callable, Iterable
 
-from app.knowledge.deidentify import Deidentifier
+from app.knowledge.deidentify import Deidentifier, name_pattern
 
 STYLES = ["en", "fr", "ar", "leb_ar", "leb_arabizi", "mixed"]
 DATA_NEEDED = ["none", "tracking_number", "order_id", "account", "wallet", "payment", "address",
@@ -58,9 +58,14 @@ def _message_text(row: dict[str, Any]) -> str:
 
 
 def build_transcript(ticket: dict[str, Any], messages: list[dict[str, Any]], *, names: list[str],
-                     max_messages: int = 40, max_chars: int = 6000) -> dict[str, Any]:
-    """One de-identified ticket record. Keeps the first and the latest messages within the limits."""
-    tool = Deidentifier(names=[*names, str(ticket.get("customer_name") or "")])
+                     max_messages: int = 40, max_chars: int = 6000,
+                     known_names: re.Pattern | None = None) -> dict[str, Any]:
+    """One de-identified ticket record. Keeps the first and the latest messages within the limits.
+
+    ``known_names`` is a pattern from name_pattern() for large name lists (all
+    customer accounts and contacts), compiled once per export.
+    """
+    tool = Deidentifier(names=[*names, str(ticket.get("customer_name") or "")], known_names=known_names)
     rows = [m for m in messages if str(m.get("message_type") or "text") != "reaction"]
     if len(rows) > max_messages:
         rows = rows[:4] + rows[-(max_messages - 4):]
@@ -93,6 +98,15 @@ async def export_transcripts(
     the held-out gold set.
     """
     names = [str(row["name"]) for row in await fetch("SELECT name FROM staff WHERE name IS NOT NULL", ())]
+    # Everyone who could be named in a conversation: customer accounts and saved contacts.
+    known: list[str] = []
+    for query in ("SELECT name FROM users WHERE name IS NOT NULL",
+                  "SELECT display_name AS name FROM support_contacts WHERE display_name IS NOT NULL"):
+        try:
+            known.extend(str(row["name"]) for row in await fetch(query, ()))
+        except Exception:
+            pass  # table absent in this database; staff and ticket names still apply
+    known_names = name_pattern(known)
     tickets = await fetch(
         """
         SELECT id, created_at, communication_style, customer_name FROM support_tickets
@@ -117,7 +131,7 @@ async def export_transcripts(
             by_ticket[int(row["ticket_id"])].append(row)
         for ticket in part:
             record = build_transcript(ticket, by_ticket.get(int(ticket["id"]), []), names=names,
-                                      max_messages=max_messages, max_chars=max_chars)
+                                      max_messages=max_messages, max_chars=max_chars, known_names=known_names)
             if any(m["role"] == "customer" for m in record["messages"]):
                 records.append(record)
     split = max(0, len(records) - max(0, gold_count))
