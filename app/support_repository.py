@@ -338,6 +338,8 @@ _SUPPORT_SCHEMA_MIGRATIONS: tuple[tuple[str, dict[str, set[str]]], ...] = (
         "handling_mode", "ai_awaiting_customer", "ai_last_reply_at", "ai_escalation_reason", "ai_escalated_at"}}),
     ("migrations/20261122_ai_media_annotations.sql", {"support_ticket_messages": {
         "ai_media_text", "ai_media_kind", "ai_media_processed_at"}}),
+    ("migrations/20261123_ai_ticket_memory.sql", {"support_tickets": {
+        "ai_memory_summary", "ai_memory_through_id", "ai_memory_fingerprint", "ai_memory_language", "ai_memory_updated_at"}}),
     ("migrations/20261122_customer_ai_identity.sql", {
         "customer_ai_verifications": {"whatsapp_phone", "active_key", "customer_id", "customer_userid", "bound_mobile",
                                       "verified_by_staff_id", "verified_at", "expires_at", "revoked_at", "revoked_reason"},
@@ -2767,6 +2769,59 @@ class SupportRepository(DashboardRepositoryMixin, DeliveryRepositoryMixin, ReadS
             except Exception:
                 await conn.rollback()
                 raise
+
+    async def ai_memory_snapshot(self, ticket_id: int, *, source_message_id: str | None) -> tuple[dict, list[dict]]:
+        """Bounded local source for summaries, including tombstones for invalidation."""
+        if self._pool is None:
+            await self.connect()
+        assert self._pool is not None
+        async with self._pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute("""SELECT ai_memory_summary, ai_memory_through_id, ai_memory_fingerprint,
+                    ai_memory_language FROM support_tickets WHERE id=%s""", (ticket_id,))
+                cache = await cur.fetchone()
+                await cur.execute("""SELECT id, sender_type, body, whatsapp_message_id, version,
+                    deleted_for_everyone_at, ai_media_text, ai_media_kind
+                    FROM support_ticket_messages WHERE ticket_id=%s
+                      AND message_type IN ('text','audio','image')
+                      AND ((sender_type='CUSTOMER' AND direction='INBOUND') OR
+                           (sender_type IN ('AI','AGENT') AND direction='OUTBOUND' AND send_status='SENT'))
+                      AND (%s IS NULL OR id <= (SELECT s.id FROM support_ticket_messages s
+                           WHERE s.ticket_id=%s AND s.whatsapp_message_id=%s LIMIT 1))
+                    ORDER BY id LIMIT 2001""", (ticket_id, source_message_id, ticket_id, source_message_id))
+                return dict(cache or {}), list(await cur.fetchall())
+
+    async def save_ai_memory(self, ticket_id: int, *, summary: str, through_id: int,
+                             fingerprint: str, language: str, expected_fingerprint: str | None) -> bool:
+        if self._pool is None:
+            await self.connect()
+        assert self._pool is not None
+        async with self._pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("""UPDATE support_tickets SET ai_memory_summary=%s,
+                    ai_memory_through_id=%s, ai_memory_fingerprint=%s, ai_memory_language=%s,
+                    ai_memory_updated_at=UTC_TIMESTAMP(6)
+                    WHERE id=%s AND ai_memory_fingerprint <=> %s""",
+                    (summary, through_id, fingerprint, language, ticket_id, expected_fingerprint))
+                return cur.rowcount == 1
+
+    async def ai_previous_ticket(self, *, current: dict, customer_id: str, reference: str) -> dict | None:
+        if not current.get("business_phone_number_id") or not customer_id:
+            return None
+        if self._pool is None:
+            await self.connect()
+        assert self._pool is not None
+        async with self._pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute("""SELECT id, ticket_reference FROM support_tickets
+                    WHERE id < %s AND whatsapp_phone=%s AND business_phone_number_id=%s
+                      AND customer_id=%s AND conversation_origin='CUSTOMER'
+                      AND status IN ('RESOLVED','CLOSED') AND active_key IS NULL
+                      AND (%s='latest' OR ticket_reference=%s)
+                    ORDER BY id DESC LIMIT 1""",
+                    (current["id"], current["whatsapp_phone"], current["business_phone_number_id"],
+                     customer_id, reference, reference))
+                return await cur.fetchone()
 
     async def save_ai_media_annotation(self, ticket_id: int, message_id: int, *, kind: str, text: str) -> bool:
         """First result wins; deleted messages and other tickets cannot be annotated."""

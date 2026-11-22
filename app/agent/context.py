@@ -13,7 +13,7 @@ _BARE_SECRET = re.compile(r"(?=\S{6,}$)(?=.*[A-Za-z])(?:(?=.*[@#$%*!_])|(?=(?:\D
 
 
 def masked_messages(rows: list[dict], *, source_message_id: str | None,
-                    redacted_current_text: str | None = None) -> list[dict[str, str]]:
+                    redacted_current_text: str | None = None, limit: int = 12) -> list[dict[str, str]]:
     messages = []
     password_prompt = False
     for row in rows:
@@ -31,4 +31,4 @@ def masked_messages(rows: list[dict], *, source_message_id: str | None,
         body = redact_sensitive_text(body)
         password_prompt = role == "assistant" and bool(_PASSWORD.search(raw))
         messages.append({"role": role, "text": body[:4096]})
-    return messages[-12:]
+    return messages[-limit:]

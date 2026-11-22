@@ -65,7 +65,8 @@ def render_result(result: BusinessResult, style: str) -> Reply:
                  awaiting_customer=result.tool == "get_customer_shipments")
 
 
-async def execute_tool(action: ToolCall, identity: AIIdentity, *, ticket: dict, style: str) -> Reply:
+async def execute_tool(action: ToolCall, identity: AIIdentity, *, ticket: dict, style: str,
+                       current_text: str = "", repository=None) -> Reply:
     if action.name == "update_shipment_mode":
         raise BusinessDataError("CHANGE_REQUIRES_HUMAN")
     spec = REGISTRY.get(action.name)
@@ -81,8 +82,12 @@ async def execute_tool(action: ToolCall, identity: AIIdentity, *, ticket: dict, 
     if data_class not in {"public", "rates"} and not identity.customer_id:
         raise BusinessDataError("IDENTITY_VERIFICATION_REQUIRED")
     if action.name == "get_previous_ticket_context":
-        # Step 5d supplies the scoped, lazy summary; never read raw history here.
-        raise BusinessDataError("BUSINESS_DATA_UNAVAILABLE")
+        from app.agent.memory import previous_context
+        if repository is None:
+            from app.support_repository import support_repository
+            repository = support_repository
+        return await previous_context(repository, ticket=ticket, identity=identity, style=style,
+                                      reference=arguments["reference"], current_text=current_text)
     result = await business_data_source.read(action.name, arguments, identity)
     if result.tool != action.name:
         raise BusinessDataError()

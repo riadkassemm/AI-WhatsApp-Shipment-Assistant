@@ -14,6 +14,7 @@ from app.agent.guard import reply_violations
 from app.agent.tools import TOOL_SCHEMAS, execute_tool
 from app.agent.business_data import BusinessDataError
 from app.agent.media import prepare_media, save_image_notes
+from app.agent.memory import ticket_summary
 from app.ai_knowledge import ai_knowledge_service
 from app.ai_provider import ai_provider_service
 from app.ai_usage import AIUsageBlocked, ai_usage_service
@@ -156,6 +157,10 @@ class AgentService:
             "messages": masked_messages(rows, source_message_id=source_message_id,
                                         redacted_current_text=redacted_current_text),
         }
+        summary = await ticket_summary(support_repository, int(ticket["id"]),
+                                       source_message_id=source_message_id, style=style)
+        if summary:
+            tail["untrusted_conversation_summary"] = summary
         prefix = cached_prefix(knowledge)
         if media and media.image_url:
             tail["_image_url"] = media.image_url
@@ -182,7 +187,10 @@ class AgentService:
                         current_identity = await customer_ai_identity_service.resolve_or_unknown(
                             str(ticket["whatsapp_phone"]),
                         )
-                        rendered = await execute_tool(action, current_identity, ticket=ticket, style=style)
+                        rendered = await execute_tool(
+                            action, current_identity, ticket=ticket, style=style, repository=support_repository,
+                            current_text=tail["messages"][-1]["text"],
+                        )
                     except BusinessDataError as exc:
                         return AgentOutcome(reason_code=exc.reason)
                     return AgentOutcome(reply=rendered)
