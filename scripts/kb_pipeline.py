@@ -19,6 +19,10 @@ permissions to --dir, outside the public repository.
   #    AI Assistant > Knowledge for staff to correct and approve:
   venv/bin/python scripts/kb_pipeline.py draft --dir ~/kb --min-tickets 30
   venv/bin/python scripts/kb_pipeline.py draft --dir ~/kb --min-tickets 30 --submit --yes
+  # 6. Validate locally prepared drafts without a database write or provider call:
+  venv/bin/python scripts/kb_pipeline.py import-drafts --dir ~/kb
+  # After approved deployment and migrations, import for staff review (never approval):
+  venv/bin/python scripts/kb_pipeline.py import-drafts --dir ~/kb --submit --yes
 """
 from __future__ import annotations
 
@@ -207,17 +211,86 @@ async def cmd_draft(args) -> None:
     print(json.dumps({"drafts_created": created}))
 
 
+def _import_drafts(path: Path) -> list[tuple[dict, int, list[int]]]:
+    """Validate the entire input before opening a database connection."""
+    from app.ai_knowledge import AIKnowledgeValidationError, validate_article
+
+    allowed = {"intent_key", "title", "approved_policy", "data_needed", "escalate_when", "examples",
+               "observed_practice", "source_ticket_count", "source_ticket_ids"}
+    articles = []
+    topics = set()
+    try:
+        with path.open(encoding="utf-8") as handle:
+            for line_number, line in enumerate(handle, 1):
+                if not line.strip():
+                    continue
+                try:
+                    row = json.loads(line)
+                    if not isinstance(row, dict) or set(row) - allowed:
+                        raise ValueError
+                    article = validate_article(row)
+                    count, ids = row.get("source_ticket_count"), row.get("source_ticket_ids")
+                    if (type(count) is not int or count <= 0 or not isinstance(ids, list) or not ids
+                            or any(type(i) is not int or i <= 0 for i in ids)
+                            or len(set(ids)) != len(ids) or count < len(ids)):
+                        raise ValueError
+                    if article["intent_key"] in topics:
+                        raise ValueError
+                except (ValueError, TypeError, AIKnowledgeValidationError):
+                    # Do not echo article bodies, source IDs or exception payloads.
+                    raise SystemExit(f"Invalid draft at line {line_number}; no drafts imported. "
+                                     "Check article fields, unique topics and source metadata.") from None
+                topics.add(article["intent_key"])
+                articles.append((article, count, ids))
+    except (OSError, UnicodeError):
+        raise SystemExit("Cannot read drafts.jsonl as UTF-8; no drafts imported.") from None
+    if not articles:
+        raise SystemExit("drafts.jsonl is empty; no drafts imported.")
+    return articles
+
+
+async def cmd_import_drafts(args) -> None:
+    if args.submit and not args.yes:
+        raise SystemExit("Refusing to import without --yes.")
+    articles = _import_drafts(args.dir / "drafts.jsonl")
+    print(json.dumps({"drafts_validated": len(articles)}))
+    if not args.submit:
+        print("Dry run: no database access. After approved deployment and migrations, "
+              "add --submit --yes to import unapproved drafts for staff review.")
+        return
+
+    from app.ai_knowledge import AIKnowledgeConflictError, ai_knowledge_service
+
+    created = skipped = 0
+    for article, count, ids in articles:
+        try:
+            await ai_knowledge_service.create_tool_draft(
+                article, source_ticket_count=count, source_ticket_ids=ids,
+            )
+        except AIKnowledgeConflictError:
+            skipped += 1
+        except Exception:
+            # Each service call commits separately. A rerun skips existing drafts.
+            raise SystemExit(f"Import stopped after {created} created and {skipped} skipped "
+                             "due to a database/service error. Existing drafts were preserved; "
+                             "check database readiness before retrying.") from None
+        else:
+            created += 1
+    print(json.dumps({"drafts_created": created, "drafts_skipped": skipped}))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
     default_dir = Path.home() / ".local/share/whatsapp_chatbot/kb"
-    for name in ("export", "classify", "collect", "taxonomy", "draft"):
+    for name in ("export", "classify", "collect", "taxonomy", "draft", "import-drafts"):
         command = sub.add_parser(name)
         command.add_argument("--dir", type=Path, default=default_dir)
         if name == "export":
             command.add_argument("--gold", type=int, default=400, help="newest tickets kept out as the gold set")
         if name in ("classify", "draft"):
             command.add_argument("--model", default=CLASSIFY_MODEL if name == "classify" else DRAFT_MODEL)
+        if name in ("classify", "draft", "import-drafts"):
             command.add_argument("--submit", action="store_true")
             command.add_argument("--yes", action="store_true")
         if name == "classify":
@@ -230,7 +303,7 @@ def main() -> int:
             command.add_argument("--min-tickets", type=int, default=30)
     args = parser.parse_args()
     args.dir = args.dir.expanduser()
-    asyncio.run(globals()["cmd_" + args.command](args))
+    asyncio.run(globals()["cmd_" + args.command.replace("-", "_")](args))
     return 0
 
 

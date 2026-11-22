@@ -114,3 +114,153 @@ def test_classify_dry_run_sends_nothing(tmp_path: Path, monkeypatch: pytest.Monk
     assert (tmp_path / "classify_requests.jsonl").stat().st_mode & 0o777 == 0o600
     with pytest.raises(SystemExit, match="--yes"):
         asyncio.run(script.cmd_classify(types.SimpleNamespace(**{**vars(args), "submit": True})))
+
+
+@pytest.fixture
+def import_cli(tmp_path, monkeypatch):
+    from app import ai_knowledge
+
+    spec = importlib.util.spec_from_file_location("kb_import_pipeline", Path("scripts/kb_pipeline.py"))
+    script = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(script)
+    calls = []
+
+    class DraftService:
+        async def create_tool_draft(self, article, **source):
+            calls.append((article, source))
+            return len(calls)
+
+    monkeypatch.setattr(ai_knowledge, "ai_knowledge_service", DraftService())
+    monkeypatch.setitem(sys.modules, "app.ai_provider", None)
+    monkeypatch.setitem(sys.modules, "app.ai_usage", None)
+    row = {"intent_key": "tracking_status", "title": "Tracking status",
+           "approved_policy": "[STAFF TO CONFIRM: when to request the tracking number]",
+           "data_needed": "Tracking number", "escalate_when": "Missing tracking data",
+           "examples": [{"style": "en", "customer": "Where is my parcel?", "reply": "Let me check."}],
+           "observed_practice": "Agents checked the warehouse.",
+           "source_ticket_count": 35, "source_ticket_ids": [1, 2, 3]}
+    args = types.SimpleNamespace(dir=tmp_path, submit=False, yes=False)
+    return script, row, args, calls
+
+
+def _draft_file(args, *rows):
+    (args.dir / "drafts.jsonl").write_text("\n".join(json.dumps(row) for row in rows), encoding="utf-8")
+
+
+def test_import_drafts_defaults_to_validation_without_database_or_provider(import_cli, monkeypatch, capsys):
+    from app.ai_knowledge import AIKnowledgeRepository
+
+    script, row, args, calls = import_cli
+    _draft_file(args, row)
+
+    async def forbidden(*_args, **_kwargs):
+        pytest.fail("Dry run must not open a database connection")
+
+    monkeypatch.setattr(AIKnowledgeRepository, "connect", forbidden)
+    monkeypatch.setattr(sys, "argv", ["kb_pipeline.py", "import-drafts", "--dir", str(args.dir)])
+    assert script.main() == 0
+    assert calls == []
+    assert '"drafts_validated": 1' in capsys.readouterr().out
+    args.submit = True
+    with pytest.raises(SystemExit, match="--yes"):
+        asyncio.run(script.cmd_import_drafts(args))
+    assert calls == []
+
+
+def test_import_drafts_passes_validated_articles_and_provenance_only(import_cli, capsys):
+    script, row, args, calls = import_cli
+    _draft_file(args, row)
+    args.submit = args.yes = True
+    asyncio.run(script.cmd_import_drafts(args))
+    assert len(calls) == 1
+    article, source = calls[0]
+    assert article == {k: v for k, v in row.items() if not k.startswith("source_")}
+    assert source == {"source_ticket_count": 35, "source_ticket_ids": [1, 2, 3]}
+    assert '"drafts_created": 1' in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("change", [
+    {"intent_key": "bad key"}, {"approved_policy": ""}, {"status": "APPROVED"},
+    {"examples": [{"style": "invalid", "customer": "a", "reply": "b"}]},
+    {"source_ticket_count": True}, {"source_ticket_count": 0}, {"source_ticket_count": "3"},
+    {"source_ticket_count": 2}, {"source_ticket_ids": []}, {"source_ticket_ids": [1, 1]},
+    {"source_ticket_ids": [True]}, {"source_ticket_ids": [0]}, {"source_ticket_ids": ["1"]},
+    {"source_ticket_ids": None},
+])
+def test_import_drafts_preflights_all_rows_before_any_write(import_cli, change):
+    script, row, args, calls = import_cli
+    _draft_file(args, row, {**row, "intent_key": "shipping_rates", **change})
+    args.submit = args.yes = True
+    with pytest.raises(SystemExit, match="line 2"):
+        asyncio.run(script.cmd_import_drafts(args))
+    assert calls == []
+
+
+def test_import_drafts_rejects_duplicate_normalized_topics(import_cli):
+    script, row, args, calls = import_cli
+    _draft_file(args, row, {**row, "intent_key": " TRACKING_STATUS "})
+    args.submit = args.yes = True
+    with pytest.raises(SystemExit, match="line 2"):
+        asyncio.run(script.cmd_import_drafts(args))
+    assert calls == []
+
+
+@pytest.mark.parametrize("content", ["", "\n  \n", "[]", "null", '{"title": "private sentinel",'])
+def test_import_drafts_rejects_bad_files_without_echoing_input(import_cli, content, capsys):
+    script, _row, args, calls = import_cli
+    (args.dir / "drafts.jsonl").write_text(content)
+    args.submit = args.yes = True
+    with pytest.raises(SystemExit) as error:
+        asyncio.run(script.cmd_import_drafts(args))
+    assert "private sentinel" not in str(error.value)
+    assert "private sentinel" not in capsys.readouterr().out
+    assert calls == []
+
+
+def test_import_drafts_missing_and_non_utf8_files_fail_safely(import_cli):
+    script, _row, args, calls = import_cli
+    for content in (None, b"\xff"):
+        if content:
+            (args.dir / "drafts.jsonl").write_bytes(content)
+        with pytest.raises(SystemExit, match="Cannot read"):
+            asyncio.run(script.cmd_import_drafts(args))
+    assert calls == []
+
+
+def test_import_drafts_skips_conflicts_without_overwriting_staff_work(import_cli, monkeypatch, capsys):
+    from app import ai_knowledge
+
+    script, row, args, calls = import_cli
+    _draft_file(args, row, {**row, "intent_key": "shipping_rates"})
+
+    async def create(article, **source):
+        if article["intent_key"] == "tracking_status":
+            raise ai_knowledge.AIKnowledgeConflictError("private sentinel")
+        calls.append((article, source))
+
+    monkeypatch.setattr(ai_knowledge.ai_knowledge_service, "create_tool_draft", create)
+    args.submit = args.yes = True
+    asyncio.run(script.cmd_import_drafts(args))
+    assert [article["intent_key"] for article, _ in calls] == ["shipping_rates"]
+    out = capsys.readouterr().out
+    assert '"drafts_created": 1, "drafts_skipped": 1' in out
+    assert "private sentinel" not in out
+
+
+def test_import_drafts_reports_partial_failure_without_database_payload(import_cli, monkeypatch):
+    from app import ai_knowledge
+
+    script, row, args, calls = import_cli
+    _draft_file(args, row, {**row, "intent_key": "shipping_rates"}, {**row, "intent_key": "delivery_time"})
+
+    async def create(article, **source):
+        if calls:
+            raise RuntimeError("private database payload")
+        calls.append((article, source))
+
+    monkeypatch.setattr(ai_knowledge.ai_knowledge_service, "create_tool_draft", create)
+    args.submit = args.yes = True
+    with pytest.raises(SystemExit, match="1 created and 0 skipped") as error:
+        asyncio.run(script.cmd_import_drafts(args))
+    assert "private database payload" not in str(error.value)
+    assert len(calls) == 1

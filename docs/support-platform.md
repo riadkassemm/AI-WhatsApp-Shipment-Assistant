@@ -1237,3 +1237,44 @@ on physical recipient phones still require device verification.
 ## Bridge persistence and dashboard refresh
 
 See [storage, request identity, polling, and rollback](bridge-dashboard-performance.md) before deploying the incremental bridge store. The API requires the additive `20261029_support_send_fingerprints.sql` migration. Existing polling overrides should be reviewed; the default is now 30 seconds with SSE-triggered refreshes. Production activation requires explicit approval.
+
+## Importing offline knowledge drafts
+
+Keep historical exports, classifications and articles in a private directory outside
+the repository. Review topic counts and merge/drop mappings before drafting; the
+held-out evaluation transcripts must not be used to classify or draft knowledge.
+Verify de-identification before sending any export to an external service.
+
+`scripts/kb_pipeline.py import-drafts --dir /private/kb` validates `drafts.jsonl`
+without database access, provider calls or a provider key. Each nonblank line is
+one article with `intent_key`, `title`, `approved_policy`, optional `data_needed`,
+`escalate_when`, `examples`, `observed_practice`, and required provenance:
+`source_ticket_count` (positive integer) and `source_ticket_ids` (nonempty list of
+unique positive integers, no longer than the count). The article validator supplies
+the same limits as the Knowledge tab. Topic keys must be unique after normalization.
+All rows are validated before the first write; malformed input reports its line
+number without printing article text or source identifiers.
+
+After an explicitly approved deployment with the knowledge tables migrated, use
+`venv/bin/python scripts/kb_pipeline.py import-drafts --dir /private/kb --submit --yes`
+against the intended database. Both flags are required to write. No new migration
+is introduced by this command. Each article goes through `create_tool_draft` and
+its audit transaction as an `AI_DRAFT` with status `DRAFT`. Despite the field name
+`approved_policy`, imported text is never approved automatically or included in
+the AI prompt. Staff review and approve it in **AI Assistant → Knowledge**.
+Keep historical practice separate from proposed policy and mark missing or
+conflicting facts with `[STAFF TO CONFIRM: ...]` for reviewers. Resolve these notes
+before approval; the current approval validator does not automatically block
+square-bracket review notes.
+
+The command prints created/skipped counts and preserves any existing draft,
+including staff edits. Each article commits separately: after a database error,
+the reported earlier creations remain. Retry after resolving the error; topics
+that still have drafts are skipped. If an earlier draft has since been approved or
+retired, importing that topic again creates a new draft version. The service keeps
+at most 200 source IDs per article alongside the full source count, so retain the
+private JSONL file for complete provenance.
+
+Rollback: stop using the command or revert its code change. Staff can retire an
+unwanted imported draft in Knowledge. Existing approved versions remain unchanged;
+do not delete knowledge audit records or migrate a real database as part of rollback.

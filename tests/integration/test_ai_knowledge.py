@@ -92,3 +92,33 @@ async def test_invalid_articles_are_rejected(knowledge):
                             ({'examples': [{'style': 'klingon', 'customer': 'a', 'reply': 'b'}]}, 'style')):
         with pytest.raises(AIKnowledgeValidationError, match=message):
             await service.create(ADMIN, {**ARTICLE, **change})
+
+
+@pytest.mark.asyncio
+async def test_imported_articles_stay_drafts_and_reruns_preserve_staff_edits(knowledge, tmp_path, monkeypatch):
+    import json
+    from types import SimpleNamespace
+
+    from app import ai_knowledge
+    from scripts import kb_pipeline
+
+    service, sql = knowledge
+    monkeypatch.setattr(ai_knowledge, 'ai_knowledge_service', service)
+    row = {**ARTICLE, 'source_ticket_count': 35, 'source_ticket_ids': [41, 42, 43]}
+    (tmp_path / 'drafts.jsonl').write_text(json.dumps(row), encoding='utf-8')
+    args = SimpleNamespace(dir=tmp_path, submit=True, yes=True)
+    await kb_pipeline.cmd_import_drafts(args)
+    articles = await sql('SELECT * FROM ai_kb_articles WHERE intent_key=%s', ('lost_parcel',))
+    assert len(articles) == 1
+    draft = articles[0]
+    assert (draft['status'], draft['source'], draft['source_ticket_count']) == ('DRAFT', 'AI_DRAFT', 35)
+    assert json.loads(draft['source_ticket_ids']) == [41, 42, 43]
+    assert await service.prompt_text() == ''
+    await service.update(ADMIN, draft['id'], {**ARTICLE, 'title': 'Staff reviewed draft',
+                                            'row_version': draft['row_version']})
+    await kb_pipeline.cmd_import_drafts(args)
+    articles = await sql('SELECT * FROM ai_kb_articles WHERE intent_key=%s', ('lost_parcel',))
+    assert len(articles) == 1 and articles[0]['title'] == 'Staff reviewed draft'
+    assert articles[0]['status'] == 'DRAFT'
+    audit = await sql('SELECT action FROM ai_kb_audit WHERE article_id=%s ORDER BY id', (draft['id'],))
+    assert [entry['action'] for entry in audit] == ['DRAFT_CREATED', 'DRAFT_EDITED']
