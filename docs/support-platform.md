@@ -49,6 +49,47 @@ normally happens within the 15-second heartbeat interval. Redis is an internal
 notification bus, not a source of authorization. There is no durable SSE replay;
 the dashboard's normal polling refreshes state after missed events.
 
+## AI usage and spending administration
+
+Admins and Super Admins can open **AI Assistant → Usage & Costs**. Regular
+agents cannot read these endpoints or change budgets/prices. Mutations require
+the staff CSRF token. The tab uses `GET /api/support/ai-usage` for its summary,
+daily series, and model/purpose/tier breakdowns, filtered by inclusive `from` and
+`to` dates (up to one year), number, and exact model ID.
+
+All spending figures are estimates calculated from API usage; the OpenAI invoice
+is final and may differ. Pending calls count at their full reserved estimate.
+The **Today's cost**, **Monthly cost**, and budget cards always cover all numbers
+and models, using the budget timezone (`Asia/Beirut` by default). The selected
+period totals, charts, and tables use the filters. Offline knowledge-building and
+evaluation costs are shown separately and excluded from per-ticket averages.
+Ticket resolution/escalation rates remain unavailable until the AI ticket model
+is implemented. The tab refreshes every 60 seconds while visible and on budget
+threshold events; polling preserves unsaved budget edits and stops on close or
+logout.
+
+`GET/PUT /api/support/ai-budget` reads/changes the shared budget, daily limit,
+warning percentages, enforcement switch, and temporary override. The override
+input is explicitly UTC. Budget saves use a version check; on conflict, review
+the latest configuration using **Discard edits and reload budget** before retrying.
+
+`GET/POST /api/support/ai-prices` lists/adds immutable price revisions. **Revise**
+prefills a new revision; it does not rewrite historical prices or usage. Verify
+the replacement against current provider pricing, including audio/minute and
+batch factor, before retiring the old revision. `POST /ai-prices/{id}/verify` and
+`POST /ai-prices/{id}/retire` (under `/api/support`) lock the selected revision;
+every price mutation and its audit entry commit together. New revisions start
+unverified. Unknown/unverified pricing still blocks calls; verified revisions
+use the existing longest-prefix, newest-effective-price selection.
+Requests already in flight settle against the verified price snapshot captured
+before their call; price changes do not change their settled rate.
+
+No additional migration is needed for this tab beyond
+`20261122_ai_usage_budget.sql`. Deployment, real-database migrations, and AI
+enablement remain separate operator actions.
+
+![Usage and Costs with synthetic data](screenshots/ai-usage-dashboard.png)
+
 ## Reopening resolved customer tickets
 
 The resolved ticket's **Reopen ticket** button is available to its last assignee

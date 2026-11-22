@@ -27,10 +27,11 @@ import contextvars
 import json
 import logging
 import math
+import re
 import secrets
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import ROUND_CEILING, Decimal
 from typing import Any, Awaitable, Callable
 from zoneinfo import ZoneInfo
@@ -38,6 +39,7 @@ from zoneinfo import ZoneInfo
 import aiomysql
 
 from app.config import settings
+from app.security import safe_log_identifier
 from app.support_auth import SupportAgent
 
 logger = logging.getLogger("shipment-bot")
@@ -239,13 +241,14 @@ class AIUsageRepository:
             UPDATE ai_usage_events
             SET settled_at = UTC_TIMESTAMP(6), duration_ms = %s, model = %s,
                 input_tokens = %s, cached_input_tokens = %s, output_tokens = %s, reasoning_tokens = %s,
-                audio_seconds = %s, cost_micros = %s, cost_basis = %s, outcome = %s, openai_request_id = %s
+                audio_seconds = %s, cost_micros = %s, cost_basis = %s, outcome = %s, openai_request_id = %s,
+                price_id = COALESCE(%s, price_id)
             WHERE reservation_id = %s AND outcome = 'pending'
             """,
             (values.get("duration_ms"), values.get("model"), values.get("input_tokens"),
              values.get("cached_input_tokens"), values.get("output_tokens"), values.get("reasoning_tokens"),
              values.get("audio_seconds"), int(values["cost_micros"]), values["cost_basis"], values["outcome"],
-             values.get("openai_request_id"), reservation_id),
+             values.get("openai_request_id"), values.get("price_id"), reservation_id),
         )
         return changed == 1
 
@@ -302,6 +305,137 @@ class AIUsageRepository:
             except Exception:
                 await conn.rollback()
                 raise
+
+    @staticmethod
+    def _filters(start: str, end: str, line: str | None, model: str | None) -> tuple[str, tuple]:
+        clauses, args = ["budget_day BETWEEN %s AND %s"], [start, end]
+        if line:
+            clauses.append("phone_number_id = %s")
+            args.append(line)
+        if model:
+            clauses.append("COALESCE(model, requested_model) = %s")
+            args.append(model)
+        return " AND ".join(clauses), tuple(args)
+
+    async def usage_by_day(self, start: str, end: str, line: str | None, model: str | None) -> list[dict[str, Any]]:
+        where, args = self._filters(start, end, line, model)
+        return await self._fetch(
+            f"""
+            SELECT budget_day AS day, COUNT(*) AS requests, COALESCE(SUM(cost_micros), 0) AS cost_micros,
+                   COALESCE(SUM(CASE WHEN outcome = 'pending' THEN cost_micros END), 0) AS pending_micros
+            FROM ai_usage_events WHERE {where}
+            GROUP BY budget_day ORDER BY budget_day
+            """, args,
+        )
+
+    async def usage_by(self, column: str, start: str, end: str, line: str | None, model: str | None) -> list[dict[str, Any]]:
+        expression = {"model": "COALESCE(model, requested_model)", "purpose": "purpose", "tier": "tier"}[column]
+        where, args = self._filters(start, end, line, model)
+        return await self._fetch(
+            f"""
+            SELECT {expression} AS name, COUNT(*) AS requests,
+                   COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                   COALESCE(SUM(cached_input_tokens), 0) AS cached_input_tokens,
+                   COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                   COALESCE(SUM(reasoning_tokens), 0) AS reasoning_tokens,
+                   COALESCE(SUM(cost_micros), 0) AS cost_micros,
+                   SUM(outcome = 'success') AS successes, SUM(outcome IN ('failure', 'timeout')) AS failures
+            FROM ai_usage_events WHERE {where}
+            GROUP BY {expression} ORDER BY cost_micros DESC
+            """, args,
+        )
+
+    async def ticket_cost(self, start: str, end: str, line: str | None, model: str | None) -> dict[str, Any]:
+        where, args = self._filters(start, end, line, model)
+        return await self._fetch(
+            f"""
+            SELECT COUNT(DISTINCT ticket_id) AS tickets,
+                   COALESCE(SUM(CASE WHEN ticket_id IS NOT NULL THEN cost_micros END), 0) AS cost_micros
+            FROM ai_usage_events WHERE {where}
+              AND purpose NOT IN ('kb_build', 'eval', 'test')
+            """, args, one=True,
+        ) or {}
+
+    async def list_prices(self) -> list[dict[str, Any]]:
+        return await self._fetch(
+            """
+            SELECT id, model_prefix, input_per_million, cached_input_per_million, output_per_million,
+                   audio_per_minute, batch_factor, effective_from, source, verified_by_staff_id,
+                   verified_by_staff_name, verified_at, retired_at
+            FROM ai_model_prices ORDER BY retired_at IS NOT NULL, model_prefix, effective_from DESC, id DESC
+            """
+        )
+
+    async def insert_price(self, values: dict[str, Any], *, actor: SupportAgent) -> int:
+        if self._pool is None:
+            await self.connect()
+        assert self._pool is not None
+        async with self._pool.acquire() as conn:
+            await conn.begin()
+            try:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        """
+                        INSERT INTO ai_model_prices (model_prefix, input_per_million, cached_input_per_million,
+                            output_per_million, audio_per_minute, batch_factor, effective_from, source)
+                        VALUES (%s, %s, %s, %s, %s, %s, UTC_TIMESTAMP(6), %s)
+                        """,
+                        (values["model_prefix"], values["input_per_million"], values["cached_input_per_million"],
+                         values["output_per_million"], values["audio_per_minute"], values["batch_factor"],
+                         values["source"]),
+                    )
+                    price_id = int(cur.lastrowid)
+                    await self._price_audit(cur, "AI_PRICE_ADDED", actor, {"id": price_id, **values})
+                await conn.commit()
+                return price_id
+            except Exception:
+                await conn.rollback()
+                raise
+
+    async def mark_price(self, price_id: int, *, verify: bool, actor: SupportAgent) -> dict[str, Any]:
+        # Prices are immutable revisions: amounts are never edited in place.
+        # Lock state transitions so verification cannot race retirement.
+        if self._pool is None:
+            await self.connect()
+        assert self._pool is not None
+        async with self._pool.acquire() as conn:
+            await conn.begin()
+            try:
+                async with conn.cursor(aiomysql.DictCursor) as cur:
+                    await cur.execute("SELECT * FROM ai_model_prices WHERE id = %s FOR UPDATE", (int(price_id),))
+                    row = await cur.fetchone()
+                    if not row or row.get("retired_at"):
+                        raise AIUsageConflictError("This price is no longer available. Refresh and try again.")
+                    if verify and row.get("verified_at"):
+                        raise AIUsageConflictError("This price is already verified. Refresh and try again.")
+                    if verify:
+                        await cur.execute(
+                            "UPDATE ai_model_prices SET verified_at = UTC_TIMESTAMP(6), "
+                            "verified_by_staff_id = %s, verified_by_staff_name = %s WHERE id = %s",
+                            (int(actor.id), actor.name, int(price_id)),
+                        )
+                    else:
+                        await cur.execute("UPDATE ai_model_prices SET retired_at = UTC_TIMESTAMP(6) WHERE id = %s",
+                                          (int(price_id),))
+                    await self._price_audit(cur, "AI_PRICE_VERIFIED" if verify else "AI_PRICE_RETIRED", actor,
+                                            {"id": int(price_id), "model_prefix": row["model_prefix"]})
+                await conn.commit()
+                return row
+            except Exception:
+                await conn.rollback()
+                raise
+
+    @staticmethod
+    async def _price_audit(cur: Any, action: str, actor: SupportAgent, details: dict[str, Any]) -> None:
+        await cur.execute(
+            """
+            INSERT INTO ai_control_settings_audit (
+                settings_id, action, actor_staff_id, actor_staff_name,
+                old_configuration_json, new_configuration_json, created_at
+            ) VALUES (1, %s, %s, %s, '{}', %s, UTC_TIMESTAMP(6))
+            """,
+            (action, int(actor.id), actor.name, json.dumps(details, default=str)),
+        )
 
     async def audit(self, action: str, details: dict[str, Any]) -> None:
         await self._execute(
@@ -489,9 +623,9 @@ class AIUsageService:
             version = int(payload["version"])
         except (KeyError, TypeError, ValueError, ArithmeticError) as exc:
             raise AIUsageValidationError("Enter valid budget amounts.") from exc
-        if not (Decimal("0") < monthly <= Decimal("100000")):
+        if not monthly.is_finite() or not (Decimal("0") < monthly <= Decimal("100000")):
             raise AIUsageValidationError("The monthly limit must be more than $0 and at most $100,000.")
-        if daily is not None and not (Decimal("0") < daily <= monthly):
+        if daily is not None and (not daily.is_finite() or not (Decimal("0") < daily <= monthly)):
             raise AIUsageValidationError("The daily limit must be more than $0 and not above the monthly limit.")
         if not thresholds or any(not 1 <= value <= 100 for value in thresholds) or len(thresholds) > 6:
             raise AIUsageValidationError("Warnings must be 1 to 6 percentages between 1 and 100.")
@@ -515,14 +649,190 @@ class AIUsageService:
             },
             actor=agent,
         )
-        logger.info("AI budget changed: actor_staff_id=%s", agent.id)
+        logger.info("AI budget changed: actor=%s", safe_log_identifier(agent.id, "staff"))
         self._settings_cache = None
+        return (await self.budget_settings(fresh=True)).to_dict()
+
+    # -- dashboard -------------------------------------------------------------------
+    @staticmethod
+    def _require_manager(agent: SupportAgent) -> None:
+        if not agent.is_supervisor:
+            raise AIUsageForbiddenError("Only Super Admins and Admins can view AI costs or change AI spending.")
+
+    async def usage_report(
+        self, agent: SupportAgent, *, start: str | None = None, end: str | None = None,
+        line: str | None = None, model: str | None = None,
+    ) -> dict[str, Any]:
+        """Usage & Costs dashboard data. Amounts are application estimates."""
+        self._require_manager(agent)
+        budget = await self.budget_settings(fresh=True)
+        now = self._clock()
+        today, month = periods(now, budget.budget_timezone)
+        start = start or f"{month}-01"
+        end = end or today
+        try:
+            first = datetime.strptime(start, "%Y-%m-%d").date()
+            last = datetime.strptime(end, "%Y-%m-%d").date()
+        except ValueError as exc:
+            raise AIUsageValidationError("Dates must be YYYY-MM-DD.") from exc
+        if last < first or (last - first).days > 366:
+            raise AIUsageValidationError("Choose a date range of at most one year, ending after it starts.")
+        start, end = first.isoformat(), last.isoformat()
+        line = (str(line).strip()[:64] or None) if line else None
+        model = (str(model).strip()[:100] or None) if model else None
+
+        today_settled, today_pending = await self.repository.period_totals(day=today)
+        month_settled, month_pending = await self.repository.period_totals(month=month)
+        month_cost = month_settled + month_pending
+        state_ok, state_reason = await self.budget_state()
+        days = await self.repository.usage_by_day(start, end, line, model)
+        day_rows = {str(row["day"]): row for row in days}
+        days = [day_rows.get((first + timedelta(days=offset)).isoformat(), {
+            "day": (first + timedelta(days=offset)).isoformat(), "requests": 0,
+            "cost_micros": 0, "pending_micros": 0,
+        }) for offset in range((last - first).days + 1)]
+        by_model = await self.repository.usage_by("model", start, end, line, model)
+        by_purpose = await self.repository.usage_by("purpose", start, end, line, model)
+        by_tier = await self.repository.usage_by("tier", start, end, line, model)
+        tickets = await self.repository.ticket_cost(start, end, line, model)
+        offline_purposes = {"kb_build", "eval"}
+        range_cost = sum(int(row["cost_micros"]) for row in days)
+        offline_cost = sum(int(row["cost_micros"]) for row in by_purpose if row["name"] in offline_purposes)
+        ticket_count = int(tickets.get("tickets") or 0)
+
+        def usage_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            return [{
+                "name": row["name"], "requests": int(row["requests"] or 0),
+                "input_tokens": int(row["input_tokens"] or 0), "cached_input_tokens": int(row["cached_input_tokens"] or 0),
+                "output_tokens": int(row["output_tokens"] or 0), "reasoning_tokens": int(row["reasoning_tokens"] or 0),
+                "cost_usd": micros_to_usd(row["cost_micros"]), "failures": int(row["failures"] or 0),
+            } for row in rows]
+
+        return {
+            "estimated": True,
+            "note": "Estimated by the application from API usage. The OpenAI invoice is final and may differ.",
+            "filters": {"from": start, "to": end, "line": line, "model": model},
+            "budget": budget.to_dict(),
+            "status": {"within_budget": state_ok, "reason": state_reason},
+            "summary": {
+                "today_cost_usd": micros_to_usd(today_settled + today_pending),
+                "month_cost_usd": micros_to_usd(month_cost),
+                "monthly_budget_usd": micros_to_usd(budget.monthly_limit_micros),
+                "budget_remaining_usd": micros_to_usd(max(0, budget.monthly_limit_micros - month_cost)),
+                "budget_used_percent": round(month_cost * 100 / budget.monthly_limit_micros, 1)
+                if budget.monthly_limit_micros else None,
+                "range_cost_usd": micros_to_usd(range_cost),
+                "offline_cost_usd": micros_to_usd(offline_cost),
+                "api_requests": sum(int(row["requests"] or 0) for row in days),
+                # AI tickets arrive with the AI ticket model (Step 3); until then these are unknown.
+                "ai_tickets_handled": ticket_count or None,
+                "average_cost_per_ticket_usd": (
+                    micros_to_usd(int(tickets.get("cost_micros") or 0) // ticket_count) if ticket_count else None
+                ),
+                "escalation_rate": None,
+                "resolution_rate": None,
+            },
+            "daily": [{"day": str(row["day"]), "requests": int(row["requests"] or 0),
+                       "cost_usd": micros_to_usd(row["cost_micros"]),
+                       "pending_usd": micros_to_usd(row["pending_micros"])} for row in days],
+            "by_model": usage_rows(by_model),
+            "by_purpose": usage_rows(by_purpose),
+            "by_tier": usage_rows(by_tier),
+        }
+
+    async def price_list(self, agent: SupportAgent) -> dict[str, Any]:
+        self._require_manager(agent)
+        rows = await self.repository.list_prices()
+        try:
+            blocked = sorted(await self.counters.blocked_models())
+        except Exception:
+            blocked = []
+
+        def money(value: Any) -> str | None:
+            return None if value is None else format(Decimal(str(value)).normalize(), "f")
+
+        return {
+            "prices": [{
+                "id": int(row["id"]), "model_prefix": row["model_prefix"],
+                "input_per_million": money(row["input_per_million"]),
+                "cached_input_per_million": money(row["cached_input_per_million"]),
+                "output_per_million": money(row["output_per_million"]),
+                "audio_per_minute": money(row.get("audio_per_minute")),
+                "batch_factor": money(row.get("batch_factor")),
+                "effective_from": _iso(row.get("effective_from")), "source": row.get("source"),
+                "verified": row.get("verified_at") is not None, "verified_at": _iso(row.get("verified_at")),
+                "verified_by": row.get("verified_by_staff_name"),
+                "retired": row.get("retired_at") is not None,
+            } for row in rows],
+            "blocked_models": blocked,
+        }
+
+    async def add_price(self, agent: SupportAgent, payload: dict[str, Any]) -> dict[str, Any]:
+        self._require_manager(agent)
+        prefix = str(payload.get("model_prefix") or "").strip().lower()
+        if not re.fullmatch(r"[a-z0-9][a-z0-9.\-]{1,99}", prefix):
+            raise AIUsageValidationError("Enter the OpenAI model name, for example gpt-6-luna.")
+
+        def amount(name: str, *, optional: bool = False) -> Decimal | None:
+            raw = payload.get(name)
+            if optional and raw in (None, ""):
+                return None
+            try:
+                value = Decimal(str(raw))
+            except (ArithmeticError, ValueError) as exc:
+                raise AIUsageValidationError(f"Enter a valid amount for {name.replace('_', ' ')}.") from exc
+            if not value.is_finite() or not (Decimal(0) <= value <= Decimal(1000)):
+                raise AIUsageValidationError("Prices must be between $0 and $1,000.")
+            if value != value.quantize(Decimal("0.000001")):
+                raise AIUsageValidationError("Prices support at most six decimal places.")
+            return value
+
+        values = {
+            "model_prefix": prefix,
+            "input_per_million": amount("input_per_million"),
+            "cached_input_per_million": amount("cached_input_per_million"),
+            "output_per_million": amount("output_per_million"),
+            "audio_per_minute": amount("audio_per_minute", optional=True),
+            "batch_factor": amount("batch_factor", optional=True),
+            "source": str(payload.get("source") or "Entered in the dashboard")[:255],
+        }
+        factor = values["batch_factor"] if values["batch_factor"] is not None else Decimal("0.5")
+        if not 0 < factor <= 1 or factor != factor.quantize(Decimal("0.0001")):
+            raise AIUsageValidationError("Batch factor must be above 0 and at most 1, with up to four decimal places.")
+        values["batch_factor"] = factor
+        await self.repository.insert_price(values, actor=agent)
+        logger.info("AI model price added: actor=%s", safe_log_identifier(agent.id, "staff"))
+        return await self.price_list(agent)
+
+    async def verify_price(self, agent: SupportAgent, price_id: int) -> dict[str, Any]:
+        self._require_manager(agent)
+        row = await self.repository.mark_price(price_id, verify=True, actor=agent)
+        try:
+            for model in await self.counters.blocked_models():
+                if model.startswith(str(row["model_prefix"])) and await self.price_for(model) is not None:
+                    await self.counters.unblock_model(model)
+        except Exception:
+            logger.warning("Blocked AI models could not be refreshed after price verification")
+        logger.info("AI model price verified: actor=%s", safe_log_identifier(agent.id, "staff"))
+        return await self.price_list(agent)
+
+    async def retire_price(self, agent: SupportAgent, price_id: int) -> dict[str, Any]:
+        self._require_manager(agent)
+        await self.repository.mark_price(price_id, verify=False, actor=agent)
+        return await self.price_list(agent)
+
+    async def budget_payload(self, agent: SupportAgent) -> dict[str, Any]:
+        self._require_manager(agent)
         return (await self.budget_settings(fresh=True)).to_dict()
 
     # -- prices --------------------------------------------------------------------
     async def price_for(self, model: str) -> ModelPrice | None:
+        return self._matching_price(model, await self.repository.verified_prices())
+
+    @staticmethod
+    def _matching_price(model: str, rows: list[dict[str, Any]]) -> ModelPrice | None:
         model = str(model or "")
-        for row in await self.repository.verified_prices():
+        for row in rows:
             if model.startswith(str(row["model_prefix"])):
                 return _price_from_row(row)
         return None
@@ -573,7 +883,10 @@ class AIUsageService:
         modalities: str = "text",
         batch: bool = False,
     ) -> Any:
-        price = await self.price_for(model)
+        # Price edits affect new requests only. Settlement uses this same
+        # verified snapshot, including when the provider returns a dated model.
+        price_rows = await self.repository.verified_prices()
+        price = self._matching_price(model, price_rows)
         if price is None:
             raise AIUsageBlocked(
                 "AI_MODEL_PRICING_UNCONFIGURED",
@@ -639,13 +952,14 @@ class AIUsageService:
                 "cost_basis": "reserved_estimate", "outcome": outcome,
             })
             raise
-        values = await self._actual_values(response, price, estimate, model, audio_seconds, batch)
+        values = await self._actual_values(response, price, estimate, model, audio_seconds, batch, price_rows)
         values["duration_ms"] = int((time.monotonic() - started) * 1000)
         await self._settle(reservation_id, month, day, estimate, values)
         return response
 
     async def _actual_values(self, response: Any, price: ModelPrice, estimate: int, model: str,
-                             audio_seconds: float | None, batch: bool) -> dict[str, Any]:
+                             audio_seconds: float | None, batch: bool,
+                             price_rows: list[dict[str, Any]]) -> dict[str, Any]:
         returned_model = str(getattr(response, "model", "") or model)
         request_id = getattr(response, "_request_id", None) or getattr(response, "id", None)
         if audio_seconds is not None:
@@ -661,7 +975,7 @@ class AIUsageService:
             "output_tokens": _usage_field(usage, "output_tokens"),
             "reasoning_tokens": _usage_field(usage, "output_tokens_details", "reasoning_tokens"),
         }
-        actual_price = await self.price_for(returned_model)
+        actual_price = self._matching_price(returned_model, price_rows)
         if usage is None or actual_price is None:
             if actual_price is None:
                 # The provider answered with a model ID that has no verified price:
@@ -674,7 +988,8 @@ class AIUsageService:
         cost = token_cost_micros(actual_price, input_tokens=tokens["input_tokens"],
                                  cached_input_tokens=tokens["cached_input_tokens"],
                                  output_tokens=tokens["output_tokens"], batch=batch)
-        return {"model": returned_model, **tokens, "cost_micros": cost, "cost_basis": "computed",
+        return {"model": returned_model, **tokens, "price_id": actual_price.id,
+                "cost_micros": cost, "cost_basis": "computed",
                 "outcome": "success", "openai_request_id": str(request_id)[:128] if request_id else None}
 
     async def _settle(self, reservation_id: str, month: str, day: str, estimate: int, values: dict[str, Any]) -> None:

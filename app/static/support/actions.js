@@ -866,7 +866,7 @@ const AI_KEY_STATUS_LABELS = {
 };
 
 function selectAiTab(name) {
-  const tabs = {numbers: ['aiTabNumbers', 'aiPanelNumbers'], openai: ['aiTabOpenAI', 'aiPanelOpenAI']};
+  const tabs = {numbers: ['aiTabNumbers', 'aiPanelNumbers'], openai: ['aiTabOpenAI', 'aiPanelOpenAI'], usage: ['aiTabUsage', 'aiPanelUsage']};
   for (const [key, [tabId, panelId]] of Object.entries(tabs)) {
     const active = key === name;
     $(tabId).classList.toggle('active', active);
@@ -875,6 +875,7 @@ function selectAiTab(name) {
     $(panelId).classList.toggle('hidden', !active);
   }
   if (name === 'openai') loadOpenAIConfiguration();
+  if (name === 'usage') startAiUsagePolling(); else stopAiUsagePolling();
 }
 
 function renderOpenAIConfiguration(config) {
@@ -1218,6 +1219,7 @@ async function openAiSettingsModal() {
   showAiSettingsError('');
   syncAiSettingsEditability();
   $('aiTabOpenAI').classList.toggle('hidden', !canManageAiSettings());
+  $('aiTabUsage').classList.toggle('hidden', !canManageAiSettings());
   selectAiTab('numbers');
   openDialog('aiSettingsModal', 'aiModeManual');
   state.aiSettingsBusy = true;
@@ -1237,6 +1239,7 @@ async function openAiSettingsModal() {
 
 function closeAiSettingsModal() {
   if (state.aiSettingsBusy) return;
+  stopAiUsagePolling();
   showAiSettingsError('');
   closeDialog('aiSettingsModal');
 }
@@ -3247,6 +3250,7 @@ $('aiSettingsForm').addEventListener('submit', saveAiSettings);
 $('aiEnableAllBtn').addEventListener('click', () => setAllNumbersAi(true));
 $('aiTabNumbers').addEventListener('click', () => selectAiTab('numbers'));
 $('aiTabOpenAI').addEventListener('click', () => selectAiTab('openai'));
+$('aiTabUsage').addEventListener('click', () => selectAiTab('usage'));
 $('aiOpenAIForm').addEventListener('submit', saveOpenAIKey);
 $('aiOpenAITestBtn').addEventListener('click', testOpenAIConnection);
 $('aiOpenAIDeleteBtn').addEventListener('click', deleteOpenAIKey);

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Literal
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Path, Request, Response, Query, UploadFile, status
@@ -14,6 +15,14 @@ from app.ai_availability import (
     AIControlForbiddenError,
     AIControlValidationError,
     ai_availability_service,
+)
+from app.ai_usage import (
+    AIUsageBlocked,
+    AIUsageConflictError,
+    AIUsageError,
+    AIUsageForbiddenError,
+    AIUsageValidationError,
+    ai_usage_service,
 )
 from app.ai_provider import (
     AIProviderError,
@@ -264,6 +273,29 @@ class WhatsAppNumberStateRequest(BaseModel):
     enabled: bool
 
 
+class AIBudgetRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    monthly_limit_usd: Decimal = Field(..., gt=0, le=100000)
+    daily_limit_usd: Decimal | None = Field(None, gt=0, le=100000)
+    warning_thresholds: list[int] = Field(..., min_length=1, max_length=6)
+    enforcement_enabled: bool
+    override_until: str | None = Field(None, max_length=40)
+    version: int = Field(..., ge=1)
+
+
+class AIPriceRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    model_prefix: str = Field(..., min_length=2, max_length=100)
+    input_per_million: Decimal = Field(..., ge=0, le=1000)
+    cached_input_per_million: Decimal = Field(..., ge=0, le=1000)
+    output_per_million: Decimal = Field(..., ge=0, le=1000)
+    audio_per_minute: Decimal | None = Field(None, ge=0, le=1000)
+    batch_factor: Decimal = Field(Decimal("0.5"), gt=0, le=1)
+    source: str | None = Field(None, max_length=255)
+
+
 class OpenAIKeyRequest(BaseModel):
     # Never echo the submitted key back in a validation error.
     model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
@@ -302,6 +334,16 @@ class WhatsAppNumberOutreachLimitsRequest(BaseModel):
 
 
 def _translate_error(exc: Exception) -> HTTPException:
+    if isinstance(exc, AIUsageForbiddenError):
+        return HTTPException(status_code=403, detail=str(exc))
+    if isinstance(exc, AIUsageValidationError):
+        return HTTPException(status_code=422, detail=str(exc))
+    if isinstance(exc, AIUsageConflictError):
+        return HTTPException(status_code=409, detail=str(exc))
+    if isinstance(exc, AIUsageBlocked):
+        return HTTPException(status_code=503, detail=str(exc))
+    if isinstance(exc, AIUsageError):
+        return HTTPException(status_code=500, detail="AI usage data is temporarily unavailable.")
     if isinstance(exc, AIProviderForbiddenError):
         return HTTPException(status_code=403, detail=str(exc))
     if isinstance(exc, AIProviderValidationError):
@@ -732,6 +774,80 @@ async def update_ai_settings(
             schedule_end_time=payload.schedule.end_time,
             schedule_timezone=payload.schedule.timezone,
         )
+    except Exception as exc:
+        raise _translate_error(exc) from exc
+
+
+@router.get("/ai-usage")
+async def get_ai_usage(
+    date_from: str | None = Query(None, alias="from", max_length=10),
+    date_to: str | None = Query(None, alias="to", max_length=10),
+    line: str | None = Query(None, max_length=64),
+    model: str | None = Query(None, max_length=100),
+    agent: SupportAgent = Depends(get_current_agent),
+) -> dict:
+    try:
+        return await ai_usage_service.usage_report(agent, start=date_from, end=date_to, line=line, model=model)
+    except Exception as exc:
+        raise _translate_error(exc) from exc
+
+
+@router.get("/ai-budget")
+async def get_ai_budget(agent: SupportAgent = Depends(get_current_agent)) -> dict:
+    try:
+        return await ai_usage_service.budget_payload(agent)
+    except Exception as exc:
+        raise _translate_error(exc) from exc
+
+
+@router.put("/ai-budget")
+async def update_ai_budget(
+    payload: AIBudgetRequest,
+    agent: SupportAgent = Depends(require_support_csrf),
+) -> dict:
+    try:
+        return await ai_usage_service.update_settings(agent, payload.model_dump())
+    except Exception as exc:
+        raise _translate_error(exc) from exc
+
+
+@router.get("/ai-prices")
+async def get_ai_prices(agent: SupportAgent = Depends(get_current_agent)) -> dict:
+    try:
+        return await ai_usage_service.price_list(agent)
+    except Exception as exc:
+        raise _translate_error(exc) from exc
+
+
+@router.post("/ai-prices")
+async def add_ai_price(
+    payload: AIPriceRequest,
+    agent: SupportAgent = Depends(require_support_csrf),
+) -> dict:
+    try:
+        return await ai_usage_service.add_price(agent, payload.model_dump())
+    except Exception as exc:
+        raise _translate_error(exc) from exc
+
+
+@router.post("/ai-prices/{price_id}/verify")
+async def verify_ai_price(
+    price_id: int,
+    agent: SupportAgent = Depends(require_support_csrf),
+) -> dict:
+    try:
+        return await ai_usage_service.verify_price(agent, price_id)
+    except Exception as exc:
+        raise _translate_error(exc) from exc
+
+
+@router.post("/ai-prices/{price_id}/retire")
+async def retire_ai_price(
+    price_id: int,
+    agent: SupportAgent = Depends(require_support_csrf),
+) -> dict:
+    try:
+        return await ai_usage_service.retire_price(agent, price_id)
     except Exception as exc:
         raise _translate_error(exc) from exc
 

@@ -64,6 +64,11 @@ function clearTicketWorkspace() {
 }
 
 function showLogin() {
+  stopAiUsagePolling();
+  state.aiUsage = null;
+  state.aiBudget = null;
+  state.aiBudgetDirty = false;
+  state.aiUsageModels = [];
   const unsavedSends = hasUnpersistedSupportMessages();
   state.sendSessionEpoch++;
   supportSendQueue.cancelWaiting();

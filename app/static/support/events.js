@@ -143,6 +143,11 @@ function openSupportEventSource() {
     let payload = {};
     try { payload = JSON.parse(event.data || '{}'); } catch (_) { return; }
     const type = String(payload.type || '');
+    if (type === 'ai_budget_threshold' && canManageAiSettings()) {
+      if (state.aiUsageTimer) loadAiUsage();
+      loadAiSettings().catch(() => {});
+      return;
+    }
     if (payload.authorized === true && payload.message) observePersistedSupportMessage(payload.message, payload.ticket_id);
     if (type === 'staff_profile_updated') {
       if (payload.authorized === true) applyStaffProfileName(payload.staff_id, payload.name);
