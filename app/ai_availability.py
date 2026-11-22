@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal, cast
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -23,7 +23,14 @@ AIAvailabilityReason = Literal[
     "MANUAL_OFF",
     "WITHIN_SCHEDULE",
     "OUTSIDE_SCHEDULE",
+    # The global setting allows AI, but this WhatsApp number's AI switch is off
+    # (or the message has no known receiving number).
+    "LINE_AI_DISABLED",
 ]
+
+# Sentinel: evaluate only the global setting (dashboard status). Passing
+# ``line_id`` (even None) also applies that number's per-line switch.
+_GLOBAL_ONLY: Any = object()
 
 _TIME_RE = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
 
@@ -246,6 +253,41 @@ class AIControlRepository:
             charset="utf8mb4",
         )
 
+    async def get_line_ai_enabled(self, line_id: str) -> bool:
+        """Per-number AI switch; unknown or removed numbers count as off."""
+        if self._pool is None:
+            await self.connect()
+        assert self._pool is not None
+        async with self._pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(
+                    """
+                    SELECT ai_enabled
+                    FROM whatsapp_phone_numbers
+                    WHERE phone_number_id = %s AND removed_at IS NULL
+                    LIMIT 1
+                    """,
+                    (str(line_id),),
+                )
+                row = await cur.fetchone()
+        return bool(row and row.get("ai_enabled"))
+
+    async def count_ai_enabled_lines(self) -> int:
+        if self._pool is None:
+            await self.connect()
+        assert self._pool is not None
+        async with self._pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(
+                    """
+                    SELECT COUNT(*) AS count
+                    FROM whatsapp_phone_numbers
+                    WHERE ai_enabled = 1 AND is_enabled = 1 AND removed_at IS NULL
+                    """
+                )
+                row = await cur.fetchone()
+        return int((row or {}).get("count") or 0)
+
     async def get(self) -> AIControlConfiguration:
         if self._pool is None:
             await self.connect()
@@ -391,16 +433,31 @@ class AIAvailabilityService:
         self,
         *,
         now: datetime | None = None,
+        line_id: Any = _GLOBAL_ONLY,
     ) -> EffectiveAIAvailability:
+        """Effective AI availability.
+
+        Without ``line_id`` only the global setting is evaluated (dashboard
+        status). With ``line_id`` AI is enabled only when the global setting
+        allows it AND that WhatsApp number's AI switch is on. A missing number
+        (None/unknown/removed) counts as off.
+        """
         configuration = await self.repository.get()
-        return evaluate_ai_availability(configuration, now=now)
+        result = evaluate_ai_availability(configuration, now=now)
+        if line_id is _GLOBAL_ONLY or not result.effective_ai_enabled:
+            return result
+        if line_id and await self.repository.get_line_ai_enabled(str(line_id)):
+            return result
+        return replace(result, effective_ai_enabled=False, effective_reason="LINE_AI_DISABLED")
 
     async def get_settings_payload(
         self,
         *,
         now: datetime | None = None,
     ) -> dict[str, Any]:
-        return (await self.get_effective_ai_availability(now=now)).to_dict()
+        payload = (await self.get_effective_ai_availability(now=now)).to_dict()
+        payload["ai_enabled_line_count"] = await self.repository.count_ai_enabled_lines()
+        return payload
 
     async def update_settings(
         self,

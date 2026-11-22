@@ -371,6 +371,10 @@ __SUPPORT_STYLE__
     </div>
     <div class="modal-body">
       <div class="staff-feedback error-box" id="aiSettingsError" role="alert" aria-live="assertive"></div>
+      <div class="quick-reply-tabs ai-settings-tabs" role="tablist" aria-label="AI assistant settings">
+        <button id="aiTabNumbers" class="btn active" type="button" role="tab" aria-selected="true" aria-controls="aiPanelNumbers">WhatsApp Numbers</button>
+      </div>
+      <div id="aiPanelNumbers" role="tabpanel" aria-labelledby="aiTabNumbers">
       <div class="ai-status-card">
         <div class="ai-status-copy"><strong>Current effective status</strong><span id="aiEffectiveReason">Loading current settings…</span></div>
         <span class="ai-status-pill off" id="aiEffectiveStatus">—</span>
@@ -395,6 +399,14 @@ __SUPPORT_STYLE__
         <div class="form-note" id="aiUpdatedMeta">Saved configuration is authoritative across backend instances.</div>
         <div class="modal-actions"><button class="btn" id="cancelAiSettingsBtn" type="button">Cancel</button><button class="btn primary" id="saveAiSettingsBtn" type="submit"><svg class="icon" aria-hidden="true"><use href="#icon-check"></use></svg>Save changes</button></div>
       </form>
+      <section class="ai-numbers-section" aria-labelledby="aiNumbersTitle">
+        <div class="section-title">
+          <div><strong id="aiNumbersTitle">AI per WhatsApp number</strong><div class="muted">AI answers on a number only when the setting above is ON and the number is switched on. New numbers start with AI off. Changes apply immediately.</div></div>
+          <div class="section-actions" id="aiNumbersBulkActions"><button class="btn" id="aiEnableAllBtn" type="button">Enable all</button><button class="btn" id="aiDisableAllBtn" type="button">Disable all</button></div>
+        </div>
+        <div class="ai-numbers-list" id="aiNumbersList" aria-live="polite"><div class="muted">Loading numbers…</div></div>
+      </section>
+      </div>
     </div>
   </div>
 </section>

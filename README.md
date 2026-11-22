@@ -385,6 +385,23 @@ PUT /api/support/ai-settings
 
 The update route uses the existing authenticated support session and CSRF protection, and the service independently allows only Supervisor/Admin roles. Updates use a MariaDB row lock plus an optimistic version and are written to `ai_control_settings_audit`.
 
+### Per-number AI switch
+
+AI answers on a WhatsApp number only when the global setting above allows it **and** that number's AI switch is on (`whatsapp_phone_numbers.ai_enabled`, migration `20261122_whatsapp_number_ai_enabled.sql`). The default is **off**, so applying the migration switches AI off on every number until an Admin or Super Admin turns it on. Newly connected numbers also start off.
+
+- **Where to change it:** the **AI Assistant** dialog, **WhatsApp Numbers** tab. It has individual switches plus **Enable all** (numbers active in the app) and **Disable all** (every saved number). The global setting remains the master switch.
+- **Effect:** changes take effect on the next inbound message on every instance. No restart is needed; the switch is read from MariaDB on each turn.
+- **Replies already in progress:** availability is checked again just before every automated reply. If AI was switched off meanwhile (globally or for the number), the drafted reply is discarded and the message is handed to human support (`AI_DISABLED_DURING_TURN`). If the state cannot be read at that moment, the result is the same (`AI_AVAILABILITY_UNAVAILABLE`).
+- **Handoff reason:** an inbound message on a number whose AI is off is handed off with `AI_DISABLED_LINE`.
+- **Audit:** every change is written to `whatsapp_integration_audit` (`AI_ENABLED`, `AI_DISABLED`, `AI_BULK_ENABLED`, `AI_BULK_DISABLED`) with the acting staff member.
+
+```text
+PUT /api/support/whatsapp-numbers/{phone_number_id}/ai   {"enabled": true|false}
+PUT /api/support/whatsapp-numbers/ai                     {"enabled": true|false, "scope": "all"}
+```
+
+Both require an Admin or Super Admin session with CSRF; agents see the switches read-only.
+
 ## Database setup
 
 ### Core support tables

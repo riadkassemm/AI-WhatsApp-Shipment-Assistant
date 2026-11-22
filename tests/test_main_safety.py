@@ -125,7 +125,7 @@ def test_message_burst_combines_adjacent_text_messages_in_provider_order() -> No
 
 
 def test_sender_queue_processes_adjacent_messages_as_one_turn(monkeypatch) -> None:
-    async def ai_on():
+    async def ai_on(**_kwargs):
         return types.SimpleNamespace(effective_ai_enabled=True)
 
     monkeypatch.setattr(

@@ -99,7 +99,7 @@ def test_ai_limit_notice_is_throttled_separately_from_quota() -> None:
 
 
 def test_quota_block_returns_200_and_never_calls_ai(monkeypatch) -> None:
-    async def ai_on():
+    async def ai_on(**_kwargs):
         return types.SimpleNamespace(effective_ai_enabled=True)
 
     monkeypatch.setattr(
@@ -194,7 +194,7 @@ def test_quota_block_returns_200_and_never_calls_ai(monkeypatch) -> None:
 
 
 def test_deterministic_shipping_answer_does_not_consume_ai_quota(monkeypatch) -> None:
-    async def ai_on():
+    async def ai_on(**_kwargs):
         return types.SimpleNamespace(effective_ai_enabled=True)
 
     monkeypatch.setattr(

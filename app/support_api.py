@@ -255,6 +255,19 @@ class WhatsAppNumberStateRequest(BaseModel):
     enabled: bool
 
 
+class WhatsAppNumberAIRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = Field(..., strict=True)
+
+
+class WhatsAppAllNumbersAIRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = Field(..., strict=True)
+    scope: Literal["all"]
+
+
 class WhatsAppNumberNameRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -717,6 +730,18 @@ async def sync_whatsapp_account(
         raise _translate_error(exc) from exc
 
 
+# Registered before /whatsapp-numbers/{phone_number_id} so "ai" is not taken as an ID.
+@router.put("/whatsapp-numbers/ai")
+async def update_all_whatsapp_numbers_ai(
+    payload: WhatsAppAllNumbersAIRequest,
+    agent: SupportAgent = Depends(require_support_csrf),
+) -> dict:
+    try:
+        return await whatsapp_registry_service.set_all_numbers_ai_enabled(agent, payload.enabled)
+    except Exception as exc:
+        raise _translate_error(exc) from exc
+
+
 @router.put("/whatsapp-numbers/{phone_number_id}")
 async def update_whatsapp_number_state(
     phone_number_id: str,
@@ -727,6 +752,18 @@ async def update_whatsapp_number_state(
         return await whatsapp_registry_service.set_number_enabled(
             agent, phone_number_id, payload.enabled
         )
+    except Exception as exc:
+        raise _translate_error(exc) from exc
+
+
+@router.put("/whatsapp-numbers/{phone_number_id}/ai")
+async def update_whatsapp_number_ai(
+    phone_number_id: str,
+    payload: WhatsAppNumberAIRequest,
+    agent: SupportAgent = Depends(require_support_csrf),
+) -> dict:
+    try:
+        return await whatsapp_registry_service.set_number_ai_enabled(agent, phone_number_id, payload.enabled)
     except Exception as exc:
         raise _translate_error(exc) from exc
 

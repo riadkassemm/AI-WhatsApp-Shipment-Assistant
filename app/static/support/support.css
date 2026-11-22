@@ -1178,7 +1178,21 @@ body.column-resizing * { cursor: col-resize !important; }
   .quick-reply-copy { padding-right: 4px; }
   .quick-reply-copy-hint { font-size: 0; gap: 0; }
 }
-.modal-card.ai-settings-card { width: min(640px, 100%); }
+.modal-card.ai-settings-card { width: min(720px, 100%); }
+.ai-numbers-section { margin-top: 22px; padding-top: 18px; border-top: 1px solid var(--border); }
+.ai-numbers-list { display: grid; gap: 8px; margin-top: 12px; }
+.ai-number-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 14px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--surface); }
+.ai-number-row.on { border-color: var(--bubble-ai-border); background: color-mix(in srgb, var(--ai-soft) 45%, var(--surface)); }
+.ai-number-copy { min-width: 0; }
+.ai-number-copy strong { display: block; overflow: hidden; color: var(--text-strong); text-overflow: ellipsis; white-space: nowrap; }
+.ai-number-copy span { display: block; color: var(--text-muted); font-size: var(--text-sm); }
+.ai-switch { position: relative; flex: 0 0 auto; width: 44px; height: 24px; padding: 0; border: 1px solid var(--border-strong); border-radius: 999px; background: var(--surface-muted); cursor: pointer; transition: background-color var(--transition), border-color var(--transition); }
+.ai-switch::after { content: ""; position: absolute; top: 2px; left: 2px; width: 18px; height: 18px; border-radius: 50%; background: var(--surface); box-shadow: 0 1px 2px rgba(0,0,0,.25); transition: transform var(--transition); }
+.ai-switch[aria-checked="true"] { border-color: var(--ai); background: var(--ai); }
+.ai-switch[aria-checked="true"]::after { transform: translateX(20px); }
+.ai-switch:disabled { cursor: default; opacity: .55; }
+.ai-switch:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+@media (max-width: 560px) { .ai-numbers-section .section-title { flex-wrap: wrap; } }
 .modal-card.whatsapp-card { width: min(760px, 100%); }
 .modal-card.location-card-modal { width: min(560px, 100%); }
 .modal-card.shortcuts-card { width: min(520px, 100%); }

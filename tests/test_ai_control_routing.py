@@ -326,7 +326,7 @@ async def _exercise_inbound(
     async def no_support_message(*_args, **_kwargs):
         return None
 
-    async def fake_availability():
+    async def fake_availability(**_kwargs):
         observations["availability_calls"] = int(observations["availability_calls"]) + 1
         return availability
 
@@ -745,7 +745,7 @@ def test_two_quick_off_messages_create_one_handoff_assignment(monkeypatch) -> No
         async def no_support_message(*_args, **_kwargs):
             return None
 
-        async def fake_availability():
+        async def fake_availability(**_kwargs):
             return availability
 
         async def finalize_handoff(*, conversation, **_kwargs):

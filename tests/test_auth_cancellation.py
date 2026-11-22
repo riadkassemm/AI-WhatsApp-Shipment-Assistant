@@ -103,7 +103,7 @@ def test_abandon_pending_auth_clears_all_partial_state_and_one_time_password() -
 
 
 def test_explicit_cancel_stops_login_instead_of_becoming_a_password(monkeypatch) -> None:
-    async def ai_on():
+    async def ai_on(**_kwargs):
         return types.SimpleNamespace(effective_ai_enabled=True)
 
     monkeypatch.setattr(
@@ -182,7 +182,7 @@ def test_explicit_cancel_stops_login_instead_of_becoming_a_password(monkeypatch)
 
 
 def test_shipping_topic_switch_clears_stale_login_and_processes_new_request(monkeypatch) -> None:
-    async def ai_on():
+    async def ai_on(**_kwargs):
         return types.SimpleNamespace(effective_ai_enabled=True)
 
     monkeypatch.setattr(
