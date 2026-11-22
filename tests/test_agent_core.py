@@ -122,7 +122,7 @@ def test_successful_repair(agent):
 
 @pytest.mark.parametrize("action,reason", [
     ({"kind": "escalate", "reason_code": "CHANGE_REQUIRES_HUMAN"}, "CHANGE_REQUIRES_HUMAN"),
-    ({"kind": "tool_call", "name": "update_shipment_mode", "arguments_json": "{}"}, "AI_TOOL_UNAVAILABLE"),
+    ({"kind": "tool_call", "name": "update_shipment_mode", "arguments_json": "{}"}, "CHANGE_REQUIRES_HUMAN"),
 ])
 def test_closed_decisions_never_execute_legacy_tools(agent, action, reason):
     agent.state["responses"] = [response(action)]
@@ -308,3 +308,35 @@ def test_failed_send_is_not_replayed(routing):
     asyncio.run(run())
     assert len(routing.agent_calls) == routing.provider_sends == 1
     assert "AI_REPLY_SEND_FAILED" in routing.handoffs
+
+
+def test_tool_result_is_rendered_without_another_model_call(agent, monkeypatch):
+    from app.agent import tools, business_data
+    from datetime import datetime, timezone
+
+    async def identity(phone):
+        return AIIdentity(level="L1", reason="PHONE_MATCH", customer_id="9")
+
+    async def read(name, arguments, owner):
+        assert owner.customer_id == "9"
+        return business_data.BusinessResult(name, datetime.now(timezone.utc), "test", {
+            "found": True, "count": 1, "shipments": [{"order_id": "O-42", "status": "Transit"}],
+        })
+
+    monkeypatch.setattr(core.customer_ai_identity_service, "resolve_or_unknown", identity)
+    monkeypatch.setattr(tools, "business_data_source", SimpleNamespace(read=read))
+    agent.state["responses"] = [response({"kind": "tool_call", "name": "get_customer_shipments", "arguments_json": "{}"})]
+    outcome = asyncio.run(agent.run())
+    assert "O-42" in outcome.reply.text and len(agent.calls) == 1
+
+
+def test_identity_is_rechecked_after_provider_call(agent, monkeypatch):
+    levels = ["L2", "L0"]
+
+    async def identity(phone):
+        return AIIdentity(level=levels.pop(0), reason="TEST", customer_id="9")
+
+    monkeypatch.setattr(core.customer_ai_identity_service, "resolve_or_unknown", identity)
+    agent.state["responses"] = [response({"kind": "tool_call", "name": "get_customer_balance", "arguments_json": "{}"})]
+    assert asyncio.run(agent.run()).reason_code == "IDENTITY_VERIFICATION_REQUIRED"
+    assert len(agent.calls) == 1 and levels == []

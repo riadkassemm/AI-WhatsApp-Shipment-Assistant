@@ -166,22 +166,6 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "type": "function",
-        "name": "update_shipment_mode",
-        "description": (
-            "Change an authenticated customer's own shipment between pickup and delivery. "
-            "Ownership is enforced by backend."
-        ),
-        "parameters": _strict_object(
-            {
-                "tracking_number": {"type": "string"},
-                "mode": {"type": "string", "enum": ["pickup", "delivery"]},
-            },
-            ["tracking_number", "mode"],
-        ),
-        "strict": True,
-    },
-    {
-        "type": "function",
         "name": "transfer_to_human",
         "description": (
             "Create a human-support handoff only for an explicit human request or a "
@@ -217,7 +201,6 @@ NEEDS_VERIFIED_IDENTITY = {
     "get_customer_shipments",
     "track_shipment",
     "get_customer_balance",
-    "update_shipment_mode",
 }
 
 NOT_VERIFIED_MESSAGE = (
@@ -283,6 +266,10 @@ async def dispatch_tool_call(
 ) -> dict[str, Any]:
     # Do not log raw arguments: shipment/customer references can be sensitive.
     logger.info("AI tool dispatch: tool=%s authenticated=%s", name, bool(verified_customer_id))
+
+    if name == "update_shipment_mode":
+        return {"handoff": True, "reason": "CHANGE_REQUIRES_HUMAN",
+                "summary": "A business change requires staff."}
 
     if name in NEEDS_VERIFIED_IDENTITY and not verified_customer_id:
         return {"error": "not_authenticated", "message": NOT_VERIFIED_MESSAGE}
@@ -366,18 +353,6 @@ async def dispatch_tool_call(
         if name == "get_customer_balance":
             assert verified_customer_id is not None
             result = await shipment_client.get_customer_balance(customer_id=verified_customer_id)
-            return json_safe(result)
-
-        if name == "update_shipment_mode":
-            assert verified_customer_id is not None
-            mode = str(arguments.get("mode") or "").strip().lower()
-            if mode not in {"pickup", "delivery"}:
-                raise ValueError("Invalid mode")
-            result = await shipment_client.update_shipment_mode(
-                customer_id=verified_customer_id,
-                tracking_number=_text_arg(arguments, "tracking_number"),
-                mode=mode,
-            )
             return json_safe(result)
 
         if name == "transfer_to_human":

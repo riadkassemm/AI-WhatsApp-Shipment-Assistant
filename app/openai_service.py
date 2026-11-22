@@ -531,7 +531,7 @@ async def get_ai_reply(
                         # never backend identity or credentials.
                         blocked_auth_tool_arguments = dict(args)
 
-                if tool_name == "transfer_to_human" and result.get("handoff") is True:
+                if tool_name in {"transfer_to_human", "update_shipment_mode"} and result.get("handoff") is True:
                     handoff = HandoffRequest(
                         reason=str(result.get("reason") or "").strip(),
                         summary=str(result.get("summary") or "").strip(),

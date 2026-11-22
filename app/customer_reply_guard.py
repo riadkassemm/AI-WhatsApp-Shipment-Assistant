@@ -1103,3 +1103,30 @@ def render_authoritative_tool_result(
     if tool_name == "get_customer_shipments" and isinstance(result, dict):
         return render_customer_shipments(result, style)
     return None
+
+
+def render_business_result(tool_name: str, result: dict[str, Any], style: str | None) -> str | None:
+    """Small v2 read-only templates: only allowlisted, typed source fields."""
+    labels = {
+        "en": ("Order status", "Wallet balance", "Recent transactions", "Reference", "Amount", "Date"),
+        "fr": ("Statut de la commande", "Solde du portefeuille", "Transactions récentes", "Référence", "Montant", "Date"),
+        "ar": ("حالة الطلب", "رصيد المحفظة", "المعاملات الأخيرة", "المرجع", "المبلغ", "التاريخ"),
+        "leb_ar": ("حالة الطلب", "رصيد المحفظة", "آخر المعاملات", "المرجع", "المبلغ", "التاريخ"),
+        "leb_arabizi": ("Status taba3 l order", "Balance taba3 l wallet", "Ekhir transactions", "Reference", "Amount", "Date"),
+        "mixed": ("Order status taba3ak", "Wallet balance taba3ak", "Recent transactions taba3ak", "Reference", "Amount", "Date"),
+    }.get(style or "en")
+    if labels is None:
+        return None
+    if tool_name in {"track_shipment", "get_order_status"}:
+        lines = _shipment_lines(result.get("shipments", []), style)
+        if len(lines) != 1:
+            return None
+        return labels[0] + "\n" + lines[0]
+    if tool_name == "get_customer_balance":
+        return f"{labels[1]}: {result['balance']} {result['currency']}"
+    if tool_name == "get_customer_transactions":
+        lines = [labels[2]]
+        for item in result.get("transactions", []):
+            lines.append(f"{labels[3]}: {item['reference']} | {labels[4]}: {item['amount']} {item['currency']} | {labels[5]}: {item['occurred_at']}")
+        return "\n".join(lines) if len(lines) > 1 else None
+    return None
