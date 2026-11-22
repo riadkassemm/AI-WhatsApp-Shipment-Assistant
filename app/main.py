@@ -67,6 +67,7 @@ from app.whatsapp_client import (
     IncomingWhatsAppMessage,
     WhatsAppSendError,
     extract_incoming_message,
+    extract_incoming_messages,
     get_transport,
     is_linked_device_message,
     whatsapp_client,
@@ -286,6 +287,7 @@ def _queued_inbound_item(
         "location_address": incoming.location_address,
         "reaction_message_id": incoming.reaction_message_id,
         "reaction_emoji": incoming.reaction_emoji,
+        "contacts": incoming.contacts,
         "claim_token": claim_token,
     }
 
@@ -341,7 +343,16 @@ def _incoming_from_queued_item(item: dict) -> IncomingWhatsAppMessage | None:
             str(reaction_message_id) if reaction_message_id is not None else None
         ),
         reaction_emoji=(str(reaction_emoji) if reaction_emoji is not None else None),
+        contacts=_queued_contacts(item.get("contacts")),
     )
+
+
+def _queued_contacts(value: object) -> list[dict] | None:
+    """Restore shared WhatsApp contacts; items queued before this field stay None."""
+    if not isinstance(value, list):
+        return None
+    contacts = [contact for contact in value if isinstance(contact, dict)]
+    return contacts or None
 
 
 def _sort_inbound_burst(items: list[dict]) -> list[dict]:
@@ -1167,8 +1178,8 @@ async def _handle_conversational_auth(
 
         conversation.pending_auth_userid = parsed.username
         logger.info(
-            "AUTH STATE SET: userid=%s state=%s",
-            conversation.pending_auth_userid,
+            "AUTH STATE SET: pending_userid_present=%s state=%s",
+            bool(conversation.pending_auth_userid),
             conversation.auth_state,
         )
         conversation.auth_state = "awaiting_password"
@@ -1181,9 +1192,8 @@ async def _handle_conversational_auth(
 
     if parsed.password is not None:
         logger.info(
-            "AUTH PASSWORD STEP: pending_userid=%s password_length=%d",
-            conversation.pending_auth_userid,
-            len(parsed.password),
+            "AUTH PASSWORD STEP: pending_userid_present=%s",
+            bool(conversation.pending_auth_userid),
         )
 
         if conversation.pending_auth_userid:
@@ -2032,11 +2042,11 @@ async def _process_incoming_message(
     )
 
     logger.info(
-        "AUTH DEBUG BEFORE HANDLE: phone=%s state=%s pending_userid=%s "
+        "AUTH DEBUG BEFORE HANDLE: phone=%s state=%s pending_userid_present=%s "
         "parsed_username=%s parsed_password=%s ambiguous=%s",
         safe_log_identifier(from_number, "wa"),
         conversation.auth_state,
-        conversation.pending_auth_userid,
+        bool(conversation.pending_auth_userid),
         parsed_auth.username_present,
         parsed_auth.password_present,
         parsed_auth.ambiguous,
@@ -2645,49 +2655,78 @@ async def process_whatsapp_payload(payload: dict, *, source: str = "cloud") -> R
     # =========================================================
     # DELIVERY / READ STATUS CALLBACKS
     # =========================================================
-
-    try:
-        change = (
-            payload["entry"][0]
-            ["changes"][0]
-            ["value"]
+    # Meta can batch several entries/changes into one request; every change's
+    # statuses are applied, not only the first one.
+    for change in _payload_change_values(payload):
+        statuses = change.get("statuses")
+        if not statuses:
+            continue
+        logger.info(
+            "WhatsApp status callback "
+            "received: count=%d",
+            len(statuses) if isinstance(statuses, list) else 0,
         )
-
-        statuses = change.get(
-            "statuses"
-        )
-
-        if statuses:
-            logger.info(
-                "WhatsApp status callback "
-                "received: count=%d",
-                len(statuses),
-            )
-            if source == "cloud" and isinstance(statuses, list):
-                await _apply_cloud_delivery_statuses(change, statuses)
-
-    except (
-        KeyError,
-        IndexError,
-        TypeError,
-    ):
-        pass
+        if source == "cloud" and isinstance(statuses, list):
+            await _apply_cloud_delivery_statuses(change, statuses)
 
     # =========================================================
-    # EXTRACT INBOUND CUSTOMER MESSAGE
+    # EXTRACT INBOUND CUSTOMER MESSAGES
     # =========================================================
-
-    incoming = extract_incoming_message(
-        payload
+    # The linked-device bridge sends one message per callback. Meta Cloud may
+    # batch several; each one gets its own claim, queue entry and drive.
+    messages = (
+        extract_incoming_messages(payload)
+        if source == "cloud"
+        else [incoming for incoming in [extract_incoming_message(payload)] if incoming is not None]
     )
 
-    if incoming is None:
+    if not messages:
         return _json_response(
             200,
             {
                 "status": "ignored"
             },
         )
+
+    if len(messages) == 1:
+        return await _accept_inbound_message(messages[0], source=source)
+
+    responses = [
+        await _accept_inbound_message(incoming, source=source)
+        for incoming in messages
+    ]
+    for response in responses:
+        if _response_is_retryable(response):
+            # Meta retries the whole payload. Messages already accepted are
+            # skipped by their per-message idempotency claim on that retry.
+            return response
+    return _json_response(
+        200,
+        {
+            "status": "batch_processed",
+            "count": len(responses),
+        },
+    )
+
+
+def _payload_change_values(payload: dict) -> list[dict]:
+    values: list[dict] = []
+    entries = payload.get("entry") if isinstance(payload, dict) else None
+    for entry in entries if isinstance(entries, list) else []:
+        changes = entry.get("changes") if isinstance(entry, dict) else None
+        for change in changes if isinstance(changes, list) else []:
+            value = change.get("value") if isinstance(change, dict) else None
+            if isinstance(value, dict):
+                values.append(value)
+    return values
+
+
+async def _accept_inbound_message(
+    incoming: IncomingWhatsAppMessage,
+    *,
+    source: str,
+) -> Response:
+    """Claim, queue and drive one inbound message (transport-independent)."""
 
     if get_transport(incoming.business_phone_number_id) != source:
         return _json_response(200, {"status": "ignored", "reason": "inactive_transport"})

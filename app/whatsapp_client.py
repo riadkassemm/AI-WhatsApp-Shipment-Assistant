@@ -564,15 +564,48 @@ whatsapp_client = RoutedWhatsAppClient()
 
 
 def extract_incoming_message(payload: dict) -> IncomingWhatsAppMessage | None:
-    """Parse the first inbound WhatsApp message, including media and reactions."""
+    """Parse the first inbound WhatsApp message, including media and reactions.
+
+    The linked-device bridge sends exactly one message per callback and keeps using
+    this function. Meta Cloud webhooks can batch several messages; the webhook uses
+    ``extract_incoming_messages`` so none of them is silently ignored.
+    """
     try:
         entry = payload["entry"][0]
         change = entry["changes"][0]["value"]
-        metadata = change.get("metadata") or {}
         messages = change.get("messages")
         if not messages:
             return None
-        message = messages[0]
+        return _parse_incoming_message(entry, change, messages[0])
+    except (KeyError, IndexError, TypeError, AttributeError):
+        return None
+
+
+def extract_incoming_messages(payload: dict) -> list[IncomingWhatsAppMessage]:
+    """Parse every inbound message in a webhook payload, in delivery order.
+
+    Meta may batch several ``entry``/``changes``/``messages`` items into one
+    request. A malformed item is skipped without hiding its well-formed siblings.
+    """
+    parsed: list[IncomingWhatsAppMessage] = []
+    entries = payload.get("entry") if isinstance(payload, dict) else None
+    for entry in entries if isinstance(entries, list) else []:
+        changes = entry.get("changes") if isinstance(entry, dict) else None
+        for change_item in changes if isinstance(changes, list) else []:
+            change = change_item.get("value") if isinstance(change_item, dict) else None
+            messages = change.get("messages") if isinstance(change, dict) else None
+            for message in messages if isinstance(messages, list) else []:
+                incoming = _parse_incoming_message(entry, change, message)
+                if incoming is not None:
+                    parsed.append(incoming)
+    return parsed
+
+
+def _parse_incoming_message(
+    entry: dict, change: dict, message: dict,
+) -> IncomingWhatsAppMessage | None:
+    try:
+        metadata = change.get("metadata") or {}
         message_type = str(message.get("type") or "unknown")
         text = None
         media_id = None
@@ -660,5 +693,5 @@ def extract_incoming_message(payload: dict) -> IncomingWhatsAppMessage | None:
             reaction_message_id=reaction_message_id,
             reaction_emoji=reaction_emoji,
         )
-    except (KeyError, IndexError, TypeError):
+    except (KeyError, IndexError, TypeError, AttributeError):
         return None
