@@ -95,20 +95,29 @@ class FakeControlRepository:
         return sum(self.lines.values())
 
 
+async def _key_ok():
+    return True, None
+
+
+def _service_with(repository, credential_state=_key_ok) -> AIAvailabilityService:
+    # Unit tests never touch a database: the OpenAI key state is injected.
+    return AIAvailabilityService(repository, credential_state=credential_state)
+
+
 # ---------------------------------------------------------------------------
 # Effective availability
 # ---------------------------------------------------------------------------
 
 def test_global_only_evaluation_is_unchanged_for_the_dashboard():
     repository = FakeControlRepository(lines={})
-    result = asyncio.run(AIAvailabilityService(repository).get_effective_ai_availability())
+    result = asyncio.run(_service_with(repository).get_effective_ai_availability())
     assert result.effective_ai_enabled is True and result.effective_reason == "MANUAL_ON"
     assert repository.line_queries == []
 
 
 def test_number_switch_gates_ai_when_global_setting_is_on():
     repository = FakeControlRepository(lines={LINE: True, "90048": False})
-    service = AIAvailabilityService(repository)
+    service = _service_with(repository)
     on = asyncio.run(service.get_effective_ai_availability(line_id=LINE))
     off = asyncio.run(service.get_effective_ai_availability(line_id="90048"))
     unknown = asyncio.run(service.get_effective_ai_availability(line_id="99999"))
@@ -121,14 +130,14 @@ def test_number_switch_gates_ai_when_global_setting_is_on():
 
 def test_global_off_wins_without_consulting_the_number():
     repository = FakeControlRepository(global_on=False, lines={LINE: True})
-    result = asyncio.run(AIAvailabilityService(repository).get_effective_ai_availability(line_id=LINE))
+    result = asyncio.run(_service_with(repository).get_effective_ai_availability(line_id=LINE))
     assert result.effective_ai_enabled is False and result.effective_reason == "MANUAL_OFF"
     assert repository.line_queries == []
 
 
 def test_settings_payload_reports_how_many_numbers_have_ai_on():
     repository = FakeControlRepository(lines={LINE: True, "90048": True, "90054": False})
-    payload = asyncio.run(AIAvailabilityService(repository).get_settings_payload())
+    payload = asyncio.run(_service_with(repository).get_settings_payload())
     assert payload["ai_enabled_line_count"] == 2
     assert payload["effective_reason"] == "MANUAL_ON"
 

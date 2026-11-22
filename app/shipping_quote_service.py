@@ -26,6 +26,7 @@ import time
 from typing import Any
 
 from app.client_chat_auth import normalize_decimal_digits
+from app.ai_provider import ai_provider_service
 from app.config import settings
 from app.conversation_store import Conversation
 from app.customer_reply_guard import (
@@ -385,7 +386,9 @@ async def _semantic_intent(
     text: str,
     context: dict[str, Any],
 ) -> NormalizedShippingIntent | None:
-    if not settings.openai_api_key or not settings.shipping_semantic_normalizer_enabled:
+    if not settings.shipping_semantic_normalizer_enabled:
+        return None
+    if not await ai_provider_service.has_api_key():
         return None
     try:
         catalog = await shipment_client.get_shipping_catalog_summary()

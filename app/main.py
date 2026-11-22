@@ -2678,6 +2678,7 @@ async def _process_incoming_message(
 
     if not ai_availability.effective_ai_enabled:
         line_disabled = ai_availability.effective_reason == "LINE_AI_DISABLED"
+        provider_unavailable = ai_availability.effective_reason in {"API_KEY_MISSING", "API_KEY_INVALID"}
         logger.info(
             "AI unavailable - handing conversation to human: customer_ref=%s "
             "message_id=%s control_mode=%s effective_reason=%s",
@@ -2690,10 +2691,16 @@ async def _process_incoming_message(
             conversation=conversation,
             incoming=incoming,
             parsed_auth=parsed_auth,
-            reason="AI_DISABLED_LINE" if line_disabled else "AI_DISABLED_GLOBAL",
+            reason=(
+                "AI_DISABLED_LINE" if line_disabled
+                else "AI_PROVIDER_UNAVAILABLE" if provider_unavailable
+                else "AI_DISABLED_GLOBAL"
+            ),
             summary=(
                 "AI is switched off for this WhatsApp number."
                 if line_disabled
+                else "No usable OpenAI API key is configured; human support takes over."
+                if provider_unavailable
                 else "AI assistant is globally unavailable for this inbound message "
                 f"({ai_availability.effective_reason})."
             ),

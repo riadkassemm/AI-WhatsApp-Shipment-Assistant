@@ -1179,6 +1179,8 @@ body.column-resizing * { cursor: col-resize !important; }
   .quick-reply-copy-hint { font-size: 0; gap: 0; }
 }
 .modal-card.ai-settings-card { width: min(720px, 100%); }
+.ai-status-dot.warn { background: var(--danger, #c0392b); box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger, #c0392b) 20%, transparent); }
+#aiPanelOpenAI .check-field { display: flex; align-items: center; gap: 8px; margin: 10px 0 4px; }
 .ai-numbers-section { margin-top: 22px; padding-top: 18px; border-top: 1px solid var(--border); }
 .ai-numbers-list { display: grid; gap: 8px; margin-top: 12px; }
 .ai-number-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 14px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--surface); }

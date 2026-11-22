@@ -20,12 +20,14 @@ import asyncio
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import hashlib
+import inspect
 import json
 import logging
 from typing import Any, Literal
 
 from openai import AsyncOpenAI
 
+from app.ai_provider import ai_provider_service
 from app.config import settings
 
 
@@ -51,23 +53,15 @@ class NormalizedShippingIntent:
     explicit_weight: bool
 
 
-_client: AsyncOpenAI | None = None
+async def _get_client() -> AsyncOpenAI:
+    """Client for the key currently configured (dashboard key, else environment)."""
+    return await ai_provider_service.get_client("normalizer")
 
 
-def _get_client() -> AsyncOpenAI:
-    global _client
-    if _client is None:
-        if not settings.openai_api_key:
-            raise RuntimeError("OPENAI_API_KEY is not configured.")
-        _client = AsyncOpenAI(
-            api_key=settings.openai_api_key,
-            timeout=max(
-                1.0,
-                float(settings.shipping_semantic_normalizer_timeout_seconds),
-            ),
-            max_retries=max(0, int(settings.openai_max_retries)),
-        )
-    return _client
+async def _client() -> AsyncOpenAI:
+    # Tests may replace _get_client with a plain function returning a fake client.
+    candidate = _get_client()
+    return await candidate if inspect.isawaitable(candidate) else candidate
 
 
 def _response_text(response: Any) -> str:
@@ -226,7 +220,7 @@ async def normalize_shipping_intent(
     """
     if not bool(settings.shipping_semantic_normalizer_enabled):
         return None
-    if not settings.openai_api_key:
+    if not await ai_provider_service.has_api_key():
         return None
 
     payload = {
@@ -272,7 +266,7 @@ async def normalize_shipping_intent(
     safety_digest = hashlib.sha256(str(user_text or "").encode("utf-8")).hexdigest()
     try:
         response = await asyncio.wait_for(
-            _get_client().responses.create(
+            (await _client()).responses.create(
                 model=model,
                 instructions=instructions,
                 input=[

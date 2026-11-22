@@ -6,7 +6,7 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Path, Request, Response, Query, UploadFile, status
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from app.ai_availability import (
     AIControlConflictError,
@@ -14,6 +14,15 @@ from app.ai_availability import (
     AIControlForbiddenError,
     AIControlValidationError,
     ai_availability_service,
+)
+from app.ai_provider import (
+    AIProviderError,
+    AIProviderForbiddenError,
+    AIProviderRateLimitedError,
+    AIProviderUnavailableError,
+    AIProviderValidationError,
+    AISecretsNotConfiguredError,
+    ai_provider_service,
 )
 from app.config import settings
 from app.google_contacts import (
@@ -255,6 +264,14 @@ class WhatsAppNumberStateRequest(BaseModel):
     enabled: bool
 
 
+class OpenAIKeyRequest(BaseModel):
+    # Never echo the submitted key back in a validation error.
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
+
+    api_key: SecretStr = Field(..., min_length=20, max_length=512)
+    test_first: bool = True
+
+
 class WhatsAppNumberAIRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -285,6 +302,16 @@ class WhatsAppNumberOutreachLimitsRequest(BaseModel):
 
 
 def _translate_error(exc: Exception) -> HTTPException:
+    if isinstance(exc, AIProviderForbiddenError):
+        return HTTPException(status_code=403, detail=str(exc))
+    if isinstance(exc, AIProviderValidationError):
+        return HTTPException(status_code=422, detail=str(exc))
+    if isinstance(exc, AIProviderRateLimitedError):
+        return HTTPException(status_code=429, detail=str(exc))
+    if isinstance(exc, (AISecretsNotConfiguredError, AIProviderUnavailableError)):
+        return HTTPException(status_code=503, detail=str(exc))
+    if isinstance(exc, AIProviderError):
+        return HTTPException(status_code=500, detail="The OpenAI configuration is temporarily unavailable.")
     if isinstance(exc, OutreachLimitError):
         return HTTPException(status_code=429, detail=str(exc))
     if isinstance(exc, OutreachUnavailableError):
@@ -705,6 +732,49 @@ async def update_ai_settings(
             schedule_end_time=payload.schedule.end_time,
             schedule_timezone=payload.schedule.timezone,
         )
+    except Exception as exc:
+        raise _translate_error(exc) from exc
+
+
+@router.get("/ai-settings/openai")
+async def get_openai_configuration(
+    agent: SupportAgent = Depends(get_current_agent),
+) -> dict:
+    try:
+        return await ai_provider_service.status_payload(agent)
+    except Exception as exc:
+        raise _translate_error(exc) from exc
+
+
+@router.put("/ai-settings/openai")
+async def save_openai_key(
+    payload: OpenAIKeyRequest,
+    agent: SupportAgent = Depends(require_support_csrf),
+) -> dict:
+    try:
+        return await ai_provider_service.save_key(
+            agent, payload.api_key.get_secret_value(), test_first=payload.test_first,
+        )
+    except Exception as exc:
+        raise _translate_error(exc) from exc
+
+
+@router.post("/ai-settings/openai/test")
+async def test_openai_connection(
+    agent: SupportAgent = Depends(require_support_csrf),
+) -> dict:
+    try:
+        return await ai_provider_service.test_connection(agent)
+    except Exception as exc:
+        raise _translate_error(exc) from exc
+
+
+@router.delete("/ai-settings/openai")
+async def delete_openai_key(
+    agent: SupportAgent = Depends(require_support_csrf),
+) -> dict:
+    try:
+        return await ai_provider_service.delete_key(agent)
     except Exception as exc:
         raise _translate_error(exc) from exc
 

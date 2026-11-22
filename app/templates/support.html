@@ -373,6 +373,7 @@ __SUPPORT_STYLE__
       <div class="staff-feedback error-box" id="aiSettingsError" role="alert" aria-live="assertive"></div>
       <div class="quick-reply-tabs ai-settings-tabs" role="tablist" aria-label="AI assistant settings">
         <button id="aiTabNumbers" class="btn active" type="button" role="tab" aria-selected="true" aria-controls="aiPanelNumbers">WhatsApp Numbers</button>
+        <button id="aiTabOpenAI" class="btn hidden" type="button" role="tab" aria-selected="false" aria-controls="aiPanelOpenAI" tabindex="-1">OpenAI Configuration</button>
       </div>
       <div id="aiPanelNumbers" role="tabpanel" aria-labelledby="aiTabNumbers">
       <div class="ai-status-card">
@@ -406,6 +407,22 @@ __SUPPORT_STYLE__
         </div>
         <div class="ai-numbers-list" id="aiNumbersList" aria-live="polite"><div class="muted">Loading numbers…</div></div>
       </section>
+      </div>
+      <div id="aiPanelOpenAI" class="hidden" role="tabpanel" aria-labelledby="aiTabOpenAI">
+        <div class="ai-status-card">
+          <div class="ai-status-copy"><strong>OpenAI API key</strong><span id="aiOpenAIDetail">Loading…</span></div>
+          <span class="ai-status-pill off" id="aiOpenAIStatus">—</span>
+        </div>
+        <div class="form-note error-box hidden" id="aiOpenAIStorageWarning" role="alert">Secure key storage is not configured on the server (AI_SECRETS_ENCRYPTION_KEY). Ask a developer to set it once; until then a key cannot be saved here.</div>
+        <form id="aiOpenAIForm" novalidate autocomplete="off">
+          <div class="field"><label for="aiOpenAIKey">New API key</label><input id="aiOpenAIKey" type="password" maxlength="512" autocomplete="new-password" spellcheck="false" placeholder="sk-…" /><div class="field-hint">Paste a key from your OpenAI account. It is stored encrypted and never shown again in full.</div></div>
+          <label class="check-field"><input id="aiOpenAITestFirst" type="checkbox" checked /><span>Test the key with OpenAI before saving</span></label>
+          <div class="modal-actions">
+            <button class="btn danger hidden" id="aiOpenAIDeleteBtn" type="button">Remove saved key</button>
+            <button class="btn" id="aiOpenAITestBtn" type="button">Test connection</button>
+            <button class="btn primary" id="aiOpenAISaveBtn" type="submit"><svg class="icon" aria-hidden="true"><use href="#icon-check"></use></svg>Save key</button>
+          </div>
+        </form>
       </div>
     </div>
   </div>

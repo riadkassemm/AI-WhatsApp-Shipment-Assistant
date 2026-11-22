@@ -402,6 +402,24 @@ PUT /api/support/whatsapp-numbers/ai                     {"enabled": true|false,
 
 Both require an Admin or Super Admin session with CSRF; agents see the switches read-only.
 
+### OpenAI API key from the dashboard
+
+Admins and Super Admins manage the OpenAI key in **AI Assistant > OpenAI Configuration** (migration `20261122_ai_provider_credentials.sql`):
+
+- **Storage:** the key is stored encrypted with Fernet. Only its last four characters and a SHA-256 fingerprint prefix are kept in clear, for display and audit. It is never returned in full, never logged, and changes are audited in `ai_control_settings_audit` (`OPENAI_KEY_SAVED`, `OPENAI_KEY_REMOVED`) without the key.
+- **One-time server setup:** set `AI_SECRETS_ENCRYPTION_KEY`, a Fernet key; `.env.example` shows how to generate one. Until it is set the dashboard refuses to save a key. To rotate the encryption key itself, use `NEW,OLD`.
+- **Precedence:** a saved dashboard key wins. Otherwise `OPENAI_API_KEY` from the environment is used as a fallback.
+- **No restart needed:** every OpenAI call reads the credential version from MariaDB, so a new key applies on all instances on the next request. Requests already in flight finish on the key they started with.
+- **Test connection / test before saving:** retrieves the configured model's metadata. This costs nothing and maps failures to `invalid_key`, `insufficient_quota`, `model_unavailable` or `network`.
+- **Missing or rejected key:** if no key is configured, or OpenAI rejects it (also at runtime: 401/403/`insufficient_quota`), AI is treated as unavailable (`API_KEY_MISSING` / `API_KEY_INVALID`). Conversations go to human support with reason `AI_PROVIDER_UNAVAILABLE`, and the header AI indicator turns into a warning.
+
+```text
+GET    /api/support/ai-settings/openai          (agents: configured/status only)
+PUT    /api/support/ai-settings/openai          {"api_key": "sk-...", "test_first": true}
+POST   /api/support/ai-settings/openai/test
+DELETE /api/support/ai-settings/openai
+```
+
 ## Database setup
 
 ### Core support tables
