@@ -1006,9 +1006,10 @@ class RedisConversationStore(
 
         raw = await self._client.get(key)
 
+        # The key embeds the customer's phone number; log only a hashed reference.
         logger.info(
-            "REDIS LOAD key=%s exists=%s",
-            key,
+            "REDIS LOAD customer_ref=%s exists=%s",
+            safe_log_identifier(storage_key, "wa"),
             raw is not None,
         )
 
@@ -1046,10 +1047,10 @@ class RedisConversationStore(
             conversation.business_display_phone_number = business_display_phone_number
 
         logger.info(
-            "REDIS CONVERSATION RESTORED state=%s pending_userid=%s verified=%s",
+            "REDIS CONVERSATION RESTORED state=%s pending_userid_present=%s verified=%s",
             conversation.auth_state,
-            conversation.pending_auth_userid,
-            conversation.verified_customer_id,
+            bool(conversation.pending_auth_userid),
+            conversation.verified_customer_id is not None,
         )
 
         return conversation
@@ -1060,9 +1061,9 @@ class RedisConversationStore(
     ) -> None:
 
         logger.info(
-            "REDIS SAVE state=%s pending_userid=%s",
+            "REDIS SAVE state=%s pending_userid_present=%s",
             conversation.auth_state,
-            conversation.pending_auth_userid,
+            bool(conversation.pending_auth_userid),
         )
 
         await self._client.set(

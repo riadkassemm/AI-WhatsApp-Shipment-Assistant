@@ -707,7 +707,7 @@ def test_duplicate_whatsapp_webhook_does_not_process_handoff_twice(monkeypatch) 
 
         monkeypatch.setattr(main, "conversation_store", store)
         monkeypatch.setattr(main, "verify_meta_signature", lambda *_args, **_kwargs: True)
-        monkeypatch.setattr(main, "extract_incoming_message", lambda _payload: incoming)
+        monkeypatch.setattr(main, "extract_incoming_messages", lambda _payload: [incoming])
         monkeypatch.setattr(main, "_process_incoming_message", fake_process)
         monkeypatch.setattr(main.support_service, "get_active_ticket", no_ticket)
         monkeypatch.setattr(main.whatsapp_registry_service, "observe_inbound", enabled_number)
