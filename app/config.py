@@ -25,6 +25,10 @@ class Settings(BaseSettings):
     # Comma-separate several keys to rotate: the first encrypts, all decrypt.
     ai_secrets_encryption_key: str = Field(default="", repr=False)
     openai_model: str = "gpt-6-sol"
+    # Agent rebuild: independently gated, default off until an approved pilot.
+    ai_agent_v2_enabled: bool = False
+    ai_agent_model: str = "gpt-6-luna"
+    ai_agent_reasoning_effort: Literal["none", "low"] = "none"
     openai_reasoning_effort: Literal["none", "low", "medium", "high", "xhigh", "max"] = "medium"
     openai_summarizer_reasoning_effort: Literal[
         "none", "low", "medium", "high", "xhigh", "max"

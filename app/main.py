@@ -983,7 +983,9 @@ def _turn_ai_ticket() -> dict | None:
     return turn.get("ticket") if turn else None
 
 
-async def _send_ai_ticket_reply(ticket: dict, *, body: str, source_message_id: str | None) -> dict:
+async def _send_ai_ticket_reply(
+    ticket: dict, *, body: str, source_message_id: str | None, awaiting_customer: bool = False,
+) -> dict:
     """Send one automated reply as an AI message on the turn's AI ticket.
 
     The reply is stored as sender_type='AI' and delivered through the support
@@ -998,9 +1000,7 @@ async def _send_ai_ticket_reply(ticket: dict, *, body: str, source_message_id: s
             ticket,
             body=body,
             source_message_id=source_message_id,
-            # The legacy pipeline has no structured "awaiting answer" signal, so its
-            # tickets follow the plain quiet-time rule.
-            awaiting_customer=False,
+            awaiting_customer=awaiting_customer,
         )
     except SupportConflictError as exc:
         reason = "AI_TICKET_HANDED_TO_HUMAN"
@@ -3014,6 +3014,44 @@ async def _handoff_after_failed_turn(
     )
 
 
+async def _run_agent_turn(
+    *, conversation: Conversation, incoming: IncomingWhatsAppMessage,
+    parsed_auth: CredentialExtraction,
+) -> Response:
+    from app.agent.core import AgentOutcome, agent_service
+
+    ticket = _turn_ai_ticket()
+    if ticket is None:
+        raise RuntimeError("Agent turn requires an AI ticket")
+    if await _is_inbound_revoked(incoming.message_id):
+        return _json_response(200, {"status": "revoked"})
+    if parsed_auth.is_authentication_attempt:
+        # V2 never resumes legacy password login or transmits credentials.
+        outcome = AgentOutcome(reason_code="IDENTITY_VERIFICATION_REQUIRED")
+    else:
+        decision = await ai_rate_limiter.consume(conversation.phone_number)
+        if not decision.allowed:
+            outcome = AgentOutcome(reason_code="AI_RATE_LIMITED")
+        else:
+            outcome = await agent_service.run(
+                ticket=ticket, style=conversation.communication_style or "en",
+                source_message_id=incoming.message_id,
+            )
+    if outcome.reply is not None:
+        await _ensure_automated_reply_allowed(incoming.business_phone_number_id)
+        await _send_ai_ticket_reply(
+            ticket, body=outcome.reply.text, source_message_id=incoming.message_id,
+            awaiting_customer=outcome.reply.awaiting_customer,
+        )
+        return _json_response(200, {"status": "agent_replied"})
+    escalated, _ = await support_service.escalate_ai_ticket(
+        ticket, reason_code=outcome.reason_code or "AI_UNCERTAIN",
+        summary="The AI agent handed this conversation to staff for review.",
+    )
+    await support_service.reconcile_conversation_mode(conversation, escalated)
+    return _json_response(200, {"status": "agent_escalated"})
+
+
 async def _run_started_turn(
     *,
     conversation: Conversation,
@@ -3029,7 +3067,8 @@ async def _run_started_turn(
     Callers treat any exception or retryable response as final: the turn is never
     replayed, and the message is handed to human support.
     """
-
+    if settings.ai_agent_v2_enabled:
+        return await _run_agent_turn(conversation=conversation, incoming=incoming, parsed_auth=parsed_auth)
 
     # An explicit cancellation is itself the completed customer intent. A clear topic
     # switch, on the other hand, falls through and is handled as a fresh normal request

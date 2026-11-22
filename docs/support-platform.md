@@ -127,6 +127,34 @@ and `20261122_ai_usage_ticket_index.sql` (index for per-ticket cost).
 
 ![AI ticket with synthetic data](screenshots/ai-tickets-dashboard.png)
 
+## Replacement AI agent core
+
+The replacement agent core is gated by `AI_AGENT_V2_ENABLED=false`. Setting it
+to true selects `app/agent/` for text turns after human ownership, availability,
+and media routing. It defaults to `AI_AGENT_MODEL=gpt-6-luna` with
+`AI_AGENT_REASONING_EFFORT=none` (`low` is also accepted). The model needs verified
+pricing in Usage & Costs before any call; there is no fallback price.
+
+The core sends at most 12 messages from the current ticket, masks passwords,
+and excludes internal notes, deleted messages, unsent drafts and later queued
+messages. It does not load Redis history or earlier tickets. Approved knowledge
+and tool definitions form a stable prompt prefix. One metered structured call
+returns a reply, tool request, or escalation. A failed output/guard/fact check
+allows one fresh repair; SDK retries are disabled. Both calls use the shared
+budget gateway. Customer text and prior replies are never factual evidence.
+The lexical fact check compares values with authoritative evidence; it is not
+a semantic correctness guarantee and does not replace the pre-pilot benchmark.
+
+Step 5a exposes no business tools: tool requests safely hand over to staff.
+Media still hands over to staff, and password attempts do not resume legacy
+login. Replies reuse the AI availability recheck, ticket ownership fence and
+message-id idempotency, and persist `awaiting_customer`. Escalations carry a
+bounded reason code and a generic staff summary, never model diagnostics.
+No schema migration is needed for this core. An approved rollout is still
+required; for rollback, leave/set `AI_AGENT_V2_ENABLED=false` in the approved
+release configuration to select the legacy pipeline. This does not enable AI
+globally or on any WhatsApp number.
+
 ## AI knowledge base
 
 **AI Assistant → Knowledge** (Admins and Super Admins) lists the topic articles

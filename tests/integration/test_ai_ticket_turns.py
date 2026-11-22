@@ -178,3 +178,129 @@ async def test_ai_usage_is_attributed_to_the_ticket(turns, monkeypatch):
     await turns.deliver('wamid.in.1')
     ticket = await turns.only_ticket()
     assert seen == [{'phone_number_id': LINE, 'ticket_id': int(ticket['id'])}]
+
+
+@pytest.fixture
+def v2_turns(turns, monkeypatch):
+    from app.agent import core
+    from app.customer_ai_identity import AIIdentity
+    import app.support_auth as auth
+
+    turns.prompts = []
+    turns.action = {'kind': 'reply', 'text': 'How can I help?', 'language': 'en',
+                    'facts_used': [], 'awaiting_customer': True}
+
+    async def knowledge():
+        return ''
+
+    async def identity(_phone):
+        return AIIdentity(level='L0', reason='NO_MATCH')
+
+    async def call(prefix, tail, **kwargs):
+        turns.prompts.append(tail)
+        before = turns.replies.get('before_reply')
+        if before:
+            await before()
+        action = {**turns.action, 'language': tail['language_style']}
+        return SimpleNamespace(status='completed', output=[{
+            'type': 'message', 'content': [{'type': 'output_text', 'text': json.dumps({'action': action})}],
+        }])
+
+    monkeypatch.setattr(main.settings, 'ai_agent_v2_enabled', True)
+    monkeypatch.setattr(service, 'staff_repository', auth.staff_repository)
+    monkeypatch.setattr(core, 'support_repository', turns.repo)
+    monkeypatch.setattr(core.ai_knowledge_service, 'prompt_text', knowledge)
+    monkeypatch.setattr(core.customer_ai_identity_service, 'resolve_or_unknown', identity)
+    monkeypatch.setattr(core.agent_service, '_call', call)
+    return turns
+
+
+@pytest.mark.asyncio
+async def test_v2_records_reply_and_awaiting_customer(v2_turns):
+    env = v2_turns
+    assert await env.deliver('wamid.v2.1', 'Hello') == (200, {'status': 'agent_replied'})
+    ticket = await env.only_ticket()
+    assert ticket['ai_awaiting_customer'] == 1 and ticket['ai_last_reply_at'] is not None
+    assert env.prompts[0]['messages'] == [{'role': 'user', 'text': 'Hello'}]
+    rows = await env.messages(ticket['id'])
+    assert rows[-1]['sender_type'] == 'AI' and rows[-1]['send_status'] == 'SENT'
+    assert env.ai_calls == []
+
+
+@pytest.mark.asyncio
+async def test_v2_takeover_during_generation_wins_send_fence(v2_turns):
+    env = v2_turns
+
+    async def take_over():
+        ticket = await env.only_ticket()
+        await service.support_service.take_over(ticket['id'], AGENT)
+
+    env.replies['before_reply'] = take_over
+    assert (await env.deliver('wamid.v2.1', 'Hello'))[1]['status'] == 'handed_off_after_failed_turn'
+    assert env.sent == []
+    ticket = await env.only_ticket()
+    assert ticket['handling_mode'] == 'HUMAN' and ticket['current_assignee_id'] == '7'
+
+
+@pytest.mark.asyncio
+async def test_v2_human_and_disabled_routes_never_call_model(v2_turns, monkeypatch):
+    env = v2_turns
+
+    async def disabled(**kwargs):
+        return SimpleNamespace(effective_ai_enabled=False, effective_reason='LINE_AI_DISABLED',
+                               configuration=SimpleNamespace(control_mode='manual'))
+
+    monkeypatch.setattr(main.ai_availability_service, 'get_effective_ai_availability', disabled)
+    assert (await env.deliver('wamid.v2.1', 'Hello'))[1]['status'] == 'handed_off_ai_disabled'
+    assert (await env.deliver('wamid.v2.2', 'Hello again'))[1]['status'] == 'held_for_human'
+    assert env.prompts == []
+
+
+@pytest.mark.asyncio
+async def test_v2_media_routes_to_staff_without_model(v2_turns):
+    env = v2_turns
+    result = await env.deliver('wamid.v2.loc', None, message_type='location',
+                               location_latitude=33.89, location_longitude=35.5)
+    assert result[1]['status'] == 'handed_off_location' and env.prompts == []
+
+
+@pytest.mark.asyncio
+async def test_v2_new_ticket_does_not_inherit_previous_ticket_or_redis_context(v2_turns):
+    env = v2_turns
+    assert (await env.deliver('wamid.v2.1', 'Old topic'))[1]['status'] == 'agent_replied'
+    old = await env.only_ticket()
+    await service.support_service.take_over(old['id'], AGENT)
+    await env.repo.resolve_ticket(old['id'], agent_id='7', agent_name='Agent')
+    assert (await env.deliver('wamid.v2.2', 'New topic'))[1]['status'] == 'agent_replied', env.prompts
+    assert env.prompts[-1]['messages'] == [{'role': 'user', 'text': 'New topic'}]
+
+
+@pytest.mark.asyncio
+async def test_agent_context_query_excludes_notes_deleted_unsent_future_and_other_ticket(infrastructure):
+    repo, sql, _redis = infrastructure
+    await sql("UPDATE support_tickets SET handling_mode='AI' WHERE id=41")
+
+    async def add(body, *, sender='CUSTOMER', status='RECEIVED', ticket=41, message_id=None):
+        row, _ = await repo.add_ticket_message(
+            ticket_id=ticket, body=body, sender_type=sender,
+            direction='INBOUND' if sender == 'CUSTOMER' else 'OUTBOUND',
+            send_status=status, whatsapp_message_id=message_id,
+        )
+        return row
+
+    await add('other ticket', ticket=42)
+    await add('staff note', sender='SYSTEM', status='SENT')
+    await add('draft', sender='AI', status='PENDING')
+    await add('failed', sender='AI', status='FAILED')
+    deleted = await add('deleted')
+    await sql('UPDATE support_ticket_messages SET deleted_for_everyone_at=UTC_TIMESTAMP(6) WHERE id=%s',
+              (deleted['id'],))
+    await add('sent reply', sender='AI', status='SENT')
+    await add('current question', message_id='wamid.current')
+    await add('future question', message_id='wamid.future')
+    rows = await repo.list_ai_context_messages(41, source_message_id='wamid.current')
+    assert [row['body'] for row in rows] == ['sent reply', 'current question']
+    assert await repo.list_ai_context_messages(42, source_message_id='wamid.current') == []
+    for i in range(20):
+        await add(f'bounded {i}')
+    assert len(await repo.list_ai_context_messages(41, source_message_id=None)) == 13
