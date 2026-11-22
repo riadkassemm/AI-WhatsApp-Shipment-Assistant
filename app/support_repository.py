@@ -421,6 +421,16 @@ class SupportRepository(DashboardRepositoryMixin, DeliveryRepositoryMixin, ReadS
             await self._pool.wait_closed()
             self._pool = None
 
+    async def ping(self) -> None:
+        """Raise unless MariaDB answers a trivial query (inbound health probe)."""
+        if self._pool is None:
+            await self.connect()
+        assert self._pool is not None
+        async with self._pool.acquire() as connection:
+            async with connection.cursor() as cursor:
+                await cursor.execute("SELECT 1")
+                await cursor.fetchone()
+
     async def get_ticket(self, ticket_id: int) -> dict[str, Any] | None:
         if self._pool is None:
             await self.connect()

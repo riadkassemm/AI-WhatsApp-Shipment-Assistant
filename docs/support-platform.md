@@ -82,6 +82,58 @@ invalidation reloads queues, history, and permissions; the composer becomes
 available only after backend confirmation. Redis mode is refreshed to human
 support, with the durable database remaining authoritative if Redis is unavailable.
 
+## Inbound queue recovery
+
+Every inbound WhatsApp message waits in a durable Redis queue per customer and
+business line until it is processed. These rules keep a failing message from
+blocking or losing a customer's conversation:
+
+- **Retry with backoff.** A message whose processing fails stays at the head of
+  its queue and is retried after `min(2^attempts, 300)` seconds, so the
+  customer's messages keep their order.
+- **Failures count only while MariaDB and Redis are healthy.** During an outage
+  no attempt is counted.
+- **Safe mode (human support, never AI).** From
+  `INBOUND_SAFE_MODE_ATTEMPTS` (default 3) counted failures, the message goes to
+  human support without AI. The same applies to recovered work, and to a
+  message that was accepted in time but that our retries pushed past the
+  15-minute freshness cutoff (reasons `INBOUND_PROCESSING_FAILED`,
+  `INBOUND_RECOVERED`, `INBOUND_DELAYED_PROCESSING`). It is no longer dropped as
+  `expired`.
+- **Dead letter.** A message that still fails after
+  `INBOUND_DEAD_LETTER_ATTEMPTS` (default 20) counted failures spanning at least
+  `INBOUND_DEAD_LETTER_MIN_AGE_SECONDS` (default 30 minutes) is moved to
+  `conversation:dead-inbound:<hash>`. The customer's later messages continue.
+  Its idempotency claim stays, so a provider redelivery is ignored as a
+  duplicate.
+- **Sweeper.** Every `INBOUND_SWEEP_INTERVAL_SECONDS` (default 30, `0` disables
+  it), the API drives every queue that still holds work, so a message no longer
+  waits for the customer's next message or a provider retry.
+- **Abandoned in-flight work.** Reserved work left behind by a crash, a lost
+  lease or the shutdown deadline is requeued automatically once it is older
+  than `INBOUND_RECOVERY_GRACE_SECONDS` (default 300). The effective grace is
+  never below the lock TTL plus 60 seconds. Recovered messages go to human
+  support only, and ticket inserts are idempotent by WhatsApp message ID.
+  Inside the grace period the customer's queue still answers 503
+  (`INBOUND_RECOVERY_REQUIRED`).
+- **Automated turns are never replayed.** Once an AI, auth or quote turn has
+  started (`whatsapp:inbound-turn:<hash>` marker), any failure hands the message
+  to human support with reason `AI_REPLY_SEND_FAILED` or `AI_TURN_FAILED`.
+
+Operations:
+
+```bash
+# Read-only: queue, lease and dead-letter counts. Dead letters are reported but
+# do not block the drain gate.
+venv/bin/python scripts/check_inbound_drain.py --socket /run/redis/redis-server.sock --inspect-only
+# Read-only listing of parked messages (metadata only, never message text)
+venv/bin/python scripts/replay_dead_inbound.py --socket /run/redis/redis-server.sock
+# After review: requeue ONE customer queue's parked messages for human support
+venv/bin/python scripts/replay_dead_inbound.py --socket /run/redis/redis-server.sock --replay <digest> --confirm
+```
+
+The runtime metrics include `support_inbound_dead_letter`.
+
 ## Outbound delivery contract
 
 The database is authoritative for staff text, location, media, and automatic

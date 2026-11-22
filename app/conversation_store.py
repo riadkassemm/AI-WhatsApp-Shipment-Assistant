@@ -357,6 +357,63 @@ def _inflight_inbound_queue_key(phone_number: str) -> str:
     return f"conversation:inflight-inbound:{_sender_digest(phone_number)}"
 
 
+def _inflight_since_key(phone_number: str) -> str:
+    # Wall-clock time at which the in-flight list last became non-empty. Shared by
+    # every instance, so it is used to decide when reserved work was abandoned.
+    return f"conversation:inflight-since:{_sender_digest(phone_number)}"
+
+
+def _dead_inbound_queue_key(phone_number: str) -> str:
+    return f"conversation:dead-inbound:{_sender_digest(phone_number)}"
+
+
+def _wall_clock() -> float:
+    return time.time()
+
+
+def _decode_queue_item(raw: Any) -> dict[str, Any] | None:
+    if raw is None:
+        return None
+    if isinstance(raw, (bytes, bytearray)):
+        raw = raw.decode("utf-8", errors="replace")
+    try:
+        item = json.loads(str(raw))
+    except (TypeError, ValueError):
+        return None
+    return item if isinstance(item, dict) else None
+
+
+def inbound_recovery_grace_seconds() -> int:
+    """How old in-flight work must be before it is treated as abandoned.
+
+    Never shorter than the conversation lock TTL plus a margin, so live work whose
+    owner still renews its lease is never taken over.
+    """
+    lock_ttl = max(
+        30,
+        int(settings.conversation_processing_lock_ttl_seconds),
+        int(float(settings.openai_turn_timeout_seconds)) + 30,
+    )
+    return max(int(settings.inbound_recovery_grace_seconds), lock_ttl + 60)
+
+
+def _recovered_payload(item: dict[str, Any], now: float) -> dict[str, Any]:
+    """Mark abandoned work so it is routed to human support, never to AI."""
+    clean = {key: value for key, value in item.items() if key != "_queue_receipt"}
+    clean["recovered"] = True
+    clean["attempts"] = int(clean.get("attempts") or 0) + 1
+    clean.setdefault("first_failed_at", now)
+    clean.pop("retry_after", None)
+    return clean
+
+
+def _dead_letter_payload(item: dict[str, Any], reason: str, now: float) -> dict[str, Any]:
+    clean = {key: value for key, value in item.items() if key != "_queue_receipt"}
+    clean["dead_lettered_at"] = now
+    clean["dead_letter_reason"] = str(reason)[:64]
+    return clean
+
+
 def _outbound_reply_key(idempotency_key: str) -> str:
     digest = hashlib.sha256(str(idempotency_key).encode("utf-8")).hexdigest()
     return f"{OUTBOUND_REPLY_GUARD_PREFIX}:{digest}"
@@ -427,6 +484,36 @@ class BaseConversationStore:
         raise NotImplementedError
 
     async def is_inbound_revoked(self, message_id: str) -> bool:
+        raise NotImplementedError
+
+    async def peek_incoming_work(self, phone_number: str) -> dict[str, Any] | None:
+        """Return the next pending item without reserving it."""
+        raise NotImplementedError
+
+    async def recover_inflight_incoming_work(self, phone_number: str, claim_token: str) -> int:
+        """Requeue abandoned in-flight work at the front, marked ``recovered``.
+
+        Only runs for the current lock owner and only once the in-flight work is
+        older than ``inbound_recovery_grace_seconds()``. Returns how many items
+        were moved back (0 while still inside the grace period).
+        """
+        raise NotImplementedError
+
+    async def dead_letter_incoming_work(
+        self, phone_number: str, item: dict[str, Any], reason: str,
+    ) -> None:
+        """Move one reserved item to the dead-letter list (its claim stays)."""
+        raise NotImplementedError
+
+    async def dead_letter_incoming_work_count(self, phone_number: str) -> int:
+        raise NotImplementedError
+
+    async def scan_inbound_queue_heads(self) -> list[dict[str, Any]]:
+        """Head item of every pending or in-flight queue, for the sweeper."""
+        raise NotImplementedError
+
+    async def ping(self) -> None:
+        """Raise if the store is unreachable."""
         raise NotImplementedError
 
     async def mark_inbound_turn_started(self, message_ids: list[str]) -> None:
@@ -622,6 +709,8 @@ class InMemoryConversationStore(
         self._outbound_replies: dict[str, tuple[str, str, float]] = {}
         self._pending_inbound_work: dict[str, list[dict[str, Any]]] = {}
         self._inflight_inbound_work: dict[str, list[dict[str, Any]]] = {}
+        self._inflight_since: dict[str, float] = {}
+        self._dead_inbound_work: dict[str, list[dict[str, Any]]] = {}
         self._revoked_inbound: dict[str, float] = {}
         self._started_turns: dict[str, float] = {}
 
@@ -834,8 +923,10 @@ class InMemoryConversationStore(
             ),
         )
         if claimed and self._inflight_inbound_work.get(phone_number):
-            self._conversation_claims.pop(phone_number, None)
-            raise RuntimeError("INBOUND_RECOVERY_REQUIRED")
+            since = self._inflight_since.get(phone_number)
+            if since is not None and _wall_clock() - since < inbound_recovery_grace_seconds():
+                self._conversation_claims.pop(phone_number, None)
+                raise RuntimeError("INBOUND_RECOVERY_REQUIRED")
         return claimed
 
     async def refresh_conversation_processing(
@@ -897,16 +988,66 @@ class InMemoryConversationStore(
         if not queue:
             self._pending_inbound_work.pop(phone_number, None)
         reserved = {**item, "_queue_receipt": secrets.token_hex(16)}
+        if not self._inflight_inbound_work.get(phone_number):
+            self._inflight_since[phone_number] = _wall_clock()
         self._inflight_inbound_work.setdefault(phone_number, []).append(reserved)
         return dict(reserved)
 
-    async def acknowledge_incoming_work(self, phone_number: str, item: dict[str, Any]) -> None:
+    def _remove_inflight(self, phone_number: str, item: dict[str, Any]) -> None:
         queue = self._inflight_inbound_work.get(phone_number, [])
         for index, reserved in enumerate(queue):
             if reserved.get("_queue_receipt") == item.get("_queue_receipt"):
                 queue.pop(index)
+                if not queue:
+                    self._inflight_since.pop(phone_number, None)
                 return
         raise RuntimeError("INBOUND_RECEIPT_MISSING")
+
+    async def acknowledge_incoming_work(self, phone_number: str, item: dict[str, Any]) -> None:
+        self._remove_inflight(phone_number, item)
+
+    async def peek_incoming_work(self, phone_number: str) -> dict[str, Any] | None:
+        queue = self._pending_inbound_work.get(phone_number)
+        return dict(queue[0]) if queue else None
+
+    async def recover_inflight_incoming_work(self, phone_number: str, claim_token: str) -> int:
+        existing = self._conversation_claims.get(phone_number)
+        if not existing or existing[1] != claim_token:
+            raise RuntimeError("INBOUND_OWNER_LOST")
+        reserved = self._inflight_inbound_work.get(phone_number) or []
+        if not reserved:
+            return 0
+        now = _wall_clock()
+        since = self._inflight_since.get(phone_number)
+        if since is not None and now - since < inbound_recovery_grace_seconds():
+            return 0
+        pending = self._pending_inbound_work.setdefault(phone_number, [])
+        pending[0:0] = [_recovered_payload(item, now) for item in reserved]
+        self._inflight_inbound_work.pop(phone_number, None)
+        self._inflight_since.pop(phone_number, None)
+        return len(reserved)
+
+    async def dead_letter_incoming_work(
+        self, phone_number: str, item: dict[str, Any], reason: str,
+    ) -> None:
+        self._remove_inflight(phone_number, item)
+        self._dead_inbound_work.setdefault(phone_number, []).append(
+            _dead_letter_payload(item, reason, _wall_clock())
+        )
+
+    async def dead_letter_incoming_work_count(self, phone_number: str) -> int:
+        return len(self._dead_inbound_work.get(phone_number, []))
+
+    async def scan_inbound_queue_heads(self) -> list[dict[str, Any]]:
+        heads = [dict(queue[0]) for queue in self._pending_inbound_work.values() if queue]
+        heads += [
+            {key: value for key, value in queue[0].items() if key != "_queue_receipt"}
+            for queue in self._inflight_inbound_work.values() if queue
+        ]
+        return heads
+
+    async def ping(self) -> None:
+        return None
 
     async def inflight_incoming_work_count(self, phone_number: str) -> int:
         return len(self._inflight_inbound_work.get(phone_number, []))
@@ -1131,17 +1272,27 @@ class RedisConversationStore(
 
     async def claim_conversation_processing(self, phone_number: str) -> str | None:
         token = secrets.token_urlsafe(24)
+        # In-flight work younger than the recovery grace period may still belong
+        # to a live owner, so the lock is refused. Older (or legacy, unmarked)
+        # in-flight work is abandoned: the lock is granted and the caller must
+        # recover it before draining.
         claimed = await self._client.eval(
             """if redis.call('EXISTS', KEYS[1]) == 1 then return 0 end
-            if redis.call('LLEN', KEYS[2]) > 0 then return -1 end
+            if redis.call('LLEN', KEYS[2]) > 0 then
+              local since = redis.call('GET', KEYS[3])
+              if since and (tonumber(ARGV[3]) - tonumber(since)) < tonumber(ARGV[4]) then return -1 end
+            end
             redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[2]); return 1""",
-            2, _conversation_processing_key(phone_number), _inflight_inbound_queue_key(phone_number),
+            3, _conversation_processing_key(phone_number), _inflight_inbound_queue_key(phone_number),
+            _inflight_since_key(phone_number),
             f"processing:{token}",
             max(
                 30,
                 int(settings.conversation_processing_lock_ttl_seconds),
                 int(float(settings.openai_turn_timeout_seconds)) + 30,
             ),
+            repr(_wall_clock()),
+            str(inbound_recovery_grace_seconds()),
         )
         if claimed == -1:
             raise RuntimeError("INBOUND_RECOVERY_REQUIRED")
@@ -1194,11 +1345,15 @@ class RedisConversationStore(
         result = await self._client.eval(
             """if ARGV[2] ~= '' and redis.call('LPOS', KEYS[2], ARGV[2]) == false then return 0 end
             redis.call(ARGV[3], KEYS[1], ARGV[1]); redis.call('PERSIST', KEYS[1])
-            if ARGV[2] ~= '' then redis.call('LREM', KEYS[2], 1, ARGV[2]) end
+            if ARGV[2] ~= '' then
+              redis.call('LREM', KEYS[2], 1, ARGV[2])
+              if redis.call('LLEN', KEYS[2]) == 0 then redis.call('DEL', KEYS[4]) end
+            end
             if ARGV[4] ~= '' and redis.call('GET', KEYS[3]) == ARGV[4] then redis.call('PERSIST', KEYS[3]) end
             return 1""",
-            3, key, _inflight_inbound_queue_key(phone_number),
+            4, key, _inflight_inbound_queue_key(phone_number),
             _inbound_message_key(str(clean.get("message_id") or "")),
+            _inflight_since_key(phone_number),
             payload, receipt, "LPUSH" if front else "RPUSH",
             f"processing:{clean['claim_token']}" if clean.get("claim_token") else "",
         )
@@ -1216,10 +1371,12 @@ class RedisConversationStore(
             """if redis.call('GET', KEYS[3]) ~= ARGV[1] then return redis.error_reply('INBOUND_OWNER_LOST') end
             local value = redis.call('LINDEX', KEYS[1], 0)
             if not value then return false end
+            if redis.call('LLEN', KEYS[2]) == 0 then redis.call('SET', KEYS[4], ARGV[2]) end
             redis.call('RPUSH', KEYS[2], value); redis.call('PERSIST', KEYS[2])
             redis.call('LPOP', KEYS[1]); return value""",
-            3, _pending_inbound_queue_key(phone_number), _inflight_inbound_queue_key(phone_number),
-            _conversation_processing_key(phone_number), f"processing:{claim_token}",
+            4, _pending_inbound_queue_key(phone_number), _inflight_inbound_queue_key(phone_number),
+            _conversation_processing_key(phone_number), _inflight_since_key(phone_number),
+            f"processing:{claim_token}", repr(_wall_clock()),
         )
         if raw is None:
             return None
@@ -1239,13 +1396,96 @@ class RedisConversationStore(
             raise RuntimeError("INBOUND_RECEIPT_MISSING")
         result = await self._client.eval(
             """if ARGV[2] == '1' and redis.call('GET', KEYS[2]) ~= 'completed' then return -1 end
-            return redis.call('LREM', KEYS[1], 1, ARGV[1])""",
-            2, _inflight_inbound_queue_key(phone_number),
-            _inbound_message_key(str(item.get("message_id") or "")), receipt,
+            local removed = redis.call('LREM', KEYS[1], 1, ARGV[1])
+            if redis.call('LLEN', KEYS[1]) == 0 then redis.call('DEL', KEYS[3]) end
+            return removed""",
+            3, _inflight_inbound_queue_key(phone_number),
+            _inbound_message_key(str(item.get("message_id") or "")),
+            _inflight_since_key(phone_number), receipt,
             "1" if item.get("message_id") and item.get("claim_token") else "0",
         )
         if result != 1:
             raise RuntimeError("INBOUND_COMPLETION_UNCONFIRMED")
+
+    async def peek_incoming_work(self, phone_number: str) -> dict[str, Any] | None:
+        raw = await self._client.lindex(_pending_inbound_queue_key(phone_number), 0)
+        return _decode_queue_item(raw)
+
+    _MOVE_INFLIGHT_SCRIPT = """
+    if redis.call('GET', KEYS[3]) ~= ARGV[3] then return redis.error_reply('INBOUND_OWNER_LOST') end
+    if redis.call('LREM', KEYS[1], 1, ARGV[1]) == 0 then return 0 end
+    redis.call(ARGV[4], KEYS[2], ARGV[2]); redis.call('PERSIST', KEYS[2])
+    if redis.call('LLEN', KEYS[1]) == 0 then redis.call('DEL', KEYS[4]) end
+    return 1
+    """
+
+    async def recover_inflight_incoming_work(self, phone_number: str, claim_token: str) -> int:
+        lock_value = f"processing:{claim_token}"
+        if await self._client.get(_conversation_processing_key(phone_number)) != lock_value:
+            raise RuntimeError("INBOUND_OWNER_LOST")
+        now = _wall_clock()
+        since = await self._client.get(_inflight_since_key(phone_number))
+        if since is not None and now - float(since) < inbound_recovery_grace_seconds():
+            return 0
+        reserved = await self._client.lrange(_inflight_inbound_queue_key(phone_number), 0, -1)
+        moved = 0
+        # Push in reverse so the original order is preserved at the queue front.
+        for raw in reversed(reserved):
+            item = _decode_queue_item(raw)
+            if item is None:
+                # Unreadable work can never be processed; park it instead of
+                # letting it block this customer forever.
+                target, payload, command = (
+                    _dead_inbound_queue_key(phone_number), raw, "RPUSH",
+                )
+            else:
+                target, command = _pending_inbound_queue_key(phone_number), "LPUSH"
+                payload = json.dumps(
+                    _recovered_payload(item, now), ensure_ascii=False, separators=(",", ":"),
+                )
+            moved += int(await self._client.eval(
+                self._MOVE_INFLIGHT_SCRIPT, 4,
+                _inflight_inbound_queue_key(phone_number), target,
+                _conversation_processing_key(phone_number), _inflight_since_key(phone_number),
+                raw, payload, lock_value, command,
+            ) or 0)
+        return moved
+
+    async def dead_letter_incoming_work(
+        self, phone_number: str, item: dict[str, Any], reason: str,
+    ) -> None:
+        receipt = item.get("_queue_receipt")
+        if not receipt:
+            raise RuntimeError("INBOUND_RECEIPT_MISSING")
+        payload = json.dumps(
+            _dead_letter_payload(item, reason, _wall_clock()),
+            ensure_ascii=False, separators=(",", ":"),
+        )
+        result = await self._client.eval(
+            """if redis.call('LREM', KEYS[1], 1, ARGV[1]) == 0 then return 0 end
+            redis.call('RPUSH', KEYS[2], ARGV[2]); redis.call('PERSIST', KEYS[2])
+            if redis.call('LLEN', KEYS[1]) == 0 then redis.call('DEL', KEYS[3]) end
+            return 1""",
+            3, _inflight_inbound_queue_key(phone_number), _dead_inbound_queue_key(phone_number),
+            _inflight_since_key(phone_number), receipt, payload,
+        )
+        if result != 1:
+            raise RuntimeError("INBOUND_RECEIPT_MISSING")
+
+    async def dead_letter_incoming_work_count(self, phone_number: str) -> int:
+        return int(await self._client.llen(_dead_inbound_queue_key(phone_number)))
+
+    async def scan_inbound_queue_heads(self) -> list[dict[str, Any]]:
+        heads: list[dict[str, Any]] = []
+        for pattern in ("conversation:pending-inbound:*", "conversation:inflight-inbound:*"):
+            async for key in self._client.scan_iter(match=pattern, count=200):
+                item = _decode_queue_item(await self._client.lindex(key, 0))
+                if item is not None:
+                    heads.append(item)
+        return heads
+
+    async def ping(self) -> None:
+        await self._client.ping()
 
     async def inflight_incoming_work_count(self, phone_number: str) -> int:
         return int(await self._client.llen(_inflight_inbound_queue_key(phone_number)))

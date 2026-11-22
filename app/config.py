@@ -88,6 +88,24 @@ class Settings(BaseSettings):
     # Bound one combined AI turn. Additional queued messages are handled by the same
     # serialized worker in the next burst rather than being rejected with HTTP 503.
     whatsapp_message_burst_max_messages: int = 8
+    # Inbound queue hardening. A message that keeps failing is retried with
+    # backoff; from INBOUND_SAFE_MODE_ATTEMPTS on it is routed to human support
+    # without AI. It is parked in a dead-letter list only after
+    # INBOUND_DEAD_LETTER_ATTEMPTS counted failures spanning at least
+    # INBOUND_DEAD_LETTER_MIN_AGE_SECONDS while MariaDB and Redis are healthy;
+    # failures during an outage are never counted.
+    inbound_safe_mode_attempts: int = 3
+    inbound_dead_letter_attempts: int = 20
+    inbound_dead_letter_min_age_seconds: int = 30 * 60
+    inbound_retry_max_backoff_seconds: int = 300
+    # Background sweeper that drains queues left behind by a failed or retried
+    # webhook. Set the interval to 0 to disable it.
+    inbound_sweep_interval_seconds: int = 30
+    inbound_sweep_concurrency: int = 4
+    # In-flight work older than this is assumed abandoned (crash, lost lease,
+    # shutdown deadline) and requeued for human support, never for AI. The
+    # effective value is never below the conversation lock TTL plus 60 seconds.
+    inbound_recovery_grace_seconds: int = 300
 
     # MariaDB
     db_host: str = "127.0.0.1"

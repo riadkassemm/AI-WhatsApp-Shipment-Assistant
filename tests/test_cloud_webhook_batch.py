@@ -155,10 +155,17 @@ def test_batch_retry_after_partial_failure_does_not_duplicate(monkeypatch):
         # wamid.3 sits on another line, so it is still accepted despite wamid.2.
         assert sorted(processed) == ["wamid.1", "wamid.3"]
 
-        # Meta retries the same payload once the dependency recovers.
+        # Meta retries the same payload once the dependency recovers. Nothing is
+        # processed twice; wamid.2 waits for its retry backoff at the queue head.
         _patch_pipeline(monkeypatch, store, processed)
         second = await main.process_whatsapp_payload(_batch_payload(), source="cloud")
         assert second.status_code == 200
+        assert sorted(processed) == ["wamid.1", "wamid.3"]
+
+        # Once the backoff has passed, the background sweeper processes it.
+        real_time = main.time.time
+        monkeypatch.setattr(main.time, "time", lambda: real_time() + 600)
+        await main._sweep_inbound_queues_once()
         assert sorted(processed) == ["wamid.1", "wamid.2", "wamid.3"]
     asyncio.run(run())
 

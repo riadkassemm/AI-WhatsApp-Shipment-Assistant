@@ -22,6 +22,7 @@ def test_runtime_checks_emit_health_and_pseudonymous_diagnostics():
     assert 'support_api_up 1' in output
     assert 'support_bridge_connected_lines 8' in output
     assert 'support_inbound_inflight 0' in output
+    assert 'support_inbound_dead_letter 0' in output
     assert 'support_runtime_check_timestamp_seconds 123' in output
     assert 'support_bridge_diagnostics_up 1' in output
     assert 'support_database_uncertain_deliveries 1' in output

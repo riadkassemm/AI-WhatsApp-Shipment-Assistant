@@ -10,11 +10,16 @@ PATTERNS = {
     "pending": "conversation:pending-inbound:*",
     "inflight": "conversation:inflight-inbound:*",
     "leases": "conversation:processing:*",
+    # Parked after repeated failures (see scripts/replay_dead_inbound.py). They
+    # are reported but do not block a drain: they no longer belong to any worker.
+    "dead_letter": "conversation:dead-inbound:*",
 }
+# Keys that must be zero for the queue to count as drained.
+DRAIN_KEYS = ("pending", "inflight", "leases", "invalid")
 
 
 def inspect(client) -> dict:
-    result = {"pending": 0, "inflight": 0, "leases": 0, "invalid": 0}
+    result = {"pending": 0, "inflight": 0, "leases": 0, "invalid": 0, "dead_letter": 0}
     for kind, pattern in PATTERNS.items():
         for key in set(client.scan_iter(match=pattern, count=100)):
             key_type = client.type(key)
@@ -36,7 +41,7 @@ def require_drained(client, stable_seconds=10, *, sleep=time.sleep, clock=time.m
     deadline = clock() + stable_seconds
     while True:
         result = inspect(client)
-        if any(result.values()):
+        if any(result[key] for key in DRAIN_KEYS):
             # Fail immediately. Waiting for a 15-minute legacy queue/lease to
             # expire is NOT evidence of successful processing.
             raise RuntimeError("INBOUND_DRAIN_UNRESOLVED")
@@ -60,7 +65,7 @@ def main():
         host="127.0.0.1", port=args.port, socket_timeout=5)
     try:
         result = inspect(client) if args.inspect_only else require_drained(client, args.stable_seconds)
-        print(json.dumps({"drained": not any(result.values()), **result}))
+        print(json.dumps({"drained": not any(result[key] for key in DRAIN_KEYS), **result}))
     except Exception:
         print('{"drained":false,"error":"INBOUND_DRAIN_UNRESOLVED_OR_UNAVAILABLE"}')
         raise SystemExit(1) from None
