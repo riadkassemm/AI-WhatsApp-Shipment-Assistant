@@ -561,6 +561,9 @@ async def _process_inbound_burst(phone_number: str, items: list[dict]) -> Respon
         response = await _process_incoming_message(
             combined,
             ai_availability_snapshot=combined_ai_availability,
+            burst_message_ids=tuple(
+                str(item.get("message_id")) for item in items if item.get("message_id")
+            ),
         )
         if _response_is_retryable(response):
             await _requeue_inbound_items_front(phone_number, items)
@@ -1934,6 +1937,7 @@ async def _process_incoming_message(
     incoming: IncomingWhatsAppMessage,
     *,
     ai_availability_snapshot: EffectiveAIAvailability | None = None,
+    burst_message_ids: tuple[str, ...] | None = None,
 ) -> Response:
     """
     Process one uniquely claimed inbound WhatsApp message.
@@ -2397,6 +2401,133 @@ async def _process_incoming_message(
 
     text = incoming.text
 
+    # =========================================================
+    # AUTOMATED TURN BOUNDARY
+    # =========================================================
+    # From here on a turn has side effects: conversation history, credential
+    # checks, quota, OpenAI calls and customer replies. Record that the turn began
+    # BEFORE the first of them. A retried delivery of a started turn must never run
+    # it again (duplicate history, a second paid AI call, a repeated login attempt);
+    # it goes to human support instead, idempotently by WhatsApp message ID.
+    turn_message_ids = [
+        message_id
+        for message_id in (burst_message_ids or (incoming.message_id,))
+        if message_id
+    ]
+    try:
+        if await _inbound_turn_already_started(turn_message_ids):
+            logger.warning(
+                "Retried inbound message belongs to an automated turn that already "
+                "started - handing to human support: customer_ref=%s message_id=%s",
+                customer_ref,
+                incoming.message_id,
+            )
+            return await _handoff_after_failed_turn(
+                conversation=conversation,
+                incoming=incoming,
+                parsed_auth=parsed_auth,
+                reason="AI_TURN_FAILED",
+            )
+        await _mark_inbound_turn_started(turn_message_ids)
+    except Exception:
+        logger.exception(
+            "Automated turn marker unavailable; nothing was started: customer_ref=%s "
+            "message_id=%s",
+            customer_ref,
+            incoming.message_id,
+        )
+        return _json_response(503, {"status": "turn_state_unavailable"})
+
+    failure_reason = "AI_TURN_FAILED"
+    try:
+        response = await _run_started_turn(
+            conversation=conversation,
+            incoming=incoming,
+            parsed_auth=parsed_auth,
+            auth_interruption=auth_interruption,
+            text=text,
+            customer_ref=customer_ref,
+            from_number=from_number,
+        )
+    except Exception as exc:
+        if isinstance(exc, WhatsAppSendError) or isinstance(exc.__cause__, WhatsAppSendError):
+            failure_reason = "AI_REPLY_SEND_FAILED"
+        # Never log exception text: provider/Redis diagnostics can contain payloads.
+        logger.error(
+            "Automated turn failed after it started: customer_ref=%s message_id=%s "
+            "reason=%s error_type=%s",
+            customer_ref,
+            incoming.message_id,
+            failure_reason,
+            type(exc).__name__,
+        )
+        response = None
+
+    if response is not None and not _response_is_retryable(response):
+        return response
+
+    # The turn may already have replied, consumed quota or called OpenAI, so it is
+    # never replayed. A human takes over this message instead. If the handoff
+    # itself is unavailable, the retry is still safe: the marker above routes the
+    # redelivered message straight to this handoff.
+    return await _handoff_after_failed_turn(
+        conversation=conversation,
+        incoming=incoming,
+        parsed_auth=parsed_auth,
+        reason=failure_reason,
+    )
+
+
+async def _inbound_turn_already_started(message_ids: list[str]) -> bool:
+    checker = getattr(conversation_store, "inbound_turn_started", None)
+    if not message_ids or not callable(checker):
+        return False
+    return bool(await checker(message_ids))
+
+
+async def _mark_inbound_turn_started(message_ids: list[str]) -> None:
+    marker = getattr(conversation_store, "mark_inbound_turn_started", None)
+    if message_ids and callable(marker):
+        await marker(message_ids)
+
+
+async def _handoff_after_failed_turn(
+    *,
+    conversation: Conversation,
+    incoming: IncomingWhatsAppMessage,
+    parsed_auth: CredentialExtraction,
+    reason: str,
+) -> Response:
+    return await _handoff_incoming_without_ai(
+        conversation=conversation,
+        incoming=incoming,
+        parsed_auth=parsed_auth,
+        reason=reason,
+        summary=(
+            "The automated reply for this message could not be completed. "
+            "It was handed to human support instead of being retried."
+        ),
+        status_name="handed_off_after_failed_turn",
+    )
+
+
+async def _run_started_turn(
+    *,
+    conversation: Conversation,
+    incoming: IncomingWhatsAppMessage,
+    parsed_auth: CredentialExtraction,
+    auth_interruption: str | None,
+    text: str,
+    customer_ref: str,
+    from_number: str,
+) -> Response:
+    """Run one automated customer turn after its start marker is recorded.
+
+    Callers treat any exception or retryable response as final: the turn is never
+    replayed, and the message is handed to human support.
+    """
+
+
     # An explicit cancellation is itself the completed customer intent. A clear topic
     # switch, on the other hand, falls through and is handled as a fresh normal request
     # (for example a public shipping question) without an extra bot message in between.
@@ -2557,12 +2688,9 @@ async def _process_incoming_message(
                 customer_ref,
             )
 
-        return _json_response(
-            500,
-            {
-                "status": "error"
-            },
-        )
+        # The caller classifies the failure (reply send vs other) and hands the
+        # message to human support; the turn is never replayed.
+        raise
 
     return _json_response(
         200 if ok else 500,
