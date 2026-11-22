@@ -425,3 +425,7 @@ assert.equal(nodes.aiNumbersBulkActions.hidden, true);
 """
     result = subprocess.run(["node", "-e", script], text=True, capture_output=True, timeout=10)
     assert result.returncode == 0, result.stderr
+
+
+# Turn-logic tests: automated turns get an in-memory AI ticket (see conftest).
+pytestmark = pytest.mark.usefixtures("fake_ai_ticket")

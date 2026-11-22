@@ -59,7 +59,7 @@ from app.support_api import router as support_api_router
 from app.support_repository import SupportConflictError, support_repository
 from app.support_media import SUPPORT_MEDIA_MESSAGE_TYPES, SupportMediaError, document_label
 from app.support_models import ACTIVE_TICKET_STATUSES, HandoffRequest
-from app.support_service import sanitize_support_text, support_service
+from app.support_service import is_ai_ticket, sanitize_support_text, support_service
 from app.support_contacts import format_shared_contacts
 from app.support_ui import SUPPORT_UI_VERSION, router as support_ui_router
 from app.linked_device_api import router as linked_device_api_router
@@ -976,6 +976,45 @@ async def _is_inbound_revoked(message_id: str | None) -> bool:
     return bool(await checker(message_id)) if callable(checker) else False
 
 
+def _turn_ai_ticket() -> dict | None:
+    """The AI ticket of the automated turn in progress, if any."""
+    turn = _automated_turn.get()
+    return turn.get("ticket") if turn else None
+
+
+async def _send_ai_ticket_reply(ticket: dict, *, body: str, source_message_id: str | None) -> dict:
+    """Send one automated reply as an AI message on the turn's AI ticket.
+
+    The reply is stored as sender_type='AI' and delivered through the support
+    delivery path, whose send-time fence refuses it once a staff member has taken
+    the ticket over or it was escalated. At most one reply per inbound message.
+    """
+    if await _is_inbound_revoked(source_message_id):
+        return {"revoked": True}
+    turn = _automated_turn.get()
+    try:
+        message = await support_service.send_ai_reply(
+            ticket,
+            body=body,
+            source_message_id=source_message_id,
+            # The legacy pipeline has no structured "awaiting answer" signal, so its
+            # tickets follow the plain quiet-time rule.
+            awaiting_customer=False,
+        )
+    except SupportConflictError as exc:
+        reason = "AI_TICKET_HANDED_TO_HUMAN"
+        if turn is not None:
+            turn["suppressed"] = reason
+        raise AutomatedReplySuppressed(reason) from exc
+    status = str(message.get("send_status") or "")
+    if status == "SENT":
+        return {"messages": [{"id": message.get("whatsapp_message_id")}]}
+    raise WhatsAppSendError(
+        "The AI reply was not sent.",
+        delivery_uncertain=status not in {"FAILED"},
+    )
+
+
 async def _send_text_once(
     *,
     to: str,
@@ -985,6 +1024,10 @@ async def _send_text_once(
 ) -> dict:
     """Attempt at most one primary customer reply per inbound WhatsApp ID."""
     await _ensure_automated_reply_allowed(phone_number_id)
+
+    ai_ticket = _turn_ai_ticket()
+    if ai_ticket is not None:
+        return await _send_ai_ticket_reply(ai_ticket, body=body, source_message_id=source_message_id)
 
     async def _provider_send() -> dict:
         if phone_number_id:
@@ -1600,6 +1643,18 @@ async def _handle_ai_result(
         return True, "authentication_required"
 
     if result.handoff is not None:
+        ai_ticket_turn = _turn_ai_ticket() is not None
+        if ai_ticket_turn and guarded_reply:
+            # The AI may speak only while it handles the ticket, so on an AI
+            # ticket the customer is told first and the ticket escalated second.
+            await conversation_store.save(conversation)
+            await _send_text_once(
+                to=conversation.phone_number,
+                body=guarded_reply,
+                source_message_id=source_message_id,
+                phone_number_id=conversation.business_phone_number_id,
+            )
+            guarded_reply = ""
         try:
             ticket, _created = await support_service.finalize_handoff(
                 conversation=conversation,
@@ -1618,6 +1673,10 @@ async def _handle_ai_result(
                 ),
             )
         except Exception:
+            if ai_ticket_turn:
+                # The notice may already be sent. Fail the turn: its handler
+                # escalates the AI ticket again (idempotently) without the AI.
+                raise
             logger.exception("Durable ticket creation failed during human handoff")
             # Roll back model-only handoff output. A fallback is actually sent below,
             # so this inbound message is considered handled and must not be retried by
@@ -1862,6 +1921,20 @@ async def _resume_after_auth(
     guarded_reply = _guard_ai_reply_for_send(conversation, result.reply_text)
 
     if result.handoff is not None:
+        ai_ticket_turn = _turn_ai_ticket() is not None
+        if ai_ticket_turn and guarded_reply:
+            # On an AI ticket: tell the customer, then escalate (see _handle_ai_result).
+            conversation.pending_request = None
+            conversation.pending_tool_name = None
+            conversation.pending_tool_arguments = None
+            await conversation_store.save(conversation)
+            await _send_text_once(
+                to=conversation.phone_number,
+                body=guarded_reply,
+                source_message_id=source_message_id,
+                phone_number_id=conversation.business_phone_number_id,
+            )
+            guarded_reply = ""
         try:
             ticket, _created = await support_service.finalize_handoff(
                 conversation=conversation,
@@ -1870,6 +1943,8 @@ async def _resume_after_auth(
                 source_message_text=None,
             )
         except Exception:
+            if ai_ticket_turn:
+                raise
             logger.exception("Ticket creation failed while resuming after authentication")
             conversation.messages = conversation.messages[:rollback_history_len]
             fallback = pending_request_unavailable(conversation.communication_style)
@@ -2395,8 +2470,15 @@ async def _process_incoming_message(
 
     # Existing durable support idempotency can remain as an
     # additional safeguard.
+    # An AI ticket does not hold the conversation for a human: its messages
+    # continue through the automated routing below and are recorded on it.
+    ai_ticket = active_ticket if is_ai_ticket(active_ticket) else None
+    if ai_ticket is not None:
+        active_ticket = None
+
     if (
         active_ticket is None
+        and ai_ticket is None
         and incoming.message_id
     ):
         try:
@@ -2738,6 +2820,21 @@ async def _process_incoming_message(
     text = incoming.text
 
     # =========================================================
+    # AI TICKET
+    # =========================================================
+    # Every automated conversation is a ticket in the AI Tickets queue. The
+    # customer message is stored on it before the turn starts, so staff see it
+    # even if the turn fails, and a takeover can stop the reply.
+    ai_ticket, ticket_response = await _ai_ticket_for_turn(
+        conversation=conversation,
+        incoming=incoming,
+        parsed_auth=parsed_auth,
+        ai_ticket=ai_ticket,
+    )
+    if ticket_response is not None:
+        return ticket_response
+
+    # =========================================================
     # AUTOMATED TURN BOUNDARY
     # =========================================================
     # From here on a turn has side effects: conversation history, credential
@@ -2775,9 +2872,13 @@ async def _process_incoming_message(
         return _json_response(503, {"status": "turn_state_unavailable"})
 
     failure_reason = "AI_TURN_FAILED"
-    turn_state: dict = {"line_id": incoming.business_phone_number_id, "suppressed": None}
+    turn_state: dict = {
+        "line_id": incoming.business_phone_number_id, "suppressed": None, "ticket": ai_ticket,
+    }
     turn_token = _automated_turn.set(turn_state)
-    usage_token = usage_scope.set({"phone_number_id": incoming.business_phone_number_id, "ticket_id": None})
+    usage_token = usage_scope.set({
+        "phone_number_id": incoming.business_phone_number_id, "ticket_id": int(ai_ticket["id"]),
+    })
     try:
         response = await _run_started_turn(
             conversation=conversation,
@@ -2828,6 +2929,55 @@ async def _process_incoming_message(
         parsed_auth=parsed_auth,
         reason=failure_reason,
     )
+
+
+async def _ai_ticket_for_turn(
+    *,
+    conversation: Conversation,
+    incoming: IncomingWhatsAppMessage,
+    parsed_auth: CredentialExtraction,
+    ai_ticket: dict | None,
+) -> tuple[dict | None, Response | None]:
+    """Open (or reuse) the AI ticket and store the customer message on it.
+
+    Returns (ticket, None) to continue with the automated turn, or (None,
+    response) to stop. Nothing has started yet, so a failure is retryable.
+    """
+    customer_ref = safe_log_identifier(conversation.phone_number, "wa")
+    try:
+        if ai_ticket is None:
+            ai_ticket, created = await support_service.open_ai_ticket(
+                conversation=conversation,
+                source_whatsapp_message_id=incoming.message_id,
+                business_phone_number_id=incoming.business_phone_number_id,
+                business_display_phone_number=incoming.business_display_phone_number,
+            )
+            if not is_ai_ticket(ai_ticket):
+                # A human ticket won a race: the redelivery is held for it.
+                logger.info("Human ticket appeared before the AI turn: customer_ref=%s", customer_ref)
+                return None, _json_response(503, {"status": "support_state_changed"})
+            if created:
+                logger.info(
+                    "AI ticket opened: customer_ref=%s ticket_id=%s", customer_ref, ai_ticket["id"],
+                )
+        await support_service.route_human_inbound(
+            ticket=ai_ticket,
+            body=_human_inbound_body(incoming, parsed_auth),
+            whatsapp_message_id=incoming.message_id,
+            whatsapp_timestamp=incoming.timestamp,
+            message_type=incoming.message_type,
+            reply_to_whatsapp_message_id=incoming.context_message_id,
+            current_language=conversation.current_language,
+            communication_style=conversation.communication_style,
+        )
+        await support_service.reconcile_conversation_mode(conversation, ai_ticket)
+    except SupportConflictError:
+        logger.info("AI ticket changed before the turn: customer_ref=%s", customer_ref)
+        return None, _json_response(503, {"status": "support_state_changed"})
+    except Exception:
+        logger.exception("AI ticket unavailable; nothing was started: customer_ref=%s", customer_ref)
+        return None, _json_response(503, {"status": "support_state_unavailable"})
+    return ai_ticket, None
 
 
 async def _inbound_turn_already_started(message_ids: list[str]) -> bool:

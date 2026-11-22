@@ -301,3 +301,8 @@ def test_redis_limiter_failure_is_fail_closed_for_wallet_protection() -> None:
         assert decision == AIQuotaDecision(False, "limiter_unavailable")
 
     asyncio.run(run())
+
+
+import pytest  # noqa: E402
+# Turn-logic tests: automated turns get an in-memory AI ticket (see conftest).
+pytestmark = pytest.mark.usefixtures("fake_ai_ticket")
