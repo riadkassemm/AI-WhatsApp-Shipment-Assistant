@@ -16,6 +16,14 @@ from app.ai_availability import (
     AIControlValidationError,
     ai_availability_service,
 )
+from app.ai_knowledge import (
+    AIKnowledgeConflictError,
+    AIKnowledgeError,
+    AIKnowledgeForbiddenError,
+    AIKnowledgeNotFoundError,
+    AIKnowledgeValidationError,
+    ai_knowledge_service,
+)
 from app.ai_usage import (
     AIUsageBlocked,
     AIUsageConflictError,
@@ -340,6 +348,16 @@ class WhatsAppNumberOutreachLimitsRequest(BaseModel):
 
 
 def _translate_error(exc: Exception) -> HTTPException:
+    if isinstance(exc, AIKnowledgeForbiddenError):
+        return HTTPException(status_code=403, detail=str(exc))
+    if isinstance(exc, AIKnowledgeNotFoundError):
+        return HTTPException(status_code=404, detail=str(exc))
+    if isinstance(exc, AIKnowledgeValidationError):
+        return HTTPException(status_code=422, detail=str(exc))
+    if isinstance(exc, AIKnowledgeConflictError):
+        return HTTPException(status_code=409, detail=str(exc))
+    if isinstance(exc, AIKnowledgeError):
+        return HTTPException(status_code=500, detail="The AI knowledge base is temporarily unavailable.")
     if isinstance(exc, AIUsageForbiddenError):
         return HTTPException(status_code=403, detail=str(exc))
     if isinstance(exc, AIUsageValidationError):
@@ -813,6 +831,98 @@ async def update_ai_budget(
 ) -> dict:
     try:
         return await ai_usage_service.update_settings(agent, payload.model_dump())
+    except Exception as exc:
+        raise _translate_error(exc) from exc
+
+
+class AIKnowledgeExample(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    style: str = Field(max_length=16)
+    customer: str = Field(max_length=500)
+    reply: str = Field(max_length=1000)
+
+
+class AIKnowledgeArticleRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    intent_key: str = Field(max_length=64)
+    title: str = Field(max_length=191)
+    approved_policy: str = Field(max_length=6000)
+    data_needed: str | None = Field(default=None, max_length=500)
+    escalate_when: str | None = Field(default=None, max_length=3000)
+    examples: list[AIKnowledgeExample] = Field(default_factory=list, max_length=6)
+    observed_practice: str | None = Field(default=None, max_length=6000)
+    row_version: int | None = None
+
+
+class AIKnowledgeVersionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    row_version: int
+
+
+@router.get("/ai-knowledge")
+async def list_ai_knowledge(
+    status: str | None = Query(default=None, pattern="^(DRAFT|APPROVED|RETIRED)$"),
+    agent: SupportAgent = Depends(get_current_agent),
+) -> dict:
+    """AI knowledge base articles (Admins and Super Admins)."""
+    try:
+        return await ai_knowledge_service.overview(agent, status=status)
+    except Exception as exc:
+        raise _translate_error(exc) from exc
+
+
+@router.get("/ai-knowledge/{article_id}")
+async def get_ai_knowledge_article(article_id: int, agent: SupportAgent = Depends(get_current_agent)) -> dict:
+    try:
+        return await ai_knowledge_service.article(agent, article_id)
+    except Exception as exc:
+        raise _translate_error(exc) from exc
+
+
+@router.post("/ai-knowledge")
+async def create_ai_knowledge_article(
+    payload: AIKnowledgeArticleRequest, agent: SupportAgent = Depends(require_support_csrf),
+) -> dict:
+    try:
+        return await ai_knowledge_service.create(agent, payload.model_dump())
+    except Exception as exc:
+        raise _translate_error(exc) from exc
+
+
+@router.put("/ai-knowledge/{article_id}")
+async def update_ai_knowledge_article(
+    article_id: int, payload: AIKnowledgeArticleRequest, agent: SupportAgent = Depends(require_support_csrf),
+) -> dict:
+    try:
+        return await ai_knowledge_service.update(agent, article_id, payload.model_dump())
+    except Exception as exc:
+        raise _translate_error(exc) from exc
+
+
+@router.post("/ai-knowledge/{article_id}/revise")
+async def revise_ai_knowledge_article(article_id: int, agent: SupportAgent = Depends(require_support_csrf)) -> dict:
+    try:
+        return await ai_knowledge_service.revise(agent, article_id)
+    except Exception as exc:
+        raise _translate_error(exc) from exc
+
+
+@router.post("/ai-knowledge/{article_id}/approve")
+async def approve_ai_knowledge_article(
+    article_id: int, payload: AIKnowledgeVersionRequest, agent: SupportAgent = Depends(require_support_csrf),
+) -> dict:
+    try:
+        return await ai_knowledge_service.approve(agent, article_id, payload.row_version)
+    except Exception as exc:
+        raise _translate_error(exc) from exc
+
+
+@router.post("/ai-knowledge/{article_id}/retire")
+async def retire_ai_knowledge_article(
+    article_id: int, payload: AIKnowledgeVersionRequest, agent: SupportAgent = Depends(require_support_csrf),
+) -> dict:
+    try:
+        return await ai_knowledge_service.retire(agent, article_id, payload.row_version)
     except Exception as exc:
         raise _translate_error(exc) from exc
 

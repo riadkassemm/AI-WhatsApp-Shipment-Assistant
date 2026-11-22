@@ -379,6 +379,7 @@ __SUPPORT_STYLE__
         <button id="aiTabNumbers" class="btn active" type="button" role="tab" aria-selected="true" aria-controls="aiPanelNumbers">WhatsApp Numbers</button>
         <button id="aiTabOpenAI" class="btn hidden" type="button" role="tab" aria-selected="false" aria-controls="aiPanelOpenAI" tabindex="-1">OpenAI Configuration</button>
         <button id="aiTabUsage" class="btn hidden" type="button" role="tab" aria-selected="false" aria-controls="aiPanelUsage" tabindex="-1">Usage &amp; Costs</button>
+        <button id="aiTabKnowledge" class="btn hidden" type="button" role="tab" aria-selected="false" aria-controls="aiPanelKnowledge" tabindex="-1">Knowledge</button>
       </div>
       <div id="aiPanelNumbers" role="tabpanel" aria-labelledby="aiTabNumbers">
       <div class="ai-status-card">
@@ -426,6 +427,34 @@ __SUPPORT_STYLE__
             <button class="btn danger hidden" id="aiOpenAIDeleteBtn" type="button">Remove saved key</button>
             <button class="btn" id="aiOpenAITestBtn" type="button">Test connection</button>
             <button class="btn primary" id="aiOpenAISaveBtn" type="submit"><svg class="icon" aria-hidden="true"><use href="#icon-check"></use></svg>Save key</button>
+          </div>
+        </form>
+      </div>
+      <div id="aiPanelKnowledge" class="hidden" role="tabpanel" aria-labelledby="aiTabKnowledge">
+        <div class="ai-status-card">
+          <div class="ai-status-copy"><strong>Approved answers the AI may use</strong><span id="aiKnowledgeSummary">Loading…</span></div>
+          <button class="btn primary" id="aiKnowledgeNewBtn" type="button"><svg class="icon" aria-hidden="true"><use href="#icon-plus"></use></svg>New topic</button>
+        </div>
+        <p class="form-note">The AI reads approved articles only. Drafts from the drafting tool contain placeholders such as &lt;AMOUNT_1&gt;; replace them with real policy text before approving. Observed practice is for reviewers and is never shown to the AI.</p>
+        <div class="ai-knowledge-filters"><label for="aiKnowledgeStatus">Show</label>
+          <select id="aiKnowledgeStatus"><option value="">All articles</option><option value="DRAFT">Drafts to review</option><option value="APPROVED">Approved</option><option value="RETIRED">Retired</option></select></div>
+        <div class="ai-knowledge-list" id="aiKnowledgeList" aria-live="polite"></div>
+        <form class="ai-knowledge-form hidden" id="aiKnowledgeForm" novalidate>
+          <h3 id="aiKnowledgeFormTitle">New topic</h3>
+          <div class="ai-knowledge-meta" id="aiKnowledgeMeta"></div>
+          <div class="field"><label for="aiKnowledgeIntent">Topic key</label><input id="aiKnowledgeIntent" type="text" maxlength="64" placeholder="lost_parcel" autocomplete="off" required /><div class="field-hint">Lowercase letters, digits and underscores. It cannot change later.</div></div>
+          <div class="field"><label for="aiKnowledgeTitle">Title</label><input id="aiKnowledgeTitle" type="text" maxlength="191" required /></div>
+          <div class="field"><label for="aiKnowledgePolicy">Approved answer</label><textarea id="aiKnowledgePolicy" rows="6" maxlength="6000" required></textarea><div class="field-hint">What the AI should tell the customer and do. Write the company's actual policy.</div></div>
+          <div class="field"><label for="aiKnowledgeData">Data needed</label><input id="aiKnowledgeData" type="text" maxlength="500" placeholder="Tracking number or order ID" /></div>
+          <div class="field"><label for="aiKnowledgeEscalate">Hand over to staff when</label><textarea id="aiKnowledgeEscalate" rows="3" maxlength="3000"></textarea></div>
+          <div class="field"><label for="aiKnowledgeExamples">Example replies (optional)</label><textarea id="aiKnowledgeExamples" rows="4" maxlength="9000" placeholder="leb_arabizi | wen el parcel? | ..."></textarea><div class="field-hint">One per line: style | customer message | reply. Styles: en, fr, ar, leb_ar, leb_arabizi, mixed.</div></div>
+          <div class="field"><label for="aiKnowledgeObserved">Observed practice (reviewers only)</label><textarea id="aiKnowledgeObserved" rows="3" maxlength="6000"></textarea></div>
+          <div class="modal-actions">
+            <button class="btn" id="aiKnowledgeCancelBtn" type="button">Close</button>
+            <button class="btn danger hidden" id="aiKnowledgeRetireBtn" type="button">Retire</button>
+            <button class="btn hidden" id="aiKnowledgeReviseBtn" type="button">Revise</button>
+            <button class="btn hidden" id="aiKnowledgeSaveBtn" type="submit">Save draft</button>
+            <button class="btn success-action hidden" id="aiKnowledgeApproveBtn" type="button"><svg class="icon" aria-hidden="true"><use href="#icon-check"></use></svg>Approve</button>
           </div>
         </form>
       </div>
