@@ -540,3 +540,17 @@ def test_audio_without_verified_minute_price_is_blocked(audio_price):
         asyncio.run(service.metered(purpose='transcription', tier='primary', model='gpt-transcribe',
                                    audio_seconds=30, call=forbidden))
     assert repository.rows == {}
+
+
+def test_turn_id_is_durable_on_reservation_before_provider_call():
+    service, repository, counters = _service()
+    async def run():
+        token = ai_usage.usage_scope.set({'ticket_id': 7, 'agent_turn_id': 'a' * 64})
+        async def call():
+            assert next(iter(repository.rows.values()))['agent_turn_id'] == 'a' * 64
+            return SimpleNamespace(model='gpt-6-luna', usage=None)
+        try:
+            await service.metered(purpose='turn', tier='primary', model='gpt-6-luna', call=call)
+        finally:
+            ai_usage.usage_scope.reset(token)
+    asyncio.run(run())

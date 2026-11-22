@@ -3022,12 +3022,26 @@ async def _run_agent_turn(
     *, conversation: Conversation, incoming: IncomingWhatsAppMessage,
     parsed_auth: CredentialExtraction,
 ) -> Response:
+    from app.agent.trace import trace_turn
+    ticket = _turn_ai_ticket()
+    if ticket is None:
+        raise RuntimeError("Agent turn requires an AI ticket")
+    async with trace_turn(support_repository, ticket_id=int(ticket["id"]), source_message_id=incoming.message_id):
+        return await _run_traced_agent_turn(conversation=conversation, incoming=incoming, parsed_auth=parsed_auth)
+
+
+async def _run_traced_agent_turn(
+    *, conversation: Conversation, incoming: IncomingWhatsAppMessage,
+    parsed_auth: CredentialExtraction,
+) -> Response:
     from app.agent.core import AgentOutcome, agent_service
+    from app.agent.trace import record_outcome
 
     ticket = _turn_ai_ticket()
     if ticket is None:
         raise RuntimeError("Agent turn requires an AI ticket")
     if await _is_inbound_revoked(incoming.message_id):
+        record_outcome("suppressed", "INBOUND_REVOKED")
         return _json_response(200, {"status": "revoked"})
     if parsed_auth.is_authentication_attempt:
         # V2 never resumes legacy password login or transmits credentials.
@@ -3049,12 +3063,14 @@ async def _run_agent_turn(
             ticket, body=outcome.reply.text, source_message_id=incoming.message_id,
             awaiting_customer=outcome.reply.awaiting_customer,
         )
+        record_outcome("replied")
         return _json_response(200, {"status": "agent_replied"})
     escalated, _ = await support_service.escalate_ai_ticket(
         ticket, reason_code=outcome.reason_code or "AI_UNCERTAIN",
         summary="The AI agent handed this conversation to staff for review.",
     )
     await support_service.reconcile_conversation_mode(conversation, escalated)
+    record_outcome("escalated", outcome.reason_code or "AI_UNCERTAIN")
     return _json_response(200, {"status": "agent_escalated"})
 
 

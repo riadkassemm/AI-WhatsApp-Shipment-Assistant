@@ -15,6 +15,7 @@ from app.agent.tools import TOOL_SCHEMAS, execute_tool
 from app.agent.business_data import BusinessDataError
 from app.agent.media import prepare_media, save_image_notes
 from app.agent.memory import ticket_summary
+from app.agent.trace import record_guard
 from app.ai_knowledge import ai_knowledge_service
 from app.ai_provider import ai_provider_service
 from app.ai_usage import AIUsageBlocked, ai_usage_service
@@ -172,6 +173,7 @@ class AgentService:
                 action = decision.action
             except (ValueError, ValidationError):
                 violations = ("invalid_structured_output",)
+                record_guard("structured", violations)
             else:
                 if isinstance(decision, ImageDecision) and not notes_saved:
                     await save_image_notes(ticket, media, decision.media_notes, support_repository)
@@ -195,6 +197,7 @@ class AgentService:
                         return AgentOutcome(reason_code=exc.reason)
                     return AgentOutcome(reply=rendered)
                 violations = reply_violations(action, style=style, evidence=(knowledge,))
+                record_guard("reply", violations)
                 if not violations:
                     return AgentOutcome(reply=action)
             # No unsafe draft is echoed back to the provider. The same context and

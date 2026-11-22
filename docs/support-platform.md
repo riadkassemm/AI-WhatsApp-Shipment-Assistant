@@ -162,6 +162,29 @@ an approved rollout; for rollback, leave/set `AI_AGENT_V2_ENABLED=false` in the 
 release configuration to select the legacy pipeline. This does not enable AI
 globally or on any WhatsApp number.
 
+### Agent turn traces
+
+The additive `20261123_ai_agent_traces.sql` migration adds `ai_agent_turns` and
+an optional `ai_usage_events.agent_turn_id` link. Apply it before deploying this
+version, including when v2 remains off: the shared usage writer knows the new
+nullable column. No migration runs automatically.
+
+V2 commits one trace start before provider work, keyed by a hash of the ticket
+and inbound message ID. A duplicate start blocks replay even after Redis loss.
+Every reservation links to that turn before the provider call, covering response,
+repair, transcription and summary work. Finalization records models, reservation
+IDs, input/cached/output tokens, estimated cost, total latency, tool names, guard
+verdicts and the send/escalation outcome. Missing usage remains unknown, and
+pending reservations retain their full estimated cost. Existing per-ticket cost
+in the dashboard continues to use `ai_usage_events`, avoiding double counting.
+
+Traces contain no text, arguments, prompts, transcripts, images or generated
+replies. Unknown model-supplied tool names become `unknown`; guard reasons are
+allowlisted. If finalization fails or the process crashes, the start row and
+reservation links remain durable. Such rows stay `started`, not falsely replied;
+query the linked usage rows for current costs. Finalization errors do not replay
+an outbound message. Trace totals are a snapshot, not the billing authority.
+
 ### Agent ticket memory
 
 The additive `20261123_ai_ticket_memory.sql` migration stores one bounded summary

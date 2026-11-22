@@ -340,6 +340,12 @@ _SUPPORT_SCHEMA_MIGRATIONS: tuple[tuple[str, dict[str, set[str]]], ...] = (
         "ai_media_text", "ai_media_kind", "ai_media_processed_at"}}),
     ("migrations/20261123_ai_ticket_memory.sql", {"support_tickets": {
         "ai_memory_summary", "ai_memory_through_id", "ai_memory_fingerprint", "ai_memory_language", "ai_memory_updated_at"}}),
+    ("migrations/20261123_ai_agent_traces.sql", {
+        "ai_agent_turns": {"turn_id", "ticket_id", "started_at", "finished_at", "latency_ms", "outcome",
+                           "reason_code", "models_json", "reservation_ids_json", "tools_json", "guards_json",
+                           "input_tokens", "cached_input_tokens", "output_tokens", "cost_micros", "pending_usage_count"},
+        "ai_usage_events": {"agent_turn_id"},
+    }),
     ("migrations/20261122_customer_ai_identity.sql", {
         "customer_ai_verifications": {"whatsapp_phone", "active_key", "customer_id", "customer_userid", "bound_mobile",
                                       "verified_by_staff_id", "verified_at", "expires_at", "revoked_at", "revoked_reason"},
@@ -2769,6 +2775,40 @@ class SupportRepository(DashboardRepositoryMixin, DeliveryRepositoryMixin, ReadS
             except Exception:
                 await conn.rollback()
                 raise
+
+    async def begin_agent_trace(self, turn_id: str, ticket_id: int) -> bool:
+        if self._pool is None:
+            await self.connect()
+        assert self._pool is not None
+        async with self._pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("INSERT IGNORE INTO ai_agent_turns (turn_id,ticket_id,started_at) VALUES (%s,%s,UTC_TIMESTAMP(6))",
+                                  (turn_id, ticket_id))
+                return cur.rowcount == 1
+
+    async def finish_agent_trace(self, turn_id: str, *, outcome: str, reason_code: str | None,
+                                 tools: list[str], guards: list[dict], latency_ms: int) -> None:
+        if self._pool is None:
+            await self.connect()
+        assert self._pool is not None
+        async with self._pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute("""SELECT reservation_id, COALESCE(model,requested_model) AS model,
+                    input_tokens,cached_input_tokens,output_tokens,cost_micros,outcome
+                    FROM ai_usage_events WHERE agent_turn_id=%s ORDER BY id""", (turn_id,))
+                usage = list(await cur.fetchall())
+                def total(field):
+                    return None if any(row[field] is None for row in usage) else sum(int(row[field]) for row in usage)
+                models = list(dict.fromkeys(str(row['model']) if re.fullmatch(r'[A-Za-z0-9._:-]{1,100}', str(row['model']))
+                                             else 'unknown' for row in usage))
+                await cur.execute("""UPDATE ai_agent_turns SET finished_at=UTC_TIMESTAMP(6),latency_ms=%s,
+                    outcome=%s,reason_code=%s,models_json=%s,reservation_ids_json=%s,tools_json=%s,guards_json=%s,
+                    input_tokens=%s,cached_input_tokens=%s,output_tokens=%s,cost_micros=%s,pending_usage_count=%s
+                    WHERE turn_id=%s AND finished_at IS NULL""",
+                    (latency_ms, outcome, reason_code, json.dumps(models),
+                     json.dumps([row['reservation_id'] for row in usage]), json.dumps(tools), json.dumps(guards),
+                     total('input_tokens'), total('cached_input_tokens'), total('output_tokens'),
+                     sum(int(row['cost_micros']) for row in usage), sum(row['outcome'] == 'pending' for row in usage), turn_id))
 
     async def ai_memory_snapshot(self, ticket_id: int, *, source_message_id: str | None) -> tuple[dict, list[dict]]:
         """Bounded local source for summaries, including tombstones for invalidation."""
