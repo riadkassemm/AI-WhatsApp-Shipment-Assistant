@@ -489,6 +489,18 @@ The AI's company knowledge is one short article per customer topic (`app/ai_know
 - **Approved articles are never edited in place.** **Revise** opens a new draft version, and approving it retires the old one. A draft that still contains de-identification placeholders (`<AMOUNT_1>`, `<PHONE_1>` and so on) cannot be approved.
 - **Every change is audited** in `ai_kb_audit`. API: `GET/POST /api/support/ai-knowledge`, `GET/PUT /api/support/ai-knowledge/{id}`, and `POST …/{id}/revise|approve|retire`.
 
+### Knowledge pipeline (run once, offline)
+
+`scripts/kb_pipeline.py` turns historical tickets into draft knowledge articles (logic in `app/knowledge/pipeline.py`). Only de-identified text is sent to OpenAI; the owner approved this on 2026-11-22. Files go to `--dir` (default `~/.local/share/whatsapp_chatbot/kb`, mode 0600), outside the repository.
+
+1. `export`: read-only. Resolved customer tickets are de-identified (customer and staff names included) and limited to 40 messages / 6,000 characters each. The newest 400 are kept out as the gold set for the Step 5 benchmark.
+2. `classify`: prints the estimated cost and writes the Batch API requests (`gpt-6-luna`, structured output: topic, style, data needed, resolution, whether staff were needed, general policy statements). It sends nothing unless given `--submit --yes`. `--limit N` runs a trial. The batch is charged to the AI budget at its full estimate when submitted (purpose `kb_build`, Batch price).
+3. `collect`: downloads the results when the batch is done.
+4. `taxonomy`: topic counts for staff review. Merge or drop labels with `--mapping mapping.json` (`{"where_is_my_parcel": "tracking_status", "spam": "drop"}`).
+5. `draft`: one `gpt-6.2-sol` call per topic with at least `--min-tickets` tickets, built from aggregated statements only. It prints the cost first and sends nothing without `--submit --yes`. Results appear as drafts in **AI Assistant → Knowledge**, with `[STAFF TO CONFIRM: …]` marks where the history disagrees. They are never approved automatically.
+
+The models' prices must be verified in Usage & Costs first, and the OpenAI key must be configured.
+
 ## Database setup
 
 ### Core support tables
