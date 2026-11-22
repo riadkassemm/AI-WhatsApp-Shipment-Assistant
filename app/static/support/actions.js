@@ -850,8 +850,126 @@ const AI_REASON_LABELS = {
   MANUAL_OFF: 'Manual control is OFF',
   WITHIN_SCHEDULE: 'Within scheduled AI hours',
   OUTSIDE_SCHEDULE: 'Outside scheduled AI hours',
-  LINE_AI_DISABLED: 'AI is off for this WhatsApp number'
+  LINE_AI_DISABLED: 'AI is off for this WhatsApp number',
+  API_KEY_MISSING: 'No OpenAI API key is configured',
+  API_KEY_INVALID: 'OpenAI rejected the configured API key'
 };
+
+const AI_KEY_STATUS_LABELS = {
+  VALID: 'Working',
+  UNTESTED: 'Saved, not tested',
+  ENVIRONMENT: 'Server environment key',
+  INVALID: 'Rejected by OpenAI',
+  QUOTA_EXCEEDED: 'No OpenAI quota',
+  MODEL_UNAVAILABLE: 'Model not available',
+  NOT_CONFIGURED: 'Not configured'
+};
+
+function selectAiTab(name) {
+  const tabs = {numbers: ['aiTabNumbers', 'aiPanelNumbers'], openai: ['aiTabOpenAI', 'aiPanelOpenAI']};
+  for (const [key, [tabId, panelId]] of Object.entries(tabs)) {
+    const active = key === name;
+    $(tabId).classList.toggle('active', active);
+    $(tabId).setAttribute('aria-selected', active ? 'true' : 'false');
+    $(tabId).tabIndex = active ? 0 : -1;
+    $(panelId).classList.toggle('hidden', !active);
+  }
+  if (name === 'openai') loadOpenAIConfiguration();
+}
+
+function renderOpenAIConfiguration(config) {
+  state.openaiConfig = config;
+  const usable = Boolean(config?.usable);
+  const pill = $('aiOpenAIStatus');
+  pill.textContent = AI_KEY_STATUS_LABELS[config?.status] || config?.status || '—';
+  pill.classList.toggle('off', !usable);
+  const parts = [];
+  if (config?.masked) parts.push(config.masked);
+  if (config?.source === 'environment') parts.push('from the server environment');
+  if (config?.source === 'dashboard' && config?.updated_at) {
+    parts.push('saved ' + fmt(config.updated_at) + (config?.updated_by?.name ? ' by ' + config.updated_by.name : ''));
+  }
+  if (config?.last_tested_at) parts.push('last tested ' + fmt(config.last_tested_at));
+  if (!config?.configured) parts.push('AI cannot answer until a key is saved');
+  text($('aiOpenAIDetail'), parts.join(' · ') || '—');
+  $('aiOpenAIStorageWarning').classList.toggle('hidden', config?.secure_storage_configured !== false);
+  $('aiOpenAIDeleteBtn').classList.toggle('hidden', config?.source !== 'dashboard');
+  $('aiOpenAITestBtn').disabled = !config?.configured;
+}
+
+async function loadOpenAIConfiguration() {
+  if (!canManageAiSettings()) return;
+  try {
+    renderOpenAIConfiguration(await api('/api/support/ai-settings/openai'));
+  } catch (error) {
+    text($('aiOpenAIDetail'), 'The OpenAI configuration could not be loaded: ' + (error.message || 'unknown error'));
+  }
+}
+
+async function saveOpenAIKey(event) {
+  event.preventDefault();
+  if (!canManageAiSettings() || state.openaiBusy) return;
+  const input = $('aiOpenAIKey');
+  const apiKey = input.value.trim();
+  if (!apiKey) { showAiSettingsError('Paste an OpenAI API key first.'); return; }
+  state.openaiBusy = true;
+  setButtonBusy($('aiOpenAISaveBtn'), true, $('aiOpenAITestFirst').checked ? 'Testing…' : 'Saving…');
+  try {
+    const config = await api('/api/support/ai-settings/openai', {
+      method: 'PUT', body: JSON.stringify({api_key: apiKey, test_first: $('aiOpenAITestFirst').checked})
+    });
+    renderOpenAIConfiguration(config);
+    notify('OpenAI API key saved.');
+    try { await loadAiSettings(); } catch (_) {}
+  } catch (error) {
+    showAiSettingsError(error.message);
+  } finally {
+    // Never keep the secret in the page after a save attempt.
+    input.value = '';
+    state.openaiBusy = false;
+    setButtonBusy($('aiOpenAISaveBtn'), false);
+  }
+}
+
+async function testOpenAIConnection() {
+  if (!canManageAiSettings() || state.openaiBusy) return;
+  state.openaiBusy = true;
+  setButtonBusy($('aiOpenAITestBtn'), true, 'Testing…');
+  try {
+    const config = await api('/api/support/ai-settings/openai/test', {method: 'POST'});
+    renderOpenAIConfiguration(config);
+    notify(config?.test?.message || 'Test finished.', config?.test?.ok ? 'success' : 'error');
+    try { await loadAiSettings(); } catch (_) {}
+  } catch (error) {
+    showAiSettingsError(error.message);
+  } finally {
+    state.openaiBusy = false;
+    setButtonBusy($('aiOpenAITestBtn'), false);
+  }
+}
+
+async function deleteOpenAIKey() {
+  if (!canManageAiSettings() || state.openaiBusy) return;
+  const confirmed = await confirmDialog({
+    title: 'Remove the saved OpenAI key?',
+    message: 'AI stops answering unless a server environment key exists. Conversations go to human agents.',
+    confirmLabel: 'Remove key',
+    tone: 'danger'
+  });
+  if (!confirmed) return;
+  state.openaiBusy = true;
+  setButtonBusy($('aiOpenAIDeleteBtn'), true, 'Removing…');
+  try {
+    renderOpenAIConfiguration(await api('/api/support/ai-settings/openai', {method: 'DELETE'}));
+    notify('Saved OpenAI key removed.');
+    try { await loadAiSettings(); } catch (_) {}
+  } catch (error) {
+    showAiSettingsError(error.message);
+  } finally {
+    state.openaiBusy = false;
+    setButtonBusy($('aiOpenAIDeleteBtn'), false);
+  }
+}
 
 // Numbers active in the app, with their per-number AI switch.
 function aiNumberLabel(number) {
@@ -1046,10 +1164,14 @@ function syncAiSettingsEditability() {
 function renderAiSettings(settings) {
   state.aiSettings = settings;
   const enabled = Boolean(settings?.effective_ai_enabled);
-  text($('aiHeaderStatus'), enabled ? 'ON' : 'OFF');
-  $('aiHeaderDot').className = 'ai-status-dot ' + (enabled ? 'on' : 'off');
-  $('aiHeaderBtn').setAttribute('aria-label', 'AI assistant is ' + (enabled ? 'on' : 'off'));
-  $('aiHeaderBtn').setAttribute('title', 'AI assistant: ' + (enabled ? 'ON' : 'OFF') + '. Select to view settings.');
+  // Global AI on, but no usable OpenAI key: show a warning instead of "on".
+  const keyProblem = enabled && settings?.provider && settings.provider.usable === false;
+  text($('aiHeaderStatus'), enabled ? (keyProblem ? 'KEY' : 'ON') : 'OFF');
+  $('aiHeaderDot').className = 'ai-status-dot ' + (keyProblem ? 'warn' : enabled ? 'on' : 'off');
+  $('aiHeaderBtn').setAttribute('aria-label', 'AI assistant is ' + (enabled ? 'on' : 'off') + (keyProblem ? ', OpenAI key problem' : ''));
+  $('aiHeaderBtn').setAttribute('title', keyProblem
+    ? 'AI assistant: ON, but ' + (AI_REASON_LABELS[settings.provider.reason] || 'the OpenAI key is not usable').toLowerCase() + '. Select to fix.'
+    : 'AI assistant: ' + (enabled ? 'ON' : 'OFF') + '. Select to view settings.');
   const status = $('aiEffectiveStatus');
   status.textContent = enabled ? 'ON' : 'OFF';
   status.classList.toggle('off', !enabled);
@@ -1095,6 +1217,8 @@ async function openAiSettingsModal() {
   if (!state.authenticated) return;
   showAiSettingsError('');
   syncAiSettingsEditability();
+  $('aiTabOpenAI').classList.toggle('hidden', !canManageAiSettings());
+  selectAiTab('numbers');
   openDialog('aiSettingsModal', 'aiModeManual');
   state.aiSettingsBusy = true;
   setButtonBusy($('saveAiSettingsBtn'), true, 'Loading…');
@@ -3121,6 +3245,11 @@ $('closeAiSettingsBtn').addEventListener('click', closeAiSettingsModal);
 $('cancelAiSettingsBtn').addEventListener('click', closeAiSettingsModal);
 $('aiSettingsForm').addEventListener('submit', saveAiSettings);
 $('aiEnableAllBtn').addEventListener('click', () => setAllNumbersAi(true));
+$('aiTabNumbers').addEventListener('click', () => selectAiTab('numbers'));
+$('aiTabOpenAI').addEventListener('click', () => selectAiTab('openai'));
+$('aiOpenAIForm').addEventListener('submit', saveOpenAIKey);
+$('aiOpenAITestBtn').addEventListener('click', testOpenAIConnection);
+$('aiOpenAIDeleteBtn').addEventListener('click', deleteOpenAIKey);
 $('aiDisableAllBtn').addEventListener('click', () => setAllNumbersAi(false));
 $('aiModeManual').addEventListener('change', syncAiSettingsFields);
 $('aiModeScheduled').addEventListener('change', syncAiSettingsFields);

@@ -5,7 +5,7 @@ import logging
 import re
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
-from typing import Any, Literal, cast
+from typing import Any, Awaitable, Callable, Literal, cast
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import aiomysql
@@ -26,6 +26,9 @@ AIAvailabilityReason = Literal[
     # The global setting allows AI, but this WhatsApp number's AI switch is off
     # (or the message has no known receiving number).
     "LINE_AI_DISABLED",
+    # No usable OpenAI key: none configured, or OpenAI rejected it.
+    "API_KEY_MISSING",
+    "API_KEY_INVALID",
 ]
 
 # Sentinel: evaluate only the global setting (dashboard status). Passing
@@ -418,9 +421,20 @@ class AIControlRepository:
         return await self.get()
 
 
+async def _default_credential_state() -> tuple[bool, str | None]:
+    from app.ai_provider import ai_provider_service
+
+    return await ai_provider_service.credential_state()
+
+
 class AIAvailabilityService:
-    def __init__(self, repository: AIControlRepository | None = None) -> None:
+    def __init__(
+        self,
+        repository: AIControlRepository | None = None,
+        credential_state: Callable[[], Awaitable[tuple[bool, str | None]]] | None = None,
+    ) -> None:
         self.repository = repository or AIControlRepository()
+        self._credential_state = credential_state or _default_credential_state
 
     @staticmethod
     def _require_manager(actor: SupportAgent) -> None:
@@ -446,9 +460,12 @@ class AIAvailabilityService:
         result = evaluate_ai_availability(configuration, now=now)
         if line_id is _GLOBAL_ONLY or not result.effective_ai_enabled:
             return result
-        if line_id and await self.repository.get_line_ai_enabled(str(line_id)):
-            return result
-        return replace(result, effective_ai_enabled=False, effective_reason="LINE_AI_DISABLED")
+        if not (line_id and await self.repository.get_line_ai_enabled(str(line_id))):
+            return replace(result, effective_ai_enabled=False, effective_reason="LINE_AI_DISABLED")
+        usable, reason = await self._credential_state()
+        if not usable:
+            return replace(result, effective_ai_enabled=False, effective_reason=reason or "API_KEY_MISSING")
+        return result
 
     async def get_settings_payload(
         self,
@@ -457,6 +474,9 @@ class AIAvailabilityService:
     ) -> dict[str, Any]:
         payload = (await self.get_effective_ai_availability(now=now)).to_dict()
         payload["ai_enabled_line_count"] = await self.repository.count_ai_enabled_lines()
+        usable, reason = await self._credential_state()
+        # No secret here: whether AI has a usable key, for the status indicator.
+        payload["provider"] = {"usable": usable, "reason": reason}
         return payload
 
     async def update_settings(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import logging
 from typing import Any
@@ -12,6 +13,7 @@ from app.ai_config import (
     reasoning_config,
     summarizer_reasoning_config,
 )
+from app.ai_provider import ai_provider_service, classify_provider_error
 from app.ai_tools import TOOLS, dispatch_tool_call
 from app.config import settings
 from app.client_chat_auth import redact_sensitive_text
@@ -26,20 +28,17 @@ from app.support_models import AIReplyResult, HandoffRequest
 
 
 logger = logging.getLogger("shipment-bot")
-client: AsyncOpenAI | None = None
 
 
-def _get_client() -> AsyncOpenAI:
-    global client
-    if client is None:
-        if not settings.openai_api_key:
-            raise RuntimeError("OPENAI_API_KEY is not configured.")
-        client = AsyncOpenAI(
-            api_key=settings.openai_api_key,
-            timeout=max(1.0, float(settings.openai_request_timeout_seconds)),
-            max_retries=max(0, int(settings.openai_max_retries)),
-        )
-    return client
+async def _get_client() -> AsyncOpenAI:
+    """Client for the key currently configured (dashboard key, else environment)."""
+    return await ai_provider_service.get_client("chat")
+
+
+async def _client() -> AsyncOpenAI:
+    # Tests may replace _get_client with a plain function returning a fake client.
+    candidate = _get_client()
+    return await candidate if inspect.isawaitable(candidate) else candidate
 
 
 def _safety_identifier(conversation: Conversation) -> str:
@@ -254,7 +253,7 @@ async def _repair_customer_reply(
         "data. Do not add facts. Do not mention that you repaired or filtered anything. "
         + style_repair_instruction(conversation.communication_style)
     )
-    response = await _get_client().responses.create(
+    response = await (await _client()).responses.create(
         model=settings.openai_model,
         instructions=instructions,
         input=[
@@ -394,7 +393,7 @@ async def _create_response(*, input_items: list[dict[str, Any]], conversation: C
                 "parallel_tool_calls": False,
             }
         )
-    return await _get_client().responses.create(**kwargs)
+    return await (await _client()).responses.create(**kwargs)
 
 
 async def get_ai_reply(
@@ -578,7 +577,20 @@ async def get_ai_reply(
             auth_tool_arguments=blocked_auth_tool_arguments,
         )
 
-    except Exception:
+    except Exception as exc:
+        if classify_provider_error(exc) in {"invalid_key", "insufficient_quota"} or getattr(exc, "code", "") == "API_KEY_MISSING":
+            # The key is missing or was rejected: never answer from guesswork. Record
+            # it for the dashboard and hand the conversation to human support.
+            await ai_provider_service.report_failure(exc)
+            return AIReplyResult(
+                reply_text="",
+                handoff=HandoffRequest(
+                    reason="AI_PROVIDER_UNAVAILABLE",
+                    summary="The OpenAI API key is missing or was rejected; human support takes over.",
+                ),
+                auth_required=False,
+                tool_names=tuple(executed_tool_names),
+            )
         logger.exception("OpenAI Responses API request failed")
         fallback = ai_unavailable_message(conversation.communication_style)
         conversation.messages.append({"role": "assistant", "content": fallback})
@@ -655,7 +667,7 @@ async def _summarize_dropped(existing_summary: str, dropped_messages: list[dict]
     prompt += f"New excerpt:\n{excerpt}"
 
     try:
-        response = await _get_client().responses.create(
+        response = await (await _client()).responses.create(
             model=settings.summarizer_model,
             instructions="Create a factual, compact conversation summary only.",
             input=prompt,

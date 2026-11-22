@@ -21,6 +21,9 @@ class Settings(BaseSettings):
     # repr=False keeps secrets out of repr(settings), which assertion
     # failures and tracebacks print in full.
     openai_api_key: str = Field(default="", repr=False)
+    # Fernet key(s) that encrypt the OpenAI key saved from the dashboard.
+    # Comma-separate several keys to rotate: the first encrypts, all decrypt.
+    ai_secrets_encryption_key: str = Field(default="", repr=False)
     openai_model: str = "gpt-6-sol"
     openai_reasoning_effort: Literal["none", "low", "medium", "high", "xhigh", "max"] = "medium"
     openai_summarizer_reasoning_effort: Literal[

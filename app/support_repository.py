@@ -291,6 +291,9 @@ _SUPPORT_SCHEMA_MIGRATIONS: tuple[tuple[str, dict[str, set[str]]], ...] = (
         "outreach_daily_limit", "outreach_new_number_daily_limit", "outreach_same_text_limit"}}),
     ("migrations/20261122_whatsapp_number_ai_enabled.sql", {"whatsapp_phone_numbers": {
         "ai_enabled", "ai_updated_by_staff_id", "ai_updated_at"}}),
+    ("migrations/20261122_ai_provider_credentials.sql", {"ai_provider_credentials": {
+        "provider", "api_key_encrypted", "key_last4", "key_fingerprint", "version", "status",
+        "last_tested_at", "last_error_code", "updated_by_staff_id", "updated_by_staff_name", "updated_at"}}),
 )
 
 MAX_QUICK_REPLIES_PER_STAFF = 200
