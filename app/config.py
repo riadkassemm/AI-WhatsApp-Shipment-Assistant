@@ -158,6 +158,9 @@ class Settings(BaseSettings):
     # customer message since the AI's last reply, unless the AI is waiting for an
     # answer. 0 disables it.
     support_ai_ticket_quiet_resolve_minutes: int = 120
+    # When the AI is waiting for the customer's answer, the ticket closes after
+    # this many minutes without one instead (0 = such tickets stay open).
+    support_ai_ticket_unanswered_resolve_minutes: int = 1440
     support_cookie_name: str = "support_session"
     support_csrf_cookie_name: str = "support_csrf"
     support_cookie_secure: bool = True

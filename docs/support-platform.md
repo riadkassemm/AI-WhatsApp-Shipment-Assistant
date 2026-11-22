@@ -111,7 +111,8 @@ When the AI hands a conversation to staff, it moves to Unassigned with a
 **From AI: <reason>** chip, an alert ("The AI assistant handed a conversation
 with … to staff"), the reason in the Escalation card (**Handed over by AI**) and
 the AI summary. The timeline records **Handed to staff by AI**, **Taken over
-from AI** and **Resolved by AI (no messages for 2 hours)**. Resolutions by the
+from AI** and **Resolved by AI (no messages for 2 hours)**, or 24 hours when the
+AI had asked the customer something that was never answered. Resolutions by the
 AI never count in agent statistics.
 
 Migrations: `20261122_support_ai_tickets.sql` (required before the API restart)
