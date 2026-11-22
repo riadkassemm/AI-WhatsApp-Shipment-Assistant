@@ -19,6 +19,10 @@ def add_linked_device_schema(columns):
     columns['whatsapp_phone_numbers'].update({'ai_enabled', 'ai_updated_by_staff_id', 'ai_updated_at'})
     columns['ai_provider_credentials'] = {'provider', 'api_key_encrypted', 'key_last4', 'key_fingerprint', 'version', 'status',
         'last_tested_at', 'last_error_code', 'updated_by_staff_id', 'updated_by_staff_name', 'updated_at'}
+    for path, required_tables in _SUPPORT_SCHEMA_MIGRATIONS:
+        if "20261122_ai_usage_budget" in path:
+            for table, required in required_tables.items():
+                columns.setdefault(table, set()).update(required)
     columns["support_delivery_receipts"] = {"provider_message_id", "line_id", "status", "checked_at", "failure_code"}
     for path, required_tables in _SUPPORT_SCHEMA_MIGRATIONS:
         if "20261027_quick_reply_images" in path or "20261025_statistics_investigation" in path or "20261023_agent_statistics" in path or "20261023_quick_reply_pdfs" in path or "20261024_quick_reply_" in path:

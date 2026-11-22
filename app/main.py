@@ -13,6 +13,7 @@ from fastapi import FastAPI, HTTPException, Request, Response
 
 from app.ai_availability import EffectiveAIAvailability, ai_availability_service
 from app.ai_tools import NEEDS_VERIFIED_IDENTITY, dispatch_tool_call
+from app.ai_usage import usage_scope
 from app.config import settings
 from app.conversation_store import Conversation, conversation_store
 from app.customer_reply_guard import (
@@ -2679,6 +2680,7 @@ async def _process_incoming_message(
     if not ai_availability.effective_ai_enabled:
         line_disabled = ai_availability.effective_reason == "LINE_AI_DISABLED"
         provider_unavailable = ai_availability.effective_reason in {"API_KEY_MISSING", "API_KEY_INVALID"}
+        budget_paused = ai_availability.effective_reason in {"BUDGET_EXCEEDED", "BUDGET_UNAVAILABLE"}
         logger.info(
             "AI unavailable - handing conversation to human: customer_ref=%s "
             "message_id=%s control_mode=%s effective_reason=%s",
@@ -2694,6 +2696,8 @@ async def _process_incoming_message(
             reason=(
                 "AI_DISABLED_LINE" if line_disabled
                 else "AI_PROVIDER_UNAVAILABLE" if provider_unavailable
+                else ("AI_BUDGET_EXCEEDED" if ai_availability.effective_reason == "BUDGET_EXCEEDED" else "AI_BUDGET_UNAVAILABLE")
+                if budget_paused
                 else "AI_DISABLED_GLOBAL"
             ),
             summary=(
@@ -2701,6 +2705,8 @@ async def _process_incoming_message(
                 if line_disabled
                 else "No usable OpenAI API key is configured; human support takes over."
                 if provider_unavailable
+                else "AI is paused by the AI budget limit; human support takes over."
+                if budget_paused
                 else "AI assistant is globally unavailable for this inbound message "
                 f"({ai_availability.effective_reason})."
             ),
@@ -2761,6 +2767,7 @@ async def _process_incoming_message(
     failure_reason = "AI_TURN_FAILED"
     turn_state: dict = {"line_id": incoming.business_phone_number_id, "suppressed": None}
     turn_token = _automated_turn.set(turn_state)
+    usage_token = usage_scope.set({"phone_number_id": incoming.business_phone_number_id, "ticket_id": None})
     try:
         response = await _run_started_turn(
             conversation=conversation,
@@ -2786,6 +2793,7 @@ async def _process_incoming_message(
         response = None
     finally:
         _automated_turn.reset(turn_token)
+        usage_scope.reset(usage_token)
 
     if turn_state.get("suppressed"):
         # AI was switched off (or its state was unreadable) mid-turn: no reply was

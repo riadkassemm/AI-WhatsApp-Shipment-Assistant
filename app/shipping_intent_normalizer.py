@@ -28,6 +28,7 @@ from typing import Any, Literal
 from openai import AsyncOpenAI
 
 from app.ai_provider import ai_provider_service
+from app.ai_usage import ai_usage_service
 from app.config import settings
 
 
@@ -265,8 +266,13 @@ async def normalize_shipping_intent(
 
     safety_digest = hashlib.sha256(str(user_text or "").encode("utf-8")).hexdigest()
     try:
+        client = await _client()
+        normalizer_input = [{"role": "user", "content": json.dumps(payload, ensure_ascii=False, separators=(",", ":"))}]
         response = await asyncio.wait_for(
-            (await _client()).responses.create(
+            ai_usage_service.metered(
+                purpose="normalizer", tier="normalizer", model=model,
+                input_payload=[instructions, normalizer_input, _schema()], max_output_tokens=700,
+                call=lambda: client.responses.create(
                 model=model,
                 instructions=instructions,
                 input=[
@@ -291,6 +297,7 @@ async def normalize_shipping_intent(
                 max_output_tokens=700,
                 store=False,
                 safety_identifier=f"shipping_intent_{safety_digest[:24]}",
+                ),
             ),
             timeout=max(
                 1.0,

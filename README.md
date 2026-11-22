@@ -420,6 +420,31 @@ POST   /api/support/ai-settings/openai/test
 DELETE /api/support/ai-settings/openai
 ```
 
+### AI usage metering and budget
+
+Every billable OpenAI call goes through `app/ai_usage.py` (migration `20261122_ai_usage_budget.sql`):
+
+- **Verified pricing is required.**
+  - `ai_model_prices` holds USD prices per 1M tokens (and per audio minute) per model prefix.
+  - A model can be called only after an Admin or Super Admin has **verified** its price row. Unknown or unverified pricing blocks the call and hands the conversation to human support (`AI_MODEL_PRICING_UNCONFIGURED`).
+  - The seeded rows come from the official pricing page (2026-11-22) but start **unverified**, so AI stays blocked until an admin verifies them.
+  - If OpenAI answers with a model ID that has no verified price, the full reservation is charged and the requested model is blocked until its price is verified.
+- **Global budget** (`ai_budget_settings`):
+  - Defaults: $300 a month, no daily limit, warnings at 50/80/95%, enforcement on, `Asia/Beirut` day boundaries.
+  - One budget covers all WhatsApp numbers.
+  - When the limit is reached, no new billable call starts. AI is reported unavailable (`BUDGET_EXCEEDED`), and conversations go to human support (`AI_BUDGET_EXCEEDED`).
+  - Admins can raise the limit or set `override_until`. Every change is audited (`AI_BUDGET_UPDATED`).
+- **Atomic, durable accounting:**
+  1. A Redis Lua reservation of the worst-case estimate, shared by all instances.
+  2. An `ai_usage_events` row committed as `pending` at the full estimate.
+  3. The OpenAI call.
+  4. Settlement with the provider's actual `usage`. Only real usage may lower a row below its estimate; timeouts, failures and crashes keep the full estimate.
+- **Counters cannot be reset by a restart or a Redis flush.** The Redis counters are rebuilt from `ai_usage_events` (pending rows included) whenever they are missing. A periodic reconciliation raises them to the database total and never lowers them. If Redis or the budget state cannot be read, AI fails closed.
+- **Estimates only:** figures are the application's estimate from API usage, not OpenAI's invoice. Threshold crossings are audited (`AI_BUDGET_THRESHOLD`), and a realtime event goes to Admins and Super Admins only.
+- **Privacy:** usage rows never contain message text, prompts or keys.
+
+The dashboard for this data (Usage & Costs tab, price verification, budget editing) follows in the next step.
+
 ## Database setup
 
 ### Core support tables

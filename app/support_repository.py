@@ -294,6 +294,17 @@ _SUPPORT_SCHEMA_MIGRATIONS: tuple[tuple[str, dict[str, set[str]]], ...] = (
     ("migrations/20261122_ai_provider_credentials.sql", {"ai_provider_credentials": {
         "provider", "api_key_encrypted", "key_last4", "key_fingerprint", "version", "status",
         "last_tested_at", "last_error_code", "updated_by_staff_id", "updated_by_staff_name", "updated_at"}}),
+    ("migrations/20261122_ai_usage_budget.sql", {
+        "ai_model_prices": {"id", "model_prefix", "input_per_million", "cached_input_per_million",
+                            "output_per_million", "audio_per_minute", "batch_factor", "effective_from",
+                            "verified_at", "verified_by_staff_id", "retired_at"},
+        "ai_budget_settings": {"id", "monthly_limit_micros", "daily_limit_micros", "warning_thresholds",
+                               "enforcement_enabled", "budget_timezone", "override_until", "version"},
+        "ai_usage_events": {"reservation_id", "purpose", "tier", "requested_model", "model", "input_tokens",
+                            "cached_input_tokens", "output_tokens", "reasoning_tokens", "estimate_micros",
+                            "cost_micros", "cost_basis", "outcome", "phone_number_id", "ticket_id",
+                            "budget_day", "budget_month"},
+    }),
 )
 
 MAX_QUICK_REPLIES_PER_STAFF = 200

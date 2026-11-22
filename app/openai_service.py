@@ -15,6 +15,7 @@ from app.ai_config import (
 )
 from app.ai_provider import ai_provider_service, classify_provider_error
 from app.ai_tools import TOOLS, dispatch_tool_call
+from app.ai_usage import AIUsageBlocked, ai_usage_service
 from app.config import settings
 from app.client_chat_auth import redact_sensitive_text
 from app.conversation_store import Conversation
@@ -253,15 +254,20 @@ async def _repair_customer_reply(
         "data. Do not add facts. Do not mention that you repaired or filtered anything. "
         + style_repair_instruction(conversation.communication_style)
     )
-    response = await (await _client()).responses.create(
+    client = await _client()
+    repair_input = [
+        {
+            "role": "user",
+            "content": json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+        }
+    ]
+    response = await ai_usage_service.metered(
+        purpose="repair", tier="primary", model=settings.openai_model,
+        input_payload=[instructions, repair_input], max_output_tokens=1600,
+        call=lambda: client.responses.create(
         model=settings.openai_model,
         instructions=instructions,
-        input=[
-            {
-                "role": "user",
-                "content": json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
-            }
-        ],
+        input=repair_input,
         reasoning={"effort": "none"},
         text={
             "format": {
@@ -279,6 +285,7 @@ async def _repair_customer_reply(
         max_output_tokens=1600,
         store=False,
         safety_identifier=_safety_identifier(conversation),
+        ),
     )
     raw = _text_from_response(response)
     parsed = json.loads(raw)
@@ -393,7 +400,13 @@ async def _create_response(*, input_items: list[dict[str, Any]], conversation: C
                 "parallel_tool_calls": False,
             }
         )
-    return await (await _client()).responses.create(**kwargs)
+    client = await _client()
+    return await ai_usage_service.metered(
+        purpose="turn", tier="primary", model=settings.openai_model,
+        input_payload=[CHATBOT_INSTRUCTIONS, input_items, kwargs.get("tools")],
+        max_output_tokens=int(kwargs["max_output_tokens"]),
+        call=lambda: client.responses.create(**kwargs),
+    )
 
 
 async def get_ai_reply(
@@ -578,6 +591,19 @@ async def get_ai_reply(
         )
 
     except Exception as exc:
+        if isinstance(exc, AIUsageBlocked):
+            # Budget used up, pricing unverified or budget state unavailable: the
+            # call never reached OpenAI. Hand the conversation to human support.
+            logger.warning("AI call blocked before reaching OpenAI: reason=%s", exc.reason)
+            return AIReplyResult(
+                reply_text="",
+                handoff=HandoffRequest(
+                    reason=exc.reason,
+                    summary="The automated reply was not attempted (AI budget or pricing control).",
+                ),
+                auth_required=False,
+                tool_names=tuple(executed_tool_names),
+            )
         if classify_provider_error(exc) in {"invalid_key", "insufficient_quota"} or getattr(exc, "code", "") == "API_KEY_MISSING":
             # The key is missing or was rejected: never answer from guesswork. Record
             # it for the dashboard and hand the conversation to human support.
@@ -667,14 +693,20 @@ async def _summarize_dropped(existing_summary: str, dropped_messages: list[dict]
     prompt += f"New excerpt:\n{excerpt}"
 
     try:
-        response = await (await _client()).responses.create(
-            model=settings.summarizer_model,
-            instructions="Create a factual, compact conversation summary only.",
-            input=prompt,
-            reasoning=summarizer_reasoning_config(),
-            text={"verbosity": "low"},
-            max_output_tokens=min(700, max(200, int(settings.openai_max_output_tokens))),
-            store=False,
+        client = await _client()
+        summary_tokens = min(700, max(200, int(settings.openai_max_output_tokens)))
+        response = await ai_usage_service.metered(
+            purpose="summary", tier="summary", model=settings.summarizer_model,
+            input_payload=prompt, max_output_tokens=summary_tokens,
+            call=lambda: client.responses.create(
+                model=settings.summarizer_model,
+                instructions="Create a factual, compact conversation summary only.",
+                input=prompt,
+                reasoning=summarizer_reasoning_config(),
+                text={"verbosity": "low"},
+                max_output_tokens=summary_tokens,
+                store=False,
+            ),
         )
         return _text_from_response(response) or existing_summary
     except Exception:
