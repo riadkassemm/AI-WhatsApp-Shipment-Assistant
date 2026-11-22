@@ -100,8 +100,8 @@ async def _key_ok():
 
 
 def _service_with(repository, credential_state=_key_ok) -> AIAvailabilityService:
-    # Unit tests never touch a database: the OpenAI key state is injected.
-    return AIAvailabilityService(repository, credential_state=credential_state)
+    # Unit tests never touch a database: key and budget states are injected.
+    return AIAvailabilityService(repository, credential_state=credential_state, budget_state=_key_ok)
 
 
 # ---------------------------------------------------------------------------

@@ -27,11 +27,11 @@ async def setup(infrastructure, monkeypatch):
     control = AIControlRepository()
     control._pool = repo._pool
     async def key_ok():
-        # The OpenAI key check is covered by test_ai_openai_key.py; never use the
-        # global provider here (it would connect to the configured database).
+        # Key and budget checks are covered by their own tests; never use the global
+        # services here (they would connect to the configured database).
         return True, None
 
-    return WhatsAppRegistryService(storage), AIAvailabilityService(control, credential_state=key_ok), sql
+    return WhatsAppRegistryService(storage), AIAvailabilityService(control, credential_state=key_ok, budget_state=key_ok), sql
 
 
 async def _no_usage(ids):

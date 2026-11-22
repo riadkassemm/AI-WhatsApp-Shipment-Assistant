@@ -647,6 +647,9 @@ class SupportService:
         *, notification_since: float | None = None,
     ) -> bool:
         """Authorize one realtime event before it reaches a staff browser."""
+        if str(event.get("type") or "").startswith("ai_budget") and not agent.is_supervisor:
+            # AI spending is Admin/Super Admin-only information.
+            return False
         if event.get("type") == "message_deleted_for_me" and str(event.get("user_id") or "") != agent.id:
             return False
         raw_ticket_id = event.get("ticket_id")

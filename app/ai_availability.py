@@ -29,6 +29,9 @@ AIAvailabilityReason = Literal[
     # No usable OpenAI key: none configured, or OpenAI rejected it.
     "API_KEY_MISSING",
     "API_KEY_INVALID",
+    # The global AI budget is used up (or its counters cannot be read).
+    "BUDGET_EXCEEDED",
+    "BUDGET_UNAVAILABLE",
 ]
 
 # Sentinel: evaluate only the global setting (dashboard status). Passing
@@ -427,14 +430,22 @@ async def _default_credential_state() -> tuple[bool, str | None]:
     return await ai_provider_service.credential_state()
 
 
+async def _default_budget_state() -> tuple[bool, str | None]:
+    from app.ai_usage import ai_usage_service
+
+    return await ai_usage_service.budget_state()
+
+
 class AIAvailabilityService:
     def __init__(
         self,
         repository: AIControlRepository | None = None,
         credential_state: Callable[[], Awaitable[tuple[bool, str | None]]] | None = None,
+        budget_state: Callable[[], Awaitable[tuple[bool, str | None]]] | None = None,
     ) -> None:
         self.repository = repository or AIControlRepository()
         self._credential_state = credential_state or _default_credential_state
+        self._budget_state = budget_state or _default_budget_state
 
     @staticmethod
     def _require_manager(actor: SupportAgent) -> None:
@@ -465,6 +476,9 @@ class AIAvailabilityService:
         usable, reason = await self._credential_state()
         if not usable:
             return replace(result, effective_ai_enabled=False, effective_reason=reason or "API_KEY_MISSING")
+        within, reason = await self._budget_state()
+        if not within:
+            return replace(result, effective_ai_enabled=False, effective_reason=reason or "BUDGET_UNAVAILABLE")
         return result
 
     async def get_settings_payload(
@@ -477,6 +491,9 @@ class AIAvailabilityService:
         usable, reason = await self._credential_state()
         # No secret here: whether AI has a usable key, for the status indicator.
         payload["provider"] = {"usable": usable, "reason": reason}
+        # Whether AI is paused by the budget - no amounts (those are Admin-only).
+        within, budget_reason = await self._budget_state()
+        payload["budget"] = {"within": within, "reason": budget_reason}
         return payload
 
     async def update_settings(

@@ -264,7 +264,10 @@ def test_effective_ai_is_off_without_a_usable_key_even_if_the_number_is_on():
     async def missing():
         return False, "API_KEY_MISSING"
 
-    service = AIAvailabilityService(Repo(), credential_state=missing)
+    async def within_budget():
+        return True, None
+
+    service = AIAvailabilityService(Repo(), credential_state=missing, budget_state=within_budget)
     result = asyncio.run(service.get_effective_ai_availability(line_id="90052"))
     assert (result.effective_ai_enabled, result.effective_reason) == (False, "API_KEY_MISSING")
     payload = asyncio.run(service.get_settings_payload())
@@ -332,6 +335,11 @@ def test_rejected_key_during_a_turn_hands_off_instead_of_replying(monkeypatch):
 
     monkeypatch.setattr(openai_service, "_get_client", lambda: Client())
     monkeypatch.setattr(openai_service.ai_provider_service, "report_failure", report)
+
+    async def passthrough(*, call, **_kwargs):
+        return await call()
+
+    monkeypatch.setattr(openai_service.ai_usage_service, "metered", passthrough)
     result = asyncio.run(openai_service.get_ai_reply(Conversation(phone_number="96170000001"), "hello"))
     assert result.reply_text == ""
     assert result.handoff is not None and result.handoff.reason == "AI_PROVIDER_UNAVAILABLE"

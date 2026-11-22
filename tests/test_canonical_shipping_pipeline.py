@@ -321,6 +321,12 @@ def test_semantic_normalizer_preserves_explicit_unsupported_destination(
     monkeypatch.setattr(settings, "shipping_semantic_normalizer_enabled", True)
     monkeypatch.setattr(shipping_intent_normalizer, "_get_client", lambda: FakeClient())
 
+    async def passthrough(*, call, **_kwargs):
+        # Usage metering is covered by tests/test_ai_usage_budget.py.
+        return await call()
+
+    monkeypatch.setattr(shipping_intent_normalizer.ai_usage_service, "metered", passthrough)
+
     async def run() -> None:
         normalized = await normalize_shipping_intent(
             user_text="طيب فيني اشحن ع قطر؟",

@@ -210,7 +210,14 @@ def test_unsafe_freeform_reply_is_repaired_with_structured_output() -> None:
 
         fake_client = types.SimpleNamespace(responses=_Responses())
         original_get_client = openai_service._get_client
+        original_metered = openai_service.ai_usage_service.metered
         openai_service._get_client = lambda: fake_client  # type: ignore[assignment]
+
+        async def passthrough(*, call, **_kwargs):
+            # Usage metering is covered by tests/test_ai_usage_budget.py.
+            return await call()
+
+        openai_service.ai_usage_service.metered = passthrough  # type: ignore[assignment]
         try:
             reply = await openai_service._prepare_customer_reply(
                 candidate=_INCIDENT_TEXT,
@@ -219,6 +226,7 @@ def test_unsafe_freeform_reply_is_repaired_with_structured_output() -> None:
             )
         finally:
             openai_service._get_client = original_get_client  # type: ignore[assignment]
+            openai_service.ai_usage_service.metered = original_metered  # type: ignore[assignment]
 
         assert reply == "L2et 10 orders. B3atle l order ID li baddak check."
         assert captured["reasoning"] == {"effort": "none"}
