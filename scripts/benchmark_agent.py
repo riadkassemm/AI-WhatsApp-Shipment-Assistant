@@ -122,6 +122,7 @@ def main() -> int:
     parser.add_argument("--approval", type=Path)
     args = parser.parse_args()
     # HTTP/SDK debug logging must never expose model bodies or message text.
+    previous_logging_disable = logging.root.manager.disable
     logging.disable(logging.CRITICAL)
     try:
         directory = private_directory(args.dir)
@@ -151,6 +152,8 @@ def main() -> int:
         # Parser/provider/database errors can contain raw inputs or credentials.
         print("Benchmark stopped. Check private inputs, review state and required approvals; no exception body logged.", file=sys.stderr)
         return 1
+    finally:
+        logging.disable(previous_logging_disable)
 
 
 if __name__ == "__main__":

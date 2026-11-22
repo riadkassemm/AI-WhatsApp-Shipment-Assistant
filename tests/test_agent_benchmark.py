@@ -213,6 +213,7 @@ def test_paid_approval_is_bound_to_dev_bundle_prices_config_and_off_switch():
 
 
 def test_cli_dry_run_and_report_are_offline_and_detect_input_changes(tmp_path, monkeypatch, capsys):
+    import logging
     from scripts import benchmark_agent as cli
     from app.agent.benchmark.files import write_jsonl
     directory = private_directory(tmp_path / 'private')
@@ -224,7 +225,9 @@ def test_cli_dry_run_and_report_are_offline_and_detect_input_changes(tmp_path, m
     write_jsonl(directory / 'cases.jsonl', cases)
     for command in ['prepare', 'run', 'report']:
         monkeypatch.setattr('sys.argv', ['benchmark_agent.py', command, '--dir', str(directory)])
+        previous_logging_disable = logging.root.manager.disable
         assert cli.main() == 0
+        assert logging.root.manager.disable == previous_logging_disable
     output = capsys.readouterr()
     assert 'private synthetic message' not in output.out
     assert '"paid_calls": 0' in output.out
