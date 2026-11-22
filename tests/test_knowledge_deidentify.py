@@ -42,3 +42,25 @@ def test_transcripts_keep_roles_and_order() -> None:
     )
     assert [row["role"] for row in rows] == ["customer", "agent"]
     assert rows[0]["text"] == "Tracking <ID_1>?" and rows[1]["text"] == "<ID_1> is in Beirut"
+
+
+def test_addresses_introduced_names_and_short_numbers_are_removed() -> None:
+    tool = Deidentifier()
+    text = tool.text("my name is Karim Nassar, deliver to Hamra street near Bank Audi, building 12 floor 3")
+    for private in ("Karim", "Nassar", "Hamra", "Bank Audi"):
+        assert private not in text
+    assert "<NAME_1>" in text and "<ADDRESS_1>" in text
+    assert "Sheet" not in tool.text("esme Sheet")  # names after Arabizi intros too
+    assert "اسمي <NAME_1>" == Deidentifier().text("اسمي جورج")
+    coded = tool.text("code 4471, pay 250 or 1,500,000")
+    assert "4471" not in coded and "250" not in coded and "1,500,000" not in coded
+    # Weights, durations and percentages stay readable.
+    assert tool.text("5 kg takes 3 days, 100 kg gets 10%") == "5 kg takes 3 days, 100 kg gets 10%"
+    assert tool.text("arrives in 120 days") == "arrives in 120 days"
+
+
+def test_known_names_pattern_masks_many_names_at_once() -> None:
+    from app.knowledge.deidentify import name_pattern
+    pattern = name_pattern(["Layla Haddad", "Omar", "x"])
+    text = Deidentifier(known_names=pattern).text("Layla Haddad asked Omar; Omari is a different word")
+    assert text == "<NAME_1> asked <NAME_2>; Omari is a different word"

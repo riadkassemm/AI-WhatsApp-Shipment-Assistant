@@ -23,7 +23,9 @@ STATUSES = ("DRAFT", "APPROVED", "RETIRED")
 EXAMPLE_STYLES = ("en", "fr", "ar", "leb_ar", "leb_arabizi", "mixed")
 _INTENT = re.compile(r"^[a-z0-9_]{2,64}$")
 # De-identification placeholders left in a draft must be replaced before approval.
-_PLACEHOLDER = re.compile(r"<(?:SECRET|EMAIL|URL|AMOUNT|NAME|PHONE|ID)(?:_\d+)?>")
+_PLACEHOLDER = re.compile(
+    r"<(?:SECRET|EMAIL|URL|AMOUNT|NAME|PHONE|ID|ADDRESS|NUMBER)(?:_\d+)?>|\[STAFF TO CONFIRM", re.IGNORECASE,
+)
 # Above this the knowledge base no longer fits comfortably in the cached prefix
 # (plan B2: about 10-15k tokens); retrieval by topic is then needed.
 PREFIX_TOKEN_BUDGET = 15_000
@@ -260,7 +262,7 @@ class AIKnowledgeRepository:
                     text = " ".join(str(row.get(key) or "") for key in ("approved_policy", "escalate_when", "examples_json"))
                     if _PLACEHOLDER.search(text):
                         raise AIKnowledgeValidationError(
-                            "Replace the placeholders such as <PHONE_1> or <AMOUNT_1> with real policy text before approving."
+                            "Replace the placeholders such as <AMOUNT_1> and resolve every [STAFF TO CONFIRM] note before approving."
                         )
                     await cur.execute(
                         "SELECT id FROM ai_kb_articles WHERE intent_key = %s AND status = 'APPROVED' FOR UPDATE",

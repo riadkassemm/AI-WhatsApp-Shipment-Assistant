@@ -122,3 +122,16 @@ async def test_imported_articles_stay_drafts_and_reruns_preserve_staff_edits(kno
     assert articles[0]['status'] == 'DRAFT'
     audit = await sql('SELECT action FROM ai_kb_audit WHERE article_id=%s ORDER BY id', (draft['id'],))
     assert [entry['action'] for entry in audit] == ['DRAFT_CREATED', 'DRAFT_EDITED']
+
+
+@pytest.mark.asyncio
+async def test_unresolved_staff_notes_block_approval(knowledge):
+    service, _ = knowledge
+    article_id = await service.create_tool_draft(
+        {**ARTICLE, 'intent_key': 'branch_hours', 'title': 'Branch hours',
+         'approved_policy': 'Open Monday to Saturday. [STAFF TO CONFIRM: Sunday hours]'},
+        source_ticket_count=29, source_ticket_ids=[5],
+    )
+    draft = await service.article(ADMIN, article_id)
+    with pytest.raises(AIKnowledgeValidationError, match='STAFF TO CONFIRM'):
+        await service.approve(ADMIN, article_id, draft['row_version'])
