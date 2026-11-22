@@ -11,6 +11,8 @@ from pydantic import ValidationError
 from app.agent.context import masked_messages
 from app.agent.contracts import DECISION_SCHEMA, Decision, Escalate, Reply, ToolCall
 from app.agent.guard import reply_violations
+from app.agent.tools import TOOL_SCHEMAS, execute_tool
+from app.agent.business_data import BusinessDataError
 from app.ai_knowledge import ai_knowledge_service
 from app.ai_provider import ai_provider_service
 from app.ai_usage import AIUsageBlocked, ai_usage_service
@@ -37,8 +39,6 @@ identity is insufficient, the customer requests staff, or you are unsure.
 Tools not listed below are unavailable; never pretend to have called a tool.
 Use awaiting_customer=true only when your reply needs an answer from the customer.
 """
-# Step 5b supplies the read-only tool registry. No legacy tools are exposed.
-TOOL_SCHEMAS: tuple[dict, ...] = ()
 
 
 def cached_prefix(knowledge: str) -> str:
@@ -146,7 +146,15 @@ class AgentService:
                 if isinstance(action, Escalate):
                     return AgentOutcome(reason_code=action.reason_code)
                 if isinstance(action, ToolCall):
-                    return AgentOutcome(reason_code="AI_TOOL_UNAVAILABLE")
+                    try:
+                        # Verification can expire or be revoked during a provider call.
+                        current_identity = await customer_ai_identity_service.resolve_or_unknown(
+                            str(ticket["whatsapp_phone"]),
+                        )
+                        rendered = await execute_tool(action, current_identity, ticket=ticket, style=style)
+                    except BusinessDataError as exc:
+                        return AgentOutcome(reason_code=exc.reason)
+                    return AgentOutcome(reply=rendered)
                 violations = reply_violations(action, style=style, evidence=(knowledge,))
                 if not violations:
                     return AgentOutcome(reply=action)

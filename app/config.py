@@ -29,6 +29,13 @@ class Settings(BaseSettings):
     ai_agent_v2_enabled: bool = False
     ai_agent_model: str = "gpt-6-luna"
     ai_agent_reasoning_effort: Literal["none", "low"] = "none"
+    # Separate SELECT-only business replica. Never fall back to the historical DB.
+    ai_business_db_host: str = ""
+    ai_business_db_port: int = Field(default=3306, ge=1, le=65535)
+    ai_business_db_name: str = ""
+    ai_business_db_user: str = ""
+    ai_business_db_password: str = Field(default="", repr=False)
+    ai_business_max_age_seconds: int = Field(default=300, ge=1, le=86400)
     openai_reasoning_effort: Literal["none", "low", "medium", "high", "xhigh", "max"] = "medium"
     openai_summarizer_reasoning_effort: Literal[
         "none", "low", "medium", "high", "xhigh", "max"

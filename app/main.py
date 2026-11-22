@@ -241,6 +241,8 @@ async def _lifespan(_app: FastAPI):
                 except asyncio.CancelledError:
                     pass
             await customer_users.close()
+            from app.agent.business_data import business_data_source
+            await business_data_source.close()
 
 
 app = FastAPI(title="AI Shipment Assistant - WhatsApp Backend", lifespan=_lifespan)

@@ -145,7 +145,10 @@ budget gateway. Customer text and prior replies are never factual evidence.
 The lexical fact check compares values with authoritative evidence; it is not
 a semantic correctness guarantee and does not replace the pre-pilot benchmark.
 
-Step 5a exposes no business tools: tool requests safely hand over to staff.
+Read-only tools use a separately configured replica with explicit freshness and
+ownership checks; see [the business adapter contract](ai-business-data.md).
+Common results use deterministic renderers. Missing/stale data and identity
+refusals hand over to staff. Business changes always require staff.
 Media still hands over to staff, and password attempts do not resume legacy
 login. Replies reuse the AI availability recheck, ticket ownership fence and
 message-id idempotency, and persist `awaiting_customer`. Escalations carry a

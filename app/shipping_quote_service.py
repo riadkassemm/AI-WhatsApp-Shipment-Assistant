@@ -45,6 +45,21 @@ from app.shipping_intent_normalizer import (
 logger = logging.getLogger("shipment-bot")
 
 
+async def execute_catalog_tool(client: Any, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    """Execute a validated structured request using the supplied catalogue source.
+
+    Agent v2 supplies a freshness-checked replica snapshot. Matching and Decimal
+    arithmetic remain the same as the conversational quote pipeline, with no
+    extra normalizer call or Redis conversation state.
+    """
+    methods = {
+        "get_shipping_price": client.get_shipping_price,
+        "get_route_shipping_options": client.get_route_shipping_options,
+        "get_delivery_duration": client.get_delivery_duration,
+    }
+    return await methods[name](**arguments)
+
+
 @dataclass(frozen=True)
 class ShippingQuoteOutcome:
     reply_text: str
