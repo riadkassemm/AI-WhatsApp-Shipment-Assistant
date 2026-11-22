@@ -356,6 +356,36 @@ class AIUsageRepository:
             """, args, one=True,
         ) or {}
 
+    async def ticket_usage(self, ticket_id: int) -> dict[str, Any]:
+        return await self._fetch(
+            """
+            SELECT COUNT(*) AS requests, COALESCE(SUM(cost_micros), 0) AS cost_micros,
+                   COALESCE(SUM(outcome = 'pending'), 0) AS pending
+            FROM ai_usage_events WHERE ticket_id = %s
+            """, (ticket_id,), one=True,
+        ) or {}
+
+    async def ai_ticket_outcomes(self, start_utc: datetime, end_utc: datetime, line: str | None) -> dict[str, Any]:
+        """Outcomes of tickets opened as AI tickets in [start_utc, end_utc)."""
+        line_clause, args = ("AND t.business_phone_number_id = %s", (line,)) if line else ("", ())
+        return await self._fetch(
+            f"""
+            SELECT COUNT(*) AS tickets,
+                   COALESCE(SUM(EXISTS (SELECT 1 FROM support_ticket_events e WHERE e.ticket_id = t.id
+                        AND e.event_type = 'TICKET_RESOLVED' AND e.actor_type = 'AI')), 0) AS resolved_by_ai,
+                   COALESCE(SUM(EXISTS (SELECT 1 FROM support_ticket_events e WHERE e.ticket_id = t.id
+                        AND e.event_type IN ('AI_ESCALATED', 'AI_TAKEN_OVER'))), 0) AS handed_to_staff,
+                   COALESCE(SUM(t.handling_mode = 'AI' AND t.active_key IS NOT NULL), 0) AS still_open
+            FROM support_tickets t
+            WHERE t.created_at >= %s AND t.created_at < %s {line_clause}
+              AND EXISTS (SELECT 1 FROM support_ticket_events c WHERE c.ticket_id = t.id
+                    AND c.event_type = 'TICKET_CREATED'
+                    AND JSON_VALID(c.details_json)
+                    AND JSON_UNQUOTE(JSON_EXTRACT(c.details_json, '$.handling_mode')) = 'AI')
+            """,
+            (start_utc.replace(tzinfo=None), end_utc.replace(tzinfo=None), *args), one=True,
+        ) or {}
+
     async def list_prices(self) -> list[dict[str, Any]]:
         return await self._fetch(
             """
@@ -695,6 +725,13 @@ class AIUsageService:
         by_purpose = await self.repository.usage_by("purpose", start, end, line, model)
         by_tier = await self.repository.usage_by("tier", start, end, line, model)
         tickets = await self.repository.ticket_cost(start, end, line, model)
+        zone = ZoneInfo(budget.budget_timezone)
+        outcomes = await self.repository.ai_ticket_outcomes(
+            datetime.combine(first, datetime.min.time(), zone).astimezone(timezone.utc),
+            datetime.combine(last + timedelta(days=1), datetime.min.time(), zone).astimezone(timezone.utc),
+            line,
+        )
+        opened = int(outcomes.get("tickets") or 0)
         offline_purposes = {"kb_build", "eval"}
         range_cost = sum(int(row["cost_micros"]) for row in days)
         offline_cost = sum(int(row["cost_micros"]) for row in by_purpose if row["name"] in offline_purposes)
@@ -724,13 +761,20 @@ class AIUsageService:
                 "range_cost_usd": micros_to_usd(range_cost),
                 "offline_cost_usd": micros_to_usd(offline_cost),
                 "api_requests": sum(int(row["requests"] or 0) for row in days),
-                # AI tickets arrive with the AI ticket model (Step 3); until then these are unknown.
                 "ai_tickets_handled": ticket_count or None,
                 "average_cost_per_ticket_usd": (
                     micros_to_usd(int(tickets.get("cost_micros") or 0) // ticket_count) if ticket_count else None
                 ),
-                "escalation_rate": None,
-                "resolution_rate": None,
+                # Of the AI tickets opened in the period (not filtered by model):
+                # handed to staff (escalated or taken over) and resolved by the AI.
+                "ai_tickets_opened": opened,
+                "ai_tickets_open": int(outcomes.get("still_open") or 0),
+                "escalation_rate": (
+                    round(int(outcomes.get("handed_to_staff") or 0) * 100 / opened, 1) if opened else None
+                ),
+                "resolution_rate": (
+                    round(int(outcomes.get("resolved_by_ai") or 0) * 100 / opened, 1) if opened else None
+                ),
             },
             "daily": [{"day": str(row["day"]), "requests": int(row["requests"] or 0),
                        "cost_usd": micros_to_usd(row["cost_micros"]),
@@ -738,6 +782,19 @@ class AIUsageService:
             "by_model": usage_rows(by_model),
             "by_purpose": usage_rows(by_purpose),
             "by_tier": usage_rows(by_tier),
+        }
+
+    async def ticket_usage(self, agent: SupportAgent, ticket_id: int) -> dict[str, Any] | None:
+        """Estimated AI cost of one ticket, for Admins and Super Admins only."""
+        if not agent.is_supervisor:
+            return None
+        row = await self.repository.ticket_usage(ticket_id)
+        requests = int(row.get("requests") or 0)
+        return {
+            "estimated": True,
+            "requests": requests,
+            "pending": int(row.get("pending") or 0),
+            "cost_usd": micros_to_usd(row.get("cost_micros") or 0),
         }
 
     async def price_list(self, agent: SupportAgent) -> dict[str, Any]:

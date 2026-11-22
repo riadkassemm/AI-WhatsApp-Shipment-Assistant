@@ -447,7 +447,7 @@ The dashboard for this data (Usage & Costs tab, price verification, budget editi
 
 ### AI tickets
 
-Every conversation the AI assistant handles is a support ticket (migration `20261122_support_ai_tickets.sql`, apply before restarting the API):
+Every conversation the AI assistant handles is a support ticket (migration `20261122_support_ai_tickets.sql`, apply before restarting the API; `20261122_ai_usage_ticket_index.sql` adds the per-ticket cost index). The dashboard side is described in `docs/support-platform.md` ("AI tickets in the dashboard"):
 
 - **Inbound flow.** When AI is enabled for the receiving number, each automated turn (auth, shipping quotes, OpenAI) first opens or reuses the customer's AI ticket and stores the customer message on it, before the turn starts. The turn's replies go out as AI messages on that ticket, and its OpenAI usage is attributed to the ticket. Media, locations, contacts, safe-mode messages and AI being switched off escalate an open AI ticket instead of opening a second ticket. When the AI hands off, the customer is told first and the ticket is escalated second, because the AI may not speak once a human owns the ticket. After a takeover or escalation, later messages are held for the human as before.
 - **Handling mode.** `support_tickets.handling_mode` is `AI` or `HUMAN`; every existing ticket is `HUMAN`. An AI ticket is listed only in the **AI Tickets** queue (`GET /api/support/tickets?view=ai`), never in Unassigned, Active, Mine, Watching or Waiting. Once resolved it appears in History like any other ticket.

@@ -63,6 +63,7 @@ __SUPPORT_STYLE__
   <symbol id="icon-shield" viewBox="0 0 24 24"><path d="M12 3 5 6v5c0 4.5 2.5 7.7 7 10 4.5-2.3 7-5.5 7-10V6z"/><path d="m9 12 2 2 4-4"/></symbol>
   <symbol id="icon-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
   <symbol id="icon-edit" viewBox="0 0 24 24"><path d="M4 20h4l11-11-4-4L4 16zM13.5 6.5l4 4"/></symbol>
+  <symbol id="icon-sparkles" viewBox="0 0 24 24"><path d="M12 3l1.8 4.7L18.5 9.5l-4.7 1.8L12 16l-1.8-4.7L5.5 9.5l4.7-1.8z"/><path d="M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z"/></symbol>
   <symbol id="icon-zap" viewBox="0 0 24 24"><path d="M13 3 5 14h6l-1 7 8-11h-6z"/></symbol>
   <symbol id="icon-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/></symbol>
   <symbol id="icon-trash" viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13M10 11v5M14 11v5"/></symbol>
@@ -142,6 +143,9 @@ __SUPPORT_STYLE__
     </div>
     <nav class="queue-nav" id="tabs" aria-label="Ticket queues">
       <div class="nav-group-label" aria-hidden="true">Work</div>
+      <button class="queue-nav-btn" data-view="ai" type="button" aria-label="AI tickets" title="AI tickets">
+        <svg class="icon" aria-hidden="true"><use href="#icon-sparkles"></use></svg><span class="queue-nav-label">AI tickets</span><span class="queue-nav-count" data-count-for="ai"></span>
+      </button>
       <button class="queue-nav-btn active" data-view="unassigned" type="button" aria-label="Unassigned tickets" aria-current="page" title="Unassigned">
         <svg class="icon" aria-hidden="true"><use href="#icon-inbox"></use></svg><span class="queue-nav-label">Unassigned</span><span class="queue-nav-count" data-count-for="unassigned"></span>
       </button>

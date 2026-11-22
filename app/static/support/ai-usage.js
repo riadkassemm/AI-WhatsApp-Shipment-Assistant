@@ -151,7 +151,11 @@ function aiStat(label, value, hint) {
 
 function renderAiUsageCards(report) {
   const s = report.summary || {};
-  const ticketHint = s.ai_tickets_handled === null ? 'Available once AI tickets are enabled' : null;
+  const ticketHint = s.ai_tickets_handled === null ? 'No AI tickets in this period' : null;
+  const opened = Number(s.ai_tickets_opened || 0);
+  const outcomeHint = opened
+    ? 'Of ' + fmtCount(opened) + ' AI ticket' + (opened === 1 ? '' : 's') + ' opened' + (s.ai_tickets_open ? ' (' + fmtCount(s.ai_tickets_open) + ' still open)' : '')
+    : 'No AI tickets opened in this period';
   $('aiUsageCards').replaceChildren(
     aiStat("Today's cost", fmtUsd(s.today_cost_usd), 'All numbers and models'),
     aiStat('Monthly cost', fmtUsd(s.month_cost_usd), 'All numbers and models'),
@@ -162,8 +166,8 @@ function renderAiUsageCards(report) {
     aiStat('API requests', fmtCount(s.api_requests), 'In the selected period'),
     aiStat('Selected period cost', fmtUsd(s.range_cost_usd), 'Includes offline work'),
     aiStat('Offline cost', fmtUsd(s.offline_cost_usd), 'Knowledge building and evaluation'),
-    aiStat('Escalation rate', fmtPercent(s.escalation_rate), ticketHint),
-    aiStat('Resolution rate', fmtPercent(s.resolution_rate), ticketHint)
+    aiStat('Handed to staff', fmtPercent(s.escalation_rate), outcomeHint),
+    aiStat('Resolved by AI', fmtPercent(s.resolution_rate), outcomeHint)
   );
 }
 

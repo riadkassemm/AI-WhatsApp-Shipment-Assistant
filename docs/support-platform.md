@@ -63,8 +63,10 @@ The **Today's cost**, **Monthly cost**, and budget cards always cover all number
 and models, using the budget timezone (`Asia/Beirut` by default). The selected
 period totals, charts, and tables use the filters. Offline knowledge-building and
 evaluation costs are shown separately and excluded from per-ticket averages.
-Ticket resolution/escalation rates remain unavailable until the AI ticket model
-is implemented. The tab refreshes every 60 seconds while visible and on budget
+**Handed to staff** and **Resolved by AI** are the shares of AI tickets opened in
+the selected period (budget-timezone days; the model filter does not apply) that
+were escalated or taken over, and that the AI resolved after the quiet period.
+Tickets still open with the AI count in neither. The tab refreshes every 60 seconds while visible and on budget
 threshold events; polling preserves unsaved budget edits and stops on close or
 logout.
 
@@ -89,6 +91,33 @@ No additional migration is needed for this tab beyond
 enablement remain separate operator actions.
 
 ![Usage and Costs with synthetic data](screenshots/ai-usage-dashboard.png)
+
+## AI tickets in the dashboard
+
+**AI tickets** (top of the Work group) lists live conversations the AI assistant
+is answering, with an **AI answering** chip. They never appear in Unassigned,
+Active, Mine, Watching or Waiting, and a customer message on them raises no staff
+alert or sound. Every staff member can open them.
+
+An AI ticket shows a banner ("The AI assistant is answering this conversation")
+and a single **Take over** action; the composer, Claim, status changes and
+Resolve stay unavailable until someone takes it over. **Take over** assigns the
+ticket to you, stops the AI (an AI reply that has not started sending is
+cancelled) and opens it in My tickets. The context panel shows the time of the
+last AI reply and, for Admins and Super Admins, **AI cost (estimate)** for the
+ticket.
+
+When the AI hands a conversation to staff, it moves to Unassigned with a
+**From AI: <reason>** chip, an alert ("The AI assistant handed a conversation
+with … to staff"), the reason in the Escalation card (**Handed over by AI**) and
+the AI summary. The timeline records **Handed to staff by AI**, **Taken over
+from AI** and **Resolved by AI (no messages for 2 hours)**. Resolutions by the
+AI never count in agent statistics.
+
+Migrations: `20261122_support_ai_tickets.sql` (required before the API restart)
+and `20261122_ai_usage_ticket_index.sql` (index for per-ticket cost).
+
+![AI ticket with synthetic data](screenshots/ai-tickets-dashboard.png)
 
 ## Reopening resolved customer tickets
 

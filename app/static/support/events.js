@@ -268,8 +268,17 @@ function openSupportEventSource() {
       return;
     }
     const customer = payload.customer_name || payload.customer_phone || 'customer';
+    if (payload.handling_mode === 'AI' && type !== 'message_reaction') {
+      // The AI assistant is answering this conversation, so staff are not
+      // alerted. It is listed in AI tickets until someone takes it over.
+      if (state.view === 'ai') requestDashboardRefresh('queue');
+      else requestDashboardRefresh('counts');
+      return;
+    }
     const notificationText = type === 'ticket_created'
-      ? 'New unassigned conversation from ' + customer + '.'
+      ? (payload.escalated_from_ai === true
+        ? 'The AI assistant handed a conversation with ' + customer + ' to staff.'
+        : 'New unassigned conversation from ' + customer + '.')
       : type === 'message_reaction'
         ? 'New WhatsApp reaction from ' + customer + '.'
         : 'New customer message from ' + customer + '.';

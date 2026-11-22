@@ -203,7 +203,7 @@ function investigationActivity(event) {
   let data;
   try { data = typeof event.details_json === 'string' ? JSON.parse(event.details_json) : event.details_json; } catch (_) { data = null; }
   if (!data || typeof data !== 'object' || Array.isArray(data)) data = {};
-  const actor = event.actor_type === 'SYSTEM' ? 'Automation' : (event.actor_name || 'A staff member');
+  const actor = event.actor_type === 'SYSTEM' ? 'Automation' : event.actor_type === 'AI' ? 'The AI assistant' : (event.actor_name || 'A staff member');
   switch (event.event_type) {
     case 'TICKET_CREATED': return 'Ticket opened for customer support.';
     case 'TICKET_CLAIMED': return actor + ' claimed the ticket.';
@@ -216,6 +216,8 @@ function investigationActivity(event) {
     case 'TICKET_CLOSED': return data.reason === 'whatsapp_line_removed' ? 'Archived when ' + actor + ' removed the WhatsApp number.' : actor + ' closed the ticket.';
     case 'TICKET_RESTORED': case 'CHAT_RESTORED': return 'Restored when ' + actor + ' linked the WhatsApp number again' + (data.restored_status ? ' (' + investigationLabel(data.restored_status).toLowerCase() + ').' : '.');
     case 'RETURNED_TO_AI': return 'Staff handling ended.';
+    case 'AI_ESCALATED': return 'The AI assistant handed the conversation to staff' + (data.reason_code ? ' (' + aiEscalationLabel(data.reason_code).toLowerCase() + ').' : '.');
+    case 'AI_TAKEN_OVER': return actor + ' took the conversation over from the AI assistant.';
     case 'STATUS_CHANGED': return actor + ' changed the status' + (data.to ? ' to ' + investigationLabel(data.to).toLowerCase() : '') + '.';
     case 'CONVERSATION_VIEWED': return actor + ' opened the conversation.';
     case 'INCOMING_MARKED_READ': return data.mode === 'reply_sync' ? 'Customer message marked as read after ' + actor + ' replied.' : actor + ' marked a customer message as read.';

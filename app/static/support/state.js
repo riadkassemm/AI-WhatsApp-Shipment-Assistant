@@ -1,4 +1,5 @@
 const QUEUE_CONFIG = {
+  ai: {label: 'AI tickets', emptyTitle: 'No AI conversations', emptyBody: 'Conversations the AI assistant is answering appear here. Take one over to answer it yourself.', icon: 'sparkles'},
   unassigned: {label: 'Unassigned', emptyTitle: 'No unassigned tickets', emptyBody: 'New customer escalations will appear here when they need an owner.', icon: 'inbox'},
   mine: {label: 'My tickets', emptyTitle: 'No tickets assigned to you', emptyBody: 'Claim an unassigned ticket or wait for a transfer from another agent.', icon: 'user-check'},
   chats: {label: 'Chats', emptyTitle: 'No staff chats yet', emptyBody: 'Use New chat to start a WhatsApp conversation with a customer.', icon: 'message'},
@@ -17,6 +18,32 @@ const STATUS_LABELS = {
   RESOLVED: 'Resolved',
   CLOSED: 'Archived'
 };
+// Why the AI assistant handed a conversation to staff (support_tickets.ai_escalation_reason).
+const AI_ESCALATION_LABELS = {
+  IDENTITY_VERIFICATION_REQUIRED: 'Customer identity must be verified',
+  CHANGE_REQUIRES_HUMAN: 'The request needs a change by staff',
+  AI_REPLY_SEND_FAILED: 'The AI reply could not be sent',
+  AI_TURN_FAILED: 'The AI could not complete its reply',
+  AI_TICKET_HANDED_TO_HUMAN: 'Handed to staff during the reply',
+  MEDIA_UNSUPPORTED_BY_AI: 'Customer sent media',
+  VOICE_NOTE_UNSUPPORTED: 'Customer sent a voice note',
+  LOCATION_UNSUPPORTED_BY_AI: 'Customer shared a location',
+  AI_DISABLED_LINE: 'AI was switched off for this number',
+  AI_DISABLED_GLOBAL: 'AI was switched off',
+  AI_DISABLED_DURING_TURN: 'AI was switched off during the reply',
+  AI_AVAILABILITY_UNAVAILABLE: 'AI settings could not be read',
+  AI_PROVIDER_UNAVAILABLE: 'OpenAI is not available',
+  AI_BUDGET_EXCEEDED: 'The AI budget was reached',
+  AI_BUDGET_UNAVAILABLE: 'The AI budget could not be checked',
+  STAFF_REPLIED_IN_WHATSAPP_APP: 'Staff replied in the WhatsApp app'
+};
+function aiEscalationLabel(code) {
+  const value = String(code || '');
+  if (!value) return '';
+  if (AI_ESCALATION_LABELS[value]) return AI_ESCALATION_LABELS[value];
+  const words = value.toLowerCase().replaceAll('_', ' ');
+  return words.charAt(0).toUpperCase() + words.slice(1);
+}
 const MESSAGE_ROLE_LABELS = {
   CUSTOMER: 'Customer',
   AGENT: 'Support agent',
