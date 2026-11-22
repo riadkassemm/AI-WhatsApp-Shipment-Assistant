@@ -14,8 +14,8 @@ SAFETY = {"unsafe_disclosures", "factual_inconsistencies"}
 def load_config(path: Path = CONFIG_PATH) -> dict:
     config = json.loads(path.read_text())
     if set(config["thresholds"]) != SAFETY | {
-        "intent_accuracy", "tool_accuracy", "escalation_recall", "must_escalate_recall",
-        "escalation_precision", "language_style_match",
+        "intent_accuracy", "tool_accuracy", "tool_call_accuracy", "escalation_recall",
+        "must_escalate_recall", "escalation_precision", "answer_rate", "language_style_match",
     }:
         raise ValueError("Invalid metric configuration")
     if not config["configurations"] or config["minimum_style_cases"] < 1:
@@ -66,6 +66,8 @@ def validate_labels(labels: list[dict], config: dict) -> None:
         ids.add(row["case_id"])
         if row.get("split") not in {"gold", "redteam"} or row.get("style") not in config["styles"]:
             raise ValueError("Invalid split or style")
+        if "style_observable" in row and type(row["style_observable"]) is not bool:
+            raise ValueError("Invalid style observability")
         if row["split"] == "gold":
             if type(row.get("escalate")) is not bool or not isinstance(row.get("intent"), str):
                 raise ValueError("Missing gold labels")
@@ -79,6 +81,10 @@ def validate_labels(labels: list[dict], config: dict) -> None:
                 raise ValueError("Invalid tool label")
             if row.get("review_status") != "reviewed":
                 raise ValueError("Gold labels must be reviewed before evaluation")
+
+
+def style_observable(label: dict) -> bool:
+    return label.get("style_observable", True) is not False
 
 
 def reviewed(row: dict) -> bool:
@@ -98,8 +104,14 @@ def _metric(name: str, pairs: list[tuple[dict, dict]]) -> tuple[int, int, int | 
         good = [row.get("intent") == label["intent"] for label, row in pairs]
     elif name == "tool_accuracy":
         good = [digest(row.get("tools")) == digest([label["tool"]] if label["tool"] else []) for label, row in pairs]
+    elif name == "tool_call_accuracy":
+        # Only cases that expect a tool, so "never call a tool" cannot score well.
+        good = [digest(row.get("tools")) == digest([label["tool"]]) for label, row in pairs if label["tool"]]
+    elif name == "answer_rate":
+        # Specificity: cases labelled not to escalate must be handled by the agent.
+        good = [not row["escalated"] for label, row in pairs if not label["escalate"]]
     elif name == "language_style_match":
-        good = [row["review"][name] for _, row in pairs if row.get("reply")]
+        good = [row["review"][name] for label, row in pairs if row.get("reply") and style_observable(label)]
     elif name == "escalation_precision":
         good = [label["escalate"] for label, row in pairs if row["escalated"]]
     else:
@@ -140,8 +152,12 @@ def build_report(labels: list[dict], results: list[dict], config: dict | None = 
         pairs = [(indexed[row["case_id"]], row) for row in valid]
         gates = []
         for scope in ["overall", *config["styles"]]:
-            selected = pairs if scope == "overall" else [(l, r) for l, r in pairs if l["style"] == scope]
-            gold_n = sum(l["split"] == "gold" and (scope == "overall" or l["style"] == scope) for l in labels)
+            # Media-only cases whose style could not be observed count overall but
+            # never in a per-style gate or its minimum case count.
+            selected = pairs if scope == "overall" else [
+                (l, r) for l, r in pairs if l["style"] == scope and style_observable(l)]
+            gold_n = sum(l["split"] == "gold" and (scope == "overall" or (
+                l["style"] == scope and style_observable(l))) for l in labels)
             for metric, limits in config["thresholds"].items():
                 good, n, incidents = _metric(metric, selected)
                 threshold = limits["overall" if scope == "overall" else "style"]

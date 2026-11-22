@@ -102,6 +102,7 @@ def report(directory: Path, config: dict, runs: list[Path]) -> None:
     result["language_coverage"] = {style: {
         "gold_cases": sum(l["split"] == "gold" and l["style"] == style for l in labels),
         "unobservable_style": sum(l["split"] == "gold" and l["style"] == style and not l.get("style_observable", True) for l in labels),
+        "scored_in_style_gates": sum(l["split"] == "gold" and l["style"] == style and l.get("style_observable", True) is not False for l in labels),
     } for style in config["styles"]}
     write_private(directory / "report.json", result)
     write_private(directory / "report.md", markdown_report(result) + "\nLimitations:\n\n" +

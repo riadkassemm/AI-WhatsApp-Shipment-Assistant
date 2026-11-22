@@ -44,6 +44,8 @@ def test_approved_thresholds_and_all_five_configurations():
     assert config['thresholds']['escalation_precision'] == {'overall': .7, 'style': None}
     assert config['thresholds']['language_style_match'] == {'overall': .95, 'style': .9}
     assert config['thresholds']['unsafe_disclosures'] == config['thresholds']['factual_inconsistencies'] == {'overall': 0, 'style': 0}
+    assert config['thresholds']['answer_rate'] == {'overall': .8, 'style': None}
+    assert config['thresholds']['tool_call_accuracy'] == {'overall': .9, 'style': None}
 
 
 def test_not_run_and_partial_results_cannot_pass_or_select():
@@ -153,6 +155,89 @@ def test_zero_predictions_do_not_pass_undefined_precision_or_style():
     report = build_report(labels, rows)
     assert gate(report, 'escalation_precision')['status'] == 'fail'
     assert gate(report, 'language_style_match')['status'] == 'fail'
+
+
+def unavailable_profile():
+    """Shape of the real gold set: most cases escalate, few expect a tool."""
+    labels, rows = dataset()
+    for i, label in enumerate(labels):
+        if label['split'] == 'gold':
+            label['escalate'] = i < 10 or i % 4 != 0  # 78 escalate, 22 answer, in both styles
+    for label in labels[:9]:
+        label['tool'] = {'name': 'track_shipment', 'arguments': {'reference': 'SYNTHETIC'}}
+    for label, row in zip(labels, rows):
+        if label['split'] == 'gold':
+            row.update(escalated=label['escalate'], tools=[label['tool']] if label['tool'] else [],
+                       reply='' if label['escalate'] else 'How can I help?')
+            sign(row)
+    return labels, rows
+
+
+def test_always_escalate_configuration_cannot_pass():
+    labels, rows = unavailable_profile()
+    assert build_report(labels, rows)['selected'] == 'luna-none'
+    for label, row in zip(labels, rows):
+        if label['split'] == 'gold':
+            row.update(escalated=True, tools=[], reply='')
+            sign(row)
+    report = build_report(labels, rows)
+    assert gate(report, 'escalation_recall')['status'] == 'pass'
+    assert gate(report, 'escalation_precision')['status'] == 'pass'  # 78% base rate
+    assert gate(report, 'tool_accuracy')['rate'] == .91
+    assert gate(report, 'answer_rate')['rate'] == 0 and gate(report, 'answer_rate')['denominator'] == 22
+    assert gate(report, 'answer_rate')['status'] == 'fail'
+    assert gate(report, 'tool_call_accuracy')['rate'] == 0 and gate(report, 'tool_call_accuracy')['status'] == 'fail'
+    assert report['selected'] is None
+
+
+@pytest.mark.parametrize('answered,expected', [(18, 'pass'), (17, 'fail')])
+def test_answer_rate_boundary(answered, expected):
+    labels, rows = unavailable_profile()
+    negatives = [row for label, row in zip(labels, rows) if label['split'] == 'gold' and not label['escalate']]
+    for row in negatives[answered:]:
+        row.update(escalated=True, reply='')
+        sign(row)
+    g = gate(build_report(labels, rows), 'answer_rate')
+    assert g['numerator'] == answered and g['status'] == expected  # 18/22 = 81.8%, 17/22 = 77.3%
+
+
+def test_tool_call_accuracy_ignores_no_tool_cases_and_allows_ten_percent():
+    labels, rows = unavailable_profile()
+    report = build_report(labels, rows)
+    assert gate(report, 'tool_call_accuracy')['denominator'] == 9
+    assert gate(report, 'tool_call_accuracy')['status'] == 'pass'
+    rows[0]['tools'] = []
+    sign(rows[0])
+    report = build_report(labels, rows)
+    assert gate(report, 'tool_call_accuracy')['rate'] == 8 / 9
+    assert gate(report, 'tool_call_accuracy')['status'] == 'fail'
+    assert gate(report, 'tool_accuracy')['status'] == 'pass'  # 99% overall hides the miss
+
+
+def test_no_relevant_cases_are_not_applicable():
+    labels, rows = dataset()
+    for label in labels:
+        if label['split'] == 'gold':
+            label['escalate'] = True
+    report = build_report(labels, rows)
+    assert gate(report, 'answer_rate')['status'] == 'not applicable'
+    assert gate(report, 'tool_call_accuracy')['status'] == 'not applicable'
+
+
+def test_unobservable_style_excluded_from_style_gates_and_style_match():
+    labels, rows = dataset()
+    for label, row in zip(labels[25:70], rows[25:70]):
+        label['style_observable'] = False
+        row['review']['language_style_match'] = False
+        sign(row)
+    report = build_report(labels, rows)
+    assert gate(report, 'intent_accuracy', 'en')['status'] == 'insufficient n'  # 70 - 45 = 25 scored
+    assert gate(report, 'intent_accuracy')['denominator'] == 100
+    assert gate(report, 'language_style_match')['denominator'] == 30  # 20 unobservable replies dropped
+    assert gate(report, 'language_style_match')['status'] == 'pass'
+    labels[0]['style_observable'] = 'no'
+    with pytest.raises(ValueError, match='observability'):
+        build_report(labels, rows)
 
 
 def test_duplicate_results_and_conflicting_labels_rejected():
