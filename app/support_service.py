@@ -11,6 +11,7 @@ from decimal import Decimal
 from typing import Any
 
 from app.support_idempotency import send_fingerprint, verify_send_fingerprint
+from app.ai_usage import ai_usage_service
 from app.config import settings
 from app.conversation_store import Conversation, conversation_store
 from app.customer_directory import ContactConflictError, ContactNotFoundError, customer_directory, normalize_phone
@@ -755,6 +756,8 @@ class SupportService:
         if event.get("type") == "customer_message":
             event["chat_notification"] = False
             event["conversation_origin"] = ticket.get("conversation_origin")
+            # The AI answers its own tickets: browsers skip the staff alert.
+            event["handling_mode"] = ticket.get("handling_mode") or "HUMAN"
             event["customer_name"] = ticket.get("customer_name")
             event["customer_phone"] = ticket.get("whatsapp_phone")
             event["current_assignee_id"] = ticket.get("current_assignee_id")
@@ -3076,7 +3079,18 @@ class SupportService:
                 return await self._history_page_for_ticket(ticket, agent)
             return {"previous_ticket_history": [], "previous_ticket_history_has_more": False}
 
-        (identity, ticket, shipment_context), (messages, messages_has_more), events, history = (
+        async def load_ai_usage() -> dict[str, Any] | None:
+            # Estimated AI cost of this ticket (Admins and Super Admins only). A
+            # failure never blocks the conversation from opening.
+            if not agent.is_supervisor or str(ticket.get("conversation_origin") or "CUSTOMER") == "STAFF":
+                return None
+            try:
+                return await ai_usage_service.ticket_usage(agent, ticket_id)
+            except Exception as exc:
+                logger.warning("Ticket AI usage unavailable: ticket_id=%s error_type=%s", ticket_id, type(exc).__name__)
+                return None
+
+        (identity, ticket, shipment_context), (messages, messages_has_more), events, history, ai_usage = (
             await _gather_or_cancel(
                 load_identity_and_shipment(),
                 load_messages(),
@@ -3085,6 +3099,7 @@ class SupportService:
                 # LIMIT so they cannot crowd out assignment/resolution events.
                 support_repository.list_events(ticket_id, limit=150, include_private_activity=False),
                 load_history(),
+                load_ai_usage(),
             )
         )
 
@@ -3094,6 +3109,7 @@ class SupportService:
             "ticket": _safe_ticket_row(ticket),
             "context": _decode_context(ticket),
             "shipment": shipment_context,
+            "ai_usage": ai_usage,
             "messages": safe_messages,
             "messages_has_more": messages_has_more,
             **history,
@@ -3147,6 +3163,13 @@ class SupportService:
                     ticket.get("status") == "NEW"
                     and ticket.get("current_assignee_id") is None
                     and ticket.get("active_key") is not None
+                    and not is_ai_ticket(ticket)
+                ),
+                # Any staff member may take a live AI conversation over.
+                "can_take_over": (
+                    is_ai_ticket(ticket)
+                    and ticket.get("active_key") is not None
+                    and ticket.get("status") in ACTIVE_TICKET_STATUSES
                 ),
                 "can_delete_history": (
                     agent.is_supervisor

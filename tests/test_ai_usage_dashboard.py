@@ -32,6 +32,15 @@ class ReportRepository(FakeRepository):
     async def ticket_cost(self, *filters):
         return {"tickets": 2, "cost_micros": 1_500_000}
 
+    async def ai_ticket_outcomes(self, start_utc, end_utc, line):
+        self.outcome_window = (start_utc, end_utc, line)
+        return self.outcomes
+
+    outcomes = {"tickets": 0}
+
+    async def ticket_usage(self, ticket_id):
+        return {"requests": 4, "cost_micros": 1_234_500, "pending": 1}
+
 
 def test_report_uses_budget_timezone_fills_days_and_separates_offline_cost():
     repository = ReportRepository()
@@ -49,6 +58,26 @@ def test_report_uses_budget_timezone_fills_days_and_separates_offline_cost():
     assert report["summary"]["average_cost_per_ticket_usd"] == .75
     assert report["summary"]["escalation_rate"] is None
     assert report["estimated"] is True
+    # The AI-ticket window is the selected Beirut days, converted to UTC.
+    assert repository.outcome_window == (datetime(2026, 11, 19, 22, tzinfo=timezone.utc),
+                                         datetime(2026, 11, 22, 22, tzinfo=timezone.utc), "line-a")
+
+
+def test_report_rates_cover_ai_tickets_opened_in_the_period():
+    repository = ReportRepository()
+    repository.outcomes = {"tickets": 8, "resolved_by_ai": 5, "handed_to_staff": 2, "still_open": 1}
+    report = asyncio.run(AIUsageService(repository, FakeCounters(), clock=lambda: NOW).usage_report(ADMIN))
+    summary = report["summary"]
+    assert summary["ai_tickets_opened"] == 8 and summary["ai_tickets_open"] == 1
+    assert summary["resolution_rate"] == 62.5 and summary["escalation_rate"] == 25.0
+
+
+def test_ticket_cost_is_for_managers_only():
+    service = AIUsageService(ReportRepository(), FakeCounters(), clock=lambda: NOW)
+    assert asyncio.run(service.ticket_usage(AGENT, 5)) is None
+    assert asyncio.run(service.ticket_usage(ADMIN, 5)) == {
+        "estimated": True, "requests": 4, "pending": 1, "cost_usd": 1.2345,
+    }
 
 
 @pytest.mark.parametrize("start,end", [("invalid", "2026-11-22"), ("2026-11-23", "2026-11-22"),

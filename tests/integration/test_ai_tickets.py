@@ -310,3 +310,60 @@ async def test_reply_from_the_whatsapp_app_stops_the_ai(service_env, monkeypatch
     assert ticket['id'] in await _ids(env.repo, 'active', SUPERVISOR)
     assert ticket['id'] not in await _ids(env.repo, 'unassigned')
     assert env.sent == []
+
+
+@pytest.mark.asyncio
+async def test_usage_report_counts_ai_ticket_outcomes_and_ticket_cost(service_env, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    from app.ai_usage import AIUsageRepository
+    from app.config import settings
+    env = service_env
+    monkeypatch.setattr(settings, 'support_ai_ticket_quiet_resolve_minutes', 120)
+    storage = AIUsageRepository()
+    storage._pool = env.repo._pool
+    resolved = await _open_ai_ticket(env, source='wamid.a')
+    await env.service.send_ai_reply(resolved, body='Done.', source_message_id='wamid.a')
+    await _age_ai_ticket(env.sql, resolved['id'], 121)
+    assert await env.service.auto_resolve_idle_ai_tickets() == 1
+    # A second customer on the same line: escalated. A third: still with the AI.
+    for phone, source in (('15550009002', 'wamid.b'), ('15550009003', 'wamid.c')):
+        conversation = Conversation(phone_number=phone, conversation_key=f'{LINE}:{phone}', business_phone_number_id=LINE)
+        ticket, _ = await env.service.open_ai_ticket(conversation=conversation, source_whatsapp_message_id=source,
+                                                     business_phone_number_id=LINE)
+        if source == 'wamid.b':
+            await env.service.escalate_ai_ticket(ticket, reason_code='CHANGE_REQUIRES_HUMAN')
+    now = datetime.now(timezone.utc)
+    outcomes = await storage.ai_ticket_outcomes(now - timedelta(days=1), now + timedelta(days=1), LINE)
+    assert {key: int(value) for key, value in outcomes.items()} == {
+        'tickets': 3, 'resolved_by_ai': 1, 'handed_to_staff': 1, 'still_open': 1,
+    }
+    # Human tickets and other lines are not AI tickets.
+    assert int((await storage.ai_ticket_outcomes(now - timedelta(days=1), now + timedelta(days=1), 'other'))['tickets']) == 0
+    assert int((await storage.ai_ticket_outcomes(now + timedelta(days=1), now + timedelta(days=2), None))['tickets']) == 0
+
+    await env.sql("""INSERT INTO ai_usage_events (reservation_id, purpose, tier, requested_model, estimate_micros, cost_micros,
+                       cost_basis, outcome, phone_number_id, ticket_id, budget_day, budget_month, created_at)
+                     VALUES ('r1','turn','primary','gpt-example',5000,4200,'actual','success',%s,%s,'2026-11-22','2026-11',
+                             UTC_TIMESTAMP(6))""", (LINE, resolved['id']))
+    usage = await storage.ticket_usage(resolved['id'])
+    assert int(usage['requests']) == 1 and int(usage['cost_micros']) == 4200 and int(usage['pending']) == 0
+    indexes = await env.sql("SHOW INDEX FROM ai_usage_events WHERE Key_name='idx_ai_usage_ticket'")
+    assert indexes
+
+
+@pytest.mark.asyncio
+async def test_ticket_detail_offers_take_over_and_admin_cost(service_env, monkeypatch):
+    import app.support_service as service
+    env = service_env
+    monkeypatch.setattr(service.ai_usage_service.repository, '_pool', env.repo._pool)
+    ticket = await _open_ai_ticket(env)
+    agent_view = await env.service.ticket_detail(ticket['id'], AGENT)
+    assert agent_view['permissions']['can_take_over'] is True
+    assert agent_view['permissions']['can_claim'] is False and agent_view['permissions']['can_reply'] is False
+    assert agent_view['ai_usage'] is None
+    admin_view = await env.service.ticket_detail(ticket['id'], SUPERVISOR)
+    assert admin_view['ai_usage'] == {'estimated': True, 'requests': 0, 'pending': 0, 'cost_usd': 0.0}
+    assert admin_view['ticket']['handling_mode'] == 'AI'
+    await env.service.take_over(ticket['id'], AGENT)
+    taken = await env.service.ticket_detail(ticket['id'], AGENT)
+    assert taken['permissions']['can_take_over'] is False and taken['permissions']['can_reply'] is True

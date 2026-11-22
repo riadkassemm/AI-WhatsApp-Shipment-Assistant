@@ -548,6 +548,15 @@ function createTicketRow(ticket) {
   if (unread) meta.append(createMetaChip(unread + ' unread', 'message'));
   if (ticket.awaiting_staff_reply) meta.append(createMetaChip('Awaiting staff reply', 'clock'));
   meta.append(createMetaChip(createSupportNumberLabel(ticket, {focusable: false}), 'message', 'channel-pill'));
+  if (ticket.handling_mode === 'AI' && ticket.active_key) {
+    const aiChip = createMetaChip('AI answering', 'sparkles');
+    aiChip.title = 'The AI assistant is answering. Take it over to reply yourself.';
+    meta.append(aiChip);
+  } else if (ticket.ai_escalation_reason && !ticket.current_assignee_name && ticket.active_key) {
+    const escalated = createMetaChip('From AI: ' + aiEscalationLabel(ticket.ai_escalation_reason), 'sparkles');
+    escalated.title = 'The AI assistant handed this conversation to staff.';
+    meta.append(escalated);
+  }
   if (ticket.current_assignee_name) meta.append(createMetaChip(ticket.current_assignee_name, 'user'));
   else if (ticket.phone_app_replied && ticket.status === 'NEW') {
     const phoneChip = createMetaChip('Answered in WhatsApp app', 'phone');
@@ -665,7 +674,7 @@ function renderQueueError(message) {
 function renderQueueFilters(options = null) {
   let reset = false;
   const filters = state.queueFilters;
-  const supported = ['unassigned', 'mine', 'chats', 'active', 'history', 'waiting'].includes(state.view);
+  const supported = ['ai', 'unassigned', 'mine', 'chats', 'active', 'history', 'waiting'].includes(state.view);
   $('queueFilters').classList.toggle('hidden', !supported);
   $('queueStaffLabel').classList.toggle('hidden', !['chats', 'active', 'history', 'waiting'].includes(state.view));
   $('queueStatusLabel').classList.toggle('hidden', state.view !== 'chats');
@@ -2226,6 +2235,13 @@ function addEvent(container, event) {
     label = 'Archived: WhatsApp number removed';
   } else if (['TICKET_RESTORED', 'CHAT_RESTORED'].includes(event.event_type)) {
     label = 'Restored: WhatsApp number linked again' + (details.restored_status ? ' (' + formatStatus(details.restored_status) + ')' : '');
+  } else if (event.event_type === 'AI_ESCALATED') {
+    label = 'Handed to staff by AI' + (details.reason_code ? ': ' + aiEscalationLabel(details.reason_code) : '');
+  } else if (event.event_type === 'AI_TAKEN_OVER') {
+    label = 'Taken over from AI';
+  } else if (event.event_type === 'TICKET_RESOLVED' && event.actor_type === 'AI') {
+    const hours = Number(details.quiet_minutes || 0) / 60;
+    label = 'Resolved by AI' + (hours ? ' (no messages for ' + (hours === 1 ? '1 hour' : Number(hours.toFixed(1)) + ' hours') + ')' : '');
   }
   const actor = event.actor_name || event.actor_type || 'System';
   element.textContent = label + ' · ' + actor + ' · ' + fmt(event.created_at);
@@ -2831,7 +2847,7 @@ function contextValue(value) {
   return String(value);
 }
 
-const CONTEXT_CARD_ICONS = {Customer: 'user', Escalation: 'alert', 'AI summary': 'activity', Shipment: 'truck', Ticket: 'tag', Chat: 'message'};
+const CONTEXT_CARD_ICONS = {Customer: 'user', Escalation: 'alert', 'AI summary': 'activity', 'AI assistant': 'sparkles', 'AI cost (estimate)': 'activity', Shipment: 'truck', Ticket: 'tag', Chat: 'message'};
 
 function appendContextCard(container, title, entries, {summary = false} = {}) {
   const card = document.createElement('section');
@@ -2947,12 +2963,29 @@ function renderContext(ticket, context, shipment, identity = null, permissions =
   ]);
 
   if (!isStaffChat(ticket)) {
-    appendContextCard(container, 'Escalation', [
-      ['Reason', ticket.reason],
-      ['Requested action', ticket.requested_action],
-      ['Tracking reference', ticket.tracking_reference, 'code']
-    ]);
+    if (ticket.handling_mode === 'AI' && ticket.active_key) {
+      appendContextCard(container, 'AI assistant', [
+        ['Handling', 'The AI assistant is answering this conversation'],
+        ['Last AI reply', ticket.ai_last_reply_at ? fmt(ticket.ai_last_reply_at) : 'No reply yet']
+      ]);
+    } else {
+      appendContextCard(container, 'Escalation', [
+        ['Handed over by AI', ticket.ai_escalation_reason ? aiEscalationLabel(ticket.ai_escalation_reason) : null],
+        ['Handed over at', ticket.ai_escalated_at ? fmt(ticket.ai_escalated_at) : null],
+        ['Reason', ticket.ai_escalation_reason && ticket.reason === ticket.ai_escalation_reason ? null : ticket.reason],
+        ['Requested action', ticket.requested_action],
+        ['Tracking reference', ticket.tracking_reference, 'code']
+      ]);
+    }
     if (ticket.ai_summary) appendContextCard(container, 'AI summary', [['Summary', ticket.ai_summary]], {summary: true});
+    const aiUsage = state.currentTicketData?.ai_usage;
+    if (aiUsage && Number(aiUsage.requests) > 0) {
+      appendContextCard(container, 'AI cost (estimate)', [
+        ['Estimated cost', '$' + Number(aiUsage.cost_usd || 0).toFixed(4)],
+        ['OpenAI requests', String(aiUsage.requests)],
+        ['Still pending', Number(aiUsage.pending) ? String(aiUsage.pending) : null]
+      ]);
+    }
   }
 
   if (shipment) {
@@ -3004,7 +3037,10 @@ function renderReadOnlyState(data) {
   const ticket = data.ticket;
   const permissions = data.permissions;
   banner.replaceChildren();
-  if (permissions.is_read_only_observer && ticket.active_key) {
+  if (ticket.handling_mode === 'AI' && ticket.active_key && !isStaffChat(ticket)) {
+    banner.append(createIcon('sparkles'), document.createTextNode('The AI assistant is answering this conversation. Take it over to reply yourself; the AI then stops.'));
+    banner.classList.remove('hidden');
+  } else if (permissions.is_read_only_observer && ticket.active_key) {
     banner.append(createIcon('eye'), document.createTextNode('Read only — this conversation is assigned to ' + (ticket.current_assignee_name || 'another staff member') + '. You can follow it live, but only the current assignee can send messages.'));
     banner.classList.remove('hidden');
   } else {
@@ -3054,6 +3090,10 @@ function renderActions(data) {
     return;
   }
 
+  if (permissions.can_take_over) {
+    container.append(actionButton('Take over', () => doAction('/take-over', 'You took over this conversation. The AI has stopped.'), 'primary', 'user-check'));
+  }
+  if (ticket.handling_mode === 'AI' && ticket.active_key) return;  // Staff act only after taking it over.
   if (permissions.can_claim) container.append(actionButton('Claim ticket', () => doAction('/claim', 'Ticket claimed.'), 'primary', 'user-check'));
   if (permissions.can_reopen && ticket.status === 'RESOLVED' && !ticket.active_key) {
     container.append(actionButton('Reopen ticket', reopenTicket, 'primary', 'refresh'));
@@ -3429,7 +3469,7 @@ async function doAction(suffix, successMessage = 'Ticket updated.') {
   if (!succeeded) return;
   // A claimed ticket now belongs to this agent: follow it into My tickets so the
   // queue shows where it went. openTicket's refreshQueue loads the new view.
-  if (suffix === '/claim') setQueueView('mine', {load: false});
+  if (suffix === '/claim' || suffix === '/take-over') setQueueView('mine', {load: false});
   await openTicket(state.ticketId, {silent: true, refreshQueue: true});
 }
 
