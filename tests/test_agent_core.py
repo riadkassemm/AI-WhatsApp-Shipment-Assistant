@@ -71,6 +71,9 @@ def agent(monkeypatch):
     async def knowledge():
         return state["knowledge"]
 
+    async def summary(*args, **kwargs):
+        return None
+
     async def messages(ticket_id, **kwargs):
         reads.append((ticket_id, kwargs))
         return state["rows"]
@@ -80,6 +83,7 @@ def agent(monkeypatch):
     monkeypatch.setattr(core.ai_usage_service, "metered", meter)
     monkeypatch.setattr(core.customer_ai_identity_service, "resolve_or_unknown", identity)
     monkeypatch.setattr(core.ai_knowledge_service, "prompt_text", knowledge)
+    monkeypatch.setattr(core, "ticket_summary", summary)
     monkeypatch.setattr(core.support_repository, "list_ai_context_messages", messages)
 
     async def run(**kwargs):

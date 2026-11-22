@@ -45,8 +45,9 @@ adapter repeats that check. L1 selects only identifiers and shipment status, wit
 no payment fields. Missing or ambiguous records escalate instead of asserting a
 zero balance or that another customer's order does not exist. Results carry the
 replication `as_of` and a fixed safe source label. Common responses are rendered
-in the requested style without another model call. Previous-ticket context remains
-unavailable until the scoped memory implementation is installed.
+in the requested style without another model call. Previous-ticket context uses the support database, requires L2 and an explicit
+customer reference, and is restricted to the same account and business line.
+See the ticket-memory section in `support-platform.md`.
 
 Business mutations are absent from both AI registries. A stale
 `update_shipment_mode` call requests `CHANGE_REQUIRES_HUMAN` without executing a

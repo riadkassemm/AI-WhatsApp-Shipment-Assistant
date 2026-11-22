@@ -137,7 +137,8 @@ pricing in Usage & Costs before any call; there is no fallback price.
 
 The core sends at most 12 messages from the current ticket, masks passwords,
 and excludes internal notes, deleted messages, unsent drafts and later queued
-messages. It does not load Redis history or earlier tickets. Approved knowledge
+messages. It does not load Redis history. Earlier tickets are accessed only by
+the explicit, identity-gated previous-ticket tool. Approved knowledge
 and tool definitions form a stable prompt prefix. One metered structured call
 returns a reply, tool request, or escalation. A failed output/guard/fact check
 allows one review by `AI_AGENT_STEP_UP_MODEL=gpt-6.2-sol` (reasoning `low`);
@@ -160,6 +161,32 @@ The additive `20261122_ai_media_annotations.sql` migration is required before
 an approved rollout; for rollback, leave/set `AI_AGENT_V2_ENABLED=false` in the approved
 release configuration to select the legacy pipeline. This does not enable AI
 globally or on any WhatsApp number.
+
+### Agent ticket memory
+
+The additive `20261123_ai_ticket_memory.sql` migration stores one bounded summary
+and its source fingerprint on the ticket. Tickets with 20 or fewer visible
+messages make no summary call. Longer tickets summarize the prefix before the
+last 12 messages, then update after at least 10 additional prefix messages. Each
+update uses one metered luna call, with no retry; this maintenance call is
+separate from the two-call response ceiling. The tail always retains its latest
+12 messages. Summaries are untrusted conversation context, never factual evidence.
+
+The fingerprint covers edits, deletions and cached media annotations. Changed
+source content invalidates the summary, and a second source check plus a
+compare-and-set write prevents saving a stale generation. A queued turn cannot
+use a summary that includes later messages. Internal notes and unsent drafts
+never enter summary input. Summary requests contain at most 200 masked messages;
+local source scans cap at 2,000. Larger unsupported histories hand off, as does an
+old ticket needing more than 200 uncached messages in a single lazy summary.
+
+`get_previous_ticket_context` requires an explicit customer reference to an older
+issue, L2 verification, and a closed customer ticket with the same phone, account
+ID (including source namespace), and receiving business line. Unknown historical
+account bindings fail closed. Access and identity are checked again after a lazy
+summary call. A new ticket does not load this history automatically. The tool
+returns one cached summary in the requested style, labeled as reported context;
+it never returns raw history. Switching styles can regenerate the cache.
 
 ### Agent media annotations
 
