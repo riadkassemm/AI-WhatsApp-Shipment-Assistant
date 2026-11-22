@@ -102,7 +102,7 @@ async def _finish_inbound_tasks(timeout: float = 180) -> None:
 
 
 async def _sweep_idle_tickets_forever() -> None:
-    """Resolve quiet phone-app tickets in the background (see support_service)."""
+    """Resolve quiet phone-app and AI tickets in the background (see support_service)."""
     interval = max(10, settings.support_idle_ticket_sweep_seconds)
     while True:
         await asyncio.sleep(interval)
@@ -112,11 +112,21 @@ async def _sweep_idle_tickets_forever() -> None:
             raise
         except Exception:
             logger.exception("Idle phone-app ticket sweep failed")
+        try:
+            await support_service.auto_resolve_idle_ai_tickets()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Quiet AI ticket sweep failed")
 
 
 async def _start_idle_ticket_sweeper() -> None:
     global _idle_ticket_sweeper
-    if settings.support_phone_app_idle_resolve_minutes > 0 and _idle_ticket_sweeper is None:
+    enabled = (
+        settings.support_phone_app_idle_resolve_minutes > 0
+        or settings.support_ai_ticket_quiet_resolve_minutes > 0
+    )
+    if enabled and _idle_ticket_sweeper is None:
         _idle_ticket_sweeper = asyncio.create_task(_sweep_idle_tickets_forever())
 
 

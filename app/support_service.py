@@ -43,6 +43,9 @@ from app.quick_reply_locations import normalize_location
 from app.support_delivery import deliver
 from app.support_events import publish_support_event
 from app.support_repository import (
+    AI_ACTOR_NAME,
+    AI_TICKET_ESCALATED_ERROR,
+    AI_TICKET_TAKEN_OVER_ERROR,
     DELIVERY_STATUS_RANK,
     SupportConflictError,
     SupportNotFoundError,
@@ -64,6 +67,20 @@ COPYABLE_DELIVERY_STATUSES = frozenset({"UNCERTAIN", "NOT_DELIVERED"})
 _UNKNOWN_SEND_FINAL_MS = 180_000
 # Proven non-sends are resent automatically only while still this recent.
 _AUTOMATIC_RESEND_WINDOW = timedelta(minutes=30)
+# The reason stored on a ticket the AI is handling; escalation replaces it.
+AI_TICKET_REASON = "AI conversation"
+_AI_ESCALATION_CODE = re.compile(r"[^A-Z0-9_]+")
+
+
+def is_ai_ticket(ticket: dict[str, Any] | None) -> bool:
+    """True when the AI assistant (not a staff member) handles this ticket."""
+    return bool(ticket) and str((ticket or {}).get("handling_mode") or "HUMAN") == "AI"
+
+
+def _ai_escalation_code(value: str | None) -> str:
+    """A stable reason code (A-Z, 0-9, _) such as IDENTITY_VERIFICATION_REQUIRED."""
+    code = _AI_ESCALATION_CODE.sub("_", str(value or "").strip().upper()).strip("_")[:64]
+    return code or "AI_ESCALATED"
 
 
 def _utc_datetime(value: Any) -> datetime | None:
@@ -639,6 +656,58 @@ async def _return_conversation_to_ai(
         )
 
 
+async def _ticket_customer_identity(conversation: Conversation) -> tuple[Any, Any, Any]:
+    """(customer_id, customer_userid, customer_name) for a new ticket."""
+    directory_identity = None
+    try:
+        directory_identity = await customer_directory.resolve(conversation.phone_number)
+    except Exception:
+        logger.exception("Could not resolve support customer identity from phone number")
+
+    customer_id = conversation.verified_customer_id
+    customer_userid = conversation.authenticated_userid
+    customer_name = conversation.authenticated_name
+    if directory_identity is not None:
+        # A dashboard name given to this registered customer wins over the
+        # account name, unless the customer signed in to a different account.
+        renamed_same_customer = (
+            directory_identity.source == "registered_user"
+            and directory_identity.contact_key is not None
+            and (not customer_id or str(customer_id) == str(directory_identity.user_id))
+        )
+        if renamed_same_customer or not customer_name:
+            customer_name = directory_identity.name
+        if directory_identity.source == "registered_user":
+            customer_id = customer_id or directory_identity.user_id
+            customer_userid = customer_userid or directory_identity.userid
+    return customer_id, customer_userid, customer_name
+
+
+async def _set_conversation_mode(ticket: dict[str, Any], mode: str, *, clear_ticket: bool = False) -> None:
+    """Mirror a durable AI-ticket change into the Redis conversation cache.
+
+    The database is authoritative; a failed cache write self-heals on the next
+    inbound message (reconcile_conversation_mode).
+    """
+    try:
+        conversation = await conversation_store.get_or_create(
+            str(ticket["whatsapp_phone"]),
+            conversation_key=_conversation_key_for_ticket(ticket),
+            business_phone_number_id=(
+                str(ticket.get("business_phone_number_id")) if ticket.get("business_phone_number_id") else None
+            ),
+            business_display_phone_number=(
+                str(ticket.get("business_display_phone_number"))
+                if ticket.get("business_display_phone_number") else None
+            ),
+        )
+        conversation.mode = mode
+        conversation.active_ticket_id = None if clear_ticket else str(ticket["id"])
+        await conversation_store.save(conversation)
+    except Exception:
+        logger.exception("AI ticket changed but the conversation cache could not be updated: ticket_id=%s", ticket.get("id"))
+
+
 class SupportService:
     async def can_receive_support_event(
         self,
@@ -782,8 +851,11 @@ class SupportService:
         changed = False
         if active_ticket:
             ticket_id = str(active_ticket["id"])
-            if conversation.mode != "human":
-                conversation.mode = "human"
+            # An AI ticket keeps the conversation in AI mode; only a human-handled
+            # ticket silences the bot.
+            mode = "ai" if is_ai_ticket(active_ticket) else "human"
+            if conversation.mode != mode:
+                conversation.mode = mode
                 changed = True
             if getattr(conversation, "active_ticket_id", None) != ticket_id:
                 conversation.active_ticket_id = ticket_id
@@ -822,28 +894,7 @@ class SupportService:
         requested_action = sanitize_support_text(handoff.requested_action).strip()[:500] or None
         context = _conversation_context(conversation)
 
-        directory_identity = None
-        try:
-            directory_identity = await customer_directory.resolve(conversation.phone_number)
-        except Exception:
-            logger.exception("Could not resolve support customer identity from phone number")
-
-        ticket_customer_id = conversation.verified_customer_id
-        ticket_customer_userid = conversation.authenticated_userid
-        ticket_customer_name = conversation.authenticated_name
-        if directory_identity is not None:
-            # A dashboard name given to this registered customer wins over the
-            # account name, unless the customer signed in to a different account.
-            renamed_same_customer = (
-                directory_identity.source == "registered_user"
-                and directory_identity.contact_key is not None
-                and (not ticket_customer_id or str(ticket_customer_id) == str(directory_identity.user_id))
-            )
-            if renamed_same_customer or not ticket_customer_name:
-                ticket_customer_name = directory_identity.name
-            if directory_identity.source == "registered_user":
-                ticket_customer_id = ticket_customer_id or directory_identity.user_id
-                ticket_customer_userid = ticket_customer_userid or directory_identity.userid
+        ticket_customer_id, ticket_customer_userid, ticket_customer_name = await _ticket_customer_identity(conversation)
 
         receiving_line = business_phone_number_id or conversation.business_phone_number_id
         if receiving_line and get_transport(str(receiving_line)) == "removed":
@@ -870,6 +921,21 @@ class SupportService:
             context_json=json.dumps(context, ensure_ascii=False),
             source_whatsapp_message_id=source_whatsapp_message_id,
         )
+        escalated = False
+        if not created and is_ai_ticket(ticket):
+            # The customer is already in an AI ticket: a handoff escalates that
+            # ticket to human support instead of opening a second one.
+            ticket, escalated = await support_repository.escalate_ai_ticket(
+                int(ticket["id"]),
+                reason_code=_ai_escalation_code(handoff.reason),
+                reason=reason,
+                summary=summary,
+            )
+        if is_ai_ticket(ticket):
+            # The AI ticket ended (for example auto-resolved) between the lookup
+            # and the escalation. Never report it as human-owned; a retry opens a
+            # new human ticket.
+            raise SupportConflictError("The AI conversation changed during the handoff. Retry.")
 
         # Persist the handoff-triggering customer message after the durable
         # ticket exists. A unique WhatsApp ID makes this idempotent on retries.
@@ -905,7 +971,7 @@ class SupportService:
         conversation.active_ticket_id = str(ticket["id"])
         await conversation_store.save(conversation)
 
-        if created:
+        if created or escalated:
             try:
                 await notify_human_agents(
                     customer_id=conversation.phone_number,
@@ -915,14 +981,175 @@ class SupportService:
             except Exception:
                 # Notification is secondary and must never invalidate the ticket.
                 logger.exception("Optional human-handoff notification failed")
+            # An escalated AI ticket is new work in Unassigned, announced the
+            # same way as a newly created ticket.
             await publish_support_event(
                 "ticket_created",
                 ticket_id=int(ticket["id"]),
                 customer_name=ticket.get("customer_name"),
                 customer_phone=ticket.get("whatsapp_phone"),
+                **({"escalated_from_ai": True} if escalated else {}),
             )
 
+        return ticket, created or escalated
+
+    async def open_ai_ticket(
+        self,
+        *,
+        conversation: Conversation,
+        source_whatsapp_message_id: str | None,
+        business_phone_number_id: str | None = None,
+        business_display_phone_number: str | None = None,
+    ) -> tuple[dict[str, Any], bool]:
+        """Open (or return) the customer's active ticket before an AI turn.
+
+        Returns (ticket, created). The returned ticket may be human-handled if a
+        handoff won a race; callers must check is_ai_ticket() before answering.
+        """
+        receiving_line = business_phone_number_id or conversation.business_phone_number_id
+        if receiving_line and get_transport(str(receiving_line)) == "removed":
+            raise SupportConflictError("This WhatsApp number has been removed. A new ticket cannot be opened on it.")
+        customer_id, customer_userid, customer_name = await _ticket_customer_identity(conversation)
+        ticket, created = await support_repository.create_ticket(
+            ticket_reference=_ticket_reference(),
+            phone_number=conversation.phone_number,
+            business_phone_number_id=receiving_line,
+            business_display_phone_number=(
+                business_display_phone_number or conversation.business_display_phone_number
+            ),
+            customer_id=customer_id,
+            customer_userid=customer_userid,
+            customer_name=customer_name,
+            reason=AI_TICKET_REASON,
+            ai_summary="",
+            tracking_reference=None,
+            requested_action=None,
+            current_language=conversation.current_language,
+            communication_style=conversation.communication_style,
+            context_json=json.dumps(_conversation_context(conversation), ensure_ascii=False),
+            source_whatsapp_message_id=source_whatsapp_message_id,
+            handling_mode="AI",
+        )
+        if created:
+            await publish_support_event(
+                "ticket_created",
+                ticket_id=int(ticket["id"]),
+                customer_name=ticket.get("customer_name"),
+                customer_phone=ticket.get("whatsapp_phone"),
+                handling_mode="AI",
+            )
         return ticket, created
+
+    async def escalate_ai_ticket(
+        self,
+        ticket: dict[str, Any],
+        *,
+        reason_code: str,
+        summary: str | None = None,
+    ) -> tuple[dict[str, Any], bool]:
+        """Move an AI ticket to Unassigned with its reason code and AI summary."""
+        code = _ai_escalation_code(reason_code)
+        safe_summary = sanitize_support_text(summary).strip()[:6000] or None
+        escalated, changed = await support_repository.escalate_ai_ticket(
+            int(ticket["id"]),
+            reason_code=code,
+            reason=code,
+            summary=safe_summary,
+        )
+        if changed:
+            await publish_support_event(
+                "ticket_created",
+                ticket_id=int(escalated["id"]),
+                customer_name=escalated.get("customer_name"),
+                customer_phone=escalated.get("whatsapp_phone"),
+                escalated_from_ai=True,
+            )
+            logger.info("AI ticket escalated: ticket_id=%s reason=%s", escalated["id"], code)
+        return escalated, changed
+
+    async def send_ai_reply(
+        self,
+        ticket: dict[str, Any],
+        *,
+        body: str,
+        source_message_id: str | None,
+        awaiting_customer: bool = False,
+    ) -> dict[str, Any]:
+        """Store one AI reply on its ticket and deliver it through the fenced path.
+
+        The caller has already validated the text (customer_reply_guard). The
+        reply is stored only while the ticket is AI-handled and dispatched only if
+        that is still true under the ticket lock at send time. One reply per
+        inbound WhatsApp message: a repeated call returns the stored reply and
+        never sends it again. Raises SupportConflictError when a takeover,
+        escalation or resolution won.
+        """
+        text = str(body or "").strip()
+        if not text:
+            raise SupportValidationError("An AI reply cannot be empty.")
+        if len(text) > 4096:
+            raise SupportValidationError("An AI reply is too long for a WhatsApp text message.")
+        ticket_id = int(ticket["id"])
+        client_message_id = (
+            f"ai-reply:{source_message_id}"[:191] if source_message_id else f"ai-reply:{uuid.uuid4().hex}"
+        )
+        message, created = await support_repository.add_ticket_message(
+            ticket_id=ticket_id,
+            sender_type="AI",
+            sender_name=AI_ACTOR_NAME,
+            direction="OUTBOUND",
+            body=sanitize_support_text(text),
+            client_message_id=client_message_id,
+            message_type="text",
+            send_status="PENDING",
+            require_active=True,
+            require_handling_mode="AI",
+            expected_phone=str(ticket.get("whatsapp_phone") or ""),
+            expected_line_id=str(ticket.get("business_phone_number_id") or ""),
+        )
+        if not created:
+            return message
+        updated = await self._deliver_outbound(ticket, message)
+        status = str((updated or {}).get("send_status") or "")
+        if status == "SENT":
+            await support_repository.record_ai_reply_sent(ticket_id, awaiting_customer=awaiting_customer)
+        elif status == "PENDING" or str((updated or {}).get("error_message") or "") in {
+            AI_TICKET_TAKEN_OVER_ERROR, AI_TICKET_ESCALATED_ERROR,
+        }:
+            # The fence refused the dispatch: someone took over or escalated.
+            raise SupportConflictError("The AI assistant no longer handles this conversation.")
+        return updated or message
+
+    async def take_over(self, ticket_id: int, agent: SupportAgent) -> dict[str, Any]:
+        """A staff member takes an AI conversation over and becomes its owner."""
+        existing = await support_repository.get_ticket(ticket_id)
+        if not existing:
+            raise SupportNotFoundError("Ticket not found.")
+        if str(existing.get("conversation_origin") or "CUSTOMER") == "STAFF":
+            raise SupportValidationError("Staff chats are not support tickets.")
+        ticket, changed = await support_repository.claim_ticket(
+            ticket_id, agent_id=agent.id, agent_name=agent.name, take_over_ai=True,
+        )
+        if changed:
+            await _set_conversation_mode(ticket, "human")
+            await publish_support_event("ticket_updated", ticket_id=ticket_id, handling_mode="HUMAN")
+        greeting_message, greeting_created = None, False
+        greeting = await self._automatic_message_for_staff(
+            staff_id=agent.id, preference_key="custom_greeting_message",
+        )
+        if greeting and changed:
+            greeting_message, greeting_created = await self._send_system_customer_message(
+                ticket=ticket,
+                body=greeting,
+                client_message_id=f"system:claim:{ticket_id}",
+                event_type="CLAIM_GREETING_SENT",
+                require_active=True,
+            )
+        logger.info(
+            "AI ticket taken over: ticket_id=%s staff_id=%s changed=%s greeting_created=%s",
+            ticket_id, agent.id, changed, greeting_created,
+        )
+        return {"ticket": _normalize_row(ticket), "changed": changed, "greeting_message": greeting_message}
 
     async def route_human_inbound(
         self,
@@ -1167,6 +1394,17 @@ class SupportService:
                     message_id=int(message["id"]),
                     message=_serialize_support_messages(int(ticket["id"]), [message])[0],
                 )
+            if created and from_me and is_ai_ticket(ticket) and ticket.get("active_key") is not None:
+                # Someone answered from the WhatsApp app: a person is now talking
+                # to the customer, so the AI stops. The ticket becomes an ordinary
+                # human ticket answered in the app (listed in Active).
+                ticket, escalated = await support_repository.escalate_ai_ticket(
+                    int(ticket["id"]), reason_code="STAFF_REPLIED_IN_WHATSAPP_APP",
+                    reason="STAFF_REPLIED_IN_WHATSAPP_APP", summary=None,
+                )
+                if escalated:
+                    await _set_conversation_mode(ticket, "human")
+                    await publish_support_event("ticket_updated", ticket_id=int(ticket["id"]), handling_mode="HUMAN")
 
         if incoming.message_type == "contacts" and message.get("message_type") == "unsupported":
             message, upgraded = await support_repository.upgrade_shared_contact(
@@ -2335,7 +2573,7 @@ class SupportService:
         return _normalize_row(forwarded) or {}
 
     async def queue_counts(self, agent: SupportAgent) -> dict[str, int]:
-        views = ("unassigned", "mine", "chats", "watching", "active", "waiting", "history")
+        views = ("ai", "unassigned", "mine", "chats", "watching", "active", "waiting", "history")
         if not agent.is_supervisor:
             views = tuple(view for view in views if view != "active")
         results = await asyncio.gather(*(
@@ -4225,6 +4463,32 @@ class SupportService:
                 "Idle phone-app ticket resolved: ticket_id=%s idle_minutes=%s",
                 ticket_id, idle_minutes,
             )
+        return resolved_count
+
+
+    async def auto_resolve_idle_ai_tickets(self) -> int:
+        """Resolve AI tickets that went quiet after the AI's last reply.
+
+        No message is sent to the customer. Returns how many were resolved.
+        """
+        quiet_minutes = settings.support_ai_ticket_quiet_resolve_minutes
+        if quiet_minutes <= 0:
+            return 0
+        resolved_count = 0
+        for ticket_id in await support_repository.list_idle_ai_tickets(quiet_minutes=quiet_minutes):
+            try:
+                resolved = await support_repository.auto_resolve_idle_ai_ticket(
+                    ticket_id, quiet_minutes=quiet_minutes,
+                )
+            except Exception:
+                logger.exception("Quiet AI ticket could not be resolved: ticket_id=%s", ticket_id)
+                continue
+            if not resolved:
+                continue
+            resolved_count += 1
+            await _set_conversation_mode(resolved, "ai", clear_ticket=True)
+            await publish_support_event("ticket_updated", ticket_id=ticket_id, status="RESOLVED")
+            logger.info("Quiet AI ticket resolved: ticket_id=%s quiet_minutes=%s", ticket_id, quiet_minutes)
         return resolved_count
 
 

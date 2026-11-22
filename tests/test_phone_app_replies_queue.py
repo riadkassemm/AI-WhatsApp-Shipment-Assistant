@@ -94,7 +94,7 @@ def _database() -> sqlite3.Connection:
     database.create_function("JSON_UNQUOTE", 1, lambda value: value)
     database.execute(
         "CREATE TABLE support_tickets (id INTEGER, conversation_origin TEXT, status TEXT, active_key TEXT, "
-        "current_assignee_id TEXT, initiated_by_staff_id TEXT)"
+        "current_assignee_id TEXT, initiated_by_staff_id TEXT, handling_mode TEXT)"
     )
     database.execute(
         "CREATE TABLE support_ticket_messages (ticket_id INTEGER, direction TEXT, sender_type TEXT, sender_id TEXT)"
@@ -103,7 +103,7 @@ def _database() -> sqlite3.Connection:
         "CREATE TABLE support_ticket_events (ticket_id INTEGER, event_type TEXT, actor_id TEXT, details_json TEXT)"
     )
     database.executemany(
-        "INSERT INTO support_tickets VALUES (?, ?, ?, ?, ?, NULL)",
+        "INSERT INTO support_tickets VALUES (?, ?, ?, ?, ?, NULL, 'HUMAN')",
         [
             (1, "CUSTOMER", "NEW", "line:1", None),  # nobody has answered yet
             (2, "CUSTOMER", "NEW", "line:2", None),  # answered in the WhatsApp app

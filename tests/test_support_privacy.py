@@ -505,13 +505,13 @@ def test_supervisor_active_queue_excludes_unclaimed_tickets() -> None:
     database = sqlite3.connect(":memory:")
     database.execute(
         "CREATE TABLE support_tickets (id INTEGER, conversation_origin TEXT, status TEXT, "
-        "active_key TEXT, current_assignee_id TEXT)"
+        "active_key TEXT, current_assignee_id TEXT, handling_mode TEXT)"
     )
     database.execute(
         "CREATE TABLE support_ticket_messages (ticket_id INTEGER, direction TEXT, sender_type TEXT, sender_id TEXT)"
     )
     database.executemany(
-        "INSERT INTO support_tickets VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO support_tickets VALUES (?, ?, ?, ?, ?, 'HUMAN')",
         [
             (1, "CUSTOMER", "NEW", "line:1", None),  # unclaimed: belongs to Unassigned
             (2, "CUSTOMER", "ASSIGNED", "line:2", "5"),

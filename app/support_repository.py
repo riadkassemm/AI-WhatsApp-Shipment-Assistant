@@ -36,6 +36,7 @@ _PHONE_APP_REPLY_EXISTS = """EXISTS (
 # either direction for the idle window. Takes the idle minutes twice.
 _IDLE_PHONE_APP_TICKET = f"""
     COALESCE(support_tickets.conversation_origin, 'CUSTOMER') <> 'STAFF'
+    AND support_tickets.handling_mode <> 'AI'
     AND support_tickets.status = 'NEW'
     AND support_tickets.current_assignee_id IS NULL
     AND support_tickets.active_key IS NOT NULL
@@ -48,6 +49,38 @@ _IDLE_PHONE_APP_TICKET = f"""
           AND recent_message.created_at >= UTC_TIMESTAMP(6) - INTERVAL %s MINUTE
     )
 """
+
+
+# An AI-handled ticket that went quiet: the AI's last reply was sent at least the
+# quiet window ago, the AI is not waiting for an answer, the customer has not
+# written since, nothing was exchanged inside the window and no outbound message
+# is still being sent. Takes the quiet minutes twice.
+_IDLE_AI_TICKET = """
+    support_tickets.handling_mode = 'AI'
+    AND support_tickets.status = 'NEW'
+    AND support_tickets.current_assignee_id IS NULL
+    AND support_tickets.active_key IS NOT NULL
+    AND support_tickets.ai_awaiting_customer = 0
+    AND support_tickets.ai_last_reply_at IS NOT NULL
+    AND support_tickets.ai_last_reply_at < UTC_TIMESTAMP(6) - INTERVAL %s MINUTE
+    AND NOT EXISTS (
+        SELECT 1
+        FROM support_ticket_messages quiet_message
+        WHERE quiet_message.ticket_id = support_tickets.id
+          AND (
+                quiet_message.created_at >= UTC_TIMESTAMP(6) - INTERVAL %s MINUTE
+                OR (quiet_message.direction = 'INBOUND'
+                    AND quiet_message.created_at > support_tickets.ai_last_reply_at)
+                OR (quiet_message.direction = 'OUTBOUND'
+                    AND quiet_message.send_status IN ('PENDING', 'DISPATCHING'))
+              )
+    )
+"""
+
+AI_ACTOR_NAME = "AI assistant"
+HANDLING_MODES = ("AI", "HUMAN")
+AI_TICKET_TAKEN_OVER_ERROR = "Not sent: a staff member took over before the AI reply was sent."
+AI_TICKET_ESCALATED_ERROR = "Not sent: the conversation was handed to human support before the AI reply was sent."
 
 
 def auto_resolve_actor_name(idle_minutes: int) -> str:
@@ -294,6 +327,8 @@ _SUPPORT_SCHEMA_MIGRATIONS: tuple[tuple[str, dict[str, set[str]]], ...] = (
     ("migrations/20261122_ai_provider_credentials.sql", {"ai_provider_credentials": {
         "provider", "api_key_encrypted", "key_last4", "key_fingerprint", "version", "status",
         "last_tested_at", "last_error_code", "updated_by_staff_id", "updated_by_staff_name", "updated_at"}}),
+    ("migrations/20261122_support_ai_tickets.sql", {"support_tickets": {
+        "handling_mode", "ai_awaiting_customer", "ai_last_reply_at", "ai_escalation_reason", "ai_escalated_at"}}),
     ("migrations/20261122_ai_usage_budget.sql", {
         "ai_model_prices": {"id", "model_prefix", "input_per_million", "cached_input_per_million",
                             "output_per_million", "audio_per_minute", "batch_factor", "effective_from",
@@ -1210,13 +1245,20 @@ class SupportRepository(DashboardRepositoryMixin, DeliveryRepositoryMixin, ReadS
         communication_style: str | None,
         context_json: str,
         source_whatsapp_message_id: str | None,
+        handling_mode: str = "HUMAN",
     ) -> tuple[dict[str, Any], bool]:
         """Create once, or return an existing equivalent ticket.
+
+        handling_mode='AI' opens an AI ticket (AI Tickets queue). An existing
+        active ticket is returned unchanged whatever its mode, so callers must
+        check the returned ticket's handling_mode.
 
         active_key has a UNIQUE index, so MariaDB is the final concurrency
         guard against two active tickets for the same WhatsApp conversation.
         source_whatsapp_message_id is also unique when present.
         """
+        if handling_mode not in HANDLING_MODES:
+            raise ValueError("Unknown ticket handling mode.")
         if self._pool is None:
             await self.connect()
         assert self._pool is not None
@@ -1261,12 +1303,13 @@ class SupportRepository(DashboardRepositoryMixin, DeliveryRepositoryMixin, ReadS
                             communication_style,
                             context_json,
                             source_whatsapp_message_id,
+                            handling_mode,
                             status,
                             created_at,
                             updated_at,
                             last_activity_at
                         ) VALUES (
-                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                             'NEW', UTC_TIMESTAMP(6), UTC_TIMESTAMP(6), UTC_TIMESTAMP(6)
                         )
                         """,
@@ -1287,6 +1330,7 @@ class SupportRepository(DashboardRepositoryMixin, DeliveryRepositoryMixin, ReadS
                             communication_style,
                             context_json,
                             source_whatsapp_message_id,
+                            handling_mode,
                         ),
                     )
                     ticket_id = cur.lastrowid
@@ -1302,6 +1346,7 @@ class SupportRepository(DashboardRepositoryMixin, DeliveryRepositoryMixin, ReadS
                                 {
                                     "reason": reason,
                                     "source_whatsapp_message_id": source_whatsapp_message_id,
+                                    "handling_mode": handling_mode,
                                 },
                                 ensure_ascii=False,
                             ),
@@ -1684,6 +1729,7 @@ class SupportRepository(DashboardRepositoryMixin, DeliveryRepositoryMixin, ReadS
         current_language: str | None = None,
         communication_style: str | None = None,
         replacement_for_message_id: int | None = None,
+        require_handling_mode: str | None = None,
     ) -> tuple[dict[str, Any], bool]:
         if self._pool is None:
             await self.connect()
@@ -1718,7 +1764,7 @@ class SupportRepository(DashboardRepositoryMixin, DeliveryRepositoryMixin, ReadS
                     await cur.execute(
                         """
                         SELECT id, status, active_key, current_assignee_id,
-                               whatsapp_phone, business_phone_number_id
+                               whatsapp_phone, business_phone_number_id, handling_mode
                         FROM support_tickets
                         WHERE id = %s
                         FOR UPDATE
@@ -1728,6 +1774,25 @@ class SupportRepository(DashboardRepositoryMixin, DeliveryRepositoryMixin, ReadS
                     ticket_state = await cur.fetchone()
                     if not ticket_state:
                         raise SupportNotFoundError("Ticket not found.")
+                    handling_mode = str(ticket_state.get("handling_mode") or "HUMAN")
+                    if require_handling_mode is not None and handling_mode != require_handling_mode:
+                        raise SupportConflictError(
+                            "The AI assistant no longer handles this conversation."
+                            if require_handling_mode == "AI"
+                            else "The AI assistant is handling this conversation."
+                        )
+                    if sender_type == "AI" and direction == "OUTBOUND" and handling_mode != "AI":
+                        # The send-time fence starts here: a reply drafted before a
+                        # takeover or escalation is never stored as pending work.
+                        raise SupportConflictError("The AI assistant no longer handles this conversation.")
+                    if (sender_type == "AGENT" and direction == "OUTBOUND" and sender_id
+                            and handling_mode == "AI"):
+                        # Dashboard staff answer an AI ticket only after taking it
+                        # over. Replies typed in the linked WhatsApp app (no
+                        # dashboard sender) are still recorded as they happened.
+                        raise SupportConflictError(
+                            "The AI assistant is handling this conversation. Take it over before replying."
+                        )
                     if require_active and (
                         ticket_state.get("active_key") is None
                         or ticket_state.get("status") not in ACTIVE_TICKET_STATUSES
@@ -3052,8 +3117,15 @@ class SupportRepository(DashboardRepositoryMixin, DeliveryRepositoryMixin, ReadS
         *,
         agent_id: str,
         agent_name: str,
+        take_over_ai: bool = False,
     ) -> tuple[dict[str, Any], bool]:
-        """Atomically claim a ticket. Repeating the same agent claim is idempotent."""
+        """Atomically claim a ticket. Repeating the same agent claim is idempotent.
+
+        An AI ticket is claimable only with take_over_ai=True. Taking over moves it
+        to human handling under the same row lock that AI reply delivery locks, so
+        an AI reply that has not started dispatching is never sent afterwards.
+        If the AI escalated the ticket meanwhile, a take-over is an ordinary claim.
+        """
         if self._pool is None:
             await self.connect()
         assert self._pool is not None
@@ -3064,7 +3136,7 @@ class SupportRepository(DashboardRepositoryMixin, DeliveryRepositoryMixin, ReadS
                 async with conn.cursor(aiomysql.DictCursor) as cur:
                     await cur.execute(
                         """
-                        SELECT id, status, current_assignee_id, active_key
+                        SELECT id, status, current_assignee_id, active_key, handling_mode
                         FROM support_tickets
                         WHERE id = %s
                         FOR UPDATE
@@ -3075,7 +3147,42 @@ class SupportRepository(DashboardRepositoryMixin, DeliveryRepositoryMixin, ReadS
                     if not state:
                         raise SupportNotFoundError("Ticket not found.")
 
-                    if (
+                    ai_mode = str(state.get("handling_mode") or "HUMAN") == "AI"
+                    if ai_mode and not take_over_ai:
+                        raise SupportConflictError(
+                            "The AI assistant is handling this conversation. Use Take over to answer it yourself."
+                        )
+                    if ai_mode:
+                        if state.get("active_key") is None or state.get("status") not in ACTIVE_TICKET_STATUSES:
+                            raise SupportConflictError("This AI conversation has already ended.")
+                        await self._fence_ai_deliveries(cur, ticket_id, AI_TICKET_TAKEN_OVER_ERROR)
+                        await cur.execute(
+                            """
+                            UPDATE support_tickets
+                            SET handling_mode = 'HUMAN',
+                                ai_awaiting_customer = 0,
+                                current_assignee_id = %s,
+                                current_assignee_name = %s,
+                                status = 'ASSIGNED',
+                                assigned_at = UTC_TIMESTAMP(6),
+                                updated_at = UTC_TIMESTAMP(6),
+                                last_activity_at = UTC_TIMESTAMP(6)
+                            WHERE id = %s
+                            """,
+                            (agent_id, agent_name, ticket_id),
+                        )
+                        for event_type in ("AI_TAKEN_OVER", "TICKET_CLAIMED"):
+                            await cur.execute(
+                                """
+                                INSERT INTO support_ticket_events (
+                                    ticket_id, event_type, actor_type, actor_id, actor_name,
+                                    details_json, created_at
+                                ) VALUES (%s, %s, 'AGENT', %s, %s, '{}', UTC_TIMESTAMP(6))
+                                """,
+                                (ticket_id, event_type, agent_id, agent_name),
+                            )
+                        changed = True
+                    elif (
                         state.get("status") == "NEW"
                         and state.get("current_assignee_id") is None
                         and state.get("active_key") is not None
@@ -3258,12 +3365,16 @@ class SupportRepository(DashboardRepositoryMixin, DeliveryRepositoryMixin, ReadS
             try:
                 async with conn.cursor(aiomysql.DictCursor) as cur:
                     await cur.execute(
-                        "SELECT status, current_assignee_id FROM support_tickets WHERE id = %s FOR UPDATE",
+                        "SELECT status, current_assignee_id, handling_mode FROM support_tickets WHERE id = %s FOR UPDATE",
                         (ticket_id,),
                     )
                     row = await cur.fetchone()
                     if not row:
                         raise SupportNotFoundError("Ticket not found.")
+                    if str(row.get("handling_mode") or "HUMAN") == "AI":
+                        raise SupportConflictError(
+                            "The AI assistant is handling this conversation. Take it over first."
+                        )
                     if expected_assignee_id is not None and str(
                         row.get("current_assignee_id") or ""
                     ) != str(expected_assignee_id):
@@ -3329,12 +3440,16 @@ class SupportRepository(DashboardRepositoryMixin, DeliveryRepositoryMixin, ReadS
             try:
                 async with conn.cursor(aiomysql.DictCursor) as cur:
                     await cur.execute(
-                        "SELECT status, current_assignee_id FROM support_tickets WHERE id = %s FOR UPDATE",
+                        "SELECT status, current_assignee_id, handling_mode, active_key FROM support_tickets WHERE id = %s FOR UPDATE",
                         (ticket_id,),
                     )
                     row = await cur.fetchone()
                     if not row:
                         raise SupportNotFoundError("Ticket not found.")
+                    if str(row.get("handling_mode") or "HUMAN") == "AI" and row.get("active_key") is not None:
+                        raise SupportConflictError(
+                            "The AI assistant is handling this conversation. Take it over first."
+                        )
                     if expected_assignee_id is not None and str(
                         row.get("current_assignee_id") or ""
                     ) != str(expected_assignee_id):
@@ -3459,7 +3574,8 @@ class SupportRepository(DashboardRepositoryMixin, DeliveryRepositoryMixin, ReadS
                     previous = details.get('previous_status') if isinstance(details, dict) else None
                     restored_status = previous if previous in ACTIVE_TICKET_STATUSES and previous != 'NEW' else 'ASSIGNED'
                     await cur.execute("""
-                        UPDATE support_tickets SET status=%s, active_key=%s,
+                        UPDATE support_tickets SET status=%s, active_key=%s, handling_mode='HUMAN',
+                            ai_awaiting_customer=0,
                             current_assignee_id=%s, current_assignee_name=%s,
                             assigned_at=IF(%s,UTC_TIMESTAMP(6),assigned_at),
                             updated_at=UTC_TIMESTAMP(6), last_activity_at=UTC_TIMESTAMP(6)
@@ -3562,6 +3678,179 @@ class SupportRepository(DashboardRepositoryMixin, DeliveryRepositoryMixin, ReadS
                 raise
         return await self.get_ticket(ticket_id)
 
+    @staticmethod
+    async def _fence_ai_deliveries(cur: Any, ticket_id: int, error_message: str) -> None:
+        """Under the ticket lock, cancel AI replies that have not started dispatching.
+
+        A replaced token makes a suspended delivery worker fail begin_delivery.
+        A reply already DISPATCHING may have reached WhatsApp and is left to finish.
+        """
+        await cur.execute(
+            """
+            UPDATE support_ticket_messages
+            SET send_status = 'FAILED', delivery_retry_safe = 0,
+                delivery_token = REPLACE(UUID(), '-', ''),
+                error_message = %s, updated_at = UTC_TIMESTAMP(6)
+            WHERE ticket_id = %s AND sender_type = 'AI' AND direction = 'OUTBOUND'
+              AND send_status = 'PENDING'
+            """,
+            (error_message, ticket_id),
+        )
+
+    async def escalate_ai_ticket(
+        self,
+        ticket_id: int,
+        *,
+        reason_code: str,
+        reason: str,
+        summary: str | None,
+    ) -> tuple[dict[str, Any], bool]:
+        """Hand an active AI ticket to human support (Unassigned).
+
+        Returns (ticket, changed). A ticket that is already human-handled or has
+        ended is returned unchanged, so retries and races are harmless.
+        """
+        if self._pool is None:
+            await self.connect()
+        assert self._pool is not None
+        changed = False
+        async with self._pool.acquire() as conn:
+            await conn.begin()
+            try:
+                async with conn.cursor(aiomysql.DictCursor) as cur:
+                    await cur.execute(
+                        "SELECT id, status, active_key, handling_mode FROM support_tickets WHERE id = %s FOR UPDATE",
+                        (ticket_id,),
+                    )
+                    state = await cur.fetchone()
+                    if not state:
+                        raise SupportNotFoundError("Ticket not found.")
+                    if (
+                        str(state.get("handling_mode") or "HUMAN") == "AI"
+                        and state.get("active_key") is not None
+                        and state.get("status") in ACTIVE_TICKET_STATUSES
+                    ):
+                        await self._fence_ai_deliveries(cur, ticket_id, AI_TICKET_ESCALATED_ERROR)
+                        await cur.execute(
+                            """
+                            UPDATE support_tickets
+                            SET handling_mode = 'HUMAN',
+                                ai_awaiting_customer = 0,
+                                ai_escalation_reason = %s,
+                                ai_escalated_at = UTC_TIMESTAMP(6),
+                                reason = %s,
+                                ai_summary = COALESCE(%s, ai_summary),
+                                updated_at = UTC_TIMESTAMP(6),
+                                last_activity_at = UTC_TIMESTAMP(6)
+                            WHERE id = %s
+                            """,
+                            (reason_code[:64], reason, summary, ticket_id),
+                        )
+                        await cur.execute(
+                            """
+                            INSERT INTO support_ticket_events (
+                                ticket_id, event_type, actor_type, actor_name, details_json, created_at
+                            ) VALUES (%s, 'AI_ESCALATED', 'AI', %s, %s, UTC_TIMESTAMP(6))
+                            """,
+                            (ticket_id, AI_ACTOR_NAME, json.dumps({"reason_code": reason_code[:64]})),
+                        )
+                        changed = True
+                await conn.commit()
+            except Exception:
+                await conn.rollback()
+                raise
+        ticket = await self.get_ticket(ticket_id)
+        if not ticket:
+            raise SupportNotFoundError("Ticket not found after escalation.")
+        return ticket, changed
+
+    async def record_ai_reply_sent(self, ticket_id: int, *, awaiting_customer: bool) -> bool:
+        """Start the quiet-time clock after an AI reply reached WhatsApp."""
+        if self._pool is None:
+            await self.connect()
+        assert self._pool is not None
+        async with self._pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """
+                    UPDATE support_tickets
+                    SET ai_last_reply_at = UTC_TIMESTAMP(6),
+                        ai_awaiting_customer = %s,
+                        updated_at = UTC_TIMESTAMP(6)
+                    WHERE id = %s AND handling_mode = 'AI' AND active_key IS NOT NULL
+                    """,
+                    (1 if awaiting_customer else 0, ticket_id),
+                )
+                changed = cur.rowcount == 1
+            await conn.commit()
+        return changed
+
+    async def list_idle_ai_tickets(self, *, quiet_minutes: int, limit: int = 50) -> list[int]:
+        """IDs of AI tickets that have been quiet since the AI's last reply."""
+        if self._pool is None:
+            await self.connect()
+        assert self._pool is not None
+        async with self._pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(
+                    f"SELECT id FROM support_tickets WHERE {_IDLE_AI_TICKET} ORDER BY id LIMIT %s",
+                    (quiet_minutes, quiet_minutes, limit),
+                )
+                return [int(row["id"]) for row in await cur.fetchall()]
+
+    async def auto_resolve_idle_ai_ticket(
+        self, ticket_id: int, *, quiet_minutes: int,
+    ) -> dict[str, Any] | None:
+        """Resolve one quiet AI ticket, rechecking every condition under the row lock.
+
+        Returns the resolved ticket, or None when it no longer qualifies (taken
+        over, escalated, a new message, or the AI is waiting for an answer).
+        """
+        if self._pool is None:
+            await self.connect()
+        assert self._pool is not None
+        details = json.dumps({
+            "reason": "ai_quiet", "quiet_minutes": quiet_minutes, "previous_status": "NEW",
+        })
+        async with self._pool.acquire() as conn:
+            await conn.begin()
+            try:
+                async with conn.cursor(aiomysql.DictCursor) as cur:
+                    await cur.execute(
+                        f"SELECT id FROM support_tickets WHERE id = %s AND {_IDLE_AI_TICKET} FOR UPDATE",
+                        (ticket_id, quiet_minutes, quiet_minutes),
+                    )
+                    if not await cur.fetchone():
+                        await conn.rollback()
+                        return None
+                    await cur.execute(
+                        """
+                        UPDATE support_tickets
+                        SET status = 'RESOLVED',
+                            active_key = NULL,
+                            ai_awaiting_customer = 0,
+                            resolved_at = UTC_TIMESTAMP(6),
+                            resolved_by_staff_id = NULL,
+                            updated_at = UTC_TIMESTAMP(6),
+                            last_activity_at = UTC_TIMESTAMP(6)
+                        WHERE id = %s
+                        """,
+                        (ticket_id,),
+                    )
+                    await cur.execute(
+                        """
+                        INSERT INTO support_ticket_events (
+                            ticket_id, event_type, actor_type, actor_name, details_json, created_at
+                        ) VALUES (%s, 'TICKET_RESOLVED', 'AI', %s, %s, UTC_TIMESTAMP(6))
+                        """,
+                        (ticket_id, AI_ACTOR_NAME, details),
+                    )
+                await conn.commit()
+            except Exception:
+                await conn.rollback()
+                raise
+        return await self.get_ticket(ticket_id)
+
     async def list_tickets(
         self,
         *,
@@ -3631,10 +3920,25 @@ class SupportRepository(DashboardRepositoryMixin, DeliveryRepositoryMixin, ReadS
             )
         """
 
-        regular_origin = "COALESCE(conversation_origin, 'CUSTOMER') <> 'STAFF'"
+        # AI-handled tickets are listed only in the AI Tickets queue (and in
+        # History once resolved). Human queues exclude them.
+        regular_origin = (
+            "COALESCE(conversation_origin, 'CUSTOMER') <> 'STAFF' AND support_tickets.handling_mode <> 'AI'"
+            if view != "history"
+            else "COALESCE(conversation_origin, 'CUSTOMER') <> 'STAFF'"
+        )
         staff_origin = "conversation_origin = 'STAFF'"
 
-        if view == "unassigned":
+        if view == "ai":
+            placeholders = ",".join(["%s"] * len(ACTIVE_TICKET_STATUSES))
+            # Every staff member can see live AI conversations, so anyone can take
+            # one over (the same visibility as unclaimed tickets).
+            where = (
+                "COALESCE(conversation_origin, 'CUSTOMER') <> 'STAFF' AND support_tickets.handling_mode = 'AI'"
+                f" AND status IN ({placeholders}) AND active_key IS NOT NULL"
+            )
+            params.extend(ACTIVE_TICKET_STATUSES)
+        elif view == "unassigned":
             # A reply sent from the linked WhatsApp app means someone is already
             # talking to the customer, so the ticket leaves Unassigned for Active.
             where = (
@@ -3725,6 +4029,9 @@ class SupportRepository(DashboardRepositoryMixin, DeliveryRepositoryMixin, ReadS
                         LEFT(ai_summary, 500) AS ai_summary,
                         tracking_reference, requested_action, current_language,
                         communication_style, status, support_tickets.active_key,
+                        support_tickets.handling_mode, support_tickets.ai_awaiting_customer,
+                        support_tickets.ai_last_reply_at, support_tickets.ai_escalation_reason,
+                        support_tickets.ai_escalated_at,
                         current_assignee_id, current_assignee_name,
                         support_tickets.created_at, support_tickets.updated_at,
                         last_activity_at, assigned_at, resolved_at, closed_at,
