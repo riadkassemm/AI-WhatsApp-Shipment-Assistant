@@ -11,6 +11,19 @@ Reason = Literal[
     "BUSINESS_DATA_UNAVAILABLE", "BUSINESS_DATA_STALE", "KNOWLEDGE_UNAVAILABLE",
     "CUSTOMER_REQUESTED_HUMAN", "AI_UNCERTAIN", "AI_TOOL_UNAVAILABLE",
     "AI_LOW_CONFIDENCE", "MULTIPLE_ISSUES", "COMPLAINT_DISPUTE",
+    "AI_MEDIA_UNAVAILABLE",
+]
+
+Intent = Literal[
+    "tracking_status", "shipping_rates", "account_access", "address_validation",
+    "general_service_information", "account_registration", "branch_hours", "warehouse_address",
+    "route_availability", "app_tracking_visibility", "local_delivery", "delivery_time",
+    "parcel_pickup", "branch_contact", "payment_confirmation", "payment_instructions",
+    "restricted_goods", "billing_weight_dispute", "delivery_mode_change", "supplier_payment",
+    "complaint_followup", "shipping_mode_change", "customs_clearance", "split_shipments",
+    "wallet_balance", "app_usage", "branch_location", "missing_or_wrong_items",
+    "return_cancellation", "refund_request", "lost_parcel", "greeting", "unclear",
+    "media_unavailable", "change_request", "human_request", "previous_ticket", "conversation_summary",
 ]
 
 
@@ -39,6 +52,7 @@ class Escalate(StrictModel):
 
 class Decision(StrictModel):
     # A root object with a nested anyOf is supported by strict Structured Outputs.
+    intent: Intent
     action: Union[Reply, ToolCall, Escalate]
 
 

@@ -205,7 +205,7 @@ def v2_turns(turns, monkeypatch):
         if action['kind'] == 'reply':
             action['language'] = tail['language_style']
         return SimpleNamespace(status='completed', output=[{
-            'type': 'message', 'content': [{'type': 'output_text', 'text': json.dumps({'action': action})}],
+            'type': 'message', 'content': [{'type': 'output_text', 'text': json.dumps({'intent': 'greeting', 'action': action})}],
         }])
 
     monkeypatch.setattr(main.settings, 'ai_agent_v2_enabled', True)
@@ -330,7 +330,7 @@ async def test_v2_image_reaches_same_call_and_notes_are_visible(v2_turns, monkey
         async def image_call(prefix, tail, **kwargs):
             env.prompts.append(tail)
             return SimpleNamespace(status='completed', output=[{'type': 'message', 'content': [{
-                'type': 'output_text', 'text': json.dumps({'action': env.action, 'media_notes': 'A sealed parcel.'}),
+                'type': 'output_text', 'text': json.dumps({'intent': 'greeting', 'action': env.action, 'media_notes': 'A sealed parcel.'}),
             }]}])
 
         monkeypatch.setattr(service.support_service, 'capture_inbound_media', capture)
