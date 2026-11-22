@@ -12,6 +12,7 @@ from typing import Any
 
 from app.support_idempotency import send_fingerprint, verify_send_fingerprint
 from app.ai_usage import ai_usage_service
+from app.customer_ai_identity import AIIdentityError, AIIdentityUnavailable, customer_ai_identity_service
 from app.config import settings
 from app.conversation_store import Conversation, conversation_store
 from app.customer_directory import ContactConflictError, ContactNotFoundError, customer_directory, normalize_phone
@@ -1122,6 +1123,73 @@ class SupportService:
             # The fence refused the dispatch: someone took over or escalated.
             raise SupportConflictError("The AI assistant no longer handles this conversation.")
         return updated or message
+
+    async def _ai_identity_ticket(self, ticket_id: int, agent: SupportAgent) -> dict[str, Any]:
+        ticket = await support_repository.get_ticket(ticket_id)
+        if not ticket or not await _can_view_ticket(ticket, agent):
+            raise SupportNotFoundError("Ticket not found.")
+        return ticket
+
+    async def ai_identity(self, ticket_id: int, agent: SupportAgent) -> dict[str, Any]:
+        """The customer's AI identity level (L0/L1/L2) for this conversation."""
+        ticket = await self._ai_identity_ticket(ticket_id, agent)
+        try:
+            identity = await customer_ai_identity_service.resolve(str(ticket.get("whatsapp_phone") or ""))
+        except AIIdentityUnavailable:
+            return {"level": "L0", "reason": "LOOKUP_UNAVAILABLE", "can_verify": False, "can_revoke": False,
+                    "verification_days": settings.ai_identity_verification_days}
+        payload = identity.to_dict()
+        payload.update({
+            "can_verify": _can_operate(ticket, agent) and ticket.get("active_key") is not None,
+            "can_revoke": _can_operate(ticket, agent) and identity.level == "L2",
+            "verification_days": settings.ai_identity_verification_days,
+        })
+        return payload
+
+    async def verify_ai_identity(
+        self, ticket_id: int, agent: SupportAgent, *, userid: str, confirmed: bool,
+    ) -> dict[str, Any]:
+        """Staff confirm who the customer is, so the AI may answer wallet and payment questions (L2)."""
+        ticket = await self._ai_identity_ticket(ticket_id, agent)
+        if not _can_operate(ticket, agent):
+            raise SupportForbiddenError("Only the assigned staff member or an Admin can verify this customer.")
+        if ticket.get("active_key") is None:
+            raise SupportConflictError("Verify customers only in an open conversation.")
+        if not confirmed:
+            raise SupportValidationError("Confirm that you verified the customer's identity.")
+        try:
+            identity = await customer_ai_identity_service.verify(
+                phone=str(ticket.get("whatsapp_phone") or ""), userid=userid,
+                staff_id=int(agent.id), staff_name=agent.name, ticket_id=ticket_id,
+            )
+        except AIIdentityError as exc:
+            raise SupportValidationError(str(exc)) from exc
+        except AIIdentityUnavailable as exc:
+            raise SupportSendError("Customer accounts are unavailable. Try again shortly.") from exc
+        await support_repository.add_event(
+            ticket_id, event_type="AI_IDENTITY_VERIFIED", actor_type="AGENT", actor_id=agent.id,
+            actor_name=agent.name, details={"customer_userid": identity.customer_userid,
+                                            "valid_days": settings.ai_identity_verification_days},
+        )
+        await publish_support_event("ticket_updated", ticket_id=ticket_id)
+        logger.info("Customer verified for AI: ticket_id=%s staff_id=%s", ticket_id, agent.id)
+        return await self.ai_identity(ticket_id, agent)
+
+    async def revoke_ai_identity(self, ticket_id: int, agent: SupportAgent) -> dict[str, Any]:
+        ticket = await self._ai_identity_ticket(ticket_id, agent)
+        if not _can_operate(ticket, agent):
+            raise SupportForbiddenError("Only the assigned staff member or an Admin can remove this verification.")
+        revoked = await customer_ai_identity_service.revoke(
+            phone=str(ticket.get("whatsapp_phone") or ""), staff_id=int(agent.id), staff_name=agent.name,
+            ticket_id=ticket_id,
+        )
+        if revoked:
+            await support_repository.add_event(
+                ticket_id, event_type="AI_IDENTITY_REVOKED", actor_type="AGENT", actor_id=agent.id,
+                actor_name=agent.name,
+            )
+            await publish_support_event("ticket_updated", ticket_id=ticket_id)
+        return await self.ai_identity(ticket_id, agent)
 
     async def take_over(self, ticket_id: int, agent: SupportAgent) -> dict[str, Any]:
         """A staff member takes an AI conversation over and becomes its owner."""

@@ -20,7 +20,7 @@ def add_linked_device_schema(columns):
     columns['ai_provider_credentials'] = {'provider', 'api_key_encrypted', 'key_last4', 'key_fingerprint', 'version', 'status',
         'last_tested_at', 'last_error_code', 'updated_by_staff_id', 'updated_by_staff_name', 'updated_at'}
     for path, required_tables in _SUPPORT_SCHEMA_MIGRATIONS:
-        if "20261122_ai_usage_budget" in path or "20261122_support_ai_tickets" in path:
+        if "20261122_ai_usage_budget" in path or "20261122_support_ai_tickets" in path or "20261122_customer_ai_identity" in path:
             for table, required in required_tables.items():
                 columns.setdefault(table, set()).update(required)
     columns["support_delivery_receipts"] = {"provider_message_id", "line_id", "status", "checked_at", "failure_code"}

@@ -336,6 +336,12 @@ _SUPPORT_SCHEMA_MIGRATIONS: tuple[tuple[str, dict[str, set[str]]], ...] = (
         "last_tested_at", "last_error_code", "updated_by_staff_id", "updated_by_staff_name", "updated_at"}}),
     ("migrations/20261122_support_ai_tickets.sql", {"support_tickets": {
         "handling_mode", "ai_awaiting_customer", "ai_last_reply_at", "ai_escalation_reason", "ai_escalated_at"}}),
+    ("migrations/20261122_customer_ai_identity.sql", {
+        "customer_ai_verifications": {"whatsapp_phone", "active_key", "customer_id", "customer_userid", "bound_mobile",
+                                      "verified_by_staff_id", "verified_at", "expires_at", "revoked_at", "revoked_reason"},
+        "customer_ai_verification_audit": {"verification_id", "whatsapp_phone", "action", "reason", "actor_type",
+                                           "actor_staff_id", "created_at"},
+    }),
     ("migrations/20261122_ai_usage_budget.sql", {
         "ai_model_prices": {"id", "model_prefix", "input_per_million", "cached_input_per_million",
                             "output_per_million", "audio_per_minute", "batch_factor", "effective_from",

@@ -457,6 +457,22 @@ Every conversation the AI assistant handles is a support ticket (migration `2026
 - **Escalation** moves the ticket to `HUMAN` in Unassigned with `ai_escalation_reason` (a code such as `IDENTITY_VERIFICATION_REQUIRED`) and the AI summary, and records `AI_ESCALATED` (actor `AI`). A human handoff for a customer who already has an AI ticket escalates that ticket instead of opening a second one. A reply typed in the linked WhatsApp app also stops the AI (`STAFF_REPLIED_IN_WHATSAPP_APP`).
 - **Auto-resolve.** An AI ticket is resolved, without sending the customer anything, after `SUPPORT_AI_TICKET_QUIET_RESOLVE_MINUTES` (default 120, `0` disables) with no message since the AI's last reply. When the AI asked the customer something and is waiting for the answer, the window is `SUPPORT_AI_TICKET_UNANSWERED_RESOLVE_MINUTES` instead (default 1440 = 24 hours, `0` keeps such tickets open). Nothing may still be sending. The event `TICKET_RESOLVED` has actor type `AI`, so it never counts as agent work. The background check shares `SUPPORT_IDLE_TICKET_SWEEP_SECONDS` with the phone-app rule.
 
+### AI identity levels
+
+What the AI may disclose depends on how sure the platform is about who is writing (`app/customer_ai_identity.py`, migration `20261122_customer_ai_identity.sql`). There is no OTP.
+
+| Level | How it is reached | The AI may share |
+|---|---|---|
+| L0 unknown | No account, several accounts, an inactive account, or only a partial (suffix) match | Public information only (rates, policies) |
+| L1 phone-matched | The WhatsApp number exactly matches the mobile of exactly one active account, and no other account uses it. Computed live. | Orders, tracking and shipments of that account |
+| L2 staff-verified | A staff member confirmed the customer's identity with the usual process and clicked **Verify customer for AI** | Also wallet, payments and account details |
+
+- **Verification** is available to the ticket's assignee and to Admins/Super Admins, in an open conversation (`POST /api/support/tickets/{id}/ai-identity/verify` with `userid` and `confirmed: true`). It is refused when the User ID is unknown or inactive, or the WhatsApp number belongs to another account. It lasts `AI_IDENTITY_VERIFICATION_DAYS` (30). Verifying again replaces the previous verification; **Remove verification** ends it (`…/ai-identity/revoke`).
+- **Automatic end:** a verification ends when it expires, the account's mobile changes, the account becomes inactive or disappears, or another account starts using the number.
+- **Audit:** every verification and every end is recorded in `customer_ai_verification_audit` (who, when, why) and on the ticket timeline.
+- **Fail closed:** if customer accounts cannot be read, the customer counts as L0.
+- The AI never asks for a password and never accepts a claimed ID or order number as proof of ownership. The agent (Step 5) checks `AIIdentity.allows(...)` before every data tool.
+
 ## Database setup
 
 ### Core support tables

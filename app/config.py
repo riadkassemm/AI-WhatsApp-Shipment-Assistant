@@ -161,6 +161,8 @@ class Settings(BaseSettings):
     # When the AI is waiting for the customer's answer, the ticket closes after
     # this many minutes without one instead (0 = such tickets stay open).
     support_ai_ticket_unanswered_resolve_minutes: int = 1440
+    # A staff "Verify customer for AI" (identity level L2) lasts this many days.
+    ai_identity_verification_days: int = 30
     support_cookie_name: str = "support_session"
     support_csrf_cookie_name: str = "support_csrf"
     support_cookie_secure: bool = True

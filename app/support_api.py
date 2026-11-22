@@ -105,6 +105,12 @@ class StatusUpdateRequest(BaseModel):
     status: str
 
 
+class AIIdentityVerifyRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    userid: str = Field(min_length=1, max_length=100)
+    confirmed: bool
+
+
 class ReopenTicketRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     # Required, nullable for legacy records. Guards against replaying an old
@@ -1517,6 +1523,43 @@ async def claim_ticket(
 ) -> dict:
     try:
         return await support_service.claim(ticket_id, agent)
+    except Exception as exc:
+        raise _translate_error(exc) from exc
+
+
+@router.get("/tickets/{ticket_id}/ai-identity")
+async def get_ai_identity(
+    ticket_id: int,
+    agent: SupportAgent = Depends(get_current_agent),
+) -> dict:
+    """The customer's AI identity level: L0 unknown, L1 phone-matched, L2 staff-verified."""
+    try:
+        return await support_service.ai_identity(ticket_id, agent)
+    except Exception as exc:
+        raise _translate_error(exc) from exc
+
+
+@router.post("/tickets/{ticket_id}/ai-identity/verify")
+async def verify_ai_identity(
+    ticket_id: int,
+    request: AIIdentityVerifyRequest,
+    agent: SupportAgent = Depends(require_support_csrf),
+) -> dict:
+    try:
+        return await support_service.verify_ai_identity(
+            ticket_id, agent, userid=request.userid, confirmed=request.confirmed,
+        )
+    except Exception as exc:
+        raise _translate_error(exc) from exc
+
+
+@router.post("/tickets/{ticket_id}/ai-identity/revoke")
+async def revoke_ai_identity(
+    ticket_id: int,
+    agent: SupportAgent = Depends(require_support_csrf),
+) -> dict:
+    try:
+        return await support_service.revoke_ai_identity(ticket_id, agent)
     except Exception as exc:
         raise _translate_error(exc) from exc
 

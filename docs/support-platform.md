@@ -115,6 +115,13 @@ from AI** and **Resolved by AI (no messages for 2 hours)**, or 24 hours when the
 AI had asked the customer something that was never answered. Resolutions by the
 AI never count in agent statistics.
 
+The **AI identity** card shows what the AI may share with this WhatsApp number:
+L0 (public information only), L1 (orders, tracking and shipments, from an exact
+phone match) or L2 (also wallet, payment and account details). The assignee or an
+Admin can click **Verify customer for AI** after confirming the customer's
+identity with the usual process; it asks for the customer's User ID and lasts 30
+days. **Remove verification** ends it early. Both appear on the timeline.
+
 Migrations: `20261122_support_ai_tickets.sql` (required before the API restart)
 and `20261122_ai_usage_ticket_index.sql` (index for per-ticket cost).
 

@@ -1046,6 +1046,7 @@ body.column-resizing * { cursor: col-resize !important; }
 .context-card h3 { display: flex; align-items: center; gap: 7px; margin: 0; padding: 9px 12px; border-bottom: 1px solid var(--border); background: var(--bg-subtle); color: var(--text-strong); font-size: var(--text-sm); font-weight: 650; letter-spacing: 0; text-transform: none; }
 .context-card h3 .icon { width: 15px; height: 15px; color: var(--text-subtle); }
 .context-card.ai { border-color: var(--bubble-ai-border); }
+.context-card-actions { display: flex; flex-wrap: wrap; gap: 8px; padding: 0 12px 12px; }
 .context-card.ai h3 { background: var(--ai-soft); color: var(--ai); border-bottom-color: var(--bubble-ai-border); }
 .context-card.ai h3 .icon { color: var(--ai); }
 .context-list { margin: 0; padding: 2px 12px; }
