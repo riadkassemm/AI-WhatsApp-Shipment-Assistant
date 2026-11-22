@@ -473,6 +473,13 @@ What the AI may disclose depends on how sure the platform is about who is writin
 - **Fail closed:** if customer accounts cannot be read, the customer counts as L0.
 - The AI never asks for a password and never accepts a claimed ID or order number as proof of ownership. The agent (Step 5) checks `AIIdentity.allows(...)` before every data tool.
 
+### Knowledge building from historical tickets (offline)
+
+Historical tickets are never sent in live AI requests. The offline tools live in `app/knowledge/` and `scripts/`:
+
+- **`app/knowledge/deidentify.py`** replaces personal data with stable per-ticket placeholders before any historical text is used: secrets → `<SECRET>`, then `<EMAIL_n>`, `<URL_n>`, `<AMOUNT_n>`, `<NAME_n>` (names supplied by the caller), `<PHONE_n>` and `<ID_n>`. Media placeholders such as `[image]` are kept, and so are Arabizi words with digits. The code is deterministic; no model is called.
+- **`scripts/profile_support_tickets.py`** produces a counts-only profile: volumes, statuses, languages and styles, reason codes, messages per ticket, media share, resolution and first-reply times. It runs in a `READ ONLY` transaction. Every row is `(section, key, count)`, and free-text reasons are reported only as `(free text)`. Run it with `--run` (the database in `.env`), or with `--sql` piped to `mysql --batch` and then `--parse`. Keep the output outside this public repository.
+
 ## Database setup
 
 ### Core support tables
