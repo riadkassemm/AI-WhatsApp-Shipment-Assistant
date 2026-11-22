@@ -66,6 +66,8 @@ def name_pattern(names) -> re.Pattern | None:
     if not cleaned:
         return None
     return re.compile(r"(?<!\w)(?:" + "|".join(re.escape(n) for n in cleaned) + r")(?!\w)", re.IGNORECASE)
+# Last resort: any run of 7+ digits, even glued to letters ("رقم70123456", "tel70123456").
+_ANY_LONG_DIGITS = re.compile(r"\d{7,}")
 _MEDIA = re.compile(r"^\[[^\]]{1,60}\]$")
 
 
@@ -105,6 +107,7 @@ class Deidentifier:
         body = _IDENTIFIER.sub(lambda m: self._placeholder("ID", m.group(0)), body)
         body = _GROUPED_NUMBER.sub(lambda m: self._placeholder("AMOUNT", m.group(0)), body)
         body = _NUMBER.sub(lambda m: self._placeholder("NUMBER", m.group(0)), body)
+        body = _ANY_LONG_DIGITS.sub(lambda m: self._placeholder("PHONE", m.group(0)), body)
         return body
 
 

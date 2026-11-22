@@ -64,3 +64,9 @@ def test_known_names_pattern_masks_many_names_at_once() -> None:
     pattern = name_pattern(["Layla Haddad", "Omar", "x"])
     text = Deidentifier(known_names=pattern).text("Layla Haddad asked Omar; Omari is a different word")
     assert text == "<NAME_1> asked <NAME_2>; Omari is a different word"
+
+
+def test_long_digit_runs_glued_to_letters_are_removed() -> None:
+    tool = Deidentifier()
+    for text in ("رقمي70123456", "tel70123456", "ID:961701234567x"):
+        assert not any(ch.isdigit() for ch in tool.text(text).replace("_1", "").replace("_2", "").replace("_3", ""))
