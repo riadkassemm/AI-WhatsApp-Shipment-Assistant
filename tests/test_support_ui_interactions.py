@@ -1657,6 +1657,7 @@ let clearedSelections = 0;
 const clearSupportSelections = () => {clearedSelections++};
 const disconnectSupportEvents = () => {};
 const stopDashboardRefresh = () => {};
+const stopAiUsagePolling = () => {};
 const saveLinkedDeviceAddition = () => {};
 const cancelVoiceRecording = () => {};
 const clearMediaDraft = () => {};

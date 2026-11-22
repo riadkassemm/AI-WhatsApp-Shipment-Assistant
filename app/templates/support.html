@@ -374,6 +374,7 @@ __SUPPORT_STYLE__
       <div class="quick-reply-tabs ai-settings-tabs" role="tablist" aria-label="AI assistant settings">
         <button id="aiTabNumbers" class="btn active" type="button" role="tab" aria-selected="true" aria-controls="aiPanelNumbers">WhatsApp Numbers</button>
         <button id="aiTabOpenAI" class="btn hidden" type="button" role="tab" aria-selected="false" aria-controls="aiPanelOpenAI" tabindex="-1">OpenAI Configuration</button>
+        <button id="aiTabUsage" class="btn hidden" type="button" role="tab" aria-selected="false" aria-controls="aiPanelUsage" tabindex="-1">Usage &amp; Costs</button>
       </div>
       <div id="aiPanelNumbers" role="tabpanel" aria-labelledby="aiTabNumbers">
       <div class="ai-status-card">
@@ -423,6 +424,49 @@ __SUPPORT_STYLE__
             <button class="btn primary" id="aiOpenAISaveBtn" type="submit"><svg class="icon" aria-hidden="true"><use href="#icon-check"></use></svg>Save key</button>
           </div>
         </form>
+      </div>
+      <div id="aiPanelUsage" class="hidden" role="tabpanel" aria-labelledby="aiTabUsage">
+        <div class="ai-usage-banner hidden" id="aiUsageBanner" role="alert"></div>
+        <form class="ai-usage-filters" id="aiUsageFilters" novalidate>
+          <div class="field"><label for="aiUsageFrom">From</label><input id="aiUsageFrom" type="date" /></div>
+          <div class="field"><label for="aiUsageTo">To</label><input id="aiUsageTo" type="date" /></div>
+          <div class="field"><label for="aiUsageLine">WhatsApp number</label><select id="aiUsageLine"><option value="">All numbers</option></select></div>
+          <div class="field"><label for="aiUsageModel">Model</label><select id="aiUsageModel"><option value="">All models</option></select></div>
+          <button class="btn" id="aiUsageApplyBtn" type="submit">Apply</button>
+        </form>
+        <div class="ai-usage-cards" id="aiUsageCards"></div>
+        <div class="ai-budget-meter" id="aiBudgetMeter"></div>
+        <p class="form-note" id="aiUsageNote">Estimated by the application from API usage. The OpenAI invoice is final and may differ.</p>
+        <section class="ai-usage-section" aria-labelledby="aiChartSpendTitle"><h3 id="aiChartSpendTitle">Estimated spend per day</h3><div class="ai-chart" id="aiChartSpend"></div></section>
+        <section class="ai-usage-section" aria-labelledby="aiChartRequestsTitle"><h3 id="aiChartRequestsTitle">OpenAI requests per day</h3><div class="ai-chart" id="aiChartRequests"></div></section>
+        <section class="ai-usage-section" aria-labelledby="aiChartModelsTitle"><h3 id="aiChartModelsTitle">Estimated spend by model</h3><div class="ai-chart" id="aiChartModels"></div></section>
+        <details class="ai-usage-section" id="aiUsageTables"><summary>Usage tables</summary><div id="aiUsageTablesBody"></div></details>
+        <section class="ai-usage-section" aria-labelledby="aiBudgetTitle">
+          <h3 id="aiBudgetTitle">Budget</h3>
+          <form class="ai-budget-form" id="aiBudgetForm" novalidate>
+            <div class="field"><label for="aiBudgetMonthly">Monthly limit (USD)</label><input id="aiBudgetMonthly" type="number" min="0.01" step="0.01" required /></div>
+            <div class="field"><label for="aiBudgetDaily">Daily limit (USD, optional)</label><input id="aiBudgetDaily" type="number" min="0.01" step="0.01" placeholder="No daily limit" /></div>
+            <div class="field"><label for="aiBudgetThresholds">Warn at (% of monthly)</label><input id="aiBudgetThresholds" type="text" maxlength="40" placeholder="50, 80, 95" /></div>
+            <div class="field"><label for="aiBudgetOverride">Re-enable AI over the limit until (UTC)</label><input id="aiBudgetOverride" type="datetime-local" /></div>
+            <label class="check-field wide"><input id="aiBudgetEnforce" type="checkbox" /><span>Stop new AI requests automatically when a limit is reached</span></label>
+            <div class="modal-actions wide"><button class="btn hidden" id="aiBudgetReloadBtn" type="button">Discard edits and reload budget</button><button class="btn primary" id="aiBudgetSaveBtn" type="submit">Save budget</button></div>
+          </form>
+        </section>
+        <section class="ai-usage-section" aria-labelledby="aiPricesTitle">
+          <h3 id="aiPricesTitle">Model prices (USD per 1M tokens)</h3>
+          <p class="form-note">AI can only call a model whose price an Admin has verified against OpenAI's pricing page. Revise adds a new price; existing prices and past usage remain unchanged. Verify the new revision before retiring the old one.</p>
+          <div id="aiPricesTable"></div>
+          <form class="ai-price-form" id="aiPriceForm" novalidate>
+            <div class="field"><label for="aiPriceModel">Model</label><input id="aiPriceModel" type="text" maxlength="100" placeholder="gpt-6-luna" /></div>
+            <div class="field"><label for="aiPriceInput">Input</label><input id="aiPriceInput" type="number" min="0" step="0.000001" /></div>
+            <div class="field"><label for="aiPriceCached">Cached input</label><input id="aiPriceCached" type="number" min="0" step="0.000001" /></div>
+            <div class="field"><label for="aiPriceOutput">Output</label><input id="aiPriceOutput" type="number" min="0" step="0.000001" /></div>
+            <div class="field"><label for="aiPriceAudio">Audio per minute</label><input id="aiPriceAudio" type="number" min="0" step="0.000001" placeholder="—" /></div>
+            <div class="field"><label for="aiPriceBatch">Batch factor</label><input id="aiPriceBatch" type="number" min="0.0001" max="1" step="0.0001" value="0.5" /></div>
+            <div class="field"><label for="aiPriceSource">Pricing source</label><input id="aiPriceSource" type="text" maxlength="255" /></div>
+            <button class="btn" id="aiPriceAddBtn" type="submit">Add price</button>
+          </form>
+        </section>
       </div>
     </div>
   </div>
