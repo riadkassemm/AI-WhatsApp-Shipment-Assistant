@@ -41,8 +41,9 @@ _SAFE_PASSWORD_GUIDANCE = re.compile(
     + r"|\bma\s+(?:tb3at|tb3ate|t3ate|t3te|tshare)\s+(?:\S+\s+){0,2}?" + _PW,
     re.I,
 )
-# For a mixed-style customer an English or Arabizi reply also matches (owner, 2026-11-23).
-_MIXED_REPLY_LANGUAGES = frozenset(("mixed", "en", "leb_arabizi"))
+# For a mixed-style customer an English, Arabizi or Arabic-script reply also matches
+# (owner, 2026-11-23).
+_MIXED_REPLY_LANGUAGES = frozenset(("mixed", "en", "leb_arabizi", "ar", "leb_ar"))
 # Polite offers of help mention "today" without asserting any date.
 _BENIGN_DATE_PHRASES = re.compile(
     r"\b(?:help|assist|serve|do for)\s+you\s+(?:with\s+\w+\s+)?today\b"
