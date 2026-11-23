@@ -205,6 +205,34 @@ def test_invented_ids_amounts_dates_and_passwords_are_rejected(text, evidence):
     assert reply_violations(reply(text), style="en", evidence=(evidence,))
 
 
+@pytest.mark.parametrize("text,evidence", [
+    ("It arrives today", "Please ask staff"),
+    ("It arrives on May 5", "Please ask staff"),
+    ("Delivery is on 5 March", "Please ask staff"),
+    ("It weighs 5kg", "It weighs 50kg"),
+    ("Pick it up on the 3rd", "Please ask staff"),
+    ("We open at 7pm", "Please ask staff"),
+    ("Your code is LB3A4", "Please ask staff"),
+    ("Order: AB3CD is ready", "Please ask staff"),
+    ("l shi7na btousal bokra 12345", "Please ask staff"),
+])
+def test_narrowed_date_and_arabizi_rules_keep_real_values_strict(text, evidence):
+    assert "ungrounded_value" in reply_violations(reply(text), style="en", evidence=(evidence,))
+
+
+@pytest.mark.parametrize("style,text", [
+    ("en", "Hello! How can I help you today?"),
+    ("en", "How can I help you with that today?"),
+    ("en", "You may send your tracking number here."),
+    ("fr", "Bonjour ! Comment puis-je vous aider aujourd'hui ?"),
+    ("ar", "مرحبا، كيف بقدر ساعدك اليوم؟"),
+    ("leb_arabizi", "ahla! ba3den b2oullak, 3tine ra2em l shi7na"),
+    ("leb_arabizi", "mni7, shu fiyye sa3dak?"),
+])
+def test_greetings_modal_may_and_arabizi_spelling_are_not_facts(style, text):
+    assert reply_violations(reply(text, language=style), style=style, evidence=()) == ()
+
+
 def test_model_fact_claims_cannot_become_evidence():
     assert "unsupported_fact_reference" in reply_violations(
         reply("It costs $90", facts_used=["It costs $90"]), style="en", evidence=("Ask staff",))
