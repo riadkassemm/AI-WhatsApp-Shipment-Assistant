@@ -53,7 +53,8 @@ def _normalize(text: str) -> str:
 
 
 def _arabizi_word(word: str) -> bool:
-    if word in _ARABIZI_WORDS:
+    # Two-character words such as "3a" (on/to), "2e", "3l"; units like 5m/7h stay facts.
+    if word in _ARABIZI_WORDS or re.fullmatch(r"[2356789][aeioul]", word):
         return True
     return (word.isalnum() and _ARABIZI_SPELLING.fullmatch(word) is not None
             and _NUMBER_WITH_UNIT.fullmatch(word) is None)

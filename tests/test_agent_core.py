@@ -215,6 +215,9 @@ def test_invented_ids_amounts_dates_and_passwords_are_rejected(text, evidence):
     ("Your code is LB3A4", "Please ask staff"),
     ("Order: AB3CD is ready", "Please ask staff"),
     ("l shi7na btousal bokra 12345", "Please ask staff"),
+    ("It is 5m away", "Please ask staff"),
+    ("Ready in 7h", "Please ask staff"),
+    ("رح توصل بكرا", "Please ask staff"),
 ])
 def test_narrowed_date_and_arabizi_rules_keep_real_values_strict(text, evidence):
     assert "ungrounded_value" in reply_violations(reply(text), style="en", evidence=(evidence,))
@@ -228,6 +231,7 @@ def test_narrowed_date_and_arabizi_rules_keep_real_values_strict(text, evidence)
     ("ar", "مرحبا، كيف بقدر ساعدك اليوم؟"),
     ("leb_arabizi", "ahla! ba3den b2oullak, 3tine ra2em l shi7na"),
     ("leb_arabizi", "mni7, shu fiyye sa3dak?"),
+    ("leb_arabizi", "eh, b2oullak 3a l ra2em"),
 ])
 def test_greetings_modal_may_and_arabizi_spelling_are_not_facts(style, text):
     assert reply_violations(reply(text, language=style), style=style, evidence=()) == ()
