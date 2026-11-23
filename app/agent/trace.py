@@ -27,6 +27,7 @@ _GUARDS = frozenset({
     'pass', 'invalid_structured_output', 'language_mismatch', 'credential_disclosure',
     'password_reference', 'unsupported_fact_reference', 'ungrounded_value', 'ungrounded_amount',
     'empty', 'too_long', 'control_character', 'internal_note_leak', 'arabic_script_in_arabizi',
+    'must_escalate_rule',
 })
 
 
