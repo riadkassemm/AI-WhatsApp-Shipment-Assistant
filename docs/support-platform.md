@@ -149,6 +149,11 @@ Replies may give safe password guidance (reset or change it in the app, never
 share it); asking for a password, any other mention and secret-looking values are
 rejected. For a mixed-style customer an English, Arabizi or Arabic-script reply
 counts as a language match, and an Arabizi reply still gets the Arabizi script rules.
+A deterministic safety net (`app/agent/escalation_rules.py`) runs after the model's
+decision: when the customer's latest messages clearly ask for a change (cancel,
+change address/mode, stop a shipment) or make a complaint (broken, missing items,
+overcharged, refund, lost), a reply or tool call becomes a hand-off with
+`CHANGE_REQUIRES_HUMAN` or `COMPLAINT_DISPUTE`. A model escalation keeps its reason.
 The lexical fact check compares values with authoritative evidence; it is not
 a semantic correctness guarantee and does not replace the pre-pilot benchmark.
 

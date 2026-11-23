@@ -14,6 +14,7 @@ from app.agent.guard import reply_violations
 from app.agent.tools import TOOL_SCHEMAS, execute_tool
 from app.agent.business_data import BusinessDataError
 from app.agent.media import prepare_media, save_image_notes
+from app.agent.escalation_rules import customer_burst, must_escalate_reason
 from app.agent.memory import ticket_summary
 from app.agent.trace import record_guard
 from app.ai_knowledge import ai_knowledge_service
@@ -192,6 +193,8 @@ class AgentService:
             "messages": masked_messages(rows, source_message_id=source_message_id,
                                         redacted_current_text=redacted_current_text),
         }
+        # Deterministic safety net: a clear change request or complaint always reaches staff.
+        forced_reason = must_escalate_reason(customer_burst(tail["messages"]))
         summary = await ticket_summary(support_repository, int(ticket["id"]),
                                        source_message_id=source_message_id, style=style)
         if summary:
@@ -219,6 +222,9 @@ class AgentService:
                         tail = {**tail, "review_reason": action.reason_code}
                         continue
                     return AgentOutcome(reason_code=action.reason_code, intent=intent)
+                if forced_reason:
+                    record_guard("reply", ("must_escalate_rule",))
+                    return AgentOutcome(reason_code=forced_reason, intent=intent)
                 if isinstance(action, ToolCall):
                     try:
                         # Verification can expire or be revoked during a provider call.
