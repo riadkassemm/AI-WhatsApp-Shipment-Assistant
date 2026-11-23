@@ -23,6 +23,19 @@ _DATES = frozenset((
     "اليوم غدا غداً بكرا مبارح الاثنين الثلاثاء الأربعاء الخميس الجمعة السبت الأحد "
     "يناير فبراير مارس أبريل مايو يونيو يوليو أغسطس سبتمبر أكتوبر نوفمبر ديسمبر"
 ).split())
+# Polite offers of help mention "today" without asserting any date.
+_BENIGN_DATE_PHRASES = re.compile(
+    r"\b(?:help|assist|serve|do for)\s+you\s+(?:with\s+\w+\s+)?today\b"
+    r"|\bvous\s+aider\s+aujourd'hui\b"
+    r"|(?:ساعدك|اساعدك|أساعدك|مساعدتك|خدمتك|بخدمتك)\s+اليوم",
+)
+# English words that are dates only next to a day number ("May 5", "5 March").
+_AMBIGUOUS_MONTHS = frozenset(("may", "march"))
+# Arabizi spells letters with digits (2 3 5 6 7 8 9), e.g. "ba3den", "mni7".
+_ARABIZI_SPELLING = re.compile(
+    r"(?=(?:.*[^\W\d_]){2})(?!.*\d\d)(?:[^\W\d_]|[2356789])*[2356789](?:[^\W\d_]|[2356789])*"
+)
+_NUMBER_WITH_UNIT = re.compile(r"\d+(?:kg|g|km|cm|mm|m|lbs?|h|hrs?|mins?|d|x|st|nd|rd|th|am|pm)")
 _MONEY_WORDS = re.compile(
     r"\b(?:[\w-]+\s+){1,4}(?:dollars?|euros?|USD|LBP|دولار|ليرة)\b", re.I,
 )
@@ -39,12 +52,30 @@ def _normalize(text: str) -> str:
     return unicodedata.normalize("NFKC", text).casefold()
 
 
+def _arabizi_word(word: str) -> bool:
+    # Two-character words such as "3a" (on/to), "2e", "3l"; units like 5m/7h stay facts.
+    if word in _ARABIZI_WORDS or re.fullmatch(r"[2356789][aeioul]", word):
+        return True
+    return (word.isalnum() and _ARABIZI_SPELLING.fullmatch(word) is not None
+            and _NUMBER_WITH_UNIT.fullmatch(word) is None)
+
+
+def _is_date_word(word: str, normalized: str, start: int, end: int) -> bool:
+    if word not in _DATES:
+        return False
+    if word in _AMBIGUOUS_MONTHS:
+        return bool(re.search(r"\d\s*$", normalized[max(0, start - 4):start])
+                    or re.match(r"^\s*\d", normalized[end:end + 4]))
+    return True
+
+
 def factual_tokens(text: str) -> set[str]:
-    normalized = _normalize(text)
+    normalized = _BENIGN_DATE_PHRASES.sub(" ", _normalize(text))
     tokens = set()
     for match in _TOKEN.finditer(normalized):
         word = match.group()
-        if (any(c.isdigit() for c in word) and word not in _ARABIZI_WORDS) or word in _DATES:
+        if ((any(c.isdigit() for c in word) and not _arabizi_word(word))
+                or _is_date_word(word, normalized, match.start(), match.end())):
             tokens.add(word)
         # A credit and a debit with the same digits are different facts.
         if word[0].isdigit() and match.start() and normalized[match.start() - 1] in "-+":
