@@ -237,6 +237,40 @@ def test_greetings_modal_may_and_arabizi_spelling_are_not_facts(style, text):
     assert reply_violations(reply(text, language=style), style=style, evidence=()) == ()
 
 
+@pytest.mark.parametrize("style,text", [
+    ("en", "You can reset your password in the app."),
+    ("en", "Please never share your password with anyone."),
+    ("en", "Forgot your password? Use the password reset option in the app."),
+    ("en", "Enter your password in the app to log in."),
+    ("fr", "Vous pouvez réinitialiser votre mot de passe dans l'application."),
+    ("ar", "فيك تغيير كلمة السر من التطبيق، ولا تشارك كلمة السر مع حدا."),
+    ("leb_arabizi", "fik t3mel reset l password mn l app, w ma tb3at l password la 7ada"),
+])
+def test_safe_password_guidance_is_allowed(style, text):
+    assert reply_violations(reply(text, language=style), style=style, evidence=()) == ()
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("Please send me your password.", "password_reference"),
+    ("What is your password?", "password_reference"),
+    ("Your password is Abc123!", "credential_disclosure"),
+    ("Reset your password: Abc!def9", "credential_disclosure"),
+])
+def test_password_requests_and_values_stay_rejected(text, expected):
+    assert expected in reply_violations(reply(text), style="en", evidence=())
+
+
+@pytest.mark.parametrize("language,text,expected", [
+    ("en", "Hello! How can I help?", ()),
+    ("leb_arabizi", "ahla! kif fiyye sa3dak?", ()),
+    ("mixed", "Hello, kif fiyye sa3dak?", ()),
+    ("leb_arabizi", "أهلا كيف فيني ساعدك؟", ("arabic_script_in_arabizi",)),
+    ("fr", "Bonjour", ("language_mismatch",)),
+])
+def test_mixed_customer_accepts_english_or_arabizi(language, text, expected):
+    assert reply_violations(reply(text, language=language), style="mixed", evidence=()) == expected
+
+
 def test_model_fact_claims_cannot_become_evidence():
     assert "unsupported_fact_reference" in reply_violations(
         reply("It costs $90", facts_used=["It costs $90"]), style="en", evidence=("Ask staff",))

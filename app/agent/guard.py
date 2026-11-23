@@ -9,7 +9,7 @@ import re
 import unicodedata
 
 from app.agent.contracts import Reply
-from app.agent.context import _PASSWORD
+from app.agent.context import _BARE_SECRET, _PASSWORD
 from app.client_chat_auth import redact_sensitive_text
 from app.customer_reply_guard import validate_customer_reply
 
@@ -23,6 +23,26 @@ _DATES = frozenset((
     "اليوم غدا غداً بكرا مبارح الاثنين الثلاثاء الأربعاء الخميس الجمعة السبت الأحد "
     "يناير فبراير مارس أبريل مايو يونيو يوليو أغسطس سبتمبر أكتوبر نوفمبر ديسمبر"
 ).split())
+# Owner-approved (2026-11-23): replies may give safe password guidance, such as
+# resetting it in the app or never sharing it. Asking for a password, or any other
+# mention, is still rejected, and secret-looking values always are.
+_PW = r"(?:password|passwd|mot de passe|كلمة\s*(?:السر|المرور)|باسورد)"
+_SAFE_PASSWORD_GUIDANCE = re.compile(
+    r"\b(?:reset|change|update|recover|create|set|choose)\s+(?:your\s+|a\s+|the\s+)?(?:new\s+)?" + _PW
+    + r"|\b(?:forgot|forgotten|forget)\s+(?:your\s+|the\s+)?" + _PW
+    + r"|\b" + _PW + r"\s+reset\b"
+    + r"|\b(?:never|don't|do\s+not)\s+(?:share|send|give|tell|type|write)\s+(?:\w+\s+){0,3}?" + _PW
+    + r"|\b(?:enter|type)\s+your\s+" + _PW + r"\s+(?:in|on)\s+the\s+(?:app|website|site|login\s+page)"
+    + r"|\b(?:réinitialiser|changer|modifier)\s+(?:votre\s+|le\s+)?" + _PW
+    + r"|" + _PW + r"\s+oublié|\bne\s+partagez\s+jamais\s+(?:votre\s+)?" + _PW
+    + r"|(?:إعادة\s+تعيين|تغيير|نسيت|نسيان|استعادة)\s+" + _PW
+    + r"|لا\s+(?:تشارك|تشاركي|تبعت|تبعتي|ترسل|ترسلي|تعطي)\s+(?:\S+\s+){0,2}?" + _PW
+    + r"|\b(?:reset|ghayyer|ghayer|t8ayyer|nsit|nesit)\s+(?:l\s+|el\s+)?" + _PW
+    + r"|\bma\s+(?:tb3at|tb3ate|t3ate|t3te|tshare)\s+(?:\S+\s+){0,2}?" + _PW,
+    re.I,
+)
+# For a mixed-style customer an English or Arabizi reply also matches (owner, 2026-11-23).
+_MIXED_REPLY_LANGUAGES = frozenset(("mixed", "en", "leb_arabizi"))
 # Polite offers of help mention "today" without asserting any date.
 _BENIGN_DATE_PHRASES = re.compile(
     r"\b(?:help|assist|serve|do for)\s+you\s+(?:with\s+\w+\s+)?today\b"
@@ -86,12 +106,17 @@ def factual_tokens(text: str) -> set[str]:
 
 
 def reply_violations(reply: Reply, *, style: str, evidence: tuple[str, ...]) -> tuple[str, ...]:
-    reasons = list(validate_customer_reply(reply.text, style).reasons)
-    if reply.language != style:
+    accepted = style == "mixed" and reply.language in _MIXED_REPLY_LANGUAGES
+    # An Arabizi reply to a mixed customer still gets the Arabizi script rules.
+    reasons = list(validate_customer_reply(reply.text, reply.language if accepted else style).reasons)
+    if reply.language != style and not accepted:
         reasons.append("language_mismatch")
-    if redact_sensitive_text(reply.text) != reply.text:
+    remainder = _SAFE_PASSWORD_GUIDANCE.sub(" ", reply.text)
+    if (redact_sensitive_text(remainder) != remainder
+            or (_PASSWORD.search(reply.text) and any(_BARE_SECRET.fullmatch(token.strip(".,;:!?\"'()"))
+                                                     for token in reply.text.split()))):
         reasons.append("credential_disclosure")
-    if _PASSWORD.search(reply.text):
+    if _PASSWORD.search(remainder):
         reasons.append("password_reference")
     # Do not let the model launder an invented value through facts_used.
     sources = tuple(_normalize(source) for source in evidence)
