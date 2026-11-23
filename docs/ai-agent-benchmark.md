@@ -171,3 +171,31 @@ The runner intentionally does not import `app.main`, enable AI, send messages,
 run migrations, restart services, or deploy code. It is a separate, sequential
 CLI process; its scoped collaborator replacements must never run in a serving
 API worker.
+
+## Local manual chat
+
+`scripts/agent_chat.py` lets a tester chat with the v2 core in a terminal. It
+uses the same core, reply guard, tool registry and metered gateway (purpose
+`eval`), a synthetic identity (`--identity L0|L1|L2`, default L1), empty
+approved knowledge unless `--knowledge FILE` is given, and unavailable business
+data. No tickets are written and nothing is sent to WhatsApp. Every turn is a
+paid call. The script refuses to start unless `DB_HOST` is local, the database
+holds no support tickets, `AI_AGENT_V2_ENABLED` is false and the model's price
+is verified there.
+
+Run it against a disposable MariaDB/Redis with all migrations applied, never
+against the database in `.env`. Override the connection with environment
+variables, which take precedence over `.env`:
+
+```bash
+set -a; . /path/to/disposable.env; set +a   # DB_HOST/DB_PORT/DB_NAME/DB_USER/DB_PASSWORD/REDIS_URL
+venv/bin/python scripts/check_runtime.py --schema
+venv/bin/python scripts/agent_chat.py
+```
+
+Start a line with `+` to queue a customer message without a bot turn, like
+several WhatsApp messages sent in a row. `/reset` starts a new conversation,
+`/cost` shows spend and `/quit` exits. Each turn prints the reply or the
+escalation reason, the intent, attempted tools, detected style, latency and
+cost. The same disposable setup satisfies the paid benchmark runner, which
+binds the approval to the machine's hostname and a local database host.
