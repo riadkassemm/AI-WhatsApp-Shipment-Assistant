@@ -147,8 +147,8 @@ never a third response call, and SDK retries are disabled. Complaints/disputes
 always go to staff. Both calls use the shared budget gateway. Customer text and prior replies are never factual evidence.
 Replies may give safe password guidance (reset or change it in the app, never
 share it); asking for a password, any other mention and secret-looking values are
-rejected. For a mixed-style customer an English or Arabizi reply counts as a
-language match, and an Arabizi reply still gets the Arabizi script rules.
+rejected. For a mixed-style customer an English, Arabizi or Arabic-script reply
+counts as a language match, and an Arabizi reply still gets the Arabizi script rules.
 The lexical fact check compares values with authoritative evidence; it is not
 a semantic correctness guarantee and does not replace the pre-pilot benchmark.
 

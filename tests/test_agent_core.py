@@ -265,9 +265,11 @@ def test_password_requests_and_values_stay_rejected(text, expected):
     ("leb_arabizi", "ahla! kif fiyye sa3dak?", ()),
     ("mixed", "Hello, kif fiyye sa3dak?", ()),
     ("leb_arabizi", "أهلا كيف فيني ساعدك؟", ("arabic_script_in_arabizi",)),
+    ("leb_ar", "أهلا، كيف فيني ساعدك؟", ()),
+    ("ar", "مرحبا، كيف يمكنني مساعدتك؟", ()),
     ("fr", "Bonjour", ("language_mismatch",)),
 ])
-def test_mixed_customer_accepts_english_or_arabizi(language, text, expected):
+def test_mixed_customer_accepts_english_arabizi_or_arabic(language, text, expected):
     assert reply_violations(reply(text, language=language), style="mixed", evidence=()) == expected
 
 
@@ -478,3 +480,11 @@ def test_single_model_benchmark_does_not_repair_rejected_reply(agent):
     outcome = asyncio.run(service.run(ticket={'id': 47, 'whatsapp_phone': 'benchmark'},
                                       style='en', source_message_id='in.1'))
     assert outcome.reason_code == 'AI_REPLY_VALIDATION_FAILED' and len(agent.calls) == 1
+
+
+def test_instructions_cover_arabizi_script_change_complaint_and_tool_use():
+    text = core.INSTRUCTIONS
+    assert "never Arabic script" in text and "a change request or a complaint in any language" in text
+    assert "CHANGE_REQUIRES_HUMAN" in text and "COMPLAINT_DISPUTE" in text
+    assert "get_customer_shipments needs no arguments" in text
+    assert "Never repeat IDs, numbers or placeholders" in text
