@@ -484,7 +484,30 @@ def test_single_model_benchmark_does_not_repair_rejected_reply(agent):
 
 def test_instructions_cover_arabizi_script_change_complaint_and_tool_use():
     text = core.INSTRUCTIONS
-    assert "never Arabic script" in text and "a change request or a complaint in any language" in text
+    assert "never Arabizi or Latin-script Arabic" in text and "a change request or a complaint in any language" in text
     assert "CHANGE_REQUIRES_HUMAN" in text and "COMPLAINT_DISPUTE" in text
     assert "get_customer_shipments needs no arguments" in text
     assert "Never repeat IDs, numbers or placeholders" in text
+
+
+@pytest.mark.parametrize("customer_style", ["leb_arabizi", "mixed"])
+def test_arabizi_and_mixed_customers_get_lebanese_arabic(agent, customer_style):
+    agent.state["responses"] = [response(reply("أهلا، كيف فيي ساعدك؟", language="leb_ar").model_dump())]
+    outcome = asyncio.run(core.agent_service.run(ticket={"id": 47, "whatsapp_phone": "15550000000"},
+                                                 style=customer_style, source_message_id="in.1"))
+    assert outcome.reply is not None and outcome.reply.language == "leb_ar"
+    tail = json.loads(agent.calls[0]["input"][0]["content"])
+    assert tail["language_style"] == "leb_ar" and tail["customer_writes"] == customer_style
+
+
+def test_arabizi_reply_to_arabizi_customer_is_now_rejected(agent):
+    agent.state["responses"] = [response(reply("ahla, kif fiyye sa3dak?", language="leb_arabizi").model_dump())] * 2
+    outcome = asyncio.run(core.agent_service.run(ticket={"id": 47, "whatsapp_phone": "15550000000"},
+                                                 style="leb_arabizi", source_message_id="in.1"))
+    assert outcome.reply is None and outcome.reason_code == "AI_REPLY_VALIDATION_FAILED"
+
+
+@pytest.mark.parametrize("style,expected", [("leb_arabizi", "leb_ar"), ("mixed", "leb_ar"), ("en", "en"),
+                                            ("ar", "ar"), ("fr", "fr"), ("leb_ar", "leb_ar")])
+def test_reply_style_mapping(style, expected):
+    assert core.reply_style(style) == expected

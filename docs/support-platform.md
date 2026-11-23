@@ -147,8 +147,10 @@ never a third response call, and SDK retries are disabled. Complaints/disputes
 always go to staff. Both calls use the shared budget gateway. Customer text and prior replies are never factual evidence.
 Replies may give safe password guidance (reset or change it in the app, never
 share it); asking for a password, any other mention and secret-looking values are
-rejected. For a mixed-style customer an English, Arabizi or Arabic-script reply
-counts as a language match, and an Arabizi reply still gets the Arabizi script rules.
+rejected. Customers who write Arabizi or mix languages get replies in Lebanese
+Arabic written in Arabic script (`leb_ar`); the agent, its guard and its tool
+templates all use that reply style, and the customer's own style is passed to the
+model as context.
 A deterministic safety net (`app/agent/escalation_rules.py`) runs after the model's
 decision: when the customer's latest messages clearly ask for a change (cancel,
 change address/mode, stop a shipment) or make a complaint (broken, missing items,
