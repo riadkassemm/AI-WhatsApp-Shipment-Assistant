@@ -1592,7 +1592,7 @@ function renderLinkedDeviceStatus(payload) {
   alertLinkedDeviceProblems(payload.lines || []);
   for (const line of payload.lines || []) {
     const row = document.createElement('div');
-    row.className = 'linked-device-line';
+    row.className = 'linked-device-line' + (needsSessionReview(line) ? ' linked-device-review' : '');
     const heading = document.createElement('strong');
     const registryNumber = (state.whatsappRegistry?.numbers || []).find(item => String(item.phone_number_id) === String(line.line_id));
     heading.append(createSupportNumberLabel({line_id: line.line_id,
@@ -1601,19 +1601,24 @@ function renderLinkedDeviceStatus(payload) {
     const status = document.createElement('div');
     status.className = 'muted';
     const labels = {connected: 'Connected', connecting: 'Connecting…', qr: 'Scan this code with the phone you want to connect', logged_out: 'Not paired', disconnected: 'Disconnected', error: 'Connection failed'};
-    status.textContent = line.recovery_category === 'storage_failure' ? 'Storage recovery required'
-      : ['authentication_failure', 'session_conflict', 'protocol_failure'].includes(line.recovery_category) ? 'Temporarily unavailable · administrator review required'
-      : line.status === 'disconnected' && line.is_paired ? 'Reconnecting…' : labels[line.status] || 'Not paired';
-    if (isRestrictedByWhatsApp(line)) {
-      status.classList.add('linked-device-restricted');
-      status.textContent = 'Restricted by WhatsApp · Do not reconnect. Open WhatsApp on this number\'s phone: if it shows a restriction or ban, tap Request a review and tell IT.';
-    } else if (line.session_blocked) {
+    status.textContent = line.status === 'connected' ? 'Connected'
+      : line.recovery_category === 'storage_failure' ? 'Storage recovery required'
+      : line.recovery_category === 'session_conflict' ? 'Session replaced · IT must check for another connection using this session'
+      : line.recovery_category === 'protocol_failure' ? 'Session or protocol error · IT review required'
+      : line.status === 'disconnected' && line.retry_scheduled ? 'Temporary connection issue · Reconnecting automatically…' : labels[line.status] || 'Not paired';
+    if (line.session_blocked) {
       status.textContent = line.saved_login
         ? 'Session blocked after an interrupted update · Resume session continues from the saved login (no phone needed)'
         : 'Session blocked · An Admin must reset the session, then pair it with the phone';
+    } else if (needsSessionReview(line)) {
+      status.textContent = 'Linked-device login rejected · Account restriction not confirmed. Check WhatsApp and Linked devices on the phone. If the app works normally, ask IT to retry the session or reset and re-pair it. If the phone shows a restriction, use Request a review if offered and tell IT.';
     } else if (line.status === 'logged_out' && line.logged_out_at) {
-      status.textContent = 'Logged out by WhatsApp at ' + new Date(line.logged_out_at).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'})
-        + '. Re-pair it with the same phone: every conversation and its history stays.';
+      const reason = line.last_disconnect?.reason || line.logout_reason;
+      const label = reason === 'dashboard_unlink' ? 'Unlink requested through the dashboard'
+        : ['device_removed', 'conflict:device_removed'].includes(reason) ? 'Linked device removed · Initiator unknown'
+        : 'Linked-device login ended · Cause unknown';
+      status.textContent = label + ' at ' + new Date(line.logged_out_at).toLocaleString()
+        + '. Re-pair with the same phone. Conversations and saved history are kept.';
     } else if (line.error) status.textContent += ' · ' + line.error;
     if (line.recovering_history) status.textContent += ' · Recovering messages sent while offline';
     if (line.pending_callbacks) status.textContent += ' · ' + line.pending_callbacks + ' updates pending';
@@ -1628,7 +1633,7 @@ function renderLinkedDeviceStatus(payload) {
       row.append(qr);
     }
     const connected = line.status === 'connected';
-    if (!connected && !line.session_blocked && line.recovery_category !== 'storage_failure' && (['qr', 'logged_out'].includes(line.status) || !line.is_paired)) {
+    if (!connected && !line.session_blocked && line.recovery_category !== 'storage_failure' && !needsSessionReview(line) && (['qr', 'logged_out'].includes(line.status) || !line.is_paired)) {
       const pair = document.createElement('button');
       const repair = line.status === 'logged_out' && Boolean(line.logged_out_at);
       pair.type = 'button'; pair.className = repair ? 'btn small primary' : 'btn small';
@@ -1668,18 +1673,20 @@ function renderLinkedDeviceStatus(payload) {
 // Super Admins. The server archives files; nothing is deleted.
 const BLOCKED_CATEGORIES = ['storage_failure', 'authentication_failure', 'session_conflict', 'protocol_failure'];
 
-// WhatsApp answers 403 (the bridge's authentication_failure) when it has
-// restricted or banned the account. Reconnecting cannot fix that and repeated
-// logins can make it worse, so the usual recovery buttons are not offered.
-function isRestrictedByWhatsApp(line) {
+// A 403 rejects this login; it does not report the account's standing or who
+// removed a device. Keep automatic retries stopped and offer reviewed recovery.
+// This transport supplies no reliable account-ban signal: never infer one.
+function needsSessionReview(line) {
   return line.status !== 'connected' && line.recovery_category === 'authentication_failure';
 }
 
 function linkedDeviceRecoveryActions(line) {
-  if (isRestrictedByWhatsApp(line)) {
+  if (needsSessionReview(line) && !line.session_blocked) {
     return [
-      {label: 'Reconnect after review', managersOnly: true, run: lineId => reconnectRestrictedLinkedDevice(lineId),
-        title: 'Only after WhatsApp lifted the restriction and works normally on the phone.'},
+      {label: 'Retry session after phone check', managersOnly: true, run: lineId => reconnectRejectedLinkedDevice(lineId),
+        title: 'Try the saved login once after confirming WhatsApp works normally on the phone.'},
+      {label: 'Reset session', managersOnly: true, run: lineId => resetLinkedDeviceSession(lineId),
+        title: 'If the linked device was removed, reset and pair again with the same phone. Conversations are kept.'},
       {label: 'Force remove', managersOnly: true, run: lineId => forceRemoveLinkedDevice(lineId), danger: true,
         title: 'Remove this number from the app. Conversations are kept.'},
     ];
@@ -1711,9 +1718,9 @@ function alertLinkedDeviceProblems(lines) {
   const current = new Set();
   for (const line of lines) {
     const problem = line.recovery_category === 'storage_failure' ? 'needs storage recovery'
-      : isRestrictedByWhatsApp(line) ? 'restricted by WhatsApp. Check the phone; do not reconnect'
+      : needsSessionReview(line) ? 'linked-device login rejected. Check the phone and ask IT'
       : line.status === 'error' ? 'connection failed'
-      : line.status === 'logged_out' ? 'was logged out by WhatsApp' : null;
+      : line.status === 'logged_out' ? 'linked-device login ended. Re-pair with the same phone' : null;
     if (!problem) continue;
     const key = line.line_id + ':' + problem;
     current.add(key);
@@ -1739,7 +1746,7 @@ function syncBridgeRestartButton() {
 async function restartWhatsAppService() {
   if (state.bridgeRestartBusy || !state.agent?.bridge_restart_available) return;
   if (!(await confirmDialog({title: 'Restart WhatsApp service?',
-    message: 'Every number disconnects for about 30 seconds, then reconnects with its saved session. Messages that arrive meanwhile are delivered after reconnecting.',
+    message: 'The WhatsApp service restarts. Available sessions reconnect with their saved login; numbers that need a session review stay paused.',
     confirmLabel: 'Restart service', tone: 'danger'}))) return;
   state.bridgeRestartBusy = true;
   syncBridgeRestartButton();
@@ -1835,7 +1842,8 @@ function renderLineHealth(payload) {
     const first = alerts[0];
     const more = alerts.length > 1 ? ' and ' + (alerts.length - 1) + ' more' : '';
     const relink = first.connection_state === 'relink_required' || first.status === 'logged_out';
-    const problem = relink ? ' needs relinking' : first.connection_state === 'storage_recovery_required' ? ' needs storage recovery' : ' is temporarily unavailable';
+    const problem = relink ? ' needs relinking' : first.connection_state === 'storage_recovery_required' ? ' needs storage recovery'
+      : first.connection_state === 'session_review_required' ? ' needs a linked-device session review' : ' is temporarily unavailable';
     message = first.name + more + problem + lineOfflineSince(first) + '.';
     canAct = canLinkWhatsApp();
   }
@@ -1868,6 +1876,7 @@ function renderComposerLineNotice(ticket) {
   const messages = {
     reconnecting: 'Reconnecting automatically. Saved replies are retained; check each message’s status before retrying.',
     temporarily_unavailable: 'Temporarily unavailable. Contact your administrator; saved messages and sessions are retained.',
+    session_review_required: 'Linked-device session needs review. Ask IT to check the phone and connection settings. Saved messages and sessions are retained.',
     storage_recovery_required: 'Storage recovery required. New sends are paused; contact your administrator. Saved sessions and delivery records are retained.',
     relink_required: 'Relink required. Ask an authorized staff member to reconnect the same phone; conversation history stays.'
   };
@@ -1997,13 +2006,13 @@ async function reconnectLinkedDevice(lineId) {
     'Reconnecting this number.');
 }
 
-async function reconnectRestrictedLinkedDevice(lineId) {
+async function reconnectRejectedLinkedDevice(lineId) {
   if (!canManageWhatsApp() || state.linkedDeviceBusy) return;
   const name = linkedDeviceName(lineId);
   if (!(await confirmDialog({title: 'Reconnect ' + name + '?',
-    message: 'WhatsApp restricted this number. Reconnect only after WhatsApp lifted the restriction and the app works normally on the phone. ' +
-      'Repeated attempts while it is restricted can make the restriction longer.',
-    confirmLabel: 'Reconnect after review', tone: 'danger'}))) return;
+    message: 'WhatsApp rejected this linked-device login; the cause is unknown. Confirm that WhatsApp works normally on the phone. ' +
+      'If the phone shows a restriction, request a review there first. Otherwise try the saved session once. If it is rejected again or the device is no longer listed, reset and re-pair with the same phone.',
+    confirmLabel: 'Retry session', tone: 'danger'}))) return;
   await reconnectLinkedDevice(lineId);
 }
 

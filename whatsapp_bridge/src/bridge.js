@@ -13,7 +13,7 @@ import { MediaFiles } from './media-files.js';
 import { AckTracker } from './ack.js';
 import { inboundEvent, outgoingEvent, outgoingConfirmationEvent, messageTombstoneEvent, messageStatusEvent, mutationEvent, textBody, millis, eventId, disconnectReason, MEDIA_TYPES, RECEIPT_STATUSES, RECEIPT_RANK } from './events.js';
 import { preserveNativeMutationMetadata } from './native-events.js';
-import { classifyDisconnect, reconnectDelay, newConnectionDiagnostics, observeHeartbeat, EventLoopDiagnostics } from './connection-diagnostics.js';
+import { classifyDisconnect, disconnectEvidence, reconnectDelay, newConnectionDiagnostics, observeHeartbeat, EventLoopDiagnostics } from './connection-diagnostics.js';
 import { mergeLineOutboxes } from './outbox-migration.js';
 
 const silentLogger = pino({ level: 'silent' });
@@ -261,7 +261,7 @@ export class Bridge {
     this.startupPhase = 'connecting';
     for (const line of prepared) {
       this.assertRunning();
-      if (autoConnect && line.store.data.enabled) {
+      if (autoConnect && line.store.data.enabled && !line.retryBlocked) {
         try { await this.connect(line.line_id); }
         catch (error) { initializationFailed(line, error); }
       }
@@ -364,6 +364,16 @@ export class Bridge {
       line.auth ??= await this.loadAuth(line);
       this.assertRunning();
       line.display_phone_number = line.store.data.bound_phone || line.expected_phone;
+      // An ordinary process restart must not retry a rejected/conflicting
+      // session or hide a logout. Only an explicit recovery action clears a hold.
+      const hold = line.store.data.connection_hold;
+      if (['authentication_failure', 'session_conflict', 'protocol_failure'].includes(hold)) {
+        Object.assign(line, {status: 'error', recoveryCategory: hold, retryBlocked: true});
+        line.disconnectedSince = line.store.data.last_disconnect?.at ?? line.disconnectedSince;
+      } else if (!line.store.data.enabled && line.store.data.logged_out_at) {
+        Object.assign(line, {status: 'logged_out', recoveryCategory: 'logged_out', retryBlocked: true});
+        line.disconnectedSince = line.store.data.logged_out_at;
+      }
     } catch (error) { if (!this.stopping) error.bridgePersistenceFailure = true; throw error; }
   }
   async addLine(payload) {
@@ -632,6 +642,15 @@ export class Bridge {
         await this.syncDirectory(line.directory);
         await this.syncDirectory(archive);
         line.auth = await this.loadAuth(line);
+        await line.store.update(data => {
+          delete data.connection_hold;
+          data.enabled = false;
+          // A rejected login may need re-pairing without a preceding 401.
+          // Preserve that offline gap just as for a confirmed revocation.
+          data.recover_since = Math.min(data.recover_since ?? Infinity,
+            (line.disconnectedSince ?? Date.now()) - RECOVERY_MARGIN_MS);
+          delete data.recover_until;
+        });
         Object.assign(line, {status: 'disconnected', retryBlocked: true, recoveryCategory: null});
         delete line.error;
         this.log({component: 'whatsapp_bridge', event: 'auth_session_reset', line_id: id, archive: path.basename(archive)});
@@ -751,6 +770,7 @@ export class Bridge {
     return { line_id: line.line_id, display_phone_number: line.display_phone_number, status: line.status,
       is_paired: Boolean(creds?.registered || creds?.me?.id),
       recovery_category: line.recoveryCategory,
+      last_disconnect: line.store?.data?.last_disconnect ?? null,
       // A blocked session cannot reconnect or pair until it is resumed or reset.
       session_blocked: this.sessionBlocked(line),
       saved_login: this.savedLogin(line),
@@ -819,7 +839,7 @@ export class Bridge {
     try {
       if (!line.store?.data) await this.prepareLine(line);
       this.assertRunning();
-      await line.store.update(data => { data.enabled = true; });
+      await line.store.update(data => { data.enabled = true; delete data.connection_hold; });
       this.assertRunning();
       const renewal = line.transportLost ? { drainTimeoutMs: this.config.auth?.reconnectDrainTimeoutMs ?? 15_000 } : undefined;
       line.auth = line.auth ? await line.auth.renew(renewal) : await this.loadAuth(line);
@@ -1094,7 +1114,8 @@ export class Bridge {
       this.blockConnection(line, socket, 'connection_closed');
       const code = update.lastDisconnect?.error?.output?.statusCode;
       this.trace(line, 'connection_closed', { provider_status: Number.isInteger(code) ? code : null,
-        provider_reason: disconnectReason(update.lastDisconnect?.error) });
+        provider_reason: disconnectReason(update.lastDisconnect?.error),
+        category: line.recoveryCategory, ...disconnectEvidence(update.lastDisconnect?.error) });
     }
     if (update.connection !== 'close' && session.closed) return;
     if (line.removing) {
@@ -1193,7 +1214,9 @@ export class Bridge {
       }
       this.trace(line, 'connection_transition', { state: 'ready' });
       if (this.config.sameIdRetry) this.retransmitUnconfirmed(line).catch(error => this.onError(error));
-      if (line.store.data.logged_out_at) await line.store.update(data => { delete data.logged_out_at; });
+      if (line.store.data.logged_out_at || line.store.data.connection_hold) await line.store.update(data => {
+        delete data.logged_out_at; delete data.logout_reason; delete data.connection_hold;
+      });
       if (line.store.data.recover_since && !line.store.data.recover_until) {
         // WhatsApp sends recent history right after pairing; accept it for a bounded time.
         await line.store.update(data => { data.recover_until = Date.now() + RECOVERY_WINDOW_MS; delete data.logout_reason; });
@@ -1211,29 +1234,41 @@ export class Bridge {
       delete line.qr;
       delete line.qr_data_url;
       const reason = update.lastDisconnect?.error?.output?.statusCode;
-      if (reason === DisconnectReason.loggedOut) {
+      const evidence = { ...disconnectEvidence(update.lastDisconnect?.error),
+        category: line.recoveryCategory, at: Date.now() };
+      const offlineSince = line.disconnectedSince ?? evidence.at;
+      await line.store.update(data => {
+        data.last_disconnect = evidence;
+        if (['authentication_failure', 'session_conflict', 'protocol_failure'].includes(evidence.category)) {
+          data.connection_hold = evidence.category;
+        }
+        if (evidence.category === 'logged_out') {
+          data.enabled = false;
+          data.logout_reason = disconnectReason(update.lastDisconnect?.error);
+          data.logged_out_at = evidence.at;
+          // Commit revocation and its recovery boundary together before reset.
+          data.recover_since = Math.min(data.recover_since ?? Infinity, offlineSince - RECOVERY_MARGIN_MS);
+          delete data.recover_until;
+          delete data.connection_hold;
+        }
+      });
+      if (line.session !== session) return;
+      if (line.recoveryCategory === 'logged_out') {
         clearTimeout(line.reconnectTimer);
         line.reconnectTimer = null;
         this.reconnectSlots.delete(line.line_id);
         line.status = 'logged_out';
-        line.error = 'This linked device was logged out. Connect and scan a new QR code.';
+        line.error = evidence.reason === 'device_removed'
+          ? 'WhatsApp removed this linked device. Who or what removed it is not reported. Re-pair with the same phone.'
+          : 'The linked-device login is no longer valid. The cause is unknown. Re-pair with the same phone.';
         const auth = line.auth;
-        const reason = disconnectReason(update.lastDisconnect?.error);
-        const offlineSince = line.disconnectedSince ?? Date.now();
-        await line.store.update(data => {
-          data.enabled = false;
-          data.logout_reason = reason;
-          data.logged_out_at = Date.now();
-          // Re-pairing recovers what customers sent from here on. Keep the earliest point.
-          data.recover_since = Math.min(data.recover_since ?? Infinity, offlineSince - RECOVERY_MARGIN_MS);
-          delete data.recover_until;
-        });
-        if (line.session !== session) return;
         line.auth = await auth.reset();
       } else if (line.retryBlocked) {
         line.status = 'error';
         line.error = line.recoveryCategory === 'session_conflict'
           ? 'Another session replaced this connection. Administrator review is required; saved credentials are retained.'
+          : line.recoveryCategory === 'authentication_failure'
+          ? 'WhatsApp rejected this linked-device login. This does not confirm an account restriction. Check WhatsApp and Linked devices on the phone; saved credentials are retained.'
           : 'WhatsApp rejected this session or protocol. Administrator review is required; saved credentials are retained.';
       } else {
         line.status = 'disconnected';
@@ -1295,7 +1330,15 @@ export class Bridge {
       line.generation++;
       line.auth?.retire();
       line.session?.dispose();
-      await line.store.update(data => { data.enabled = false; });
+      await line.store.update(data => {
+        data.enabled = false;
+        data.logout_reason = 'dashboard_unlink';
+        data.logged_out_at = Date.now();
+        data.last_disconnect = {at: data.logged_out_at, category: 'logged_out',
+          reason: 'dashboard_unlink', source: 'dashboard', provider_status: null};
+        delete data.connection_hold;
+      });
+      this.trace(line, 'unlink_requested', {source: 'dashboard'});
       const socket = line.socket;
       line.socket = null;
       line.ack?.close();
@@ -1309,6 +1352,8 @@ export class Bridge {
       await line.store.update(data => { data.bound_phone = ''; });
       line.display_phone_number = line.expected_phone;
       line.status = 'logged_out';
+      line.recoveryCategory = 'logged_out';
+      line.retryBlocked = true;
       delete line.error;
       delete line.qr;
       delete line.qr_data_url;

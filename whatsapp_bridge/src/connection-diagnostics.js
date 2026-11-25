@@ -1,8 +1,23 @@
 import { monitorEventLoopDelay } from 'node:perf_hooks';
 
+// Baileys passes either the stream's first child or the entire stream node.
+// Only structured device-removal evidence establishes revocation; error text
+// and a bare 403 cannot establish either a manual logout or an account ban.
+export function disconnectEvidence(error) {
+  let node = error?.data;
+  if (node?.tag === 'stream:error' && Array.isArray(node.content)) {
+    node = node.content.find(child => child?.tag === 'conflict') ?? node;
+  }
+  const reason = node?.tag === 'conflict' && node.attrs?.type === 'device_removed' ? 'device_removed'
+    : node?.tag === 'conflict' && node.attrs?.type === 'replaced' ? 'session_replaced' : 'unknown';
+  const code = error?.output?.statusCode;
+  return { provider_status: Number.isInteger(code) ? code : null, reason, source: 'provider' };
+}
+
 // Fixed labels only. Never retain provider errors, stanzas, addresses or keys.
 export function classifyDisconnect(error) {
   if (error?.bridgePersistenceFailure) return { category: 'storage_failure', retry: false };
+  if (disconnectEvidence(error).reason === 'device_removed') return { category: 'logged_out', retry: false };
   const code = error?.output?.statusCode;
   if (code === 401) return { category: 'logged_out', retry: false };
   if (code === 403) return { category: 'authentication_failure', retry: false };

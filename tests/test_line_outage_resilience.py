@@ -358,7 +358,9 @@ def test_staff_connection_states_distinguish_recovery_from_relinking(monkeypatch
     cases = [
         ({"status": "connected"}, "connected", "none"),
         ({"status": "disconnected", "recovery_category": "temporary_transport"}, "reconnecting", "automatic"),
-        ({"status": "error", "recovery_category": "session_conflict"}, "temporarily_unavailable", "administrator"),
+        ({"status": "error", "recovery_category": "session_conflict"}, "session_review_required", "administrator"),
+        ({"status": "error", "recovery_category": "authentication_failure"}, "session_review_required", "administrator"),
+        ({"status": "error", "recovery_category": "protocol_failure"}, "session_review_required", "administrator"),
         ({"status": "error", "recovery_category": "storage_failure"}, "storage_recovery_required", "administrator"),
         ({"status": "logged_out"}, "relink_required", "relink"),
     ]
@@ -367,3 +369,5 @@ def test_staff_connection_states_distinguish_recovery_from_relinking(monkeypatch
         assert line["connection_state"] == expected and line["recovery_action"] == action
         if expected == "reconnecting":
             assert not line["alert"], "brief recoverable gaps should not sound an alarm"
+        elif expected == "session_review_required":
+            assert line["alert"], "terminal session failures need attention without a retry delay"

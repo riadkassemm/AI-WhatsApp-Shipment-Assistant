@@ -142,6 +142,8 @@ async def linked_device_status(agent: SupportAgent = Depends(get_current_agent))
             "logged_out_at": item.get("logged_out_at") if isinstance(item.get("logged_out_at"), int) else None,
             "recovering_history": item.get("recovering_history") is True,
             "recovery_category": item.get("recovery_category") if isinstance(item.get("recovery_category"), str) else None,
+            "retry_scheduled": item.get("retry_scheduled") is True,
+            "last_disconnect": _disconnect_evidence(item.get("last_disconnect")),
             "session_blocked": item.get("session_blocked") is True,
             "saved_login": item.get("saved_login") is True,
             # Present only when the bridge runs each number in its own process.
@@ -149,6 +151,18 @@ async def linked_device_status(agent: SupportAgent = Depends(get_current_agent))
             "process_state": item["process"].get("state") if isinstance(item.get("process"), dict) and isinstance(item["process"].get("state"), str) else None,
         })
     return {"configured": True, "lines": lines, "default_transport": settings.whatsapp_transport}
+
+
+def _disconnect_evidence(value: object) -> dict | None:
+    """Expose fixed diagnostic fields only, never raw provider/session data."""
+    if not isinstance(value, dict):
+        return None
+    return {
+        "at": value.get("at") if type(value.get("at")) is int else None,
+        "provider_status": value.get("provider_status") if type(value.get("provider_status")) is int else None,
+        "reason": value.get("reason") if value.get("reason") in ("device_removed", "session_replaced", "dashboard_unlink") else "unknown",
+        "source": value.get("source") if value.get("source") in ("provider", "dashboard") else "unknown",
+    }
 
 
 @router.get("/api/support/whatsapp-linked-device/restart")
@@ -245,10 +259,13 @@ async def disconnect_linked_device(
 
     if await whatsapp_registry_service.is_number_enabled(line_id):
         raise HTTPException(409, "Remove this line from the app before unlinking it.")
+    logger.info("Linked-device unlink requested: line_id=%s actor_staff_id=%s", line_id, agent.id)
     try:
         await linked_device_client.disconnect(line_id)
+        logger.info("Linked-device unlink completed: line_id=%s actor_staff_id=%s", line_id, agent.id)
         return await linked_device_status(agent)
     except WhatsAppSendError as exc:
+        logger.warning("Linked-device unlink failed: line_id=%s actor_staff_id=%s", line_id, agent.id)
         raise HTTPException(503, str(exc)) from exc
 
 
