@@ -96,21 +96,73 @@ assert.equal(linkedDeviceRecoveryActions({status: 'error'}).find(action => actio
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is unavailable")
-def test_a_number_restricted_by_whatsapp_offers_no_retry_buttons() -> None:
-    # WhatsApp's 403 (authentication_failure) means a restriction or ban. On
-    # 2026-11-17 staff retried Tripoli five times; none of that can help.
+def test_a_rejected_session_offers_reviewed_recovery_without_claiming_a_ban() -> None:
+    # Saida received a generic 403 while the account still worked on the phone.
     code = _HTML[_HTML.index("const BLOCKED_CATEGORIES"): _HTML.index("async function loadLinkedDeviceStatus(")]
     script = r"""
 const assert = require('node:assert/strict');
 """ + code + r"""
-const restricted = {status: 'error', is_paired: true, process_restartable: true, saved_login: true,
+const rejected = {status: 'error', is_paired: true, process_restartable: true, saved_login: true,
   recovery_category: 'authentication_failure'};
-const actions = linkedDeviceRecoveryActions(restricted);
-assert.deepEqual(actions.map(action => action.label), ['Reconnect after review', 'Force remove']);
-assert.ok(actions.every(action => action.managersOnly), 'agents get no recovery button for a restricted number');
-assert.equal(isRestrictedByWhatsApp({...restricted, status: 'connected'}), false, 'a number that reconnected is not restricted');
-assert.deepEqual(linkedDeviceRecoveryActions({...restricted, status: 'connected'}).map(action => action.label),
+const actions = linkedDeviceRecoveryActions(rejected);
+assert.deepEqual(actions.map(action => action.label), ['Retry session after phone check', 'Reset session', 'Force remove']);
+assert.ok(actions.every(action => action.managersOnly), 'session rejection needs administrator review');
+assert.equal(needsSessionReview({...rejected, status: 'connected'}), false);
+assert.deepEqual(linkedDeviceRecoveryActions({...rejected, status: 'connected'}).map(action => action.label),
   ['Reconnect', 'Restart number']);
+assert.deepEqual(linkedDeviceRecoveryActions({...rejected, session_blocked: true}).map(action => action.label),
+  ['Resume session', 'Restart number', 'Reset session', 'Force remove'], 'storage fences still control recovery');
+"""
+    result = subprocess.run(["node", "-e", script], text=True, capture_output=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+
+
+def test_disconnect_evidence_exposes_only_fixed_metadata() -> None:
+    assert linked_device_api._disconnect_evidence(None) is None
+    assert linked_device_api._disconnect_evidence({
+        "at": 123, "provider_status": 403, "reason": "device_removed", "source": "provider", "keys": "private",
+    }) == {"at": 123, "provider_status": 403, "reason": "device_removed", "source": "provider"}
+    assert linked_device_api._disconnect_evidence({
+        "at": True, "provider_status": "403", "reason": {"private": "data"}, "source": ["private"],
+    }) == {"at": None, "provider_status": None, "reason": "unknown", "source": "unknown"}
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is unavailable")
+def test_connection_status_names_evidence_without_inventing_a_restriction_or_actor() -> None:
+    code = _HTML[_HTML.index("function renderLinkedDeviceStatus("): _HTML.index("async function loadLinkedDeviceStatus(")]
+    script = r"""
+const assert = require('node:assert/strict');
+const state = {};
+const element = () => ({children: [], textContent: '', classList: {toggle() {}, add() {}},
+  append(...items) { this.children.push(...items); }, replaceChildren() { this.children = []; }});
+const elements = {};
+const $ = id => elements[id] ??= element();
+const document = {createElement: element};
+const pendingLinkedDeviceAddition = () => false;
+const notify = () => {};
+const createSupportNumberLabel = () => element();
+const canManageWhatsApp = () => true;
+const canLinkWhatsApp = () => true;
+const text = (node, value) => node.textContent = value;
+""" + code + r"""
+const render = line => {
+  renderLinkedDeviceStatus({configured: true, lines: [{line_id: '90062', ...line}]});
+  return $('linkedDeviceLines').children[0].children[1].textContent;
+};
+const rejected = render({status: 'error', recovery_category: 'authentication_failure', pending_callbacks: 3});
+assert.match(rejected, /^Linked-device login rejected/);
+assert.match(rejected, /Account restriction not confirmed/);
+assert.match(rejected, /3 updates pending$/);
+assert.doesNotMatch(rejected, /Restricted by WhatsApp|Do not reconnect/);
+assert.match(render({status: 'logged_out', logged_out_at: 1000, last_disconnect: {reason: 'device_removed'}}),
+  /Linked device removed · Initiator unknown/);
+assert.match(render({status: 'logged_out', logged_out_at: 1000, logout_reason: 'dashboard_unlink'}),
+  /Unlink requested through the dashboard/);
+assert.match(render({status: 'logged_out', logged_out_at: 1000}), /Cause unknown/);
+assert.match(render({status: 'disconnected', retry_scheduled: true}), /Reconnecting automatically/);
+assert.equal(render({status: 'disconnected', retry_scheduled: false}), 'Disconnected');
+assert.match(render({status: 'error', recovery_category: 'session_conflict'}), /Session replaced/);
+assert.equal(render({status: 'connected', recovery_category: 'authentication_failure'}), 'Connected');
 """
     result = subprocess.run(["node", "-e", script], text=True, capture_output=True, timeout=10)
     assert result.returncode == 0, result.stderr

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { classifyDisconnect, reconnectDelay, newConnectionDiagnostics, observeHeartbeat } from '../src/connection-diagnostics.js';
+import { classifyDisconnect, disconnectEvidence, reconnectDelay, newConnectionDiagnostics, observeHeartbeat } from '../src/connection-diagnostics.js';
 import { Bridge } from '../src/bridge.js';
 
 const gate = () => { let resolve; const promise = new Promise(done => { resolve = done; }); return {promise, resolve}; };
@@ -33,6 +33,24 @@ test('diagnostics keep bounded timing fields without copying provider payloads',
   assert.equal(diagnostics.heartbeat_rtt_ms, 35);
   assert.equal(diagnostics.heartbeat_timeouts, 1);
   assert.doesNotMatch(JSON.stringify(diagnostics), /secret|private|credentials/);
+});
+
+test('device removal needs structured evidence and never identifies a human or a ban', () => {
+  const removal = {tag: 'conflict', attrs: {type: 'device_removed', jid: 'private'}};
+  for (const code of [401, 403, 440]) {
+    for (const data of [removal, {tag: 'stream:error', content: [removal]}]) {
+      const error = {output: {statusCode: code}, data, message: 'private'};
+      assert.deepEqual(classifyDisconnect(error), {category: 'logged_out', retry: false});
+      assert.deepEqual(disconnectEvidence(error), {provider_status: code, reason: 'device_removed', source: 'provider'});
+      assert.deepEqual(classifyDisconnect({...error, bridgePersistenceFailure: true}), {category: 'storage_failure', retry: false});
+    }
+  }
+  for (const data of [undefined, {reason: '403'}, {tag: 'conflict', attrs: {type: 'unknown'}}]) {
+    const error = {output: {statusCode: 403}, data, message: 'banned device_removed'};
+    assert.deepEqual(classifyDisconnect(error), {category: 'authentication_failure', retry: false});
+    assert.equal(disconnectEvidence(error).reason, 'unknown');
+  }
+  assert.equal(disconnectEvidence({data: {tag: 'conflict', attrs: {type: 'replaced'}}}).reason, 'session_replaced');
 });
 
 test('nearby reconnects are staggered without waiting behind another line long backoff', t => {

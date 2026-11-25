@@ -2278,6 +2278,84 @@ test('messages recovered after an outage become staff-only snapshots', () => {
   assert.equal(recovered.payload.entry[0].changes[0].value.messages[0].type, 'text');
 });
 
+test('an unqualified 403 preserves credentials and stays stopped across restart until explicit recovery', async t => {
+  const {bridge, line, socket, config} = await fixture(t);
+  line.auth.state.creds.registered = true;
+  await line.auth.saveCreds();
+  const previousAuth = line.auth;
+  await bridge.connectionUpdate(line, socket, {connection: 'close', lastDisconnect: {error: {
+    output: {statusCode: 403}, data: {reason: '403'}, message: 'Connection Failure',
+  }}});
+  const status = bridge.lineStatus(line);
+  assert.equal(status.status, 'error');
+  assert.equal(status.recovery_category, 'authentication_failure');
+  assert.equal(status.is_paired, true);
+  assert.equal(status.retry_scheduled, false);
+  assert.equal(status.last_disconnect.reason, 'unknown');
+  assert.equal(status.last_disconnect.provider_status, 403);
+  assert.equal(status.logout_reason, null);
+  assert.equal(line.auth, previousAuth, 'an unqualified rejection must not erase credentials');
+  await bridge.close();
+  let calls = 0;
+  const replacement = mockSocket();
+  const restarted = await new Bridge(config, {makeSocket: () => { calls++; return replacement; },
+    onError: () => {}, log: () => {}, storageFilesystem: healthyStorage}).initialize();
+  t.after(() => restarted.close());
+  const restored = restarted.getLine(LINE);
+  assert.equal(calls, 0, 'process restart must not bypass terminal recovery policy');
+  assert.equal(restarted.lineStatus(restored).recovery_category, 'authentication_failure');
+  assert.equal(restarted.lineStatus(restored).last_disconnect.at, status.last_disconnect.at);
+  await restarted.reconnectLine(LINE);
+  assert.equal(calls, 1, 'explicit recovery may try the saved session once');
+  await restarted.connectionUpdate(restored, replacement, {connection: 'open'});
+  assert.equal(restored.status, 'connected');
+  assert.equal(restored.store.data.connection_hold, undefined);
+});
+
+test('resetting a rejected session retains messages and marks the offline gap for history recovery', async t => {
+  const {bridge, line, socket} = await fixture(t);
+  await bridge.connectionUpdate(line, socket, {connection: 'close', lastDisconnect: {error: {output: {statusCode: 403}}}});
+  const offlineSince = line.disconnectedSince;
+  const status = await bridge.resetSession(LINE);
+  assert.equal(status.status, 'disconnected');
+  assert.equal(status.is_paired, false);
+  assert.equal(line.store.data.connection_hold, undefined);
+  assert.equal(line.store.data.enabled, false, 'reset waits for deliberate pairing');
+  assert.ok(line.store.data.messages.ORIGINAL, 'saved conversation evidence remains');
+  assert.ok(line.store.data.recover_since <= offlineSince - 60_000);
+});
+
+test('structured device removal overrides a generic forbidden code and restores the logout after restart', async t => {
+  const {bridge, line, socket, config} = await fixture(t);
+  await bridge.connectionUpdate(line, socket, {connection: 'close', lastDisconnect: {error: {
+    output: {statusCode: 403}, data: {tag: 'conflict', attrs: {type: 'device_removed'}},
+  }}});
+  const status = bridge.lineStatus(line);
+  assert.equal(status.status, 'logged_out');
+  assert.equal(status.recovery_category, 'logged_out');
+  assert.equal(status.last_disconnect.reason, 'device_removed');
+  assert.equal(status.last_disconnect.source, 'provider', 'provider removal does not identify a person');
+  assert.equal(status.retry_scheduled, false);
+  assert.equal(line.store.data.enabled, false);
+  assert.ok(line.store.data.recover_since <= status.disconnected_since - 60_000);
+  await bridge.close();
+  const restarted = await new Bridge(config, {makeSocket: () => { throw Error('must not connect'); },
+    onError: () => {}, log: () => {}, storageFilesystem: healthyStorage}).initialize();
+  t.after(() => restarted.close());
+  assert.equal(restarted.lineStatus(restarted.getLine(LINE)).status, 'logged_out');
+  assert.equal(restarted.lineStatus(restarted.getLine(LINE)).logged_out_at, status.logged_out_at);
+});
+
+test('dashboard unlink records its source separately from provider revocation', async t => {
+  const {bridge, line} = await fixture(t);
+  const status = await bridge.disconnect(LINE);
+  assert.equal(status.status, 'logged_out');
+  assert.equal(status.logout_reason, 'dashboard_unlink');
+  assert.equal(status.last_disconnect.source, 'dashboard');
+  assert.equal(status.last_disconnect.provider_status, null);
+  assert.equal(line.store.data.connection_hold, undefined);
+});
+
 test('a WhatsApp logout records why and when, and re-pairing recovers the gap', async t => {
   const { bridge, line, socket } = await fixture(t);
   const before = Date.now();

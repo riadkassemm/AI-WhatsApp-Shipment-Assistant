@@ -73,7 +73,9 @@ def summarize(registry: list[dict[str, Any]], bridge_lines: list[dict[str, Any]]
             connection_state, recovery_action = "relink_required", "relink"
         elif state == "connected":
             connection_state, recovery_action = "connected", "none"
-        elif state == "reconnecting" and category not in {"authentication_failure", "session_conflict", "protocol_failure"}:
+        elif category in {"authentication_failure", "session_conflict", "protocol_failure"}:
+            connection_state, recovery_action = "session_review_required", "administrator"
+        elif state == "reconnecting":
             connection_state, recovery_action = "reconnecting", "automatic"
         else:
             connection_state, recovery_action = "temporarily_unavailable", "administrator"
@@ -81,7 +83,7 @@ def summarize(registry: list[dict[str, Any]], bridge_lines: list[dict[str, Any]]
             "line_id": line_id, "name": row.get("name") or line_id, "status": state, "since": _iso(since),
             "logout_reason": reason if isinstance(reason, str) else None,
             "connection_state": connection_state, "recovery_action": recovery_action,
-            "alert": connection_state in {"relink_required", "storage_recovery_required"} or
+            "alert": connection_state in {"relink_required", "storage_recovery_required", "session_review_required"} or
                      (state != "connected" and since is not None and now - since >= ALERT_AFTER_SECONDS),
         })
     return lines
