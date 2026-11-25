@@ -216,7 +216,7 @@ assert.equal(unlink.disabled, false);
 unlink.onclick();
 assert.deepEqual(changes, [['remove', '90002']]);
 // A WhatsApp logout points at re-pairing, which keeps everything; never-paired lines do not.
-assert.match(rows[2].children[1].textContent, /^Logged out by WhatsApp at .+Re-pair it with the same phone/);
+assert.match(rows[2].children[1].textContent, /^Linked-device login ended · Cause unknown at .+Re-pair with the same phone/);
 assert.equal(rows[2].children[2].textContent, 'Re-pair (keeps all history)');
 assert.match(rows[2].children[2].className, /primary/);
 assert.equal(rows[3].children[1].textContent, 'Not paired');
