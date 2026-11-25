@@ -1592,7 +1592,7 @@ function renderLinkedDeviceStatus(payload) {
   alertLinkedDeviceProblems(payload.lines || []);
   for (const line of payload.lines || []) {
     const row = document.createElement('div');
-    row.className = 'linked-device-line';
+    row.className = 'linked-device-line' + (needsSessionReview(line) ? ' linked-device-review' : '');
     const heading = document.createElement('strong');
     const registryNumber = (state.whatsappRegistry?.numbers || []).find(item => String(item.phone_number_id) === String(line.line_id));
     heading.append(createSupportNumberLabel({line_id: line.line_id,

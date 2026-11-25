@@ -1288,6 +1288,9 @@ body.column-resizing * { cursor: col-resize !important; }
 .linked-device-line > .btn { grid-row: 1 / span 2; }
 .linked-device-line:not(:has(> .btn + .btn)) > .btn { grid-column: 2 / -1; justify-self: end; }
 .linked-device-line > .linked-device-qr { grid-column: 1; grid-row: 3; }
+.linked-device-line.linked-device-review { display: flex; flex-wrap: wrap; gap: 8px 6px; }
+.linked-device-review > strong, .linked-device-review > .muted { flex: 0 0 100%; }
+.linked-device-review > .btn { white-space: normal; }
 .linked-device-line:last-child { border-bottom: 0; }
 .section-spaced { margin-top: 24px; }
 .whatsapp-card .section-title { padding-top: 2px; }
