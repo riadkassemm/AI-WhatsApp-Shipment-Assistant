@@ -1,7 +1,8 @@
 # Saida 90062: false restriction warning
 
-Investigated on November 25, 2026. Production inspection was read-only. The
-source changes described below have not been deployed or runtime-tested.
+Investigated on November 25, 2026. Initial production inspection was read-only.
+The user subsequently approved commit, push, PR creation, merge, and production
+deployment following DEV verification.
 
 ## Evidence and limits
 
@@ -37,7 +38,10 @@ that counter is independent of account standing and disconnect classification.
 A proposed authenticated live-status GET was rejected by automatic approval
 review because it would obtain the bearer secret from the production process
 environment. It was not retried, and no secret was printed. The findings above
-come from journal metadata and source inspection, not that status endpoint.
+come from journal metadata and source inspection. During the approved rollout,
+the existing app client was run with its normal systemd EnvironmentFile for
+deployment checks, without reading any process environment. This confirmed
+Saida remained in authentication failure while the other six lines connected.
 
 ## Root cause of the false warning
 
@@ -90,18 +94,33 @@ cover generic 403, structured device removal, storage precedence, restart
 holds, explicit recovery, dashboard unlink provenance, offline history
 boundaries, API metadata filtering, UI wording, and recovery controls.
 
-Runtime tests and a dashboard screenshot remain pending. Per `AGENTS.md`,
-execution belongs on DEV and deployment requires reviewed, committed source
-and explicit approval. Commit, push, PR creation, and DEV deployment have not
-been authorized. No database migration is required. New line-state fields are
-additive; older bridge code ignores the hold, so rolling back would restore its
-older automatic-start behavior.
+DEV verification of committed source completed: 1,487 Python/browser tests,
+375 bridge tests, and two additional upgrade-hold tests passed. Support asset
+syntax/scope checks, Python compilation, and the pinned Baileys patch check
+passed. A legacy UI assertion was updated because it required the incorrect
+provider-attributed logout wording. The initial focused browser test was rerun
+with the explicitly configured retained Chromium binary. DEV's retired services
+stayed stopped; no production credentials or sessions were copied there.
 
-After approval, run the repository's unit/bridge suites, support asset check,
-compilation, and browser regressions on DEV with mock WhatsApp sockets and
-disposable services. Verify a simulated 403 shows session rejection, and
-capture the updated dashboard. Do not copy production sessions to DEV.
-Production deployment and any live Saida recovery require separate approval.
+The updated status component was rendered in DEV Chromium using synthetic
+data. Its instructions now span the available width, with recovery buttons
+wrapping below. See the [status preview](images/saida-session-rejected.png).
+
+No database migration is required. For the first bridge upgrade, stop API
+admission, capture a fresh status snapshot with `captured_at` in epoch
+milliseconds, then stop the bridge and back up its state. Run
+`node whatsapp_bridge/scripts/preserve-session-holds.js snapshot.json` with
+the bridge's usual service environment before starting the new release. The
+script rejects snapshots older than five minutes, locks the shared data
+directory and each affected worker, and writes only terminal hold metadata
+through the existing journal implementation. It does not read auth files or
+alter message records. This prevents the upgrade from retrying Saida's existing
+in-memory authentication failure. Keep both prior production releases and
+service overrides for rollback. Older code ignores the new hold, so rollback
+would restore its older automatic-start behavior.
+
+The approved rollout deploys the reviewed source; it does not reset Saida or
+resend uncertain deliveries. Re-pairing still requires the office's phone.
 For Saida, first check the phone's Linked devices list: if the device is gone,
 an authorized reset and re-pair is appropriate; if still listed and the account
 works normally, one reviewed saved-session retry is available. Preserve
